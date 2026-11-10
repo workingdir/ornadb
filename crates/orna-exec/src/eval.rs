@@ -24,7 +24,7 @@ impl<'p> Machine<'p> {
         frame: &mut Frame,
         id: ExprId,
     ) -> Result<Value, Stop> {
-        self.tick()?;
+        self.tick(body.exprs[id].weight)?;
         match &body.exprs[id].kind {
             ExprKind::Lit(lit) => self.literal(lit),
             ExprKind::Local(slot) => frame.get(*slot),
@@ -151,8 +151,9 @@ impl<'p> Machine<'p> {
                 let Value::Closure(closure) = self.eval(body, frame, *callee)? else {
                     return Err(Stop::NotYet("call of a non-closure value (H4)"));
                 };
-                let arguments = self.arguments(body, frame, call, &[])?;
-                let callee_body = &self.program.bodies[closure.body];
+                let program = self.program;
+                let callee_body = &program.bodies[closure.body];
+                let arguments = self.closure_arguments(body, frame, call, callee_body.params.len())?;
                 if arguments.len() != callee_body.params.len()
                     || binders::binds_a_name_twice(callee_body)
                 {
@@ -181,6 +182,25 @@ impl<'p> Machine<'p> {
         let mut arguments = Vec::with_capacity(call.args.len());
         for argument in call.args.iter() {
             arguments.push(self.argument(body, frame, argument, params)?);
+        }
+        Ok(arguments)
+    }
+
+    /// Evaluates the arguments of a closure call in order. The old evaluator binds positionally and fails at the
+    /// first argument with no parameter before evaluating it, so an excess argument is never evaluated.
+    fn closure_arguments(
+        &mut self,
+        body: &'p Body,
+        frame: &mut Frame,
+        call: &Call,
+        arity: usize,
+    ) -> Result<Vec<(usize, Value)>, Stop> {
+        let mut arguments = Vec::with_capacity(call.args.len());
+        for (index, argument) in call.args.iter().enumerate() {
+            if index >= arity {
+                return Err(Stop::Error("ORNA-EVAL-ARGUMENT"));
+            }
+            arguments.push(self.argument(body, frame, argument, &[])?);
         }
         Ok(arguments)
     }

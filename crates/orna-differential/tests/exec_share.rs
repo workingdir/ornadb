@@ -20,7 +20,9 @@ fn executor_agreement_with_the_old_pipeline_only_grows() {
     let evaluable = corpus.cases.iter().filter(|case| case.evaluate).count();
     let mut ran = 0usize;
     let mut agreed = 0usize;
+    let mut steps_exact = 0usize;
     let mut mismatches = Vec::new();
+    let mut step_differences: Vec<(String, u64, u64)> = Vec::new();
     let mut reasons: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for case in &corpus.cases {
         match observe_exec::run_case(case) {
@@ -31,27 +33,49 @@ fn executor_agreement_with_the_old_pipeline_only_grows() {
                 }
                 reasons.entry(reason).or_default().push(case.id.clone());
             }
-            ExecOutcome::Ran(outcome) => {
+            ExecOutcome::Ran { outcome, steps } => {
                 ran += 1;
-                let old = match observe_old::observe(case) {
-                    Ok(observation) => observation.outcome,
+                let observation = match observe_old::observe(case) {
+                    Ok(observation) => observation,
                     Err(error) => {
                         mismatches.push(format!("{}: the old pipeline failed: {error}", case.id));
                         continue;
                     }
                 };
-                if old.as_ref() == Some(&outcome) {
-                    agreed += 1;
-                } else {
-                    mismatches.push(format!("{}: executor {outcome:?}, old {old:?}", case.id));
+                if observation.outcome.as_ref() != Some(&outcome) {
+                    mismatches.push(format!("{}: executor {outcome:?}, old {:?}", case.id, observation.outcome));
+                    continue;
+                }
+                agreed += 1;
+                match observation.steps {
+                    Some(old) if old == steps => steps_exact += 1,
+                    Some(old) => step_differences.push((case.id.clone(), old, steps)),
+                    None => {}
                 }
             }
+        }
+    }
+    let allowances = compare::load_step_allowances().expect("the step allowances parse");
+    let mut used = vec![false; allowances.len()];
+    for (id, old, executor) in step_differences {
+        match allowances.iter().position(|allowance| allowance.matches(&id, old, executor)) {
+            Some(index) => used[index] = true,
+            None => mismatches.push(format!("{id}: executor charges {executor} steps, old pipeline {old}")),
+        }
+    }
+    for (allowance, used) in allowances.iter().zip(&used) {
+        if !used {
+            mismatches.push(format!(
+                "{}: step allowance for old {} and executor {} is stale; remove or update it",
+                allowance.case, allowance.old, allowance.executor
+            ));
         }
     }
     println!(
         "executor agreement: {agreed}/{ran} run cases agree with the old pipeline ({} cases in the corpus)",
         corpus.cases.len()
     );
+    println!("exact step parity: {steps_exact}/{agreed} agreeing run cases charge the old pipeline's steps");
     for (reason, ids) in &reasons {
         println!("  {:>5} {reason}", ids.len());
         if std::env::var_os("EXEC_SHARE_IDS").is_some() {
@@ -65,7 +89,11 @@ fn executor_agreement_with_the_old_pipeline_only_grows() {
         "the executor disagrees with the old pipeline:\n{}",
         mismatches.join("\n")
     );
-    let observed = compare::ExecShare { agreed, evaluable };
+    let observed = compare::ExecShare {
+        agreed,
+        evaluable,
+        steps_exact,
+    };
     let failures = compare::exec_share_ratchet(recorded, observed);
     assert!(
         failures.is_empty(),

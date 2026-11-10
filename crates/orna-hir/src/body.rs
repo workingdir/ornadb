@@ -65,6 +65,9 @@ pub struct Expr {
     pub ty: Ty,
     /// Where it was written.
     pub span: SourceSpan,
+    /// The legacy evaluator steps this node stands for (`docs/design/hir.md` section 6.4): one, plus one for
+    /// each parenthesised group folded into it.
+    pub weight: u16,
 }
 
 /// The structure of one expression.

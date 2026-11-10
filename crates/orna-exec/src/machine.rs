@@ -52,7 +52,7 @@ impl<'p> Machine<'p> {
 
     /// Charges one expression evaluation against the step limit, and ends the
     /// run when the owner has requested cancellation.
-    pub(crate) fn tick(&mut self) -> Result<(), Stop> {
+    pub(crate) fn tick(&mut self, weight: u16) -> Result<(), Stop> {
         if self
             .cancel
             .as_ref()
@@ -60,7 +60,7 @@ impl<'p> Machine<'p> {
         {
             return Err(Stop::Cancelled);
         }
-        self.steps += 1;
+        self.steps += u64::from(weight);
         if self.steps > self.limits.max_steps {
             return Err(Stop::Error("ORNA-EVAL-LIMIT"));
         }
@@ -109,7 +109,7 @@ impl<'p> Machine<'p> {
 ///
 /// [`ExecError::Code`] when the program ends with a language error, and
 /// [`ExecError::NotYet`] when it reaches a construct this stage does not run.
-pub fn run_entry(program: &Program, entry: DefId, limits: ExecLimits) -> Result<Value, ExecError> {
+pub fn run_entry(program: &Program, entry: DefId, limits: ExecLimits) -> Run {
     run(program, entry, limits, None)
 }
 
@@ -127,16 +127,29 @@ pub fn run_entry_cancellable(
     entry: DefId,
     limits: ExecLimits,
     cancel: Arc<AtomicBool>,
-) -> Result<Value, ExecError> {
+) -> Run {
     run(program, entry, limits, Some(cancel))
 }
 
-fn run(
-    program: &Program,
-    entry: DefId,
-    limits: ExecLimits,
-    cancel: Option<Arc<AtomicBool>>,
-) -> Result<Value, ExecError> {
+/// The outcome of one run and the steps it charged.
+#[derive(Debug)]
+pub struct Run {
+    /// The entry's value, or the reason the run ended.
+    pub result: Result<Value, ExecError>,
+    /// The legacy evaluator steps charged: each node counts its weight.
+    pub steps: u64,
+}
+
+fn run(program: &Program, entry: DefId, limits: ExecLimits, cancel: Option<Arc<AtomicBool>>) -> Run {
+    let mut machine = Machine::new(program, limits, cancel);
+    let result = start(&mut machine, program, entry);
+    Run {
+        result,
+        steps: machine.steps,
+    }
+}
+
+fn start(machine: &mut Machine<'_>, program: &Program, entry: DefId) -> Result<Value, ExecError> {
     let DefKind::Fn(function) = &program.defs[entry].kind else {
         return Err(ExecError::NotYet("entry is not a function"));
     };
@@ -146,7 +159,6 @@ fn run(
     if !function.params.is_empty() {
         return Err(ExecError::NotYet("entry takes arguments"));
     }
-    let mut machine = Machine::new(program, limits, cancel);
     machine
         .invoke(body_id, Vec::new(), &[])
         .map_err(ExecError::from)

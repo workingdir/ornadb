@@ -40,7 +40,7 @@ fn run(source: &str) -> Result<Value, ExecError> {
                 && program.defs[*def].name.as_str() == "run"
         })
         .expect("the source defines `run`");
-    run_entry(&program, run_def, LIMITS)
+    run_entry(&program, run_def, LIMITS).result
 }
 
 fn int(value: &str) -> Value {

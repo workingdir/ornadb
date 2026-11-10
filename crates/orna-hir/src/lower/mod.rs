@@ -195,6 +195,7 @@ impl BodyState {
                 kind: crate::ExprKind::Error,
                 ty: error_ty,
                 span: SyntaxSpan::new(0, 0),
+                weight: 1,
             })
         });
         Body {

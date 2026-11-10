@@ -37,7 +37,12 @@ const STEP_LIMIT_CODE: &str = "ORNA-EVAL-LIMIT";
 pub enum ExecOutcome {
     /// The entry ran to a value or to a language error, in the same shape as
     /// [`crate::Observation::outcome`]: canonical bytes or the error code.
-    Ran(Result<Vec<u8>, String>),
+    Ran {
+        /// Canonical bytes or the error code, in the shape of [`crate::Observation::outcome`].
+        outcome: Result<Vec<u8>, String>,
+        /// The legacy evaluator steps the run charged, per node weight.
+        steps: u64,
+    },
     /// The case is outside what this stage runs; the reason names the stage or
     /// construct that owns it.
     NotYet(String),
@@ -75,21 +80,31 @@ fn run_with(case: &Case, cancel: Option<Arc<AtomicBool>>) -> ExecOutcome {
     let Some(def) = entry_def(&lowered, case, entry) else {
         return ExecOutcome::NotYet(format!("the entry `{entry}` is not a function of the case"));
     };
-    let outcome = match cancel {
+    let run = match cancel {
         Some(flag) => run_entry_cancellable(&lowered.program, def, EXEC_LIMITS, flag),
         None => run_entry(&lowered.program, def, EXEC_LIMITS),
     };
-    match outcome {
-        Ok(value) => ExecOutcome::Ran(match value.to_raw() {
-            Ok(raw) => encode(raw),
-            Err(code) => Err(code.to_owned()),
-        }),
+    let steps = run.steps;
+    match run.result {
+        Ok(value) => ExecOutcome::Ran {
+            outcome: match value.to_raw() {
+                Ok(raw) => encode(raw),
+                Err(code) => Err(code.to_owned()),
+            },
+            steps,
+        },
         Err(ExecError::Code(STEP_LIMIT_CODE)) => ExecOutcome::NotYet(
             "the step budget ends the run; step parity is not measured yet".to_owned(),
         ),
-        Err(ExecError::Code(code)) => ExecOutcome::Ran(Err(code.to_owned())),
+        Err(ExecError::Code(code)) => ExecOutcome::Ran {
+            outcome: Err(code.to_owned()),
+            steps,
+        },
         Err(ExecError::NotYet(reason)) => ExecOutcome::NotYet(reason.to_owned()),
-        Err(ExecError::Cancelled) => ExecOutcome::Ran(Err("ORNA-EVAL-CANCELLED".to_owned())),
+        Err(ExecError::Cancelled) => ExecOutcome::Ran {
+            outcome: Err("ORNA-EVAL-CANCELLED".to_owned()),
+            steps,
+        },
     }
 }
 

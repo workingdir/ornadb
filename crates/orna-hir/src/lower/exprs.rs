@@ -181,7 +181,13 @@ fn lower_operator(
             )
         }
         AstExpr::Field { base, name, span } => lower_field(builder, state, base, name, span),
-        AstExpr::Group { inner, .. } => lower_expr(builder, state, inner),
+        AstExpr::Group { inner, .. } => {
+            // The old evaluator steps once for a group node of its own. Lowering keeps no node for it, so the
+            // step folds into the child. Parser nesting is bounded far below `u16::MAX` groups.
+            let child = lower_expr(builder, state, inner);
+            state.exprs[child].weight = state.exprs[child].weight.saturating_add(1);
+            child
+        }
         _ => return None,
     })
 }
@@ -348,7 +354,12 @@ pub(crate) fn push(
     span: SyntaxSpan,
 ) -> ExprId {
     let ty = builder.program.tys.error();
-    state.push_expr(Expr { kind, ty, span })
+    state.push_expr(Expr {
+        kind,
+        ty,
+        span,
+        weight: 1,
+    })
 }
 
 /// Adds one expression with the type its declaration already states.
@@ -360,7 +371,12 @@ pub(crate) fn push_typed(
     ty: Ty,
 ) -> ExprId {
     let _ = builder;
-    state.push_expr(Expr { kind, ty, span })
+    state.push_expr(Expr {
+        kind,
+        ty,
+        span,
+        weight: 1,
+    })
 }
 
 /// The field definition `name` denotes on a value of `ty`, when the written
@@ -615,7 +631,11 @@ fn lower_recover(
     let error_ty = builder.program.tys.error();
     let handler = state.add_local(Name::new(ERROR_SLOT), error_ty, span.clone());
     let error_value = push(builder, state, ExprKind::Local(handler), span.clone());
+    state.exprs[error_value].weight = 0;
     let arm = lower_stage(builder, state, rhs, Some(error_value), span);
+    // The old evaluator applies the handler to the failure without a call step or a step for the piped
+    // error value; only the handler's own callee and body are charged.
+    state.exprs[arm].weight = 0;
     state.pop_scope(span.end);
     push(
         builder,
@@ -992,6 +1012,8 @@ fn lower_lambda(
             ExprKind::Local(slot),
             parameter.pattern.span().clone(),
         );
+        // The old evaluator binds a destructured parameter directly and charges no step for this read.
+        lambda.exprs[init].weight = 0;
         let pat =
             pats::lower_pattern_with(builder, &mut lambda, &parameter.pattern, Some(expected));
         prologue.push(Stmt::Let { pat, init });
@@ -1000,7 +1022,7 @@ fn lower_lambda(
     lambda.root = Some(if prologue.is_empty() {
         root
     } else {
-        push(
+        let block = push(
             builder,
             &mut lambda,
             ExprKind::Block {
@@ -1008,7 +1030,10 @@ fn lower_lambda(
                 tail: Some(root),
             },
             body.span(),
-        )
+        );
+        // The prologue wrapper is lowering scaffolding; only the body's own nodes are charged.
+        lambda.exprs[block].weight = 0;
+        block
     });
     lambda.pop_scope(body.span().end);
     let error_ty = builder.program.tys.error();
