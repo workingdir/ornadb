@@ -1989,10 +1989,16 @@ The owner's direction: rewrite the unit system and make it better, rather than c
 
 What is decided:
 
-* User-declared units and dimensions return in 1.x. `dim` and `unit` are ordinary
-  Orna declarations, with the grammar of units.md section 2.
+* User-declared units and dimensions return in 1.x as enum-shaped families (D15, owner
+  direction 2026-11-10): a family is an `enum`, a unit is a payload-free variant, and
+  `kilometre = 1000 metre,` gives the scale. Grammar: units.md section 2. The keyword
+  forms `dim` and `unit` of the first 2026-11-10 draft are withdrawn.
 * Dimensional algebra is kept and rewritten: exponent vectors over base axes,
   rational scales, and the typing rules of units.md section 6.
+* Surface prerequisites (units.md section 11.2): P3a, `impl` and `static` members in
+  enums; P3e, a payload-free variant as a type argument (`Quantity<Decimal, Length.kilometre>`).
+  Suffix ambiguity: the same suffix in two families in scope is ORNA-S011; the qualified
+  form `Family.name(n)` resolves it.
 * Built-in units are ordinary declarations in the embedded `core` (units.md
   section 8), in the same form a user writes: time postfixes (`.day`, `.seconds`),
   data size, and the currency family. `Duration`, `Instant`, `Decimal` and `Money<C>`
@@ -2013,7 +2019,7 @@ Consequences:
 * `Duration` stays the 1.1.0 primitive, wire tag 60005. The time dimension names
   it with the `repr` attribute (units.md O6).
 * The finer-unit rule for mixed-scale add is the rule the 1.1.0 checker already
-  implements (`inference.rs:1163`), restated as ORNA-UNIT-011.
+  implements (`inference.rs:1168`), restated as ORNA-UNIT-011.
 * Stage H2c of `docs/design/hir.md` is rewritten to implement units.md, not deleted.
 
 Open sub-questions. They stay open for the owner. Each has the default this design
