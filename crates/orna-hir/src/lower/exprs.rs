@@ -202,7 +202,7 @@ fn lower_field(
     let member_of_path = qualified_member(builder, state, base, name);
     let base = lower_expr(builder, state, base);
     if let Some(member) =
-        member_of_path.filter(|def| is_variant(builder, *def) || is_static(builder, *def))
+        member_of_path.filter(|def| builder.is_variant(*def) || builder.is_static(*def))
     {
         // `Enum.variant` and `Type.static` name the member itself; the owner path is only recorded.
         let name_span = SyntaxSpan::new(span.end.saturating_sub(name.len()), span.end);
@@ -425,22 +425,6 @@ fn field_type(builder: &mut Builder<'_>, field: DefId) -> Ty {
         super::declare::PendingKind::Built(DefKind::Field(definition)) => definition.ty,
         _ => builder.program.tys.error(),
     }
-}
-
-/// Whether `def` is an enum variant.
-fn is_variant(builder: &Builder<'_>, def: DefId) -> bool {
-    matches!(
-        builder.pending[def.index()].kind,
-        super::declare::PendingKind::Built(DefKind::Variant(_))
-    )
-}
-
-/// Whether `def` is a `static` constant an enum or type implementation declares.
-fn is_static(builder: &Builder<'_>, def: DefId) -> bool {
-    matches!(
-        builder.pending[def.index()].kind,
-        super::declare::PendingKind::Built(DefKind::Let(_))
-    )
 }
 
 /// The field definitions a table, nominal type or enum variant owns.

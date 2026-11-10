@@ -490,6 +490,22 @@ impl<'a> Builder<'a> {
         })
     }
 
+    /// Whether `def` is an enum variant.
+    pub(crate) fn is_variant(&self, def: DefId) -> bool {
+        matches!(
+            self.pending[def.index()].kind,
+            PendingKind::Built(crate::DefKind::Variant(_))
+        )
+    }
+
+    /// Whether `def` is a `static` constant an enum or type implementation declares.
+    pub(crate) fn is_static(&self, def: DefId) -> bool {
+        matches!(
+            self.pending[def.index()].kind,
+            PendingKind::Built(crate::DefKind::Let(_))
+        )
+    }
+
     /// Whether the definition is a table, type or enum: a value type.
     pub(crate) fn is_nominal(&self, def: DefId) -> bool {
         match &self.pending[def.index()].kind {
