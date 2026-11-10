@@ -511,15 +511,9 @@ pub(crate) fn lower_name(
             );
             error_expr(builder, state, span)
         }
-        NameTarget::Unresolved => {
-            builder.diagnose(
-                module,
-                crate::diag::UNRESOLVED,
-                format!("`{name}` is not in scope"),
-                span.clone(),
-            );
-            error_expr(builder, state, span)
-        }
+        // Typeck resolves a bare word to a payload-free variant of the expected
+        // enum type (decision P3b) and reports it as unresolved otherwise.
+        NameTarget::Unresolved => push(builder, state, ExprKind::BareName(name), span),
     }
 }
 

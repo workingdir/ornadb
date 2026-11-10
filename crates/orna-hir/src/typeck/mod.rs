@@ -185,6 +185,8 @@ enum Attempt {
     },
     /// The body is inside the program and has a conflict.
     Failed {
+        /// Every body the failed pass checked, so none is reported a second time.
+        bodies: Vec<BodyId>,
         /// The conflicts the pass reported.
         diagnostics: Vec<HirDiagnostic>,
         /// How many conflicts were reported.
@@ -220,12 +222,13 @@ impl TypeChecker<'_> {
                         self.commit_typed(body, bodies, solved);
                     }
                     Attempt::Failed {
+                        bodies,
                         diagnostics,
                         conflicts,
                         detail,
                     } => {
                         progressed = true;
-                        self.commit_failed(body, diagnostics, conflicts, &detail);
+                        self.commit_failed(body, bodies, diagnostics, conflicts, &detail);
                     }
                     Attempt::NotYet(reason) => {
                         reasons.insert(body, reason);
@@ -253,6 +256,7 @@ impl TypeChecker<'_> {
                 conflicts: 0,
             });
         }
+        self.report_unresolved_bare_names();
     }
 
     /// The bodies the pass walks: every function body with an Orna body, every
@@ -319,6 +323,7 @@ impl TypeChecker<'_> {
                             })
                             .collect::<Vec<_>>();
                         return Attempt::Failed {
+                            bodies: Vec::new(),
                             conflicts: diagnostics.len(),
                             diagnostics,
                             detail: "a public function omits a parameter annotation".into(),
@@ -399,6 +404,7 @@ impl TypeChecker<'_> {
                 .join("; ");
             diagnostics.shrink_to_fit();
             Attempt::Failed {
+                bodies: bodies.iter().map(|(id, _)| *id).collect(),
                 diagnostics,
                 conflicts,
                 detail: detail.into_boxed_str(),
@@ -434,6 +440,7 @@ impl TypeChecker<'_> {
     fn commit_failed(
         &mut self,
         body: BodyId,
+        bodies: Vec<BodyId>,
         diagnostics: Vec<HirDiagnostic>,
         conflicts: usize,
         detail: &str,
@@ -442,6 +449,7 @@ impl TypeChecker<'_> {
         let module = self.program.defs[owner].module;
         self.program.modules[module].diagnostics.extend(diagnostics);
         self.done.insert(body);
+        self.done.extend(bodies);
         self.outcomes.push(BodyOutcome {
             body,
             owner,
@@ -452,6 +460,30 @@ impl TypeChecker<'_> {
             )),
             conflicts,
         });
+    }
+
+    /// Reports each bare name that no pass typed. A body left `NotYet` keeps its
+    /// lowered `BareName` expressions, and no later pass can resolve them.
+    fn report_unresolved_bare_names(&mut self) {
+        let mut reports = Vec::new();
+        for (id, checked) in self.program.bodies.iter_enumerated() {
+            if self.done.contains(&id) {
+                continue;
+            }
+            let module = self.program.defs[checked.owner].module;
+            for expr in checked.exprs.iter() {
+                if let ExprKind::BareName(name) = &expr.kind {
+                    let message = format!("`{name}` is not in scope");
+                    reports.push((
+                        module,
+                        HirDiagnostic::new(crate::diag::UNRESOLVED, message, expr.span.clone()),
+                    ));
+                }
+            }
+        }
+        for (module, diagnostic) in reports {
+            self.program.modules[module].diagnostics.push(diagnostic);
+        }
     }
 }
 
@@ -669,6 +701,9 @@ impl<'a> BodyCheck<'a> {
                     }
                 }
                 expected
+            }
+            (ExprKind::BareName(name), expected) => {
+                self.check_bare_name(body, id, &name, expected, span.clone())?
             }
             (ExprKind::Lambda { body: child, .. }, Some(expected))
                 if matches!(self.kind_of(self.resolved(expected)), Some(TyKind::Fn(_))) =>

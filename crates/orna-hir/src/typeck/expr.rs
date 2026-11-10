@@ -3,7 +3,7 @@
 
 use orna_syntax::SyntaxSpan;
 
-use crate::{Arm, AssignOp, BinOp, Body, ExprId, ExprKind, Ty, TyKind};
+use crate::{Arm, AssignOp, BinOp, Body, DefId, DefKind, ExprId, ExprKind, Ty, TyKind};
 
 use super::{BodyCheck, NotYetReason};
 
@@ -302,6 +302,60 @@ impl<'a> BodyCheck<'a> {
             ExprKind::Error => Ok(self.error()),
             _ => unreachable!("the dispatcher selected the jump group"),
         }
+    }
+
+    /// Types a bare word that lowering left unresolved (decision P3b). It names
+    /// the payload-free variant of the expected enum type with the same spelling;
+    /// otherwise it is reported as unresolved and typed as an error.
+    pub(super) fn check_bare_name(
+        &mut self,
+        body: &mut Body,
+        id: ExprId,
+        name: &crate::Name,
+        expected: Option<Ty>,
+        span: SyntaxSpan,
+    ) -> Result<Ty, NotYetReason> {
+        if let Some(expected) = expected {
+            let expected = self.resolved(expected);
+            if matches!(self.kind_of(expected), Some(TyKind::Infer(_))) {
+                return Err(NotYetReason::Unsupported(
+                    "a bare name waits for its expected type to be solved".into(),
+                ));
+            }
+            if let Some(variant) = self.expected_variant(expected, name) {
+                body.exprs[id].kind = ExprKind::Def(variant);
+                let ty = self.def_value_ty(variant, span.clone())?;
+                return Ok(self.coerce(ty, expected, span));
+            }
+        }
+        body.exprs[id].kind = ExprKind::Error;
+        self.conflicts += 1;
+        self.diagnostics.push(crate::HirDiagnostic::new(
+            crate::diag::UNRESOLVED,
+            format!("`{name}` is not in scope"),
+            span,
+        ));
+        Ok(self.error())
+    }
+
+    /// The payload-free variant of the enum `expected` names that is spelled `name`.
+    fn expected_variant(&self, expected: Ty, name: &crate::Name) -> Option<DefId> {
+        let Some(TyKind::Adt(owner, _)) = self.kind_of(expected) else {
+            return None;
+        };
+        let Some(DefKind::Enum(enumeration)) = self
+            .program
+            .defs
+            .get(owner)
+            .map(|definition| &definition.kind)
+        else {
+            return None;
+        };
+        enumeration.variants.iter().copied().find(|variant| {
+            let definition = &self.program.defs[*variant];
+            definition.name == *name
+                && matches!(&definition.kind, DefKind::Variant(v) if v.fields.is_empty())
+        })
     }
 
     /// Types an `if`. Each branch is checked against `expected`, so a lifted
