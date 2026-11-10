@@ -1239,7 +1239,10 @@ fn annotate_item(item: &mut Item, source: &SourceLines<'_>, file: &str) {
             }
         }
         Declaration::Enum {
-            generics, variants, implementations, ..
+            generics,
+            variants,
+            implementations,
+            ..
         } => {
             for parameter in generics {
                 annotate_generic(parameter, source, file);
@@ -4207,7 +4210,10 @@ impl Parser {
             }
             let start = self.current().span.clone();
             if !implementations.is_empty() {
-                self.error_here("ORNA-PARSE-001", "enum variants must come before implementation blocks");
+                self.error_here(
+                    "ORNA-PARSE-001",
+                    "enum variants must come before implementation blocks",
+                );
             }
             if !self.contextual() {
                 self.error_here("ORNA-PARSE-001", "expected enum variant");
