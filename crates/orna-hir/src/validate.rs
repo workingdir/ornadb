@@ -6,10 +6,10 @@
 //! a test instead of as a wrong answer in production. The invariants are the
 //! ones the design states for the ids and tables (section 2.2), bodies and
 //! patterns (section 2.4), and calls and the one argument binder (sections 2.6
-//! and 2.7). The stage text calls this "the validator of 2.12"; the design
-//! revision this crate implements has no section 2.12, so no invariants are
-//! claimed from a section that does not state them. The type and effect passes
-//! of H2 and H3 add their own invariants to the same entry point.
+//! and 2.7). The stage text calls this "the validator of 2.12", but
+//! `docs/design/hir.md` has no section 2.12 (its section 2 ends at 2.10), so no
+//! invariants are claimed from a section that does not state them. The type and
+//! effect passes of H2 and H3 add their own invariants to the same entry point.
 //!
 //! The invariants checked here are:
 //!
