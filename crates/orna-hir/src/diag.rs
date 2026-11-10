@@ -57,6 +57,12 @@ pub const INFER_AMBIGUOUS: &str = "ORNA-INFER-007";
 /// diagnostic so the two agree on the same mistake.
 pub const PUBLIC_ANNOTATION: &str = "ORNA-S020-ANNOTATION";
 
+/// Two protocol implementations of one type supply the same member call.
+///
+/// Overlap is a static error whatever the source order (ORNA-GENERIC-014), so
+/// the call cannot pick one of them.
+pub const GENERIC_OVERLAP: &str = "ORNA-GENERIC-014";
+
 /// A source module whose first segment is the reserved `sys` or `std` root (S003).
 pub const RESERVED: &str = "ORNA-S003-RESERVED";
 /// Two source namespaces that Unicode folding makes siblings, or a repeated

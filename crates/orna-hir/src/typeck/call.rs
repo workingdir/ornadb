@@ -72,14 +72,33 @@ impl<'a> BodyCheck<'a> {
             Callee::Pending { base, name } => Some((*base, name.clone())),
             _ => None,
         };
+        let mut protocol_member = false;
         if let Some((base, name)) = pending {
-            let settled = self.settle_pending(body, base, &name, span.clone())?;
+            let Some(settled) = self.settle_pending(body, base, &name, span.clone())? else {
+                return Ok(self.error());
+            };
+            if matches!(settled, Callee::Source { .. }) {
+                // A protocol member takes the receiver as its first argument (D1: the receiver is not written out).
+                let arguments: Box<[crate::Arg]> = std::iter::once(crate::Arg {
+                    slot: crate::ParamIdx::new(0),
+                    value: crate::ArgValue::Expr(base),
+                })
+                .chain(call.args.iter().map(|argument| crate::Arg {
+                    slot: crate::ParamIdx::new(argument.slot.as_u32() + 1),
+                    value: argument.value,
+                }))
+                .collect();
+                call.args = arguments;
+                protocol_member = true;
+            }
             call.callee = settled;
         }
         match &call.callee {
-            Callee::Source { def, targs } => self.source_call_ty(body, call, *def, targs, span),
+            Callee::Source { def, targs } => {
+                self.source_call_ty(body, call, *def, targs, span, protocol_member)
+            }
             Callee::Native { def, targs } | Callee::Sys { def, targs } => {
-                self.source_call_ty(body, call, *def, targs, span)
+                self.source_call_ty(body, call, *def, targs, span, false)
             }
             Callee::TableOp { table, op } => {
                 let table = *table;
@@ -128,13 +147,15 @@ impl<'a> BodyCheck<'a> {
     }
 
     /// Settles a member call whose meaning the receiver's type decides.
+    ///
+    /// `Ok(None)` means the selection was ambiguous and the conflict is recorded.
     fn settle_pending(
         &mut self,
         body: &mut Body,
         base: ExprId,
         name: &Name,
-        _span: SyntaxSpan,
-    ) -> Result<Callee, NotYetReason> {
+        span: SyntaxSpan,
+    ) -> Result<Option<Callee>, NotYetReason> {
         let base_ty = self.infer_expr(body, base, None)?;
         let resolved = self.resolved(base_ty);
         if let Some(TyKind::Relation(inner)) = self.kind_of(resolved) {
@@ -142,19 +163,13 @@ impl<'a> BodyCheck<'a> {
                 && matches!(self.program.defs[table].kind, DefKind::Table(_))
                 && let Some(op) = table_operation(name.as_str())
             {
-                return Ok(Callee::TableOp { table, op });
+                return Ok(Some(Callee::TableOp { table, op }));
             }
             if let Some(op) = relation_operation(name.as_str()) {
-                return Ok(Callee::Relational { op });
+                return Ok(Some(Callee::Relational { op }));
             }
         }
-        Err(NotYetReason::Unsupported(
-            format!(
-                "the member call `.{}` on this receiver type is not on HIR yet",
-                name.as_str()
-            )
-            .into(),
-        ))
+        self.settle_protocol_call(resolved, name, span)
     }
 
     /// Types a source, native or `sys` call against the resolved signature.
@@ -165,15 +180,17 @@ impl<'a> BodyCheck<'a> {
         def: DefId,
         targs: &[Ty],
         span: SyntaxSpan,
+        protocol_member: bool,
     ) -> Result<Ty, NotYetReason> {
         let Some(DefKind::Fn(function)) = self.program.defs.get(def).map(|d| d.kind.clone()) else {
             return Err(NotYetReason::Unsupported(
                 "the callee is not a function declaration".into(),
             ));
         };
-        if matches!(function.body, FnBody::Signature) {
+        // A bodiless function is only callable as a protocol member, whose signature is the call's type.
+        if !protocol_member && matches!(function.body, FnBody::Signature) {
             return Err(NotYetReason::Unsupported(
-                "calling a protocol member is not on HIR yet".into(),
+                "calling a function declared without a body is not on HIR yet".into(),
             ));
         }
         let inferred: Vec<Ty>;

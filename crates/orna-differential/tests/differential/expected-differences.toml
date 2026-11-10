@@ -1059,8 +1059,8 @@ bead = "ornadb-csenl.16"
 
 [[environment]]
 category = "harness-environment-names"
-count = 11
-reason = "harness bindings: the expression fixtures (fallback, left, middle, missing) and the example cases use names the harness supplies (log, process, read, rows, get, valid_email). The case declares none of them, so each use is an environment blocker that the harness fidelity work closes"
+count = 12
+reason = "harness bindings: the expression fixtures (fallback, left, middle, missing) and the example cases use names the harness supplies (log, process, read, rows, get, valid_email) or that the corpus mentions without declaring (EmailHeader, in From<EmailHeader>). The case declares none of them, so each use is an environment blocker that the harness fidelity work closes"
 bead = "ornadb-csenl.15"
 
 [[environment]]

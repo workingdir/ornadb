@@ -230,6 +230,8 @@ pub enum ValidationError {
     },
 }
 
+mod generics;
+
 impl Program {
     /// Checks every structural invariant and returns all violations.
     ///
@@ -368,9 +370,15 @@ impl Program {
                 self.validate_kinds(&variant.fields, "variant field", DefKind::is_field, errors);
             }
             DefKind::Protocol(protocol) => {
+                self.validate_generics(&protocol.params, errors);
                 self.validate_def_refs(&protocol.members, "protocol member", errors)
             }
             DefKind::Impl(implementation) => {
+                self.validate_def_refs(
+                    std::slice::from_ref(&implementation.owner),
+                    "impl owner",
+                    errors,
+                );
                 if let Some(protocol) = implementation.protocol {
                     self.validate_kinds(
                         std::slice::from_ref(&protocol),
@@ -379,6 +387,10 @@ impl Program {
                         errors,
                     );
                 }
+                implementation
+                    .protocol_args
+                    .iter()
+                    .for_each(|ty| self.validate_ty(*ty, "impl argument", errors));
                 self.validate_def_refs(&implementation.members, "impl member", errors);
             }
             DefKind::Dimension(dimension) => {
@@ -399,21 +411,6 @@ impl Program {
                 self.validate_owned_body(assertion.body, from, "assertion body", errors);
             }
             DefKind::Field(field) => self.validate_ty(field.ty, "field.ty", errors),
-        }
-    }
-
-    fn validate_generics(
-        &self,
-        generics: &[crate::GenericParam],
-        errors: &mut Vec<ValidationError>,
-    ) {
-        for generic in generics {
-            self.validate_kinds(
-                &generic.bounds,
-                "generic bound",
-                DefKind::is_protocol,
-                errors,
-            );
         }
     }
 
