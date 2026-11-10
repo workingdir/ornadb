@@ -371,3 +371,29 @@ fn missing_contains_instance_names_the_in_operator_and_protocol() {
     assert!(message.contains("`in`"), "{message}");
     assert!(message.contains("`Contains`"), "{message}");
 }
+
+#[test]
+fn ordering_comparison_selects_the_order_instance() {
+    let mut program = program(
+        "use core.{Ordering};\nuse core.ops.*;\npub type Money {\n    cents: Int,\n    impl Order {\n        fn compare(self, other: Self): Ordering = equal;\n    }\n}\npub fn before(a: Money, b: Money): Bool = a < b;\n",
+    );
+    let summary = typeck(&mut program);
+    assert!(test_accepted(&program, &summary), "{summary:?}");
+    assert_eq!(result(&program, "before"), "Bool");
+}
+
+#[test]
+fn missing_order_instance_names_the_ordering_operator_and_protocol() {
+    let mut program = program(
+        "pub type Money {\n    cents: Int,\n}\npub fn before(a: Money, b: Money): Bool = a < b;\n",
+    );
+    let _ = typeck(&mut program);
+    let message = program.modules[test_module(&program)]
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == crate::diag::INFER_CONFLICT)
+        .map(|diagnostic| diagnostic.message.to_string())
+        .unwrap_or_default();
+    assert!(message.contains("`<`"), "{message}");
+    assert!(message.contains("`Order`"), "{message}");
+}

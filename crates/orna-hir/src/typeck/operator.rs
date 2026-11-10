@@ -45,6 +45,18 @@ fn binary_protocol(op: BinOp) -> Option<OperatorProtocol> {
     })
 }
 
+/// The `Ordering` test an ordering operator lowers to: its symbol, the `==` or `!=` that tests the
+/// comparison result, and the `Ordering` variant it compares against.
+fn order_test(op: BinOp) -> Option<(&'static str, BinOp, &'static str)> {
+    match op {
+        BinOp::Lt => Some(("<", BinOp::Eq, "less")),
+        BinOp::Le => Some(("<=", BinOp::Ne, "greater")),
+        BinOp::Gt => Some((">", BinOp::Eq, "greater")),
+        BinOp::Ge => Some((">=", BinOp::Ne, "less")),
+        _ => None,
+    }
+}
+
 /// One instance that can serve an operator: its member and that member's signature.
 struct Implementation {
     member: DefId,
@@ -72,6 +84,9 @@ impl BodyCheck<'_> {
         if matches!(op, BinOp::In) {
             return self.contains_operator_ty(body, id, operands, types, span);
         }
+        if order_test(op).is_some() {
+            return self.order_operator_ty(body, id, op, operands, types, span);
+        }
         let operator = binary_protocol(op)?;
         let (left_expr, right_expr) = operands;
         let (left, right) = types;
@@ -89,6 +104,82 @@ impl BodyCheck<'_> {
         self.unify_operands(&[left, right], &implementation.params, &span);
         body.exprs[id].kind = operator_call(implementation.member, &[left_expr, right_expr], span);
         Some(implementation.output)
+    }
+
+    /// Types an ordering comparison of a nominal operand through its `Order` instance.
+    ///
+    /// `left < right` becomes `left.compare(right) == Ordering.less`; the other ordering operators test the
+    /// same `Ordering` result with `==` or `!=`. The `Ordering` nodes are new expressions, so their types are
+    /// set here.
+    fn order_operator_ty(
+        &mut self,
+        body: &mut Body,
+        id: ExprId,
+        op: BinOp,
+        operands: (ExprId, ExprId),
+        types: (Ty, Ty),
+        span: SyntaxSpan,
+    ) -> Option<Ty> {
+        let (symbol, test, variant) = order_test(op)?;
+        let (left_expr, right_expr) = operands;
+        let (left, right) = types;
+        if matches!(self.kind_of(right), Some(TyKind::Infer(_))) {
+            return None;
+        }
+        let owner = self.nominal_owner(left)?;
+        let protocol = self.core_ops_protocol("Order")?;
+        let operator = OperatorProtocol {
+            symbol,
+            protocol: "Order",
+            member: "compare",
+            output: true,
+        };
+        let found = self.operator_implementations(owner, protocol, &operator, None);
+        let Some(implementation) =
+            self.settle_operator(found, &operator, (left, Some(right)), &span)
+        else {
+            return Some(self.error());
+        };
+        self.unify_operands(&[left, right], &implementation.params, &span);
+        let ordering = implementation.output;
+        let variant = self.ordering_variant(variant)?;
+        let node_span = body.exprs[id].span.clone();
+        let call = body.exprs.push(crate::Expr {
+            kind: operator_call(implementation.member, &[left_expr, right_expr], span),
+            ty: ordering,
+            span: node_span.clone(),
+        });
+        let variant = body.exprs.push(crate::Expr {
+            kind: ExprKind::Def(variant),
+            ty: ordering,
+            span: node_span,
+        });
+        body.exprs[id].kind = ExprKind::Binary {
+            op: test,
+            lhs: call,
+            rhs: variant,
+        };
+        Some(self.program.tys.intern(TyKind::Bool))
+    }
+
+    /// The `Ordering` variant named `name`, from the root `core` module.
+    fn ordering_variant(&self, name: &str) -> Option<DefId> {
+        let path = ModulePath::new([Name::new("core")]);
+        let module = self
+            .program
+            .modules
+            .iter()
+            .find(|module| module.path == path)?;
+        let ordering = *module.exports.get(&Name::new("Ordering"))?;
+        let DefKind::Enum(declared) = &self.program.defs[ordering].kind else {
+            return None;
+        };
+        let name = Name::new(name);
+        declared
+            .variants
+            .iter()
+            .copied()
+            .find(|variant| self.program.defs[*variant].name == name)
     }
 
     /// Types `value in container` through the `Contains` instance of a nominal container.
