@@ -1,0 +1,12 @@
+# The H4 executor agreement ratchet (docs/design/hir.md section 6.3, stage H4).
+#
+# `agreed` is the number of corpus cases the HIR executor ran whose outcome
+# (canonical result bytes or error code) matches the old pipeline exactly. Every
+# case the executor runs must agree; a disagreement fails the test outright.
+#
+# The agreed count may only grow: update it in the commit that runs more of the
+# corpus. Cases the executor does not run are counted by reason ("not yet on
+# HIR") and are not part of this count.
+
+[[exec-share]]
+agreed = 2

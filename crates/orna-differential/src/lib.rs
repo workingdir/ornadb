@@ -42,6 +42,7 @@
 pub mod case;
 pub mod compare;
 pub mod observe_checker;
+pub mod observe_exec;
 pub mod observe_new;
 pub mod observe_old;
 mod toml_lite;

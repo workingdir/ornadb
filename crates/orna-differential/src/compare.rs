@@ -371,6 +371,44 @@ pub fn typed_share_ratchet(recorded: TypedShare, observed: TypedShare) -> Vec<St
     failures
 }
 
+/// Reads `tests/differential/exec-share.toml`: the number of corpus cases the
+/// executor ran whose outcome matches the old pipeline.
+pub fn load_exec_agreed() -> Result<usize, String> {
+    let path = differential_dir().join("exec-share.toml");
+    parse_exec_agreed(&read_file(&path)?)
+}
+
+/// Parses the exec-share ratchet text.
+pub fn parse_exec_agreed(source: &str) -> Result<usize, String> {
+    let document = toml_lite::parse(source)?;
+    let table = document
+        .tables_named("exec-share")
+        .next()
+        .ok_or_else(|| "exec-share.toml: no `[[exec-share]]` table".to_owned())?;
+    usize::try_from(table.integer("agreed")?)
+        .map_err(|_| "exec-share.toml: `agreed` must be non-negative".to_owned())
+}
+
+/// Applies the exec-share ratchet.
+///
+/// The agreed count may only grow, and a grown count must be recorded in the
+/// same commit: an unrecorded rise would let a later fall pass unseen.
+#[must_use]
+pub fn exec_share_ratchet(recorded: usize, observed: usize) -> Vec<String> {
+    let mut failures = Vec::new();
+    if observed < recorded {
+        failures.push(format!(
+            "executor agreement fell from {recorded} to {observed} cases; the ratchet only grows"
+        ));
+    }
+    if observed > recorded {
+        failures.push(format!(
+            "executor agreement rose from {recorded} to {observed}; record {observed} in exec-share.toml"
+        ));
+    }
+    failures
+}
+
 /// Lowercase hex, the canonical rendering both ratchets and messages use.
 #[must_use]
 pub fn encode(bytes: &[u8]) -> String {
