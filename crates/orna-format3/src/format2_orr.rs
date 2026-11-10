@@ -63,7 +63,7 @@ pub fn decode_orr2_blob_field(text: &str) -> Result<Orr2BlobField, Orr2DecodeErr
     if trimmed.starts_with('{') {
         return parse_record(trimmed).map(Orr2BlobField::Reference);
     }
-    orna_value::base64_decode(trimmed)
+    orna_base::base64_decode(trimmed)
         .map(Orr2BlobField::Inline)
         .map_err(|_| Orr2DecodeError::InvalidInline)
 }

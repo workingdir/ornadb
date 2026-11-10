@@ -459,10 +459,14 @@ pub fn git_sha1_oid(kind: &str, data: &[u8]) -> Vec<u8> {
     hasher.finalize().to_vec()
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
+/// Test-only OGB object stores and vectors, shared with the repository's
+/// format-2 Blob-read tests through the `test-support` feature.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[allow(dead_code, unused_imports)]
+pub mod test_support {
     use super::*;
-    use crate::hex::hex_encode;
+    use orna_base::hex;
     use std::collections::HashMap;
 
     enum Obj {
@@ -471,7 +475,7 @@ pub(crate) mod tests {
     }
 
     #[derive(Default)]
-    pub(crate) struct MemStore {
+    pub struct MemStore {
         objects: HashMap<Vec<u8>, Obj>,
     }
 
@@ -540,7 +544,7 @@ pub(crate) mod tests {
 
     /// Builds the one-chunk root described by the zip vector "abc" and returns
     /// `(store, root_entries)`. Descriptor bytes follow the superseded draft ORNA-OGB-004 layout.
-    pub(crate) fn abc_root(chunk: &[u8]) -> (MemStore, Vec<OgbTreeEntry>) {
+    pub fn abc_root(chunk: &[u8]) -> (MemStore, Vec<OgbTreeEntry>) {
         let mut store = MemStore::default();
         let digest: [u8; 32] = Sha256::digest(b"abc").into();
         let chunk_oid = store.put_blob(chunk);
@@ -575,11 +579,11 @@ pub(crate) mod tests {
         let verified = verify_ogb_root(&store, &root).unwrap();
         assert_eq!(verified.total_length, 3);
         assert_eq!(
-            hex_encode(&verified.content_sha256),
+            hex(&verified.content_sha256),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
         assert_eq!(
-            hex_encode(&git_sha1_oid("blob", b"abc")),
+            hex(&git_sha1_oid("blob", b"abc")),
             "f2ba8f84ab5c1bce84a7b441cb1959cfc7093b7f"
         );
     }
@@ -911,7 +915,7 @@ pub(crate) mod tests {
         let verified = verify_ogb_root(&store, &root).unwrap();
         assert_eq!(verified.total_length, 0);
         assert_eq!(
-            hex_encode(&verified.content_sha256),
+            hex(&verified.content_sha256),
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
     }

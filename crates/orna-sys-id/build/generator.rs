@@ -72,12 +72,13 @@ pub struct Generated {
     pub tables: String,
     pub dispatch: String,
     pub engine_functions: String,
+    pub provider_links: String,
 }
 
 impl Generated {
     /// The generated files in a stable order.
     #[must_use]
-    pub fn files(&self) -> [(&'static str, &str); 8] {
+    pub fn files(&self) -> [(&'static str, &str); 9] {
         [
             ("functions.rs", &self.functions),
             ("codes.rs", &self.codes),
@@ -87,6 +88,7 @@ impl Generated {
             ("tables.rs", &self.tables),
             ("dispatch.rs", &self.dispatch),
             ("engine_functions.rs", &self.engine_functions),
+            ("provider_links.rs", &self.provider_links),
         ]
     }
 }
@@ -144,6 +146,7 @@ pub fn generate_unchecked(sys_json: &str, engine_json: &str) -> Result<Generated
         tables: render_tables(&catalogue, &engine),
         dispatch: render_dispatch(&catalogue),
         engine_functions: render_engine_functions(&engine)?,
+        provider_links: render_provider_links(&catalogue)?,
     })
 }
 
@@ -4468,5 +4471,206 @@ fn render_engine_functions(engine: &Engine) -> Result<String> {
     writeln!(out, "        }}").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out, "}}").unwrap();
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// Production provider linkage
+// ---------------------------------------------------------------------------
+
+/// The production host that executes one linked member.
+const PROVIDER_HOSTS: [&str; 4] = [
+    "Evaluator",
+    "HostOperationRegistry",
+    "LiveAdministration",
+    "PublicationMetadata",
+];
+
+/// Callable labels bound by a production host. Every other catalogue callable
+/// is emitted as `None` rather than omitted.
+const LINKED_CALLABLES: [(&str, &str); 15] = [
+    ("sys.blob.length", "Evaluator"),
+    ("sys.blob.digest", "Evaluator"),
+    ("sys.blob.verify", "Evaluator"),
+    ("sys.blob.read", "Evaluator"),
+    ("sys.blob.to_bytes", "Evaluator"),
+    ("sys.blob.from_bytes", "Evaluator"),
+    ("sys.blob.annotate", "Evaluator"),
+    ("sys.blob.media_type", "Evaluator"),
+    ("sys.blob.suffix", "Evaluator"),
+    ("sys.blob.same_content", "Evaluator"),
+    ("sys.blob.capture_file", "HostOperationRegistry"),
+    ("sys.explain(Query)", "Evaluator"),
+    ("sys.rt.info", "Evaluator"),
+    ("sys.admin.pause_stream", "LiveAdministration"),
+    ("sys.admin.resume_stream", "LiveAdministration"),
+];
+
+/// Canonical relation names bound by a production host.
+const LINKED_RELATIONS: [(&str, &str); 3] = [
+    ("sys.Materialization", "Evaluator"),
+    ("sys.MaintenanceJob", "PublicationMetadata"),
+    ("sys.Storage", "PublicationMetadata"),
+];
+
+/// Grouped handles bound by a production host.
+const LINKED_GROUPED_HANDLES: [(&str, &str); 2] = [
+    ("sys.catalog.columns", "Evaluator"),
+    ("sys.catalog.tables", "Evaluator"),
+];
+
+fn render_provider_links(catalogue: &Catalogue) -> Result<String> {
+    let host = |kind: &str| -> Result<&'static str> {
+        PROVIDER_HOSTS
+            .iter()
+            .copied()
+            .find(|candidate| *candidate == kind)
+            .ok_or_else(|| GenError::new(format!("unknown provider host kind `{kind}`")))
+    };
+
+    let mut callables = BTreeMap::new();
+    for (label, kind) in LINKED_CALLABLES {
+        host(kind)?;
+        if !catalogue
+            .functions
+            .iter()
+            .any(|function| function.label == label)
+        {
+            return Err(GenError::new(format!(
+                "provider link names unknown callable `{label}`"
+            )));
+        }
+        if callables.insert(label, kind).is_some() {
+            return Err(GenError::new(format!(
+                "provider link repeats callable `{label}`"
+            )));
+        }
+    }
+    let mut relations = BTreeMap::new();
+    for (name, kind) in LINKED_RELATIONS {
+        host(kind)?;
+        if !catalogue
+            .relations
+            .iter()
+            .any(|relation| relation.name == name)
+        {
+            return Err(GenError::new(format!(
+                "provider link names unknown relation `{name}`"
+            )));
+        }
+        relations.insert(name, kind);
+    }
+    let mut handles = BTreeMap::new();
+    for (name, kind) in LINKED_GROUPED_HANDLES {
+        host(kind)?;
+        if !catalogue
+            .relations
+            .iter()
+            .any(|relation| relation.handle == name)
+        {
+            return Err(GenError::new(format!(
+                "provider link names unknown grouped handle `{name}`"
+            )));
+        }
+        handles.insert(name, kind);
+    }
+
+    let mut out = String::new();
+    out.push_str(HEADER);
+    writeln!(
+        out,
+        "// Generated production provider linkage for the portable `sys` surface."
+    )
+    .unwrap();
+    out.push('\n');
+    writeln!(
+        out,
+        "/// The production boundary that executes a linked member."
+    )
+    .unwrap();
+    writeln!(out, "#[derive(Clone, Copy, Debug, Eq, PartialEq)]").unwrap();
+    writeln!(out, "pub enum ProviderHostKind {{").unwrap();
+    for kind in PROVIDER_HOSTS {
+        writeln!(out, "    /// `{kind}`.").unwrap();
+        writeln!(out, "    {kind},").unwrap();
+    }
+    writeln!(out, "}}").unwrap();
+    out.push('\n');
+
+    let render_table = |out: &mut String, name: &str, count: &str, entries: &[String]| {
+        writeln!(
+            out,
+            "/// One entry per catalogue member, in catalogue order."
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "pub const {name}: [Option<ProviderHostKind>; {count}] = ["
+        )
+        .unwrap();
+        for entry in entries {
+            writeln!(out, "    {entry},").unwrap();
+        }
+        writeln!(out, "];").unwrap();
+        out.push('\n');
+    };
+
+    let function_entries: Vec<String> = catalogue
+        .functions
+        .iter()
+        .map(|function| match callables.get(function.label.as_str()) {
+            Some(kind) => format!("Some(ProviderHostKind::{kind})"),
+            None => "None".to_owned(),
+        })
+        .collect();
+    render_table(
+        &mut out,
+        "SYS_FUNCTION_PROVIDER_HOSTS",
+        "crate::SYS_FUNCTION_COUNT",
+        &function_entries,
+    );
+
+    let relation_entries: Vec<String> = catalogue
+        .relations
+        .iter()
+        .map(|relation| match relations.get(relation.name.as_str()) {
+            Some(kind) => format!("Some(ProviderHostKind::{kind})"),
+            None => "None".to_owned(),
+        })
+        .collect();
+    render_table(
+        &mut out,
+        "SYS_RELATION_PROVIDER_HOSTS",
+        "crate::SYS_RELATION_COUNT",
+        &relation_entries,
+    );
+
+    let handle_entries: Vec<String> = catalogue
+        .relations
+        .iter()
+        .map(|relation| match handles.get(relation.handle.as_str()) {
+            Some(kind) => format!("Some(ProviderHostKind::{kind})"),
+            None => "None".to_owned(),
+        })
+        .collect();
+    render_table(
+        &mut out,
+        "SYS_GROUPED_HANDLE_PROVIDER_HOSTS",
+        "crate::SYS_GROUPED_HANDLE_COUNT",
+        &handle_entries,
+    );
+
+    let singleton_entries: Vec<String> = catalogue
+        .singletons
+        .iter()
+        .map(|_| "None".to_owned())
+        .collect();
+    render_table(
+        &mut out,
+        "SYS_SINGLETON_PROVIDER_HOSTS",
+        "crate::SYS_SINGLETON_COUNT",
+        &singleton_entries,
+    );
+
     Ok(out)
 }

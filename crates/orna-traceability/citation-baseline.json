@@ -7,6 +7,7 @@
     "orna-conformance",
     "orna-evaluator",
     "orna-evolution",
+    "orna-format3",
     "orna-intrinsics",
     "orna-live",
     "orna-lsp",

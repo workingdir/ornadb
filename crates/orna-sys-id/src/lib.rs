@@ -22,6 +22,7 @@ pub mod engine;
 pub mod error_code;
 pub mod function;
 pub mod host_operation;
+pub mod provider_links;
 pub mod relation;
 pub mod removed;
 pub mod versioned;
@@ -44,6 +45,10 @@ pub use function::{AmbiguousPath, SYS_FUNCTION_COUNT, SysFunction};
 pub use host_operation::{
     HOST_OPERATION_COUNT, HOST_OPERATION_DESCRIPTORS, HOST_PROVIDER_COUNT, HostOperation,
     HostOperationDescriptor, HostProvider, host_operation_descriptor,
+};
+pub use provider_links::{
+    ProviderHostKind, SYS_FUNCTION_PROVIDER_HOSTS, SYS_GROUPED_HANDLE_PROVIDER_HOSTS,
+    SYS_RELATION_PROVIDER_HOSTS, SYS_SINGLETON_PROVIDER_HOSTS,
 };
 pub use relation::{
     SYS_ENUM_COUNT, SYS_ENUM_VALUE_COUNT, SYS_FIELD_COUNT, SYS_GROUPED_HANDLE_COUNT,
