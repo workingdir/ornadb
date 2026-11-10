@@ -558,7 +558,8 @@ migration does to each file:
   size, a non-positive step, fewer than two points and unordered timestamps)
   _and_ `stdlib/std/query.orna:202-207`. The runtime does not perform that
   check: `window_time_series_statistics`
-  (`crates/orna-evaluator/src/lib.rs:14521-14560`) starts at
+  (`crates/orna-evaluator/src/lib.rs:14305-14344` at `09546575e`, `:14521` at
+  the measurement commit `f02dd7c31`) starts at
   `positive_collection_size` and never validates ordering. So the wrapper
   stays as ordinary source and the leaf becomes a private
   `native fn __window_rate(...)`.
