@@ -21,9 +21,7 @@ use orna_hir::{
     BodyId, DefId, DefKind, LocalId, ModuleId as HirModuleId, Name, NameTarget, NameUse, Program,
     SourceId, SourceUnit, TyKind, UseContext, lower,
 };
-use orna_syntax::{
-    Declaration, Keyword, SyntaxSpan, SyntaxTree, Token, TokenKind, UseTail, lex, parse_module,
-};
+use orna_syntax::{Declaration, Keyword, SyntaxSpan, Token, TokenKind, UseTail, lex, parse_module};
 
 use crate::analysis::{self, EditorParse, EditorSymbol};
 use crate::documents::Document;
@@ -357,7 +355,7 @@ impl Workspace {
             .map(|(logical, source)| {
                 (
                     module_path_of(logical),
-                    parse_module_with_file(source, logical.clone()).value,
+                    orna_syntax::parse_module_with_file(source, logical.clone()).value,
                 )
             })
             .collect::<Vec<_>>();
@@ -443,6 +441,17 @@ impl Workspace {
             self.declarations[module].push(declared);
         }
 
+        self.index_bindings();
+
+        self.index_parameters();
+
+        self.index_detached_defs();
+
+        self.index_occurrences();
+    }
+
+    /// Lexical bindings of every body, with the module they belong to.
+    fn index_bindings(&mut self) {
         for (body_id, body) in self.program.bodies.iter_enumerated() {
             let module = self.program.defs[body.owner].module;
             let Some(module_index) = self.hir_modules.iter().position(|hir| *hir == Some(module))
@@ -470,8 +479,10 @@ impl Workspace {
                 });
             }
         }
+    }
 
-        // Function parameter names, from the lowered body's first slots.
+    /// Function parameter names, from the lowered body's first slots.
+    fn index_parameters(&mut self) {
         for declarations in &mut self.declarations {
             for declared in declarations.iter_mut() {
                 let Some(body) = self.program.source_body(declared.def) else {
@@ -487,28 +498,35 @@ impl Workspace {
                     .collect();
             }
         }
+    }
 
-        if matches!(self.scope, Scope::Detached) {
-            for declarations in &self.declarations {
-                // Same-name declarations of one document are one overload
-                // group, as the old shared scope treated them.
-                let mut first_in_module = HashMap::<&str, DefId>::new();
-                for declared in declarations.iter() {
-                    if declared.owner.is_none() {
-                        first_in_module
-                            .entry(declared.key.as_str())
-                            .or_insert(declared.def);
-                    }
-                }
-                for (key, def) in first_in_module {
-                    self.detached_defs
-                        .entry(key.to_owned())
-                        .or_default()
-                        .push(def);
+    /// Same-name top-level declarations of detached documents share one scope.
+    fn index_detached_defs(&mut self) {
+        if !matches!(self.scope, Scope::Detached) {
+            return;
+        }
+        for declarations in &self.declarations {
+            // Same-name declarations of one document are one overload
+            // group, as the old shared scope treated them.
+            let mut first_in_module = HashMap::<&str, DefId>::new();
+            for declared in declarations.iter() {
+                if declared.owner.is_none() {
+                    first_in_module
+                        .entry(declared.key.as_str())
+                        .or_insert(declared.def);
                 }
             }
+            for (key, def) in first_in_module {
+                self.detached_defs
+                    .entry(key.to_owned())
+                    .or_default()
+                    .push(def);
+            }
         }
+    }
 
+    /// Name occurrences of every module, sorted and deduplicated by span.
+    fn index_occurrences(&mut self) {
         for (module, hir_module) in self.hir_modules.iter().enumerate() {
             let Some(hir_module) = hir_module else {
                 continue;
@@ -1142,11 +1160,6 @@ pub(crate) fn module_path_of(logical: &str) -> orna_hir::ModulePath {
             .into_iter()
             .map(|part| Name::new(&part)),
     )
-}
-
-/// Parses a source under the logical path its spans belong to.
-fn parse_module_with_file(source: &str, logical: String) -> orna_syntax::Parse<SyntaxTree> {
-    orna_syntax::parse_module_with_file(source, logical)
 }
 
 /// The type a field's declared type names, for hover and member checks.
