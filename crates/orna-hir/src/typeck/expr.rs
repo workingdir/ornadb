@@ -3,7 +3,7 @@
 
 use orna_syntax::SyntaxSpan;
 
-use crate::{AssignOp, BinOp, Body, ExprId, ExprKind, Ty, TyKind};
+use crate::{Arm, AssignOp, BinOp, Body, ExprId, ExprKind, Ty, TyKind};
 
 use super::{BodyCheck, NotYetReason};
 
@@ -186,40 +186,8 @@ impl<'a> BodyCheck<'a> {
     ) -> Result<Ty, NotYetReason> {
         match kind {
             ExprKind::Block { stmts, tail } => self.check_block(body, &stmts, tail, None, span),
-            ExprKind::If { cond, then, els } => {
-                let bool_ty = self.intern(TyKind::Bool);
-                let cond_ty = self.infer_expr(body, cond, Some(bool_ty))?;
-                self.unify(cond_ty, bool_ty, span.clone());
-                let then_ty = self.infer_expr(body, then, None)?;
-                match els {
-                    Some(els) => {
-                        let else_ty = self.infer_expr(body, els, None)?;
-                        self.unify(then_ty, else_ty, span.clone());
-                        Ok(self.resolved(then_ty))
-                    }
-                    None => Ok(self.intern(TyKind::Unit)),
-                }
-            }
-            ExprKind::Case { scrutinee, arms } => {
-                let scrutinee_ty = self.infer_expr(body, scrutinee, None)?;
-                let mut result = None;
-                for arm in arms.iter() {
-                    self.bind_pattern(body, arm.pat, scrutinee_ty, span.clone())?;
-                    if let Some(guard) = arm.guard {
-                        let bool_ty = self.intern(TyKind::Bool);
-                        let guard_ty = self.infer_expr(body, guard, Some(bool_ty))?;
-                        self.unify(guard_ty, bool_ty, span.clone());
-                    }
-                    let arm_ty = self.infer_expr(body, arm.body, None)?;
-                    match result {
-                        Some(previous) => self.unify(previous, arm_ty, span.clone()),
-                        None => result = Some(arm_ty),
-                    }
-                }
-                result.ok_or_else(|| {
-                    NotYetReason::Unsupported("a `case` with no arms has no H2a type".into())
-                })
-            }
+            ExprKind::If { cond, then, els } => self.check_if(body, cond, then, els, None, span),
+            ExprKind::Case { scrutinee, arms } => self.check_case(body, scrutinee, &arms, None, span),
             ExprKind::For {
                 pat,
                 iter,
@@ -288,7 +256,7 @@ impl<'a> BodyCheck<'a> {
             ExprKind::Continue => Ok(self.intern(TyKind::Never)),
             ExprKind::Assign { place, op, value } => {
                 let place_ty = self.place_ty(body, &place, span.clone())?;
-                let value_ty = self.infer_expr(body, value, None)?;
+                let value_ty = self.infer_expr(body, value, matches!(op, AssignOp::Set).then_some(place_ty))?;
                 match op {
                     AssignOp::Set => {
                         self.unify(place_ty, value_ty, span.clone());
@@ -301,8 +269,15 @@ impl<'a> BodyCheck<'a> {
                             AssignOp::Divide => BinOp::Div,
                             AssignOp::Set => unreachable!("handled above"),
                         };
-                        let left = self.resolved(place_ty);
-                        let right = self.resolved(value_ty);
+                        let mut left = self.resolved(place_ty);
+                        let mut right = self.resolved(value_ty);
+                        if matches!(self.kind_of(left), Some(TyKind::Infer(_)))
+                            || matches!(self.kind_of(right), Some(TyKind::Infer(_)))
+                        {
+                            self.unify(place_ty, value_ty, span.clone());
+                            left = self.resolved(place_ty);
+                            right = self.resolved(value_ty);
+                        }
                         match crate::ops::binary(&mut self.program.tys, binary, left, right) {
                             Some(result) => self.unify(place_ty, result, span.clone()),
                             None => {
@@ -324,5 +299,70 @@ impl<'a> BodyCheck<'a> {
             ExprKind::Error => Ok(self.error()),
             _ => unreachable!("the dispatcher selected the jump group"),
         }
+    }
+
+    /// Types an `if`. Each branch is checked against `expected`, so a lifted
+    /// branch (decision D3) is accepted where the result is optional.
+    pub(super) fn check_if(
+        &mut self,
+        body: &mut Body,
+        cond: ExprId,
+        then: ExprId,
+        els: Option<ExprId>,
+        expected: Option<Ty>,
+        span: SyntaxSpan,
+    ) -> Result<Ty, NotYetReason> {
+        let bool_ty = self.intern(TyKind::Bool);
+        let cond_ty = self.infer_expr(body, cond, Some(bool_ty))?;
+        self.unify(cond_ty, bool_ty, span.clone());
+        let Some(els) = els else {
+            self.infer_expr(body, then, None)?;
+            let unit = self.intern(TyKind::Unit);
+            return Ok(match expected {
+                Some(expected) => self.coerce(unit, expected, span),
+                None => unit,
+            });
+        };
+        let then_ty = self.infer_expr(body, then, expected)?;
+        let else_ty = self.infer_expr(body, els, expected)?;
+        match expected {
+            Some(expected) => Ok(expected),
+            None => {
+                self.unify(then_ty, else_ty, span);
+                Ok(self.resolved(then_ty))
+            }
+        }
+    }
+
+    /// Types a `case`. Each arm body is checked against `expected` when the
+    /// context fixes the result type.
+    pub(super) fn check_case(
+        &mut self,
+        body: &mut Body,
+        scrutinee: ExprId,
+        arms: &[Arm],
+        expected: Option<Ty>,
+        span: SyntaxSpan,
+    ) -> Result<Ty, NotYetReason> {
+        let scrutinee_ty = self.infer_expr(body, scrutinee, None)?;
+        let mut result = None;
+        for arm in arms {
+            self.bind_pattern(body, arm.pat, scrutinee_ty, span.clone())?;
+            if let Some(guard) = arm.guard {
+                let bool_ty = self.intern(TyKind::Bool);
+                let guard_ty = self.infer_expr(body, guard, Some(bool_ty))?;
+                self.unify(guard_ty, bool_ty, span.clone());
+            }
+            let arm_ty = self.infer_expr(body, arm.body, expected)?;
+            match result {
+                Some(previous) => self.unify(previous, arm_ty, span.clone()),
+                None => result = Some(arm_ty),
+            }
+        }
+        let ty = result.ok_or_else(|| NotYetReason::Unsupported("a `case` with no arms has no H2a type".into()))?;
+        Ok(match expected {
+            Some(expected) => expected,
+            None => self.resolved(ty),
+        })
     }
 }
