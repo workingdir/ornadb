@@ -62,6 +62,10 @@ name = "orna-intrinsics"
 layer = 2
 
 [[crate]]
+name = "orna-hir"
+layer = 3
+
+[[crate]]
 name = "orna-sys-id"
 layer = 3
 
@@ -222,3 +226,8 @@ reason = "owner decision 2026-11-09 (S9): orna-sys-codegen validates semantic ro
 id = "V11"
 key = "orphan:orna-sys-id"
 reason = "the generated identity crate lands before its adopters; stage 06 wires orna-sys and orna-eval to it"
+
+[[known]]
+id = "V13"
+key = "orphan:orna-hir"
+reason = "HIR stage H0 (bead ornabd-csenl.15) lands the typed IR crate before its adopters; H1 makes orna-check and orna-evaluator depend on it and the entry is deleted then"

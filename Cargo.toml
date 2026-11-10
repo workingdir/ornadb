@@ -9,6 +9,7 @@ members = [
     "crates/orna-evolution",
     "crates/orna-format3",
     "crates/orna-evaluator",
+    "crates/orna-hir",
     "crates/orna-lsp",
     "crates/orna-live",
     "crates/orna-protocol",
