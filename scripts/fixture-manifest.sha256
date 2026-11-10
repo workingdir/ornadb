@@ -5476,6 +5476,7 @@ ac72d86602d2336fd3ed425989e7011266e8b16bbc40e0f47d96be95c77a8ff1  crates/orna-sy
 2740b5f3a803f6d720f219a42a61b6d35ad16a9f270bacb06027e68c1b5633f3  crates/orna-syntax/tests/fixtures/reference/invalid/assert-missing-semicolon.orna
 9aad49ab664f743ac445a1d488061e3da657e0a6e8999ae6f7871003a1fff472  crates/orna-syntax/tests/fixtures/reference/invalid/assignment-expression.orna
 ce43ab2d019887d6f84906f52a2c420b08bef7d5d621321bf5c496655adad674  crates/orna-syntax/tests/fixtures/reference/invalid/comparison-chain.orna
+fd589d81ae9871d8ec5e09dbd93c40b4e6087f779f38f70a83fafdc8df165de2  crates/orna-syntax/tests/fixtures/reference/invalid/enum-variant-after-impl.orna
 73a2e47e64e2997012d6138a54a2c5ed74296fe97e388cc436967976a2a1944a  crates/orna-syntax/tests/fixtures/reference/invalid/legacy-assert-else.orna
 51d5df5d256a84d4d5c52958531d1727aafdf68a08ee1f1bd95ee4d993f55f5f  crates/orna-syntax/tests/fixtures/reference/invalid/legacy-assert-pipe-bang.orna
 6778a1c0ec7318199f6bd0a0b177342d0c68174924edcb896d6b041e7f4f96f6  crates/orna-syntax/tests/fixtures/reference/invalid/legacy-colon-bound.orna
@@ -5533,6 +5534,7 @@ b0457fa3099758f91aa437ad8e10aa5aa0711243f977051252a40f13131b915d  crates/orna-sy
 c225a831fb0cffea67f2c5e16848e348a139ba2abd6f827073cdb6fce951494e  crates/orna-syntax/tests/fixtures/reference/valid/duration-format.orna
 1e50a69aee59e92b716e73924e56caf0e357ddc9ed7c69956011e2372bceceee  crates/orna-syntax/tests/fixtures/reference/valid/effectful-expression.orna
 8bce5a3ee0ce81e9af145bedb4a7c2ec4bd603d71dae4e30649176d77857ffe7  crates/orna-syntax/tests/fixtures/reference/valid/empty-record-lambda.orna
+f1d0292366baf4fa7cb9c1b35e440b9c4cd16927d8dafc4c589b8dd534fb3b8e  crates/orna-syntax/tests/fixtures/reference/valid/enum-nested-impl.orna
 0401f6a23927fac9d0085e965d7545dfd3311645b4259ee4f0f04b1b8f062167  crates/orna-syntax/tests/fixtures/reference/valid/enum.orna
 7b4e922fa92015175d702f24887da0e65a8ce423f59579febe109ea251bd0f1b  crates/orna-syntax/tests/fixtures/reference/valid/executable-assertion.orna
 fbf7c6cf30d392fc207a6cda669ff5cb2762b600b5bdb5f49a45e9ee88aae6b1  crates/orna-syntax/tests/fixtures/reference/valid/explicit-rekey.orna

@@ -222,7 +222,7 @@ impl_function     = "fn" , identifier , [ generic_parameters ] ,
 impl_static_property = "static" , identifier , [ ":" , type_expression ] , "=" , expression , ";" ;
 
 enum_declaration  = visibility , "enum" , identifier , [ generic_parameters ] ,
-                    "{" , [ enum_variants ] , "}" ;
+                    "{" , [ enum_variants ] , { nested_impl_declaration } , "}" ;
 enum_variants     = enum_variant , { "," , enum_variant } , [ "," ] ;
 enum_variant      = contextual_name , [ "{" , [ enum_payload_fields ] , "}" ] ;
 enum_payload_fields = enum_payload_field , { "," , enum_payload_field } , [ "," ] ;
