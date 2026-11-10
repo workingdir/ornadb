@@ -17,5 +17,5 @@
 # and the checker's special cases (H3).
 
 [[typed-share]]
-typed = 50
+typed = 52
 lowered = 212

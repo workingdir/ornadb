@@ -90,7 +90,9 @@ impl<'p> Machine<'p> {
             | Lit::Float(_)
             | Lit::None
             | Lit::Date(_)
-            | Lit::Instant { .. } => Err(Stop::NotYet("literal kind (H4)")),
+            | Lit::Instant { .. }
+            | Lit::Period(_)
+            | Lit::Duration { .. } => Err(Stop::NotYet("literal kind (H4)")),
         }
     }
 
