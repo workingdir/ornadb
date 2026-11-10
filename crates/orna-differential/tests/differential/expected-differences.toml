@@ -1067,8 +1067,8 @@ bead = "ornadb-csenl.18"
 
 [[environment]]
 category = "connector-and-host-names"
-count = 26
-reason = "connector and host names (mail, google, finance, energy, HEAD, CWD, work) and the mail header type EmailHeader are a documented not-in-scope class: they name external connectors and host paths that the reference fixture supplies, and HIR does not invent declarations for them. They are not resolvable in HIR until a connector surface is declared"
+count = 25
+reason = "connector and host names (mail, google, finance, energy, HEAD, CWD, work) are a documented not-in-scope class: they name external connectors and host paths that the reference fixture supplies, and HIR does not invent declarations for them. They are not resolvable in HIR until a connector surface is declared"
 bead = "ornadb-csenl.15"
 
 [[environment]]
@@ -1091,8 +1091,8 @@ bead = "ornadb-csenl.16"
 
 [[environment]]
 category = "harness-environment-names"
-count = 13
-reason = "harness bindings: the expression fixtures (fallback, left, middle, missing) and the example cases use names the harness supplies (log, process, read, rows, get, valid_email). The case declares none of them, so each use is an environment blocker that the harness fidelity work closes"
+count = 14
+reason = "harness bindings: the expression fixtures (fallback, left, middle, missing) and the example cases use names the harness supplies (log, process, read, rows, get, valid_email) or that the corpus mentions without declaring (EmailHeader, in From<EmailHeader>). The case declares none of them, so each use is an environment blocker that the harness fidelity work closes"
 bead = "ornadb-csenl.15"
 
 [[environment]]
