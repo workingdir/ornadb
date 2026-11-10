@@ -45,6 +45,7 @@ use crate::{
 
 mod call;
 mod expr;
+mod operator;
 mod protocol;
 #[cfg(test)]
 mod tests;
@@ -788,12 +789,17 @@ impl<'a> BodyCheck<'a> {
     fn unary_ty(
         &mut self,
         body: &mut Body,
+        id: ExprId,
         op: UnOp,
         operand: ExprId,
         span: SyntaxSpan,
     ) -> Result<Ty, NotYetReason> {
         let operand_ty = self.infer_expr(body, operand, None)?;
         let resolved = self.resolved(operand_ty);
+        if let Some(result) = self.unary_operator_ty(body, id, op, operand, resolved, span.clone())
+        {
+            return Ok(result);
+        }
         match crate::ops::unary(&mut self.program.tys, op, resolved) {
             Some(result) => Ok(result),
             None => {
@@ -815,6 +821,7 @@ impl<'a> BodyCheck<'a> {
     fn binary_ty(
         &mut self,
         body: &mut Body,
+        id: ExprId,
         op: BinOp,
         lhs: ExprId,
         rhs: ExprId,
@@ -838,6 +845,16 @@ impl<'a> BodyCheck<'a> {
         if let Some(result) =
             crate::ops::binary(&mut self.program.tys, op, left_resolved, right_resolved)
         {
+            return Ok(result);
+        }
+        if let Some(result) = self.binary_operator_ty(
+            body,
+            id,
+            op,
+            (lhs, rhs),
+            (left_resolved, right_resolved),
+            span.clone(),
+        ) {
             return Ok(result);
         }
         let has_variable = matches!(self.kind_of(left_resolved), Some(TyKind::Infer(_)))
