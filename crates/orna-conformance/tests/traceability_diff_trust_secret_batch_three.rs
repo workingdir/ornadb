@@ -8,11 +8,11 @@ use orna_compat_v1::{
     catalogue::SchemaDefinition,
     catalogue_diff::{SemanticChange, catalogue_diff},
 };
+use orna_format3::compact::CompactCommittedSegmentProjection;
 use orna_live::{
     Error as LiveError, Limits as LiveLimits, LiveCredentialIssuer, LiveHost, LiveSessionAuthority,
     LiveTransport, SessionMetadata, TransportLimits, WireRequest,
 };
-use orna_repository::CompactCommittedSegmentProjection;
 use orna_runtime::{PublicationRowEncoding, PublicationValueEncoding};
 use orna_security::{
     CredentialIssuer, Origin, OriginPolicy, SecretMetadata, SecretRef, SecretResolver,

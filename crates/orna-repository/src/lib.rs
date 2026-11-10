@@ -103,10 +103,8 @@ pub(crate) use commit::{
     reviewed_candidate_token, split_committed_revision_record,
 };
 pub use compact::{
-    COMPACT_MANIFEST_SHARD_LIMIT, COMPACT_MAX_UNCOMPRESSED_PAGE_BYTES, CompactCommittedRow,
-    CompactCommittedSegmentProjection, CompactManifest, CompactManifestEntry,
-    CompactManifestWitness, CompactPublicationPending, CompactRuntimeReceipt, CompactSegmentRole,
-    LegacyAuthoritativeRow, LegacyAuthoritativeTable, validate_compact_page_uncompressed_sizes,
+    CompactManifestWitness, CompactPublicationPending, CompactRuntimeReceipt,
+    LegacyAuthoritativeRow, LegacyAuthoritativeTable,
 };
 #[cfg(any(test, feature = "legacy-fixture-writer"))]
 pub use compact::{

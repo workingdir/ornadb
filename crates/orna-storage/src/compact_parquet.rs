@@ -10,10 +10,11 @@
 use std::{cmp::Ordering, collections::BTreeMap, error::Error, fmt};
 
 use bytes::Bytes;
-use orna_repository::{
-    CompactManifest, CompactManifestEntry, CompactSegmentRole, GitCommitRef, Repository,
-    RepositoryError, Uuid, validate_compact_page_uncompressed_sizes,
+use orna_format3::compact::{
+    CompactManifest, CompactManifestEntry, CompactSegmentRole,
+    validate_compact_page_uncompressed_sizes,
 };
+use orna_repository::{GitCommitRef, Repository, RepositoryError, Uuid};
 use orna_value::{CanonicalValue, OvbRaw, SchemaDescriptor, compare_primary_keys};
 use parquet::{
     basic::{
@@ -1982,9 +1983,12 @@ fn digest_hex(bytes: [u8; 32]) -> String {
 mod tests {
     use super::*;
     use crate::compact::CompactLogicalKeyError;
+    use orna_format3::compact::{
+        COMPACT_MAX_UNCOMPRESSED_PAGE_BYTES, CompactManifest, CompactSegmentRole,
+    };
     use orna_repository::{
-        COMPACT_MAX_UNCOMPRESSED_PAGE_BYTES, CompactManifest, CompactPublicationRequest,
-        CompactSegment, CompactSegmentRecord, CompactSegmentRole, ManagedFileChange, ManagedPath,
+        CompactPublicationRequest, CompactSegment, CompactSegmentRecord, ManagedFileChange,
+        ManagedPath,
     };
     use orna_value::SchemaDescriptor;
     use parquet::{

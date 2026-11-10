@@ -37,11 +37,12 @@ use super::legacy_fixture_writer::with_page_checksums;
 use super::{CompactCommittedRow, resolve_legacy_authoritative_rows};
 use crate::hex::hex_encode;
 use crate::{
-    CompactManifest, CompactPublicationPlan, CompactPublicationRequest, CompactSegment,
-    CompactSegmentRecord, CompactSegmentRole, GitCommitRef, GitDeclaredObjectSetState,
-    GitObjectKind, GitObjectState, IndexGeneration, ManagedFileChange, ManagedPath, Repository,
-    RepositoryError, RuntimeGeneration, WorktreeState, test_support,
+    CompactPublicationPlan, CompactPublicationRequest, CompactSegment, CompactSegmentRecord,
+    GitCommitRef, GitDeclaredObjectSetState, GitObjectKind, GitObjectState, IndexGeneration,
+    ManagedFileChange, ManagedPath, Repository, RepositoryError, RuntimeGeneration, WorktreeState,
+    test_support,
 };
+use orna_format3::compact::{CompactManifest, CompactSegmentRole};
 
 use crate::test_support::git;
 
@@ -1106,9 +1107,7 @@ fn filtered_compact_clone() -> Option<FilteredCompactClone> {
             .entries()
             .first()?
             .relative_path()
-            .as_path()
-            .display()
-            .to_string(),
+            .to_owned(),
         format!(".orna/storage/{promised_table}/manifest.orna"),
         format!(".orna/storage/{promised_table}/shards/00000000.orna"),
     ] {
@@ -1358,7 +1357,7 @@ fn compact_manifest_inventory_hydration_rejects_missing_malformed_and_orphan_clo
             ManagedPath::new(format!(".orna/storage/{table}/manifest.orna")).unwrap();
         let shard_path =
             ManagedPath::new(format!(".orna/storage/{table}/shards/00000000.orna")).unwrap();
-        let segment_path = manifest.entries()[0].relative_path().clone();
+        let segment_path = manifest.entries()[0].relative_path().to_owned();
         let manifest_bytes = git_bytes(
             root.path(),
             &[
@@ -1385,11 +1384,7 @@ fn compact_manifest_inventory_hydration_rejects_missing_malformed_and_orphan_clo
             root.path(),
             &[
                 "show",
-                &format!(
-                    "{}:{}",
-                    plan.candidate_commit(),
-                    segment_path.as_path().display()
-                ),
+                &format!("{}:{}", plan.candidate_commit(), segment_path.as_str()),
             ],
         );
         let changes = match failure {
@@ -1403,12 +1398,18 @@ fn compact_manifest_inventory_hydration_rejects_missing_malformed_and_orphan_clo
                     shard_path,
                     Some(b"not a compact manifest shard\n".to_vec()),
                 ),
-                ManagedFileChange::new(segment_path, Some(segment_bytes)),
+                ManagedFileChange::new(
+                    ManagedPath::new(segment_path.clone()).unwrap(),
+                    Some(segment_bytes),
+                ),
             ],
             "orphan" => vec![
                 ManagedFileChange::new(manifest_path, Some(manifest_bytes)),
                 ManagedFileChange::new(shard_path, Some(shard_bytes)),
-                ManagedFileChange::new(segment_path, Some(segment_bytes)),
+                ManagedFileChange::new(
+                    ManagedPath::new(segment_path.clone()).unwrap(),
+                    Some(segment_bytes),
+                ),
                 ManagedFileChange::new(
                     ManagedPath::new(format!(
                         ".orna/storage/{table}/data/01/{}.parquet",
@@ -1605,9 +1606,6 @@ fn compact_manifest_inventory_rejects_symlinked_manifest_shard_and_segment_entri
                 .first()
                 .unwrap()
                 .relative_path()
-                .as_path()
-                .to_str()
-                .unwrap()
                 .to_owned(),
             _ => unreachable!(),
         };
@@ -1678,16 +1676,12 @@ fn compact_manifest_inventory_rejects_missing_or_malformed_manifest_closure_with
             root.path(),
             &[
                 "show",
-                &format!(
-                    "{}:{}",
-                    plan.candidate_commit(),
-                    segment.relative_path().as_path().display()
-                ),
+                &format!("{}:{}", plan.candidate_commit(), segment.relative_path()),
             ],
         );
         let head = repo.head().unwrap().unwrap();
         let mut changes = vec![ManagedFileChange::new(
-            segment.relative_path().clone(),
+            ManagedPath::new(segment.relative_path()).unwrap(),
             Some(segment_bytes),
         )];
         if !missing_manifest {
@@ -2840,7 +2834,7 @@ fn ordinary_commit_preserves_verified_compact_manifest_and_segment_identities() 
         .unwrap()
         .unwrap();
     let entry = manifest.entries().first().unwrap();
-    let segment_path = entry.relative_path().as_path().display().to_string();
+    let segment_path = entry.relative_path().to_owned();
     let segment_object = entry.git_object_id().to_owned();
     assert_eq!(
         git(
@@ -2911,10 +2905,7 @@ fn encoded_int(value: u64) -> Vec<u8> {
 }
 
 fn legacy_row(key: u64, value: Option<u64>) -> CompactCommittedRow {
-    CompactCommittedRow {
-        key: canonical_int(key),
-        value: value.map(canonical_int),
-    }
+    CompactCommittedRow::new(canonical_int(key), value.map(canonical_int))
 }
 
 #[test]

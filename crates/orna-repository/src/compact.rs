@@ -9,15 +9,19 @@
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
-    fmt,
 };
 
 use bytes::Bytes;
-pub use orna_format3::compact::COMPACT_MANIFEST_SHARD_LIMIT;
+#[cfg(any(test, feature = "legacy-fixture-writer"))]
+use orna_format3::compact::validate_event_time_bounds;
+pub use orna_format3::compact::{
+    COMPACT_MANIFEST_SHARD_LIMIT, CompactCommittedRow, CompactCommittedSegmentProjection,
+    CompactManifest, CompactManifestEntry, CompactSegmentRole,
+};
 use orna_format3::compact::{
     COMPACT_PROFILE, ManifestHeader, SegmentRole, ShardEntry, canonical_key_extrema,
     canonical_key_order, is_safe_atom, parse_manifest_header as parse_manifest_header_bytes,
-    parse_shard as parse_shard_bytes, validate_event_time_bounds,
+    parse_shard as parse_shard_bytes, scan_compact_page_headers,
 };
 use orna_syntax::parse_row;
 use orna_value::{CanonicalValue, OvbRaw, SchemaDescriptor};
@@ -27,7 +31,9 @@ use parquet::{
     file::reader::{FileReader, SerializedFileReader},
 };
 use sha2::{Digest, Sha256};
-use uuid::{Uuid, Version};
+use uuid::Uuid;
+#[cfg(any(test, feature = "legacy-fixture-writer"))]
+use uuid::Version;
 
 #[cfg(any(test, feature = "legacy-fixture-writer"))]
 use crate::PublicationJournalEntry;
@@ -45,112 +51,8 @@ use crate::{
 /// as the decoded allocation ceiling for a page as well.  It is checked from
 /// the serialized page header before parquet-rs can allocate its decompressed
 /// buffer.
-pub const COMPACT_MAX_UNCOMPRESSED_PAGE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_COMPACT_FILE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_COMPACT_ROW_GROUP_ROWS: i64 = 65_536;
-
-/// The compact role of one immutable segment.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CompactSegmentRole {
-    Data,
-    Replacement,
-    Deletion,
-}
-
-impl CompactSegmentRole {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Data => "data",
-            Self::Replacement => "replacement",
-            Self::Deletion => "deletion",
-        }
-    }
-}
-/// One canonical logical row projected from a verified committed segment.
-///
-/// `key` and `value` are decoded and re-encoded OVB values. They are never
-/// treated as arbitrary Parquet or byte-array payloads. A deletion carries its
-/// key and no value; data and replacement segments carry a complete row value.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CompactCommittedRow {
-    key: CanonicalValue,
-    value: Option<CanonicalValue>,
-}
-
-impl CompactCommittedRow {
-    pub fn key(&self) -> &CanonicalValue {
-        &self.key
-    }
-
-    pub fn value(&self) -> Option<&CanonicalValue> {
-        self.value.as_ref()
-    }
-}
-
-/// The verified logical projection of one committed compact segment.
-///
-/// This is the repository-to-storage producer boundary. The projection is
-/// available only after the committed Git object, manifest identity, Parquet
-/// profile, schema descriptor, and every physical value have been verified.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CompactCommittedSegmentProjection {
-    table_id: Uuid,
-    schema_id: [u8; 32],
-    schema: SchemaDescriptor,
-    source_schema_id: [u8; 32],
-    source_schema: SchemaDescriptor,
-    profile: &'static str,
-    encoder_version: String,
-    generation: u64,
-    role: CompactSegmentRole,
-    rows: Vec<CompactCommittedRow>,
-}
-
-impl CompactCommittedSegmentProjection {
-    pub const fn table_id(&self) -> Uuid {
-        self.table_id
-    }
-
-    pub const fn schema_id(&self) -> [u8; 32] {
-        self.schema_id
-    }
-
-    /// The logical schema of the projected rows. It equals the encoded schema
-    /// on the exact-schema read path.
-    pub fn schema(&self) -> &SchemaDescriptor {
-        &self.schema
-    }
-
-    /// The verified descriptor and fingerprint used to encode the physical
-    /// segment, retained after a history-aware projection.
-    pub fn source_schema(&self) -> &SchemaDescriptor {
-        &self.source_schema
-    }
-
-    pub const fn source_schema_id(&self) -> [u8; 32] {
-        self.source_schema_id
-    }
-
-    pub const fn profile(&self) -> &'static str {
-        self.profile
-    }
-
-    pub fn encoder_version(&self) -> &str {
-        &self.encoder_version
-    }
-
-    pub const fn generation(&self) -> u64 {
-        self.generation
-    }
-
-    pub const fn role(&self) -> CompactSegmentRole {
-        self.role
-    }
-
-    pub fn rows(&self) -> &[CompactCommittedRow] {
-        &self.rows
-    }
-}
 
 /// Observed compact-storage layout at one commit: manifest-holding tables
 /// paired with their validated shard/data paths.
@@ -284,160 +186,6 @@ pub struct CompactPublicationRequest<'a> {
     pub message: &'a str,
 }
 
-/// The canonical metadata for one immutable compact file.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CompactManifestEntry {
-    segment_id: Uuid,
-    role: CompactSegmentRole,
-    generation: u64,
-    schema: [u8; 32],
-    encoder_version: String,
-    relative_path: ManagedPath,
-    git_object_id: String,
-    sha256: [u8; 32],
-    min_key: Vec<u8>,
-    max_key: Vec<u8>,
-    min_event_time: Option<String>,
-    max_event_time: Option<String>,
-    row_count: u64,
-    compressed_bytes: u64,
-    columns: Vec<u8>,
-    row_group_index: bool,
-    bloom: bool,
-}
-
-impl CompactManifestEntry {
-    pub fn segment_id(&self) -> Uuid {
-        self.segment_id
-    }
-
-    /// Returns the immutable logical role recorded for this manifest entry.
-    pub const fn role(&self) -> CompactSegmentRole {
-        self.role
-    }
-
-    pub const fn generation(&self) -> u64 {
-        self.generation
-    }
-
-    /// Returns the number of rows the physical segment must enumerate.
-    pub const fn row_count(&self) -> u64 {
-        self.row_count
-    }
-
-    /// Returns the verified compressed byte size declared by this entry.
-    pub const fn compressed_bytes(&self) -> u64 {
-        self.compressed_bytes
-    }
-
-    /// Returns the schema fingerprint authenticated by the committed
-    /// segment's manifest entry.
-    pub const fn schema_id(&self) -> [u8; 32] {
-        self.schema
-    }
-
-    /// Returns the canonical physical-column descriptor bytes authenticated
-    /// by the committed segment's manifest entry.
-    pub fn columns(&self) -> &[u8] {
-        &self.columns
-    }
-
-    /// Returns the encoder identity recorded by the committed manifest.
-    pub fn encoder_version(&self) -> &str {
-        &self.encoder_version
-    }
-
-    pub fn relative_path(&self) -> &ManagedPath {
-        &self.relative_path
-    }
-
-    pub fn git_object_id(&self) -> &str {
-        &self.git_object_id
-    }
-
-    pub const fn sha256(&self) -> [u8; 32] {
-        self.sha256
-    }
-
-    /// Returns the immutable canonical key lower bound recorded in this
-    /// manifest entry.
-    pub fn min_key(&self) -> &[u8] {
-        &self.min_key
-    }
-
-    /// Returns the immutable canonical key upper bound recorded in this
-    /// manifest entry.
-    pub fn max_key(&self) -> &[u8] {
-        &self.max_key
-    }
-
-    #[cfg(any(test, feature = "legacy-fixture-writer"))]
-    fn from_segment(
-        table: Uuid,
-        segment: &CompactSegment,
-        generation: u64,
-        git_object_id: String,
-    ) -> Result<Self, RepositoryError> {
-        segment.validate_unallocated()?;
-        verify_physical_segment(table, segment, &segment.bytes)?;
-        if generation == 0 || !is_hex(&git_object_id) {
-            return Err(RepositoryError::InvalidCompactManifest);
-        }
-        let compressed_bytes = u64::try_from(segment.bytes.len())
-            .map_err(|_| RepositoryError::InvalidCompactManifest)?;
-        Ok(Self {
-            segment_id: segment.segment_id,
-            role: segment.role,
-            generation,
-            schema: segment.schema,
-            encoder_version: segment.encoder_version.clone(),
-            relative_path: segment.relative_path.clone(),
-            git_object_id,
-            sha256: Sha256::digest(&segment.bytes).into(),
-            min_key: segment.min_key.clone(),
-            max_key: segment.max_key.clone(),
-            min_event_time: segment.min_event_time.clone(),
-            max_event_time: segment.max_event_time.clone(),
-            row_count: segment.row_count,
-            compressed_bytes,
-            columns: segment.columns.clone(),
-            row_group_index: segment.row_group_index,
-            bloom: segment.bloom,
-        })
-    }
-
-    fn validate(
-        &self,
-        table: Uuid,
-        object_id_length: Option<usize>,
-    ) -> Result<(), RepositoryError> {
-        if self.segment_id.get_version() != Some(Version::SortRand)
-            || self.generation == 0
-            || self.encoder_version.is_empty()
-            || !self.encoder_version.bytes().all(is_safe_atom)
-            || canonical_key_order(&self.min_key, &self.max_key)? == Ordering::Greater
-            || self.row_count == 0
-            || self.compressed_bytes == 0
-            || !is_hex(&self.git_object_id)
-            || object_id_length.is_some_and(|length| self.git_object_id.len() != length)
-            || self.relative_path != compact_segment_path(table, self.segment_id)?
-            || self
-                .relative_path
-                .as_path()
-                .extension()
-                .and_then(|value| value.to_str())
-                != Some("parquet")
-        {
-            return Err(RepositoryError::InvalidCompactManifest);
-        }
-        validate_event_time_bounds(
-            self.min_event_time.as_deref(),
-            self.max_event_time.as_deref(),
-        )?;
-        Ok(())
-    }
-}
-
 /// Reads only the physical representation boundary needed by the fixture
 /// writer. Logical row decoding and the complete descriptor/OVB semantics
 /// remain owned by the storage reader; the fixture writer nevertheless rejects
@@ -464,18 +212,18 @@ fn verify_physical_entry(
     entry: &CompactManifestEntry,
     bytes: &[u8],
 ) -> Result<(), RepositoryError> {
-    if entry.compressed_bytes
+    if entry.compressed_bytes()
         != u64::try_from(bytes.len()).map_err(|_| RepositoryError::InvalidCompactManifest)?
     {
         return Err(RepositoryError::InvalidCompactManifest);
     }
     verify_physical_metadata(
         table,
-        entry.role,
-        entry.schema,
-        &entry.encoder_version,
-        &entry.columns,
-        entry.row_count,
+        entry.role(),
+        entry.schema_id(),
+        entry.encoder_version(),
+        entry.columns(),
+        entry.row_count(),
         bytes,
     )
 }
@@ -490,8 +238,8 @@ fn verify_manifest_segment_bytes(
     object: &str,
     bytes: &[u8],
 ) -> Result<(), RepositoryError> {
-    if object != entry.git_object_id
-        || Sha256::digest(bytes).as_slice() != entry.sha256
+    if object != entry.git_object_id()
+        || Sha256::digest(bytes).as_slice() != entry.sha256()
         || verify_physical_entry(table, entry, bytes).is_err()
     {
         return Err(RepositoryError::InvalidCompactManifest);
@@ -1246,7 +994,7 @@ fn decode_compact_segment_projection(
         return Err(RepositoryError::InvalidCompactManifest);
     }
     let (_, physical_columns) = verify_physical_columns(
-        &entry.columns,
+        entry.columns(),
         reader.metadata().file_metadata().schema_descr(),
         &descriptor,
         entry.role(),
@@ -1324,29 +1072,29 @@ fn decode_compact_segment_projection(
             );
             Some(CanonicalValue::new(raw).map_err(|_| RepositoryError::InvalidCompactManifest)?)
         };
-        rows.push(CompactCommittedRow { key, value });
+        rows.push(CompactCommittedRow::new(key, value));
     }
     let keys = rows
         .iter()
-        .map(|row| row.key.encode())
+        .map(|row| row.key().encode())
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| RepositoryError::InvalidCompactManifest)?;
     let (min_key, max_key) = canonical_key_extrema(keys.iter().map(Vec::as_slice))?;
     if min_key != entry.min_key() || max_key != entry.max_key() {
         return Err(RepositoryError::InvalidCompactManifest);
     }
-    Ok(CompactCommittedSegmentProjection {
-        table_id: table,
-        schema_id: entry.schema_id(),
-        schema: descriptor.clone(),
-        source_schema_id: entry.schema_id(),
-        source_schema: descriptor,
-        profile: COMPACT_PROFILE,
-        encoder_version: entry.encoder_version().to_owned(),
-        generation: entry.generation(),
-        role: entry.role(),
+    Ok(CompactCommittedSegmentProjection::new(
+        table,
+        entry.schema_id(),
+        descriptor.clone(),
+        entry.schema_id(),
+        descriptor,
+        COMPACT_PROFILE,
+        entry.encoder_version().to_owned(),
+        entry.generation(),
+        entry.role(),
         rows,
-    })
+    ))
 }
 
 /// Projects verified canonical rows by stable field identity. This accepts
@@ -1357,13 +1105,14 @@ fn project_compact_segment_schema(
     projection: &CompactCommittedSegmentProjection,
     target: &SchemaDescriptor,
 ) -> Result<CompactCommittedSegmentProjection, RepositoryError> {
-    let source_fp = schema_descriptor_fingerprint(&projection.source_schema)?;
+    let source_fp = schema_descriptor_fingerprint(projection.source_schema())?;
     let target_fp = schema_descriptor_fingerprint(target)?;
-    if source_fp != projection.schema_id || schema_descriptor_table(target)? != projection.table_id
+    if source_fp != projection.schema_id()
+        || schema_descriptor_table(target)? != projection.table_id()
     {
         return Err(RepositoryError::InvalidCompactManifest);
     }
-    let source = schema_projection_parts(&projection.source_schema)?;
+    let source = schema_projection_parts(projection.source_schema())?;
     let destination = schema_projection_parts(target)?;
     if source.table != destination.table
         || source.keys != destination.keys
@@ -1403,30 +1152,26 @@ fn project_compact_segment_schema(
         }
     }
 
-    let mut rows = Vec::with_capacity(projection.rows.len());
-    for row in &projection.rows {
+    let mut rows = Vec::with_capacity(projection.rows().len());
+    for row in projection.rows() {
         let value = row
-            .value
-            .as_ref()
+            .value()
             .map(|value| project_compact_row_value(value, &source, &destination))
             .transpose()?;
-        rows.push(CompactCommittedRow {
-            key: row.key.clone(),
-            value,
-        });
+        rows.push(CompactCommittedRow::new(row.key().clone(), value));
     }
-    Ok(CompactCommittedSegmentProjection {
-        table_id: projection.table_id,
-        schema_id: target_fp,
-        schema: target.clone(),
-        source_schema_id: projection.source_schema_id,
-        source_schema: projection.source_schema.clone(),
-        profile: projection.profile,
-        encoder_version: projection.encoder_version.clone(),
-        generation: projection.generation,
-        role: projection.role,
+    Ok(CompactCommittedSegmentProjection::new(
+        projection.table_id(),
+        target_fp,
+        target.clone(),
+        projection.source_schema_id(),
+        projection.source_schema().clone(),
+        projection.profile(),
+        projection.encoder_version().to_owned(),
+        projection.generation(),
+        projection.role(),
         rows,
-    })
+    ))
 }
 
 struct SchemaProjectionField {
@@ -1822,262 +1567,7 @@ fn verify_page_checksums(
     bytes: &[u8],
     row_groups: &[parquet::file::metadata::RowGroupMetaData],
 ) -> Result<(), RepositoryError> {
-    scan_compact_page_headers(bytes, row_groups, true, true)
-}
-
-/// Validates the complete compact page framing required at a storage-reader
-/// boundary. This is intentionally shared with repository admission so a
-/// direct reader cannot accept a weaker Parquet profile than publication.
-pub fn validate_compact_page_uncompressed_sizes(
-    bytes: &[u8],
-    row_groups: &[parquet::file::metadata::RowGroupMetaData],
-) -> Result<(), RepositoryError> {
-    scan_compact_page_headers(bytes, row_groups, true, true)
-}
-
-fn scan_compact_page_headers(
-    bytes: &[u8],
-    row_groups: &[parquet::file::metadata::RowGroupMetaData],
-    require_checksums: bool,
-    require_data_page_v2: bool,
-) -> Result<(), RepositoryError> {
-    for row_group in row_groups {
-        let mut row_group_uncompressed_len = 0usize;
-        for column in row_group.columns() {
-            let start = column
-                .dictionary_page_offset()
-                .unwrap_or_else(|| column.data_page_offset());
-            let length = column.compressed_size();
-            let start =
-                usize::try_from(start).map_err(|_| RepositoryError::InvalidCompactManifest)?;
-            let length =
-                usize::try_from(length).map_err(|_| RepositoryError::InvalidCompactManifest)?;
-            let end = start
-                .checked_add(length)
-                .filter(|end| *end <= bytes.len())
-                .ok_or(RepositoryError::InvalidCompactManifest)?;
-            let mut cursor = start;
-            while cursor < end {
-                let header = parse_compact_page_header(&bytes[cursor..end])?;
-                if (require_checksums && !header.has_checksum)
-                    || header.uncompressed_len > COMPACT_MAX_UNCOMPRESSED_PAGE_BYTES
-                    || (require_data_page_v2 && !matches!(header.page_type, 2 | 3))
-                {
-                    return Err(RepositoryError::InvalidCompactManifest);
-                }
-                row_group_uncompressed_len = row_group_uncompressed_len
-                    .checked_add(header.uncompressed_len)
-                    .filter(|size| *size <= COMPACT_MAX_UNCOMPRESSED_PAGE_BYTES)
-                    .ok_or(RepositoryError::InvalidCompactManifest)?;
-                cursor = cursor
-                    .checked_add(header.encoded_len)
-                    .and_then(|value| value.checked_add(header.compressed_len))
-                    .filter(|value| *value <= end)
-                    .ok_or(RepositoryError::InvalidCompactManifest)?;
-            }
-            if cursor != end {
-                return Err(RepositoryError::InvalidCompactManifest);
-            }
-        }
-    }
-    Ok(())
-}
-
-struct CompactPageHeader {
-    encoded_len: usize,
-    compressed_len: usize,
-    uncompressed_len: usize,
-    has_checksum: bool,
-    page_type: i32,
-}
-
-fn parse_compact_page_header(bytes: &[u8]) -> Result<CompactPageHeader, RepositoryError> {
-    let mut cursor = 0;
-    let mut last_field = 0_i16;
-    let mut compressed_len = None;
-    let mut uncompressed_len = None;
-    let mut has_checksum = false;
-    let mut page_type = None;
-    loop {
-        let tag = take_compact_byte(bytes, &mut cursor)?;
-        let kind = tag & 0x0f;
-        if kind == 0 {
-            break;
-        }
-        let delta = i16::from(tag >> 4);
-        let field = if delta == 0 {
-            decode_compact_i16(bytes, &mut cursor)?
-        } else {
-            last_field
-                .checked_add(delta)
-                .ok_or(RepositoryError::InvalidCompactManifest)?
-        };
-        if field <= last_field {
-            return Err(RepositoryError::InvalidCompactManifest);
-        }
-        last_field = field;
-        if field == 1 && kind == 5 {
-            page_type = Some(decode_compact_i32(bytes, &mut cursor)?);
-        } else if field == 2 && kind == 5 {
-            let value = decode_compact_i32(bytes, &mut cursor)?;
-            uncompressed_len =
-                Some(usize::try_from(value).map_err(|_| RepositoryError::InvalidCompactManifest)?);
-        } else if field == 3 && kind == 5 {
-            let value = decode_compact_i32(bytes, &mut cursor)?;
-            compressed_len =
-                Some(usize::try_from(value).map_err(|_| RepositoryError::InvalidCompactManifest)?);
-        } else {
-            if field == 4 && kind == 5 {
-                has_checksum = true;
-            }
-            skip_compact_value(bytes, &mut cursor, kind, 0)?;
-        }
-    }
-    Ok(CompactPageHeader {
-        encoded_len: cursor,
-        compressed_len: compressed_len.ok_or(RepositoryError::InvalidCompactManifest)?,
-        uncompressed_len: uncompressed_len.ok_or(RepositoryError::InvalidCompactManifest)?,
-        has_checksum,
-        page_type: page_type.ok_or(RepositoryError::InvalidCompactManifest)?,
-    })
-}
-
-fn skip_compact_value(
-    bytes: &[u8],
-    cursor: &mut usize,
-    kind: u8,
-    depth: usize,
-) -> Result<(), RepositoryError> {
-    if depth > 64 {
-        return Err(RepositoryError::InvalidCompactManifest);
-    }
-    match kind {
-        1 | 2 => Ok(()),
-        3 => {
-            take_compact_byte(bytes, cursor)?;
-            Ok(())
-        }
-        4..=6 => {
-            let _ = decode_compact_varint(bytes, cursor)?;
-            Ok(())
-        }
-        7 => {
-            let end = cursor
-                .checked_add(8)
-                .filter(|end| *end <= bytes.len())
-                .ok_or(RepositoryError::InvalidCompactManifest)?;
-            *cursor = end;
-            Ok(())
-        }
-        8 => {
-            let length = usize::try_from(decode_compact_varint(bytes, cursor)?)
-                .map_err(|_| RepositoryError::InvalidCompactManifest)?;
-            let end = cursor
-                .checked_add(length)
-                .filter(|end| *end <= bytes.len())
-                .ok_or(RepositoryError::InvalidCompactManifest)?;
-            *cursor = end;
-            Ok(())
-        }
-        9 | 10 => {
-            let size_and_kind = take_compact_byte(bytes, cursor)?;
-            let size = if size_and_kind >> 4 == 15 {
-                usize::try_from(decode_compact_varint(bytes, cursor)?)
-                    .map_err(|_| RepositoryError::InvalidCompactManifest)?
-            } else {
-                usize::from(size_and_kind >> 4)
-            };
-            let item_kind = size_and_kind & 0x0f;
-            if size > bytes.len() {
-                return Err(RepositoryError::InvalidCompactManifest);
-            }
-            for _ in 0..size {
-                skip_compact_value(bytes, cursor, item_kind, depth + 1)?;
-            }
-            Ok(())
-        }
-        11 => {
-            let size = usize::try_from(decode_compact_varint(bytes, cursor)?)
-                .map_err(|_| RepositoryError::InvalidCompactManifest)?;
-            if size == 0 {
-                return Ok(());
-            }
-            let kinds = take_compact_byte(bytes, cursor)?;
-            let key_kind = kinds >> 4;
-            let value_kind = kinds & 0x0f;
-            for _ in 0..size {
-                skip_compact_value(bytes, cursor, key_kind, depth + 1)?;
-                skip_compact_value(bytes, cursor, value_kind, depth + 1)?;
-            }
-            Ok(())
-        }
-        12 => skip_compact_struct(bytes, cursor, depth + 1),
-        _ => Err(RepositoryError::InvalidCompactManifest),
-    }
-}
-
-fn skip_compact_struct(
-    bytes: &[u8],
-    cursor: &mut usize,
-    depth: usize,
-) -> Result<(), RepositoryError> {
-    let mut last_field = 0_i16;
-    loop {
-        let tag = take_compact_byte(bytes, cursor)?;
-        let kind = tag & 0x0f;
-        if kind == 0 {
-            return Ok(());
-        }
-        let delta = i16::from(tag >> 4);
-        let field = if delta == 0 {
-            decode_compact_i16(bytes, cursor)?
-        } else {
-            last_field
-                .checked_add(delta)
-                .ok_or(RepositoryError::InvalidCompactManifest)?
-        };
-        if field <= last_field {
-            return Err(RepositoryError::InvalidCompactManifest);
-        }
-        last_field = field;
-        skip_compact_value(bytes, cursor, kind, depth)?;
-    }
-}
-
-fn take_compact_byte(bytes: &[u8], cursor: &mut usize) -> Result<u8, RepositoryError> {
-    let value = *bytes
-        .get(*cursor)
-        .ok_or(RepositoryError::InvalidCompactManifest)?;
-    *cursor = cursor
-        .checked_add(1)
-        .ok_or(RepositoryError::InvalidCompactManifest)?;
-    Ok(value)
-}
-
-fn decode_compact_varint(bytes: &[u8], cursor: &mut usize) -> Result<u64, RepositoryError> {
-    let mut value = 0_u64;
-    for shift in (0..64).step_by(7) {
-        let byte = take_compact_byte(bytes, cursor)?;
-        value |= u64::from(byte & 0x7f)
-            .checked_shl(shift)
-            .ok_or(RepositoryError::InvalidCompactManifest)?;
-        if byte & 0x80 == 0 {
-            return Ok(value);
-        }
-    }
-    Err(RepositoryError::InvalidCompactManifest)
-}
-
-fn decode_compact_i16(bytes: &[u8], cursor: &mut usize) -> Result<i16, RepositoryError> {
-    let value = decode_compact_varint(bytes, cursor)?;
-    let value = i64::try_from(value).map_err(|_| RepositoryError::InvalidCompactManifest)?;
-    i16::try_from((value >> 1) ^ -(value & 1)).map_err(|_| RepositoryError::InvalidCompactManifest)
-}
-
-fn decode_compact_i32(bytes: &[u8], cursor: &mut usize) -> Result<i32, RepositoryError> {
-    let value = decode_compact_varint(bytes, cursor)?;
-    let value = i64::try_from(value).map_err(|_| RepositoryError::InvalidCompactManifest)?;
-    i32::try_from((value >> 1) ^ -(value & 1)).map_err(|_| RepositoryError::InvalidCompactManifest)
+    scan_compact_page_headers(bytes, row_groups, true, true).map_err(Into::into)
 }
 
 fn required_physical_metadata(
@@ -2111,160 +1601,6 @@ fn schema_descriptor_fingerprint(
     digest.update(b"orna.schema.v1\0");
     digest.update(bytes);
     Ok(digest.finalize().into())
-}
-
-/// A complete canonical compact manifest for one table snapshot.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CompactManifest {
-    table: Uuid,
-    schema: [u8; 32],
-    next_generation: u64,
-    entries: Vec<CompactManifestEntry>,
-}
-
-impl CompactManifest {
-    pub fn empty(table: Uuid, schema: [u8; 32]) -> Self {
-        Self {
-            table,
-            schema,
-            next_generation: 1,
-            entries: Vec::new(),
-        }
-    }
-
-    pub fn table(&self) -> Uuid {
-        self.table
-    }
-
-    /// Returns the retained logical schema fingerprint for this manifest.
-    pub const fn schema(&self) -> [u8; 32] {
-        self.schema
-    }
-
-    pub const fn next_generation(&self) -> u64 {
-        self.next_generation
-    }
-
-    pub fn entries(&self) -> &[CompactManifestEntry] {
-        &self.entries
-    }
-
-    pub fn manifest_path(&self) -> Result<ManagedPath, RepositoryError> {
-        compact_manifest_path(self.table)
-    }
-
-    /// Validates manifest bookkeeping. Segment schema IDs identify the
-    /// revisions that encoded those immutable files and may differ from the
-    /// table's current manifest schema; a reader must prove compatibility
-    /// from each verified embedded descriptor before projecting those rows.
-    fn validate(&self, object_id_length: Option<usize>) -> Result<(), RepositoryError> {
-        if self.next_generation == 0 {
-            return Err(RepositoryError::InvalidCompactManifest);
-        }
-        let mut ids = BTreeSet::new();
-        let mut paths = BTreeSet::new();
-        for entry in &self.entries {
-            entry.validate(self.table, object_id_length)?;
-            if entry.generation >= self.next_generation
-                || !ids.insert(entry.segment_id)
-                || !paths.insert(path_key(&entry.relative_path)?)
-            {
-                return Err(RepositoryError::InvalidCompactManifest);
-            }
-        }
-        Ok(())
-    }
-
-    fn sorted_entries(&self) -> Vec<&CompactManifestEntry> {
-        let mut entries = self.entries.iter().collect::<Vec<_>>();
-        entries.sort_by_key(|entry| entry.segment_id.as_bytes().to_owned());
-        entries
-    }
-
-    fn canonical_files(&self) -> Result<Vec<ManagedFileChange>, RepositoryError> {
-        self.validate(None)?;
-        let entries = self.sorted_entries();
-        let mut shards = Vec::new();
-        for (number, entries) in entries.chunks(COMPACT_MANIFEST_SHARD_LIMIT).enumerate() {
-            let number =
-                u64::try_from(number).map_err(|_| RepositoryError::InvalidCompactManifest)?;
-            let file = shard_path(self.table, number)?;
-            let bytes = canonical_shard(entries)?;
-            let (min_key, max_key) = canonical_key_extrema(
-                entries
-                    .iter()
-                    .flat_map(|entry| [entry.min_key.as_slice(), entry.max_key.as_slice()]),
-            )?;
-            shards.push(ShardDescriptor {
-                number,
-                min_key: min_key.to_vec(),
-                max_key: max_key.to_vec(),
-                entries: entries.len(),
-                file,
-                hash: Sha256::digest(&bytes).into(),
-                bytes,
-            });
-        }
-        let manifest = canonical_manifest(self, &shards)?;
-        let mut files = shards
-            .into_iter()
-            .map(|shard| ManagedFileChange::new(shard.file, Some(shard.bytes)))
-            .collect::<Vec<_>>();
-        files.push(ManagedFileChange::new(
-            self.manifest_path()?,
-            Some(manifest),
-        ));
-        Ok(files)
-    }
-
-    #[cfg(any(test, feature = "legacy-fixture-writer"))]
-    fn witness(
-        &self,
-        base_sha256: [u8; 32],
-        selected_ref: String,
-        runtime_intent_id: [u8; 16],
-        cleanup_watermark: [u8; 32],
-    ) -> Result<CompactManifestWitness, RepositoryError> {
-        let manifest_path = self.manifest_path()?;
-        let manifest = self
-            .canonical_files()?
-            .into_iter()
-            .find(|change| change.path() == &manifest_path)
-            .and_then(|change| change.bytes().map(ToOwned::to_owned))
-            .ok_or(RepositoryError::InvalidCompactManifest)?;
-        Ok(CompactManifestWitness {
-            table: self.table,
-            selected_ref,
-            runtime_intent_id,
-            cleanup_watermark,
-            manifest_path,
-            base_sha256,
-            manifest_sha256: Sha256::digest(manifest).into(),
-            generation: self
-                .next_generation
-                .checked_sub(1)
-                .ok_or(RepositoryError::InvalidCompactManifest)?,
-            entries: self
-                .entries
-                .iter()
-                .map(|entry| CompactManifestObject {
-                    path: entry.relative_path.clone(),
-                    object_id: entry.git_object_id.clone(),
-                    sha256: entry.sha256,
-                })
-                .collect(),
-        })
-    }
-}
-
-struct ShardDescriptor {
-    number: u64,
-    min_key: Vec<u8>,
-    max_key: Vec<u8>,
-    entries: usize,
-    file: ManagedPath,
-    hash: [u8; 32],
-    bytes: Vec<u8>,
 }
 
 /// The compact-specific portion of a durable publication journal.  It records
@@ -2636,7 +1972,9 @@ impl Repository {
         table: Uuid,
         entry: &CompactManifestEntry,
     ) -> Result<Vec<u8>, RepositoryError> {
-        let Some((mode, object)) = self.tree_entry_at(commit, &entry.relative_path)? else {
+        let Some((mode, object)) =
+            self.tree_entry_at(commit, &ManagedPath::new(entry.relative_path())?)?
+        else {
             return Err(RepositoryError::InvalidCompactManifest);
         };
         if !is_regular_git_file_mode(&mode) {
@@ -2914,7 +2252,8 @@ fn resolve_legacy_authoritative_rows(
     Ok(winners
         .into_values()
         .filter_map(|(_, row)| {
-            let CompactCommittedRow { key, value } = row;
+            let key = row.key().clone();
+            let value = row.value().cloned();
             value.map(|value| LegacyAuthoritativeRow { key, value })
         })
         .collect())
@@ -3056,7 +2395,7 @@ impl Repository {
                 }
             }
             for entry in manifest.entries() {
-                if !declared_paths.insert(path_key(entry.relative_path())?) {
+                if !declared_paths.insert(path_key_str(entry.relative_path())?) {
                     return Err(RepositoryError::InvalidCompactManifest);
                 }
             }
@@ -3097,7 +2436,7 @@ impl Repository {
             let (min_key, max_key) = canonical_key_extrema(
                 parsed
                     .iter()
-                    .flat_map(|entry| [entry.min_key.as_slice(), entry.max_key.as_slice()]),
+                    .flat_map(|entry| [entry.min_key(), entry.max_key()]),
             )?;
             if parsed.len() != shard.entries
                 || min_key != shard.min_key.as_slice()
@@ -3108,12 +2447,12 @@ impl Repository {
             shard_bytes_by_path.push((shard.file.clone(), shard_bytes));
             entries.extend(parsed);
         }
-        let manifest = CompactManifest {
-            table: header.table,
-            schema: header.schema,
-            next_generation: header.next_generation,
+        let manifest = CompactManifest::from_parts(
+            header.table,
+            header.schema,
+            header.next_generation,
             entries,
-        };
+        );
         manifest.validate(Some(self.native_object_id_length()?))?;
         verify_canonical_manifest_files(&manifest, &bytes, &shard_bytes_by_path)?;
         self.verify_manifest_at_commit(commit, &manifest)?;
@@ -3166,7 +2505,7 @@ impl Repository {
             let (min_key, max_key) = match canonical_key_extrema(
                 parsed
                     .iter()
-                    .flat_map(|entry| [entry.min_key.as_slice(), entry.max_key.as_slice()]),
+                    .flat_map(|entry| [entry.min_key(), entry.max_key()]),
             ) {
                 Ok(extrema) => extrema,
                 Err(_) => return Ok(crate::GitDeclaredObjectSetState::Malformed),
@@ -3180,12 +2519,12 @@ impl Repository {
             shard_bytes_by_path.push((shard.file.clone(), shard_bytes));
             entries.extend(parsed);
         }
-        let manifest = CompactManifest {
-            table: header.table,
-            schema: header.schema,
-            next_generation: header.next_generation,
+        let manifest = CompactManifest::from_parts(
+            header.table,
+            header.schema,
+            header.next_generation,
             entries,
-        };
+        );
         if manifest
             .validate(Some(self.observer_native_object_id_length()?))
             .is_err()
@@ -3195,11 +2534,11 @@ impl Repository {
         }
         for entry in manifest.entries() {
             let Ok(Some((mode, object))) =
-                self.observed_tree_entry_at(commit, &entry.relative_path)
+                self.observed_tree_entry_at(commit, &ManagedPath::new(entry.relative_path())?)
             else {
                 return Ok(crate::GitDeclaredObjectSetState::Malformed);
             };
-            if !is_regular_git_file_mode(&mode) || object != entry.git_object_id {
+            if !is_regular_git_file_mode(&mode) || object != entry.git_object_id() {
                 return Ok(crate::GitDeclaredObjectSetState::Malformed);
             }
         }
@@ -3260,7 +2599,7 @@ impl Repository {
                 }
             }
             for entry in manifest.entries() {
-                if !declared_paths.insert(path_key(entry.relative_path())?) {
+                if !declared_paths.insert(path_key_str(entry.relative_path())?) {
                     return Err(RepositoryError::InvalidCompactManifest);
                 }
             }
@@ -3281,11 +2620,12 @@ impl Repository {
     ) -> Result<BTreeMap<String, crate::GitObjectState>, RepositoryError> {
         let mut plan = BTreeMap::new();
         for entry in manifest.entries() {
-            let Some((mode, object)) = self.observed_tree_entry_at(commit, &entry.relative_path)?
+            let Some((mode, object)) =
+                self.observed_tree_entry_at(commit, &ManagedPath::new(entry.relative_path())?)?
             else {
                 return Err(RepositoryError::InvalidCompactManifest);
             };
-            if !matches!(mode.as_str(), "100644" | "100755") || object != entry.git_object_id {
+            if !matches!(mode.as_str(), "100644" | "100755") || object != entry.git_object_id() {
                 return Err(RepositoryError::InvalidCompactManifest);
             }
             let state = self.observe_git_object(&object)?;
@@ -3407,11 +2747,12 @@ impl Repository {
             {
                 continue;
             }
-            let Some((mode, object)) = self.observed_tree_entry_at(commit, &entry.relative_path)?
+            let Some((mode, object)) =
+                self.observed_tree_entry_at(commit, &ManagedPath::new(entry.relative_path())?)?
             else {
                 return Err(RepositoryError::InvalidCompactManifest);
             };
-            if !matches!(mode.as_str(), "100644" | "100755") || object != entry.git_object_id {
+            if !matches!(mode.as_str(), "100644" | "100755") || object != entry.git_object_id() {
                 return Err(RepositoryError::InvalidCompactManifest);
             }
             let state = self.observe_git_object(&object)?;
@@ -3472,7 +2813,7 @@ impl Repository {
             let (min_key, max_key) = canonical_key_extrema(
                 parsed
                     .iter()
-                    .flat_map(|entry| [entry.min_key.as_slice(), entry.max_key.as_slice()]),
+                    .flat_map(|entry| [entry.min_key(), entry.max_key()]),
             )?;
             if parsed.len() != shard.entries
                 || min_key != shard.min_key.as_slice()
@@ -3483,12 +2824,12 @@ impl Repository {
             shard_bytes_by_path.push((shard.file.clone(), shard_bytes));
             entries.extend(parsed);
         }
-        let manifest = CompactManifest {
-            table: header.table,
-            schema: header.schema,
-            next_generation: header.next_generation,
+        let manifest = CompactManifest::from_parts(
+            header.table,
+            header.schema,
+            header.next_generation,
             entries,
-        };
+        );
         manifest.validate(Some(self.observer_native_object_id_length()?))?;
         verify_canonical_manifest_files(&manifest, &manifest_bytes, &shard_bytes_by_path)?;
         Ok(manifest)
@@ -3558,8 +2899,8 @@ impl Repository {
         }
         self.verify_manifest_at_commit(expected_head, &base)?;
         let object_id_length = self.native_object_id_length()?;
-        let generation = base.next_generation;
-        let root = compact_data_root(base.table)?;
+        let generation = base.next_generation();
+        let root = compact_data_root(base.table())?;
         let mut paths = BTreeSet::new();
         let mut additions = Vec::with_capacity(segments.len());
         for segment in segments {
@@ -3573,26 +2914,26 @@ impl Repository {
             if object_id.len() != object_id_length {
                 return Err(RepositoryError::InvalidCompactManifest);
             }
-            additions.push(CompactManifestEntry::from_segment(
-                base.table, segment, generation, object_id,
+            additions.push(entry_from_segment(
+                base.table(),
+                segment,
+                generation,
+                object_id,
             )?);
         }
-        let mut entries = base.entries.clone();
+        let mut entries = base.entries().to_vec();
         entries.extend(additions);
-        entries.sort_by_key(|entry| entry.segment_id.as_bytes().to_owned());
+        entries.sort_by_key(|entry| entry.segment_id().as_bytes().to_owned());
         let next_generation = generation
             .checked_add(1)
             .ok_or(RepositoryError::InvalidCompactManifest)?;
-        let manifest = CompactManifest {
-            table: base.table,
-            schema: base.schema,
-            next_generation,
-            entries,
-        };
+        let manifest =
+            CompactManifest::from_parts(base.table(), base.schema(), next_generation, entries);
         manifest.validate(Some(object_id_length))?;
         let base_sha256 = self.manifest_digest_at_commit(expected_head, &base)?;
         let selected_ref = self.symbolic_head_ref()?;
-        let witness = manifest.witness(
+        let witness = witness(
+            &manifest,
             base_sha256,
             selected_ref,
             runtime_intent_id,
@@ -3605,7 +2946,7 @@ impl Repository {
                 ManagedFileChange::new(segment.relative_path.clone(), Some(segment.bytes.clone()))
             })
             .collect::<Vec<_>>();
-        changes.extend(manifest.canonical_files()?);
+        changes.extend(canonical_files(&manifest)?);
         let candidate = self.build_private_commit(expected_head, &changes, message)?;
         self.verify_candidate_compact_manifest(&candidate, &manifest, &witness)?;
 
@@ -3654,9 +2995,9 @@ impl Repository {
         let manifest = self
             .read_compact_manifest_from_candidate(candidate, &bytes)
             .map_err(|_| RepositoryError::InvalidPublicationJournal)?;
-        if manifest.table != witness.table
-            || manifest.next_generation.checked_sub(1) != Some(witness.generation)
-            || manifest.entries.len() != witness.entries.len()
+        if manifest.table() != witness.table
+            || manifest.next_generation().checked_sub(1) != Some(witness.generation)
+            || manifest.entries().len() != witness.entries.len()
         {
             return Err(RepositoryError::InvalidPublicationJournal);
         }
@@ -3666,13 +3007,19 @@ impl Repository {
             };
             let bytes = self.git_bytes(["cat-file", "blob", &actual])?;
             let manifest_entry = manifest
-                .entries
+                .entries()
                 .iter()
-                .find(|entry| entry.relative_path == object.path)
+                .find(|entry| {
+                    object
+                        .path
+                        .as_path()
+                        .to_str()
+                        .is_some_and(|path| entry.relative_path() == path)
+                })
                 .ok_or(RepositoryError::InvalidPublicationJournal)?;
             if actual != object.object_id
-                || manifest_entry.git_object_id != object.object_id
-                || manifest_entry.sha256 != object.sha256
+                || manifest_entry.git_object_id() != object.object_id
+                || manifest_entry.sha256() != object.sha256
                 || Sha256::digest(&bytes).as_slice() != object.sha256
                 || verify_physical_entry(witness.table, manifest_entry, &bytes).is_err()
             {
@@ -3702,7 +3049,7 @@ impl Repository {
                 let manifest = self
                     .read_compact_manifest(journal.old_head(), witness.table)?
                     .ok_or(RepositoryError::InvalidPublicationJournal)?;
-                if manifest.next_generation != witness.generation {
+                if manifest.next_generation() != witness.generation {
                     return Err(RepositoryError::InvalidPublicationJournal);
                 }
             }
@@ -3717,9 +3064,9 @@ impl Repository {
         commit: &GitCommitRef,
         manifest: &CompactManifest,
     ) -> Result<(), RepositoryError> {
-        let expected = manifest.canonical_files()?;
-        if manifest.entries.is_empty() {
-            match self.committed_file_bytes(commit, &manifest.manifest_path()?)? {
+        let expected = canonical_files(manifest)?;
+        if manifest.entries().is_empty() {
+            match self.committed_file_bytes(commit, &compact_manifest_path(manifest.table())?)? {
                 Some(actual) if expected[0].bytes() == Some(actual.as_slice()) => {}
                 Some(_) => return Err(RepositoryError::InvalidCompactManifest),
                 None => return Ok(()),
@@ -3730,15 +3077,17 @@ impl Repository {
                 return Err(RepositoryError::InvalidCompactManifest);
             }
         }
-        for entry in &manifest.entries {
-            let Some((mode, object)) = self.tree_entry_at(commit, &entry.relative_path)? else {
+        for entry in manifest.entries() {
+            let Some((mode, object)) =
+                self.tree_entry_at(commit, &ManagedPath::new(entry.relative_path())?)?
+            else {
                 return Err(RepositoryError::InvalidCompactManifest);
             };
             if !is_regular_git_file_mode(&mode) {
                 return Err(RepositoryError::InvalidCompactManifest);
             }
             let bytes = self.git_bytes(["cat-file", "blob", &object])?;
-            verify_manifest_segment_bytes(manifest.table, entry, &object, &bytes)?;
+            verify_manifest_segment_bytes(manifest.table(), entry, &object, &bytes)?;
         }
         Ok(())
     }
@@ -3749,9 +3098,9 @@ impl Repository {
         commit: &GitCommitRef,
         manifest: &CompactManifest,
     ) -> Result<[u8; 32], RepositoryError> {
-        match self.committed_file_bytes(commit, &manifest.manifest_path()?)? {
+        match self.committed_file_bytes(commit, &compact_manifest_path(manifest.table())?)? {
             Some(bytes) => Ok(Sha256::digest(bytes).into()),
-            None if manifest.entries.is_empty() => Ok([0; 32]),
+            None if manifest.entries().is_empty() => Ok([0; 32]),
             None => Err(RepositoryError::InvalidCompactManifest),
         }
     }
@@ -3766,7 +3115,7 @@ impl Repository {
         self.verify_compact_journal(candidate, witness)
             .map_err(|_| RepositoryError::InvalidCompactManifest)?;
         let actual = self
-            .candidate_file_bytes(candidate, &manifest.manifest_path()?)?
+            .candidate_file_bytes(candidate, &compact_manifest_path(manifest.table())?)?
             .ok_or(RepositoryError::InvalidCompactManifest)?;
         let parsed = self.read_compact_manifest_from_candidate(candidate, &actual)?;
         if parsed != *manifest {
@@ -3835,7 +3184,7 @@ impl Repository {
             let (min_key, max_key) = canonical_key_extrema(
                 parsed
                     .iter()
-                    .flat_map(|entry| [entry.min_key.as_slice(), entry.max_key.as_slice()]),
+                    .flat_map(|entry| [entry.min_key(), entry.max_key()]),
             )?;
             if parsed.len() != shard.entries
                 || min_key != shard.min_key.as_slice()
@@ -3846,12 +3195,12 @@ impl Repository {
             shard_bytes_by_path.push((shard.file.clone(), shard_bytes));
             entries.extend(parsed);
         }
-        let manifest = CompactManifest {
-            table: header.table,
-            schema: header.schema,
-            next_generation: header.next_generation,
+        let manifest = CompactManifest::from_parts(
+            header.table,
+            header.schema,
+            header.next_generation,
             entries,
-        };
+        );
         manifest.validate(Some(self.native_object_id_length()?))?;
         verify_canonical_manifest_files(&manifest, manifest_bytes, &shard_bytes_by_path)?;
         Ok(manifest)
@@ -3867,8 +3216,8 @@ fn verify_canonical_manifest_files(
     manifest_bytes: &[u8],
     shard_bytes_by_path: &[(ManagedPath, Vec<u8>)],
 ) -> Result<(), RepositoryError> {
-    for expected in manifest.canonical_files()? {
-        let actual = if expected.path() == &manifest.manifest_path()? {
+    for expected in canonical_files(manifest)? {
+        let actual = if expected.path() == &compact_manifest_path(manifest.table())? {
             manifest_bytes
         } else {
             shard_bytes_by_path
@@ -3923,17 +3272,6 @@ fn compact_manifest_path(table: Uuid) -> Result<ManagedPath, RepositoryError> {
 
 fn compact_data_root(table: Uuid) -> Result<ManagedPath, RepositoryError> {
     managed_child(&compact_root(table)?, "data")
-}
-
-fn compact_segment_path(table: Uuid, segment_id: Uuid) -> Result<ManagedPath, RepositoryError> {
-    let segment = segment_id.to_string();
-    let prefix = segment
-        .get(..2)
-        .ok_or(RepositoryError::InvalidCompactManifest)?;
-    managed_child(
-        &compact_data_root(table)?,
-        &format!("{prefix}/{segment}.parquet"),
-    )
 }
 
 fn shard_path(table: Uuid, number: u64) -> Result<ManagedPath, RepositoryError> {
@@ -4004,42 +3342,167 @@ fn parse_manifest_header(bytes: &[u8]) -> Result<ParsedManifestHeader, Repositor
 fn parse_shard(bytes: &[u8]) -> Result<Vec<CompactManifestEntry>, RepositoryError> {
     parse_shard_bytes(bytes)?
         .into_iter()
-        .map(CompactManifestEntry::from_parsed)
+        .map(entry_from_parsed)
         .collect()
 }
 
-impl CompactSegmentRole {
-    fn from_reader(role: SegmentRole) -> Self {
-        match role {
-            SegmentRole::Data => Self::Data,
-            SegmentRole::Replacement => Self::Replacement,
-            SegmentRole::Deletion => Self::Deletion,
-        }
+fn role_from_reader(role: SegmentRole) -> CompactSegmentRole {
+    match role {
+        SegmentRole::Data => CompactSegmentRole::Data,
+        SegmentRole::Replacement => CompactSegmentRole::Replacement,
+        SegmentRole::Deletion => CompactSegmentRole::Deletion,
     }
 }
 
-impl CompactManifestEntry {
-    fn from_parsed(parsed: ShardEntry) -> Result<Self, RepositoryError> {
-        Ok(Self {
-            segment_id: parsed.segment_id,
-            role: CompactSegmentRole::from_reader(parsed.role),
-            generation: parsed.generation,
-            schema: parsed.schema,
-            encoder_version: parsed.encoder_version,
-            relative_path: ManagedPath::new(parsed.relative_path)?,
-            git_object_id: parsed.git_object_id,
-            sha256: parsed.sha256,
-            min_key: parsed.min_key,
-            max_key: parsed.max_key,
-            min_event_time: parsed.min_event_time,
-            max_event_time: parsed.max_event_time,
-            row_count: parsed.row_count,
-            compressed_bytes: parsed.compressed_bytes,
-            columns: parsed.columns,
-            row_group_index: parsed.row_group_index,
-            bloom: parsed.bloom,
-        })
+fn entry_from_parsed(parsed: ShardEntry) -> Result<CompactManifestEntry, RepositoryError> {
+    Ok(CompactManifestEntry::from_parts(
+        parsed.segment_id,
+        role_from_reader(parsed.role),
+        parsed.generation,
+        parsed.schema,
+        parsed.encoder_version,
+        parsed.relative_path,
+        parsed.git_object_id,
+        parsed.sha256,
+        parsed.min_key,
+        parsed.max_key,
+        parsed.min_event_time,
+        parsed.max_event_time,
+        parsed.row_count,
+        parsed.compressed_bytes,
+        parsed.columns,
+        parsed.row_group_index,
+        parsed.bloom,
+    ))
+}
+
+struct ShardDescriptor {
+    number: u64,
+    min_key: Vec<u8>,
+    max_key: Vec<u8>,
+    entries: usize,
+    file: ManagedPath,
+    hash: [u8; 32],
+    bytes: Vec<u8>,
+}
+
+fn canonical_files(manifest: &CompactManifest) -> Result<Vec<ManagedFileChange>, RepositoryError> {
+    manifest.validate(None)?;
+    let entries = manifest.sorted_entries();
+    let mut shards = Vec::new();
+    for (number, entries) in entries.chunks(COMPACT_MANIFEST_SHARD_LIMIT).enumerate() {
+        let number = u64::try_from(number).map_err(|_| RepositoryError::InvalidCompactManifest)?;
+        let file = shard_path(manifest.table(), number)?;
+        let bytes = canonical_shard(entries)?;
+        let (min_key, max_key) = canonical_key_extrema(
+            entries
+                .iter()
+                .flat_map(|entry| [entry.min_key(), entry.max_key()]),
+        )?;
+        shards.push(ShardDescriptor {
+            number,
+            min_key: min_key.to_vec(),
+            max_key: max_key.to_vec(),
+            entries: entries.len(),
+            file,
+            hash: Sha256::digest(&bytes).into(),
+            bytes,
+        });
     }
+    let manifest_bytes = canonical_manifest(manifest, &shards)?;
+    let mut files = shards
+        .into_iter()
+        .map(|shard| ManagedFileChange::new(shard.file, Some(shard.bytes)))
+        .collect::<Vec<_>>();
+    files.push(ManagedFileChange::new(
+        compact_manifest_path(manifest.table())?,
+        Some(manifest_bytes),
+    ));
+    Ok(files)
+}
+
+#[cfg(any(test, feature = "legacy-fixture-writer"))]
+fn witness(
+    manifest: &CompactManifest,
+    base_sha256: [u8; 32],
+    selected_ref: String,
+    runtime_intent_id: [u8; 16],
+    cleanup_watermark: [u8; 32],
+) -> Result<CompactManifestWitness, RepositoryError> {
+    let manifest_path = compact_manifest_path(manifest.table())?;
+    let manifest_bytes = canonical_files(manifest)?
+        .into_iter()
+        .find(|change| change.path() == &manifest_path)
+        .and_then(|change| change.bytes().map(ToOwned::to_owned))
+        .ok_or(RepositoryError::InvalidCompactManifest)?;
+    Ok(CompactManifestWitness {
+        table: manifest.table(),
+        selected_ref,
+        runtime_intent_id,
+        cleanup_watermark,
+        manifest_path,
+        base_sha256,
+        manifest_sha256: Sha256::digest(manifest_bytes).into(),
+        generation: manifest
+            .next_generation()
+            .checked_sub(1)
+            .ok_or(RepositoryError::InvalidCompactManifest)?,
+        entries: manifest
+            .entries()
+            .iter()
+            .map(|entry| {
+                Ok(CompactManifestObject {
+                    path: ManagedPath::new(entry.relative_path())?,
+                    object_id: entry.git_object_id().to_owned(),
+                    sha256: entry.sha256(),
+                })
+            })
+            .collect::<Result<Vec<_>, RepositoryError>>()?,
+    })
+}
+
+#[cfg(any(test, feature = "legacy-fixture-writer"))]
+fn entry_from_segment(
+    table: Uuid,
+    segment: &CompactSegment,
+    generation: u64,
+    git_object_id: String,
+) -> Result<CompactManifestEntry, RepositoryError> {
+    segment.validate_unallocated()?;
+    verify_physical_segment(table, segment, &segment.bytes)?;
+    if generation == 0 || !is_hex(&git_object_id) {
+        return Err(RepositoryError::InvalidCompactManifest);
+    }
+    let compressed_bytes =
+        u64::try_from(segment.bytes.len()).map_err(|_| RepositoryError::InvalidCompactManifest)?;
+    Ok(CompactManifestEntry::from_parts(
+        segment.segment_id,
+        segment.role,
+        generation,
+        segment.schema,
+        segment.encoder_version.clone(),
+        segment
+            .relative_path
+            .as_path()
+            .to_str()
+            .ok_or(RepositoryError::InvalidCompactManifest)?
+            .to_owned(),
+        git_object_id,
+        Sha256::digest(&segment.bytes).into(),
+        segment.min_key.clone(),
+        segment.max_key.clone(),
+        segment.min_event_time.clone(),
+        segment.max_event_time.clone(),
+        segment.row_count,
+        compressed_bytes,
+        segment.columns.clone(),
+        segment.row_group_index,
+        segment.bloom,
+    ))
+}
+
+fn path_key_str(path: &str) -> Result<String, RepositoryError> {
+    Ok(path.to_owned())
 }
 
 fn canonical_manifest(
@@ -4048,15 +3511,15 @@ fn canonical_manifest(
 ) -> Result<Vec<u8>, RepositoryError> {
     let mut output = format!(
         "{{profile: \"{COMPACT_PROFILE}\", table: \"{}\", schema: \"{}\", next_generation: {}, shards: [",
-        manifest.table,
-        hex_encode(&manifest.schema),
-        manifest.next_generation,
+        manifest.table(),
+        hex_encode(&manifest.schema()),
+        manifest.next_generation(),
     );
     for (index, shard) in shards.iter().enumerate() {
         if index != 0 {
             output.push_str(", ");
         }
-        let root = compact_root(manifest.table)?;
+        let root = compact_root(manifest.table())?;
         let relative = shard
             .file
             .as_path()
@@ -4090,23 +3553,23 @@ fn canonical_shard(entries: &[&CompactManifestEntry]) -> Result<Vec<u8>, Reposit
         }
         output.push_str(&format!(
             "{{segment_id: \"{}\", role: \"{}\", generation: {}, schema_id: \"{}\", profile_version: 1, encoder_version: \"{}\", relative_path: \"{}\", git_object_id: \"{}\", sha256: \"{}\", min_key: \"{}\", max_key: \"{}\", min_event_time: {}, max_event_time: {}, row_count: {}, compressed_bytes: {}, columns: \"{}\", row_group_index: {}, bloom: {}}}",
-            entry.segment_id,
-            entry.role.as_str(),
-            entry.generation,
-            hex_encode(&entry.schema),
-            entry.encoder_version,
-            entry.relative_path.as_path().to_str().ok_or(RepositoryError::InvalidCompactManifest)?,
-            entry.git_object_id,
-            hex_encode(&entry.sha256),
-            hex_encode(&entry.min_key),
-            hex_encode(&entry.max_key),
-            entry.min_event_time.as_ref().map(|value| format!("\"{value}\"")).unwrap_or_else(|| "null".into()),
-            entry.max_event_time.as_ref().map(|value| format!("\"{value}\"")).unwrap_or_else(|| "null".into()),
-            entry.row_count,
-            entry.compressed_bytes,
-            orna_value::base64_encode(&entry.columns),
-            entry.row_group_index,
-            entry.bloom,
+            entry.segment_id(),
+            entry.role().as_str(),
+            entry.generation(),
+            hex_encode(&entry.schema_id()),
+            entry.encoder_version(),
+            entry.relative_path(),
+            entry.git_object_id(),
+            hex_encode(&entry.sha256()),
+            hex_encode(entry.min_key()),
+            hex_encode(entry.max_key()),
+            entry.min_event_time().map(|value| format!("\"{value}\"")).unwrap_or_else(|| "null".into()),
+            entry.max_event_time().map(|value| format!("\"{value}\"")).unwrap_or_else(|| "null".into()),
+            entry.row_count(),
+            entry.compressed_bytes(),
+            orna_value::base64_encode(entry.columns()),
+            entry.row_group_index(),
+            entry.bloom(),
         ));
     }
     output.push_str("]}\n");
@@ -4125,12 +3588,6 @@ fn is_selected_ref(value: &str) -> bool {
         && value.bytes().all(|byte| is_safe_atom(byte) || byte == b'/')
 }
 
-impl fmt::Display for CompactSegmentRole {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
 #[cfg(feature = "legacy-fixture-writer")]
 mod legacy_fixture_builder;
 #[cfg(any(test, feature = "legacy-fixture-writer"))]
@@ -4147,6 +3604,9 @@ mod legacy_reader_tests;
 mod tests {
     use super::*;
     use bytes::Bytes;
+    use orna_format3::compact::{
+        decode_compact_i16, decode_compact_i32, skip_compact_value, take_compact_byte,
+    };
     use parquet::{
         basic::{Compression, PageType},
         column::reader::ColumnReader,
@@ -5084,25 +4544,25 @@ mod tests {
     fn compact_manifest_entry_exposes_validated_role_and_row_count() {
         let table = Uuid::from_bytes([0x11; 16]);
         let segment_id = Uuid::from_bytes([0, 0, 0, 0, 0, 0, 0x70, 0, 0x80, 0, 0, 0, 0, 0, 0, 1]);
-        let entry = CompactManifestEntry {
+        let entry = CompactManifestEntry::from_parts(
             segment_id,
-            role: CompactSegmentRole::Replacement,
-            generation: 9,
-            schema: [0x42; 32],
-            encoder_version: "test".to_owned(),
-            relative_path: compact_segment_path(table, segment_id).unwrap(),
-            git_object_id: "a".repeat(40),
-            sha256: [0x43; 32],
-            min_key: vec![0],
-            max_key: vec![1],
-            min_event_time: None,
-            max_event_time: None,
-            row_count: 37,
-            compressed_bytes: 1,
-            columns: Vec::new(),
-            row_group_index: true,
-            bloom: true,
-        };
+            CompactSegmentRole::Replacement,
+            9,
+            [0x42; 32],
+            "test".to_owned(),
+            orna_format3::compact::segment_path(table, segment_id),
+            "a".repeat(40),
+            [0x43; 32],
+            vec![0],
+            vec![1],
+            None,
+            None,
+            37,
+            1,
+            Vec::new(),
+            true,
+            true,
+        );
         entry.validate(table, Some(40)).unwrap();
         assert_eq!(entry.role(), CompactSegmentRole::Replacement);
         assert_eq!(entry.generation(), 9);
@@ -5116,25 +4576,25 @@ mod tests {
     fn compact_manifest_entry_rejects_invalid_event_time_bounds() {
         let table = Uuid::from_bytes([0x11; 16]);
         let segment_id = Uuid::from_bytes([0, 0, 0, 0, 0, 0, 0x70, 0, 0x80, 0, 0, 0, 0, 0, 0, 1]);
-        let mut entry = CompactManifestEntry {
+        let entry = CompactManifestEntry::from_parts(
             segment_id,
-            role: CompactSegmentRole::Data,
-            generation: 9,
-            schema: [0x42; 32],
-            encoder_version: "test".to_owned(),
-            relative_path: compact_segment_path(table, segment_id).unwrap(),
-            git_object_id: "a".repeat(40),
-            sha256: [0x43; 32],
-            min_key: vec![0],
-            max_key: vec![1],
-            min_event_time: Some("2026-03-01T00:00:00Z".to_owned()),
-            max_event_time: Some("2026-03-01T00:00:01Z".to_owned()),
-            row_count: 37,
-            compressed_bytes: 1,
-            columns: Vec::new(),
-            row_group_index: true,
-            bloom: true,
-        };
+            CompactSegmentRole::Data,
+            9,
+            [0x42; 32],
+            "test".to_owned(),
+            orna_format3::compact::segment_path(table, segment_id),
+            "a".repeat(40),
+            [0x43; 32],
+            vec![0],
+            vec![1],
+            Some("2026-03-01T00:00:00Z".to_owned()),
+            Some("2026-03-01T00:00:01Z".to_owned()),
+            37,
+            1,
+            Vec::new(),
+            true,
+            true,
+        );
         entry.validate(table, Some(40)).unwrap();
 
         let invalid_bounds = [
@@ -5144,11 +4604,28 @@ mod tests {
             (Some("2026-03-01T00:00:01Z"), Some("2026-03-01T00:00:00Z")),
         ];
         for (min_event_time, max_event_time) in invalid_bounds {
-            entry.min_event_time = min_event_time.map(str::to_owned);
-            entry.max_event_time = max_event_time.map(str::to_owned);
+            let entry = CompactManifestEntry::from_parts(
+                segment_id,
+                CompactSegmentRole::Data,
+                9,
+                [0x42; 32],
+                "test".to_owned(),
+                orna_format3::compact::segment_path(table, segment_id),
+                "a".repeat(40),
+                [0x43; 32],
+                vec![0],
+                vec![1],
+                min_event_time.map(str::to_owned),
+                max_event_time.map(str::to_owned),
+                37,
+                1,
+                Vec::new(),
+                true,
+                true,
+            );
             assert!(matches!(
                 entry.validate(table, Some(40)),
-                Err(RepositoryError::InvalidCompactManifest)
+                Err(orna_format3::compact::CompactError::InvalidManifest)
             ));
         }
     }
@@ -5159,25 +4636,6 @@ mod tests {
         let segment_id = Uuid::from_bytes([0, 0, 0, 0, 0, 0, 0x70, 0, 0x80, 0, 0, 0, 0, 0, 0, 1]);
         let shard_path = shard_path(table, 0).unwrap();
         let manifest_path = compact_manifest_path(table).unwrap();
-        let mut entry = CompactManifestEntry {
-            segment_id,
-            role: CompactSegmentRole::Data,
-            generation: 1,
-            schema: [0x42; 32],
-            encoder_version: "test".to_owned(),
-            relative_path: compact_segment_path(table, segment_id).unwrap(),
-            git_object_id: "a".repeat(40),
-            sha256: [0x43; 32],
-            min_key: vec![0],
-            max_key: vec![1],
-            min_event_time: None,
-            max_event_time: None,
-            row_count: 1,
-            compressed_bytes: 1,
-            columns: Vec::new(),
-            row_group_index: false,
-            bloom: false,
-        };
         let invalid_bounds = [
             (Some("2026-02-30T00:00:00Z"), Some("2026-03-01T00:00:00Z")),
             (Some("2026-03-01T00:00:00Z"), None),
@@ -5187,25 +4645,37 @@ mod tests {
         let (root, repository) = test_repository();
         let head = repository.head().unwrap().unwrap();
         for (min_event_time, max_event_time) in invalid_bounds {
-            entry.min_event_time = min_event_time.map(str::to_owned);
-            entry.max_event_time = max_event_time.map(str::to_owned);
+            let entry = CompactManifestEntry::from_parts(
+                segment_id,
+                CompactSegmentRole::Data,
+                1,
+                [0x42; 32],
+                "test".to_owned(),
+                orna_format3::compact::segment_path(table, segment_id),
+                "a".repeat(40),
+                [0x43; 32],
+                vec![0],
+                vec![1],
+                min_event_time.map(str::to_owned),
+                max_event_time.map(str::to_owned),
+                1,
+                1,
+                Vec::new(),
+                false,
+                false,
+            );
             let shard_bytes = canonical_shard(&[&entry]).unwrap();
             let shard = ShardDescriptor {
                 number: 0,
-                min_key: entry.min_key.clone(),
-                max_key: entry.max_key.clone(),
+                min_key: entry.min_key().to_vec(),
+                max_key: entry.max_key().to_vec(),
                 entries: 1,
                 file: shard_path.clone(),
                 hash: Sha256::digest(&shard_bytes).into(),
                 bytes: shard_bytes.clone(),
             };
             let manifest_bytes = canonical_manifest(
-                &CompactManifest {
-                    table,
-                    schema: entry.schema,
-                    next_generation: 2,
-                    entries: vec![entry.clone()],
-                },
+                &CompactManifest::from_parts(table, entry.schema_id(), 2, vec![entry.clone()]),
                 &[shard],
             )
             .unwrap();
@@ -5796,21 +5266,21 @@ mod tests {
         ))
         .unwrap();
         let source_id = schema_descriptor_fingerprint(&source).unwrap();
-        let projection = CompactCommittedSegmentProjection {
-            table_id: table,
-            schema_id: source_id,
-            schema: source.clone(),
-            source_schema_id: source_id,
-            source_schema: source,
-            profile: COMPACT_PROFILE,
-            encoder_version: "test-encoder-v1".into(),
-            generation: 1,
-            role: CompactSegmentRole::Data,
-            rows: vec![CompactCommittedRow {
-                key: CanonicalValue::new(OvbRaw::Bool(true)).unwrap(),
-                value: Some(row),
-            }],
-        };
+        let projection = CompactCommittedSegmentProjection::new(
+            table,
+            source_id,
+            source.clone(),
+            source_id,
+            source,
+            COMPACT_PROFILE,
+            "test-encoder-v1".into(),
+            1,
+            CompactSegmentRole::Data,
+            vec![CompactCommittedRow::new(
+                CanonicalValue::new(OvbRaw::Bool(true)).unwrap(),
+                Some(row),
+            )],
+        );
 
         let projected = project_compact_segment_schema(&projection, &target).unwrap();
         assert_eq!(

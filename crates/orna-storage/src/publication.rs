@@ -456,9 +456,10 @@ mod tests {
     use super::*;
     use crate::LoosePath;
     use bytes::Bytes;
+    use orna_format3::compact::{CompactManifest, CompactSegmentRole};
     use orna_repository::{
-        CompactManifest, CompactPublicationPlan, CompactPublicationRequest, CompactSegment,
-        CompactSegmentRecord, CompactSegmentRole, ManagedFileChange, Uuid,
+        CompactPublicationPlan, CompactPublicationRequest, CompactSegment, CompactSegmentRecord,
+        ManagedFileChange, Uuid,
     };
     use orna_value::{CanonicalValue, OvbRaw};
     use parquet::file::{
