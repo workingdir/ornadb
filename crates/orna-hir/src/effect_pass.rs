@@ -76,7 +76,7 @@ fn component_effects(direct: &[EffectSet], calls: &[Vec<DefId>]) -> Vec<EffectSe
 }
 
 /// The effects one non-source callee performs by itself.
-fn direct_effects(program: &Program, callee: &Callee) -> EffectSet {
+pub(crate) fn direct_effects(program: &Program, callee: &Callee) -> EffectSet {
     match callee {
         Callee::Native { def, .. } | Callee::Sys { def, .. } => native_effects(program, *def),
         Callee::TableOp { op, .. } => EffectSet::single(table_kind(*op)).join(EffectSet::failing()),

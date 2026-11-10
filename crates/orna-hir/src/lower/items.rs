@@ -767,7 +767,8 @@ impl Builder<'_> {
         self_ty: Option<DefId>,
     ) {
         let module = self.pending[def.index()].module;
-        let mut state = BodyState::new(body_id, def, module);
+        // An assertion body is owned by its table or type row, not by the assertion itself.
+        let mut state = BodyState::new(body_id, self_ty.unwrap_or(def), module);
         state.push_scope(expr.span().start);
         if let Some(owner) = self_ty {
             // An assertion's owner row is written as `self` (design section
