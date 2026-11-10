@@ -17,8 +17,9 @@ owner; each says what reopening would cost.
    environment is sufficient without `std` and that `std` is optional and replaceable. The design follows that
    sentence literally.
 5. **No silent magic.** Effects, failures, overloads and units are visible to the reader and the tools.
-6. **It is a scripting language.** A feature earns its place only if a script author needs it. Mutation, effect syntax,
-   user-declared units and index declarations do not clear that bar today, so they are not in the language.
+6. **It is a scripting language.** A feature earns its place only if a script author needs it. Effect syntax, user-declared
+   units and index declarations do not clear that bar today, so they are not in the language. Mutation is not ceremony:
+   assigning to a variable just works.
 
 ## Decisions
 
@@ -33,7 +34,7 @@ owner; each says what reopening would cost.
 | D7 | `Int` stays arbitrary precision. The digit cap is a resource quota reported as a quota error, not a language rule. No fixed-width integer types until a stated need (`Bytes` indexing yields `Int` in 0..255). The numeric tower has no implicit conversions between `Int`, `Decimal` and `Float`; conversions are explicit and total or failing by name. |
 | D8 | Cut user-declared units and dimensions from 1.x (reserved syntax). `Duration`, `Instant`, `Decimal` and `Money<C>` stay as built-in types with their literal postfixes (`1.day`). The checker's dimensional algebra is deleted. |
 | D9 | Default key is `Uuid` (`uuid7()`), because the product's core workflow is branch and merge. Auto-increment integer keys remain available by explicit declaration with the merge-conflict caveat documented. No index or unique declarations: uniqueness stays an assertion, and the engine MUST recognise the canonical key-shaped forms and serve them from an index (the spec only allowed this before, ASSERT-058). |
-| D10 | Bindings are immutable. `let` binds once; the assignment statement is removed in 1.2 (ORNA-CFLOW-005/006 change). Accumulation uses `fold` and the new `Map`, `Set`, `Bytes` and `List` operations; `for` stays for effects, with `break`, `continue` and `return`. `while` and `loop` stay only because effectful loops (drain a queue, retry) are real; they cannot update a binding. Closures capture immutable values, so capture-by-value stops being a trap. The std loops that exist only to emulate mutation are rewritten. |
+| D10 | Mutation just works. `let` binds a variable and `x = value;` reassigns it, exactly as 1.1 allows; there is no `mut`, no `var`, and no immutability ceremony. Closures capture the variable itself (a shared slot within the activation), so assigning to an outer variable inside a closure updates that variable and the closure sees later assignments. Values stay immutable; only the variable slot changes. The one boundary: `parallel` and task bodies capture snapshots, and assigning to an outer variable from them is a compile error, so concurrent children cannot race on a slot. |
 | D11 | Add `pub use path;` and `pub use path as name;`. `std` is replaceable ordinary Orna. A package may not ship native code. |
 | D12 | Host functions live in an engine-versioned `core` and `sys`, declared body-less in embedded `core.orna` and `sys.orna` and bound by `DefId` to implementations in the engine. `std` is pure Orna on top and re-exports `core` where it wants stable paths (`std.bits.bit_or` is `pub use core.bits.bit_or`). Natives are declared only in engine-embedded modules; this supersedes the earlier native-declarations decision that allowed them in pinned std modules. Old pinned std keeps working through an engine `NativeAbi` version. |
 | D13 | Write a language reference beside the frozen 1.1.0 publication: grammar, typing rules, effect rules, evaluation rules, numeric tower, strings, modules. Format and storage specs and product requirements are separate documents. Orchestrator text and the vendor name leave the normative corpus (the store requirement becomes a transactional contract). Fossils of unshipped syntax move to a migration appendix. The frozen 1.1.0 stays hash-pinned as history; the new reference is 1.2. |
@@ -48,7 +49,7 @@ owner; each says what reopening would cost.
 6. D6/D7: yes to `Map`, `Set`, `Bytes`; no fixed-width integers yet.
 7. D8: a closed set (time, size, money) is enough for 1.x.
 8. D9: branch-and-merge is the default workflow; the default key is merge-safe.
-9. D10: `var` was removed to keep one binding form; the same reasoning now removes reassignment. Orna has no mutation.
+9. D10: `var` was removed to keep one binding form; that is a reason for one form (`let`, reassignable), not for immutability. Mutation stays plain assignment.
 10. D11/D12: `std` is replaceable; no third-party native code.
 11. D13: 1.1.0 is frozen history; the language reference is new.
 
@@ -62,6 +63,6 @@ owner; each says what reopening would cost.
 
 ## Follow-up work items created from these decisions
 
-Spec work (language reference chapters), parser work (`pub use`, type arguments, removing assignment,
-`Map`/`Set`/`Bytes` literals), std rewrites of mutation-emulating loops, checker work, canonical tags for the new collections, and the deprecation aliases are
+Spec work (language reference chapters), parser work (`pub use`, type arguments, the closure slot-capture rule,
+`Map`/`Set`/`Bytes` literals), checker work, canonical tags for the new collections, and the deprecation aliases are
 tracked as beads under `ornadb-csenl` (see the bd comments on `ornadb-csenl.1` to `.13`).
