@@ -1596,7 +1596,7 @@ type, and H4 only needs types from H2 for arithmetic selection; section 7.2).
 ### 6.4 Step parity
 
 Step counts are observable (ORNA-CLOSURE-004 lets limits vary only where
-"explicitly permitted and … observable"), they are asserted by existing tests
+"explicitly permitted and ... observable"), they are asserted by existing tests
 (`std_intrinsic_step_parity.rs`: 27 programs at 256, 1,024 and 4,096 elements),
 and an activation that fails with `ORNA-EVAL-LIMIT` at one count in one
 pipeline and succeeds in the other is a visible difference. So parity is
