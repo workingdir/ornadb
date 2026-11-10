@@ -37,9 +37,10 @@ fn hir_call_classification_matches_the_route_trace() {
         assert!(
             entry.field.starts_with("call")
                 || entry.field.starts_with("resolution")
-                || entry.field == "public-signature",
-            "{}: `{}` is not a compared field; the classification, resolution and signature \
-             tests own this file",
+                || entry.field == "public-signature"
+                || entry.field == "effects",
+            "{}: `{}` is not a compared field; the classification, resolution and signature tests own \
+             the call, resolution and signature fields, and tests/effects.rs owns effects",
             entry.case,
             entry.field
         );
