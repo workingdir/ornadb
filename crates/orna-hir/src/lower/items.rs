@@ -311,9 +311,21 @@ impl Builder<'_> {
         let params = self.build_generics(module, &names, generics);
         // Each member is generic over the protocol's parameters, then `Self`, then its own.
         let mut inherited = params.clone();
+        let self_args = (0..generics.len())
+            .map(|index| {
+                let index = u32::try_from(index).expect("generic parameters fit u32");
+                self.program
+                    .tys
+                    .intern(crate::TyKind::Param(crate::ParamIdx::new(index)))
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
         inherited.push(GenericParam {
             name: crate::Name::new("Self"),
-            bounds: Vec::new(),
+            bounds: vec![crate::Bound {
+                protocol: def,
+                args: self_args,
+            }],
         });
         let mut lowered = Vec::new();
         for member in members {
@@ -755,7 +767,8 @@ impl Builder<'_> {
         }
     }
 
-    /// A signature with no body, for a protocol member.
+    /// A signature with no body, for a protocol member. Each member is generic over the protocol's parameters,
+    /// then `Self` (bounded by the protocol, ORNA-GENERIC-002/003), then its own generics.
     fn signature_only(
         &mut self,
         module: ModuleId,

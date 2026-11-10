@@ -32,6 +32,17 @@ INTERFACE = ROOT / "crates/orna-hir/interface"
 ROOT_ROWS = ["Some", "now", "uuid7", "error"]
 ROOT_EXCLUDED = {"fail": "abrupt evaluation rule (hir.md 2.6 IntrinsicForm), not a native"}
 
+# Root enums (kernel-and-library.md listing 5: `Ordering` returned by `Order.compare`; candidate 8: `Rounding`).
+# Declared in core.orna by this generator; variants are lowercase like every Orna variant.
+ROOT_ENUMS = [
+    ("Ordering", ["less", "equal", "greater"], "Result of `Order.compare` (kernel-and-library.md listing 5)."),
+    (
+        "Rounding",
+        ["half_even", "half_up", "toward_zero", "away_from_zero", "floor", "ceil"],
+        "Decimal rounding modes (kernel-and-library.md candidate 8); replaces the name-based rounding words.",
+    ),
+]
+
 # Language-defined native groups (hir.md section 4, `core.orna` row of the table).
 INCLUDED_MODULES = [
     "std.collection",
@@ -175,6 +186,13 @@ def load_rows():
     return by_module
 
 
+def enum_declaration(name, variants, doc):
+    for variant in variants:
+        if not re.fullmatch(r"[a-z][a-z_]*", variant):
+            fail(f"enum {name}: variant `{variant}` is not a lowercase identifier")
+    return [f"// core.{name}: {doc}", f"pub enum {name} {{", *[f"    {variant}," for variant in variants], "}", ""]
+
+
 def render():
     """Return ({path: text}, gaps)."""
     by_module = load_rows()
@@ -193,6 +211,8 @@ def render():
                   "// and in `core/*.orna`. Re-exported by std where stable paths are wanted.", "",
                   "// core.Error: the failure value (language reference 04-effects-and-failure.md).",
                   "pub type Error {", "    pub code: Str,", "    pub message: Str,", "    pub cause: Error?,", "}", ""]
+    for name, variants, doc in ROOT_ENUMS:
+        root_lines.extend(enum_declaration(name, variants, doc))
     for name in ROOT_ROWS:
         root_lines.extend(declaration("core", root_rows[name], {"Some"} | EXTRA_BUILTINS))
     files["core.orna"] = "\n".join(root_lines).rstrip() + "\n"

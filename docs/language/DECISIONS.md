@@ -1785,6 +1785,9 @@ D1 (principal types) and D5 (overload resolution).
 --------------------------------------------------------------------------
 
 ## D8. Units of measure
+Status: SUPERSEDED by the amendment of 2026-11-10 below, AMENDED by owner direction
+2026-11-10. The cut in this section is kept as the record of the earlier decision.
+
 
 Bead `ornadb-csenl.8`. Critique F10, section 3.2.
 
@@ -1808,7 +1811,7 @@ Bead `ornadb-csenl.8`. Critique F10, section 3.2.
   (`29-formats.md:28`, `:110`). Unit identities are stable ObjectIds
   (ORNA-OBJECT-001, `07-tables.md:350`).
 * Time units (`1.day`, `5.minutes`) are described separately as Duration and
-  calendar period (ORNA-TIME-001 to 004, `05-types.md:141-161`).
+  calendar period (ORNA-TIME-001 to 004, `reference/05-units.md`).
 
 ### Implementation today
 
@@ -1980,6 +1983,63 @@ question under D13).
 * D: no quantity type; `dim`/`unit` are reserved words.
 * Under every option, the numeric-postfix rule must resolve through
   declared names, not the hard-coded list at `lib.rs:5867-5900`.
+
+### Amendment 2026-11-10: AMENDED by owner direction 2026-11-10
+
+Status: AMENDED by owner direction 2026-11-10. This is a decision, not a proposal.
+It supersedes the cut in the D8 row of `DECIDED.md` and in the D8 section above,
+which is kept as superseded. Specification: `docs/design/units.md`.
+
+The owner's direction: rewrite the unit system and make it better, rather than cut it.
+
+What is decided:
+
+* User-declared units and dimensions return in 1.x as enum-shaped families (D15, owner
+  direction 2026-11-10): a family is an `enum`, a unit is a payload-free variant, and
+  `kilometre = 1000 metre,` gives the scale. Grammar: units.md section 2. The keyword
+  forms `dim` and `unit` of the first 2026-11-10 draft are withdrawn.
+* Dimensional algebra is kept and rewritten: exponent vectors over base axes,
+  rational scales, and the typing rules of units.md section 6.
+* Surface prerequisites (units.md section 11.2): P3a, `impl` and `static` members in
+  enums; P3e, a payload-free variant as a type argument (`Quantity<Decimal, Length.kilometre>`).
+  Suffix ambiguity: the same suffix in two families in scope is ORNA-S011; the qualified
+  form `Family.name(n)` resolves it.
+* Built-in units are ordinary declarations in the embedded `core` (units.md
+  section 8), in the same form a user writes: time postfixes (`.day`, `.seconds`),
+  data size, and the currency family. `Duration`, `Instant`, `Decimal` and `Money<C>`
+  remain built-in type names.
+* The checker natively knows only the minimum listed in units.md section 5.
+* `Band.cold` is cited by the owner as an example. units.md does not specify it, and
+  this amendment does not decide its meaning.
+
+Why. Language features are dogfooded: a reader who opens the source of `Duration`,
+a unit family or `Money<C>` must find plain Orna, not Rust special cases. Ordinary
+declarations plus a small native core let one rule serve built-in and user families
+alike.
+
+Consequences:
+
+* The 1.1.0 clauses ORNA-UNIT-001 to 008 are carried forward with their meaning
+  (units.md section 10.2). Numbers 009 to 019 are new.
+* `Duration` stays the 1.1.0 primitive, wire tag 60005. The time dimension names
+  it with the `repr` attribute (units.md O6).
+* The finer-unit rule for mixed-scale add is the rule the 1.1.0 checker already
+  implements (`inference.rs:1168`), restated as ORNA-UNIT-011.
+* Stage H2c of `docs/design/hir.md` is rewritten to implement units.md, not deleted.
+
+Open sub-questions. They stay open for the owner. Each has the default this design
+uses until the owner answers (units.md section 12):
+
+* Q1. `day` and `days`: default follows the checker, a calendar `Period`
+  (ORNA-TIME-004). The reference `02-types.md` says elapsed `Duration`; to be corrected
+  once the owner decides.
+* Q2. Conversion name: default `q.to(U)`.
+* Q3. Rounding: default a library function, `to(U, scale, rounding)`, not a rule.
+* Q4. `canonical`: default a general dimension clause; only time declares one.
+* Q5. Nominal form of `Duration`: default a separate primitive (units.md O6), not an
+  alias of `Quantity<Decimal, s>`.
+* Q6. `Int` time quantity under a `Duration` annotation: default no widening; the
+  annotation is a type error (ORNA-UNIT-016 widens only for non-integer ratios).
 
 --------------------------------------------------------------------------
 
