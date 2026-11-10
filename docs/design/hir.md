@@ -1266,3 +1266,369 @@ dominated by Git object writing and by the admission path that bypasses the
 language; that is stream E/F work. What this section delivers is that the
 language path can address a million rows at all, with memory bounded by the
 operators that retain, so the gate can be re-earned through `orna run`.
+
+--------------------------------------------------------------------------
+
+## 6. Migration: a strangler with a differential harness
+
+### 6.1 Rules
+
+1. **The old pipeline keeps working and stays authoritative** until stage H9.
+   Every stage before H9 is additive: new crates, new tests, and a consumer
+   that switches to the new code only where the stage's acceptance proof says it
+   is equal or better.
+2. **The tree is green after every merge.** A stage is a series of PRs, each
+   independently mergeable. No PR leaves a crate that does not compile, a test
+   on the known-red list that was not there, or a corpus case that regressed.
+3. **Equality is measured, not argued.** The differential harness (6.2) runs
+   the corpus through both pipelines and compares results, diagnostics, step
+   counts and call classification. A difference is either a bug or an entry in
+   a reviewed `expected-differences.toml` with a reason and a bead. The file
+   behaves like `scripts/known-test-failures.toml`: an entry that stops
+   differing fails the run, so the list only shrinks.
+4. **Deletion belongs to the stage that makes the code dead.** A stage's
+   acceptance includes the line count it removes. Nothing is deleted before its
+   replacement is the only consumer.
+5. **No stage depends on a language decision it does not need** (section 8), so
+   the owner's answers to D1 to D13 can arrive while work proceeds.
+
+### 6.2 The differential harness (stage H0)
+
+A new test-support crate, `orna-differential` (layer 14, role `harness`, never
+linked into `orna-cli`; `scripts/check_architecture.py` enforces it). It owns:
+
+**The corpus.** One loader that turns every program the repository already
+owns into a `Case`:
+
+| Source | Size at `026faee90` | Becomes |
+|---|---|---|
+| `reference/Orna-1.1.0/examples/valid` and `invalid` | 92 and 80 files | module cases; expected accept or reject |
+| `.orna` fixtures under `crates/*/tests/fixtures` and `src/fixtures` | 5,532 files in the 15 largest directories: evaluator 2,145, check 1,076, conformance 653, syntax 428, runtime 285, traceability 183, sys 164, cli 159, application 109, project 72, lsp 66, project-repl 65, and three smaller | module, REPL-input or expression cases, by the harness each fixture already feeds |
+| `crates/orna-evaluator/tests/standard_*.rs` | 115 files, 99 uses of `AdmittedReplSession` | REPL-session cases (an ordered list of inputs) |
+| `stdlib/std` | 53 modules | module cases; every public function is also an entry |
+| `reference/Orna-1.1.0/tests/*.json` vectors | 16 files | expectations attached to the above, not new cases |
+
+Each `Case` records its sources, entry function or input list, environment,
+limits and the table rows it needs. Today's tests already hold this knowledge
+in test code; the harness lifts it into data so both pipelines can be driven
+from the same description.
+
+**The observation.** Each pipeline, for each case, produces:
+
+```rust
+pub struct Observation {
+    pub diagnostics: Vec<String>,           // codes, sorted (the checker sorts by code then message, lib.rs:2215)
+    pub outcome: Option<Result<Vec<u8>, String>>,   // canonical value bytes, or the error code
+    pub steps: Option<u64>,
+    pub calls: Vec<CallRecord>,             // one per executed call: span, kind
+    pub writes: Vec<(String, Vec<u8>, Option<Vec<u8>>)>,   // table, key, new row, in staging order
+}
+```
+
+The old pipeline's observer drives `ApplicationAuthority::admit_module` and
+`evaluate_staged*` for module cases and `AdmittedReplSession` for REPL cases,
+the same entry points the production binary uses. Steps are read from the
+existing `StepBudget` (`orna-evaluator/src/lib.rs:269`, `remaining()` at `:386`;
+`evaluate_with_functions_and_budget`, `:2368`), so one run gives the count;
+where an API takes no budget the harness falls back to the technique of
+`orna-evaluator/tests/std_intrinsic_step_parity.rs`: the smallest `max_steps`
+that lets the program succeed, found by bisection (the predicate is monotone).
+
+**The route trace.** One test-only hook in the old evaluator: under a Cargo
+feature `route-trace` (off in every shipped build), `call` records
+`CallRecord { span, kind }` where `kind` is which of the nine branches of
+section 1.3 served the call. This is the single edit to production code in H0,
+about 20 lines at the exits of `call` (`orna-evaluator/src/lib.rs:9581-9662`),
+and it is deleted in H9. It is what makes the "classification equals the old
+routing" assertion of H1 possible without reading the evaluator.
+
+**Comparators and the ratchet.** `diagnostics` compared as sets of codes (spans
+are new information, not a difference); `outcome` compared byte for byte;
+`steps` compared exactly unless a case lists an allowance (6.4); `calls`
+compared through the mapping of 6.3 (stage H1); `writes` compared in order.
+`tests/differential/expected-differences.toml` holds one entry per accepted
+difference: case id, field, old, new, reason, bead. A run fails on a new
+difference and on a stale entry.
+
+**Where it runs.** A job in `.github/workflows/cli-tests.yml` runs the harness
+on every PR. The corpus is small programs: the evaluator tests that already
+run them take seconds each in aggregate, so the target is the whole corpus in
+under three minutes on a CI runner `[INFERENCE: not measured; H0 measures it
+and, if it exceeds the target, PRs run the subset touching changed crates and
+the nightly run takes everything]`. Self-differential at H0 (old against old)
+must report zero differences and zero flaky cases; that proves the harness
+before any new code exists.
+
+### 6.3 Stage list
+
+Beads are children of `ornadb-csenl`. Each stage names what it delivers, the
+acceptance proof, what it deletes and its main risk.
+
+```mermaid
+flowchart LR
+    H0["H0 scaffold, harness, baseline benchmarks"] --> H1["H1 lower, resolve, classify, LSP"]
+    H1 --> H2["H2 Ty and inference"]
+    H2 --> H3["H3 effects, rules, orna check on HIR"]
+    H1 --> H4["H4 exec pure core"]
+    H3 --> H4
+    H4 --> H5["H5 Host, natives, link"]
+    H5 --> H6["H6 TableStore, one mutation path"]
+    H6 --> H7["H7 relational operators, explain"]
+    H5 --> H8["H8 REPL"]
+    H7 --> H9["H9 cutover, deletion"]
+    H8 --> H9
+    H3 --> H9
+```
+
+H2 and H4 may proceed in parallel after H1 (execution of untyped-but-resolved
+bodies is possible for the operators whose behaviour does not depend on a
+type, and H4 only needs types from H2 for arithmetic selection; section 7.2).
+
+#### H0: scaffold, differential harness, baseline benchmarks (`ornadb-csenl.15`)
+
+- **Delivers.** `orna-hir` with ids, `Program`, an empty lowering entry point
+  and the validator of 2.12 (no passes yet); `orna-differential` as in 6.2;
+  the `route-trace` hook; three benchmarks (section 7.4) measured on the old
+  evaluator, with their numbers checked in as the baseline; `layers.toml`
+  entries for both crates.
+- **Acceptance.** Old-against-old differential over the whole corpus: zero
+  differences, zero flaky cases, wall time recorded. Benchmarks run in CI and
+  fail on a regression of the deterministic counters. `check_architecture.py`
+  passes with the new crates.
+- **Deletes.** Nothing.
+- **Risk.** Corpus extraction is tedious because fixtures feed different
+  harnesses; a case that cannot be reproduced is listed as excluded with a
+  reason, and the excluded count is itself ratcheted. Decisions: none.
+
+#### H1: lowering, resolver, call classification; LSP on HIR (`ornadb-csenl.16`)
+
+- **Delivers.** AST to HIR items and bodies; the one resolver for names,
+  imports, locals and slots, patterns and the one argument binder (2.7);
+  `Callee` classification for every path callee (2.6); `NameUse` index per
+  module. `orna-lsp` definition, references, rename, hover (names only; types
+  arrive in H2) and semantic tokens move to HIR queries.
+- **Acceptance.** (a) Classification: for every call the old evaluator
+  executes over the corpus, the HIR `Callee` at that span maps to the recorded
+  route by this table, with differences only in `expected-differences.toml`:
+
+  | Old route (section 1.3) | HIR `Callee` |
+  |---|---|
+  | 9 source function | `Source`, `Value` |
+  | 8 native, 2 codec decode, 3 `std.ui.action` | `Native` |
+  | 7 system host | `Sys` |
+  | 6 relation stage or terminal | `Relational` (via `Pending::Container` until H2) |
+  | 4 root intrinsic | `Intrinsic` or `Native` (D12) |
+  | effect-handler table write | `TableOp` |
+  | 1 `.divide` | `Pending::Member` until H2 |
+
+  (b) Resolution: for every name in every corpus program, the HIR resolver and
+  the old checker agree on resolved or unresolved, and on `ORNA-S011`
+  ambiguity. (c) The `orna-lsp` test suite passes unchanged. (d) The
+  validator of 2.12 passes on every lowered corpus program.
+- **Deletes.** R24 to R26: `orna-lsp/src/names.rs` (1,485 lines), the resolver
+  half of `workspace.rs` (`:382-561` of 1,108), `standard.rs` (375) and the
+  `Hint` approximations in `analysis.rs`.
+- **Risk.** The old checker is the oracle for resolution, and it has quirks
+  (suffix match on the last path segment at `orna-application/src/lib.rs:2159-2171`; the `sys` shadow test at
+  `orna-evaluator/src/lib.rs:9804` that ORNA-NS-006 says should be a resolution
+  error). Quirks that the specification does not require are listed as
+  differences and fixed in the HIR; quirks it does require are copied. The
+  tolerant parse must lower to a total `Program`. Decisions: D5 and D11 affect
+  `Binding::Overloads` and re-exports; lowering produces the single-definition
+  forms and the other forms are added when decided.
+
+#### H2: `Ty`, inference and expression typing on HIR (`ornadb-csenl.17`)
+
+- **Delivers.** `Ty` interning, `InferCtxt`, operator tables over `Ty`,
+  expression typing, call checking per `Callee`, `Pending` calls settled,
+  diagnostics with spans (ORNA-INFER-011). Three parts, in order:
+  - **H2a, no decision needed.** Fully annotated programs and the
+    annotation-required solver (2.3), first-order and local to a body.
+  - **H2b, needs D1, D3, D5.** The parameter-annotation policy, the option
+    representation and lifting, overloading and type arguments.
+  - **H2c, needs D8.** `Quantity`, or its removal.
+- **Acceptance.** Over the corpus, for every program the old checker accepts
+  and the new one accepts, the printed type of every public signature is equal
+  or listed; for every program one rejects and the other accepts, an entry with
+  the reason (the heuristic of `inference.rs:1455-1533` is the expected source
+  of most). Invalid-corpus codes match (80 `examples/invalid` and the
+  conformance expected-diagnostics). The `generics_fail_explicitly` pin
+  (`orna-project-repl/src/lib.rs:1564`) is listed as an expected difference
+  that H8 then turns into a passing test.
+- **Deletes.** Nothing yet: the old checker remains authoritative.
+- **Risk.** The largest in the plan. `orna-check` is 36,352 lines of
+  accumulated special cases (checkpoints, snapshot contexts, secrets, money),
+  and the spec gives typing rules only as INFER-1. H2a ships a strict subset;
+  anything the subset cannot type is reported as "not yet on HIR" and the
+  harness counts it, so the ratchet is "typed share of the corpus only grows".
+
+#### H3: effects pass and checker rules on HIR; `orna check` on HIR (`ornadb-csenl.18`)
+
+- **Delivers.** `FnDef.effects` by strongly connected component (2.5); every
+  rule family of 3.1 ported; `analyze*` reimplemented as `check(..)` plus a
+  conversion to `Analysis`, one function at a time. Rule families with a
+  checkpoint or secret flavour keep a `Ty`-to-`Type` adapter until their own
+  port lands, so the tree stays green.
+- **Acceptance.** Diagnostic codes equal over the whole corpus including
+  invalid and conformance cases; `Analysis` equal for the library entry points
+  consumed by `orna-application`; the effect set of every corpus function
+  equals the old `EffectSummary` or is listed. `orna check` runs on HIR by
+  default; `ORNA_CHECK_LEGACY=1` selects the old path for two releases of
+  nightly runs, then goes.
+- **Deletes.** In `orna-check`: `inference.rs` (3,294), `calls.rs` (2,877),
+  `intrinsics.rs` (1,255), `flow.rs` (1,234), `imports.rs` (1,112),
+  `collections.rs` and `collection_calls.rs` (439), `scope.rs` (137),
+  `types.rs` (162) and the matching parts of `lib.rs`: 10,510 lines in nine
+  files plus. `checkpoint.rs`, `semantic_payload.rs` and `secrets.rs` (5,819)
+  follow when their rules are ported. `located.rs` (235) goes with
+  span-carrying diagnostics.
+- **Risk.** Rule parity at the margins (checkpoint topology, snapshot context
+  maps, `checkpoint.rs` 3,574 lines of pairwise rules). Mitigation: the
+  adapter above and the harness; nothing is switched until the corpus agrees.
+
+#### H4: `orna-exec` pure core (`ornadb-csenl.19`)
+
+- **Delivers.** Values, frames of slots, `Completion`, the one binder, the
+  operator tree for expressions, control flow, source calls, closures with
+  captures, patterns, records, lists, enums, failure and recovery (`|?`),
+  cancellation as a variant, bit-length digit check, `Usage`. No natives, no
+  tables.
+- **Acceptance.** The subset of the corpus that needs only these features is
+  executed by both pipelines with equal outcomes and equal steps (6.4); the
+  harness reports the executable share (it must only grow); benchmarks B1 and
+  B2 (section 7.4) run on the new executor and meet their targets.
+- **Deletes.** Nothing: it is a new crate.
+- **Risk.** Step parity (6.4) and `BigInt` behaviour; mitigated by the
+  allowlist and by differential testing of every operator over generated
+  operand pairs in addition to the corpus.
+
+#### H5: `Host`, `core`/`sys` native declarations, link, native families (`ornadb-csenl.20`)
+
+- **Delivers.** Section 4: `core.orna`, `sys.orna`, the build script, `link`,
+  `Host`, and the native families ported one PR each (bits, text, hash, base64,
+  json, orna and ovb codecs, math, time, random, money, collections, stats,
+  streams, concurrent, ui, then `sys`).
+- **Acceptance.** `api/sys.json` generated from `sys.orna` is byte-equal to
+  the checked-in file. Per family, the standard-library tests
+  (`orna-evaluator/tests/standard_*.rs`, `std_intrinsic_*.rs`) pass on the
+  new executor through the harness; step parity per family against
+  `std_intrinsic_step_parity.rs`'s baseline. A deliberately unbound declaration
+  is a link error with both names; a deliberately undeclared implementation
+  fails the build.
+- **Deletes.** Section 4.7, but only at H9 for the parts the old evaluator
+  still uses; `orna-sys-macros` and the codegen half of `orna-sys-codegen` go
+  in H5 because nothing else consumes them.
+- **Risk.** D12 decides where std natives live, and the pinned std changes in
+  a separate repository (native-declarations.md N4). Mitigation: the
+  declaration form is the same under both answers; the first ports (bits,
+  hash) need only `core.orna`. Native families are copied, not shared: the old
+  evaluator's `Value` is private to it and differently shaped, so each family
+  exists twice until H9. That duplication is bounded and one-directional, and
+  the harness is the guard against drift.
+
+#### H6: `TableStore`, cursors, one mutation path (`ornadb-csenl.21`)
+
+- **Delivers.** Section 5.2 and 5.3: the trait, an in-memory implementation,
+  the SQLite and committed-Git implementation, `table::apply`, assertion
+  validation through the same store, removal of the three limits.
+- **Acceptance.** Every `writes` observation in the corpus equal in order and
+  bytes; a scan of a table with more rows than the old cap (generate 100,000
+  rows) completes with bounded memory (measured peak, B3); the 2,048-row
+  tests are rewritten to assert the old limit is gone and listed as
+  expected differences; the six handlers' behaviours covered by one parametrised
+  test over `TableStore` implementations.
+- **Deletes.** At H9 with the old evaluator; in H6 itself, the conformance
+  crate's three handlers once assertion admission uses `table::apply`
+  (`semantic_adapter.rs`, the parts at `:4590`, `:4695`, `:6318`), which also
+  lets `orna-cli` drop `orna-conformance` (V2).
+- **Risk.** The ordering contract of the committed base (5.2). Durability is
+  not touched: commit and rollback entry points are called as today.
+
+#### H7: relational operators as a pull tree; `sys.explain` on it (`ornadb-csenl.22`)
+
+- **Delivers.** Section 5.4; `sys.explain(query)` and `sys.explain(function)`
+  printing the real tree.
+- **Acceptance.** `explain_runtime.rs` and `planner_metadata.rs` expectations
+  re-derived from the tree (listed as differences where the planner's
+  invented fields disappear); a `take(10)` over a 100,000-row table reads 10
+  rows (counted through the store).
+- **Deletes.** `explain_bindings.rs` (369) and, with stream A,
+  `orna-sys/src/introspection.rs` consumers.
+- **Risk.** The `sys.Plan` shape in the specification (`15-system.md:204`) may
+  expect fields only a planner could supply; any such field is reported to the
+  owner rather than invented.
+
+#### H8: REPL as an incremental module (`ornadb-csenl.23`)
+
+- **Delivers.** 3.3.
+- **Acceptance.** All 115 `standard_*` tests and the 65 project-repl fixtures
+  pass through the new `Session` via the harness; the generic-function pin
+  becomes a passing test; there is no `ActivationMode`.
+- **Deletes.** `orna-check/src/repl.rs` (564), `orna-evaluator/src/repl.rs`
+  (1,766), the alias code in `orna-project-repl`, and the write path in
+  `repl_transaction.rs`.
+- **Risk.** Redefinition and shadowing semantics across inputs; the two-phase
+  `stage`/`commit` contract is kept to bound it.
+
+#### H9: cutover and deletion (`ornadb-csenl.24`)
+
+- **Delivers.** Each entry point switches in its own PR, in this order, each
+  with a shadow period (the old pipeline also runs in the nightly job and any
+  difference fails it): the assertion gate, `orna run`, the REPL, `serve`, the
+  mount. Then the old pipeline is deleted. Optional last step: replace operator
+  strings and `Expr::Control` in the AST with enums (critique F36); consumers
+  are already unaffected because only the lowering pass reads them.
+- **Acceptance.** Two consecutive nightly runs with zero harness differences
+  outside the allowlist; the allowlist has no entry without a bead; the
+  benchmarks meet section 7.4; no `orna-evaluator` dependency remains in
+  `cargo metadata`.
+- **Deletes.** Section 10.
+- **Risk.** The long tail: a production path whose behaviour is covered by no
+  corpus case. Mitigation: the shadow period, and a rule that any production
+  discrepancy found later first becomes a corpus case.
+
+### 6.4 Step parity
+
+Step counts are observable (ORNA-CLOSURE-004 lets limits vary only where
+"explicitly permitted and … observable"), they are asserted by existing tests
+(`std_intrinsic_step_parity.rs`: 27 programs at 256, 1,024 and 4,096 elements),
+and an activation that fails with `ORNA-EVAL-LIMIT` at one count in one
+pipeline and succeeds in the other is a visible difference. So parity is
+measured from H4. Each lowered `Expr` carries `weight: u16`, the number of
+legacy steps it stands for: one for most nodes; zero for a `Group`, which the
+old evaluator counts as a step of its own (`evaluate_node` calls `step()` for
+every node including `Expr::Group`, `lib.rs:6010`) so lowering folds that step
+into the child's weight; and the per-row charge of relation scans
+(`context.step()` per streamed row, `lib.rs:8323-8326`). `weight` is deleted
+with the old evaluator.
+
+Exact parity is the default. A case may carry an allowance when lowering
+legitimately removes work the old evaluator did (a resolved call no longer
+evaluates its callee expression, `call_source_function` evaluating the callee at
+`lib.rs:10012`). Each allowance names the reason. At H9 the new count
+becomes the definition: baselines are re-recorded once, in one reviewed PR, and
+`weight` is removed.
+
+### 6.5 Value delivered at each stage
+
+| After | What exists that did not |
+|---|---|
+| H0 | a corpus-wide differential harness; published benchmark numbers for the old evaluator |
+| H1 | one resolver, proved against the old evaluator's routing on every corpus call; the editor and the engine agree; about 2,000 lines of second resolver deleted (`names.rs` 1,485, `standard.rs` 375, the resolver half of `workspace.rs`; the critique counts about 2,950 for the whole resolving layer) |
+| H2 | spans on type errors; real inference for annotated programs; the `fn same(name) = name == "admin"` rejection (`inference.rs:1455`) gone |
+| H3 | `orna check` on HIR; about 10,500 lines of checker deleted; per-function effects available to every consumer |
+| H4 | an executor with slot locals; B1 and B2 numbers |
+| H5 | one declaration mechanism for host functions; `api/sys.json` derived |
+| H6 | no 2,048-row read cap; one write path; `orna-cli` without `orna-conformance` |
+| H7 | `sys.explain` that describes what runs |
+| H8 | one REPL path; generics at the prompt |
+| H9 | the old pipeline gone |
+
+### 6.6 Reversibility
+
+Before H9 every stage can be reverted by reverting its PRs, because the old
+pipeline never stopped being authoritative; the only shipped-code edits are the
+`route-trace` feature (H0) and consumer switches that H1 (LSP) and H3 (`orna
+check`) gate behind an environment variable for a fixed period. H9's per-entry
+switches are single-line defaults with the old path intact until the final
+deletion PR.
