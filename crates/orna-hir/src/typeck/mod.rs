@@ -625,6 +625,25 @@ impl<'a> BodyCheck<'a> {
         }
     }
 
+    /// Checks a value against its expected type, applying the lift rule of
+    /// decision D3: a `T` where `T?` is expected is accepted as `Some(T)`. The
+    /// value keeps its flat representation, so no node is added.
+    fn coerce(&mut self, actual: Ty, expected: Ty, span: SyntaxSpan) {
+        let actual_resolved = self.resolved(actual);
+        let expected_resolved = self.resolved(expected);
+        if let Some(TyKind::Option(inner)) = self.kind_of(expected_resolved) {
+            let lifts = match self.kind_of(actual_resolved) {
+                Some(TyKind::Option(_) | TyKind::Never | TyKind::Error) | None => false,
+                Some(_) => true,
+            };
+            if lifts {
+                self.unify(actual, inner, span);
+                return;
+            }
+        }
+        self.unify(actual, expected, span);
+    }
+
     /// Checks one expression, using `expected` for the constructs where context
     /// decides a variable (a record, list, lambda or block).
     fn infer_expr(
@@ -667,7 +686,7 @@ impl<'a> BodyCheck<'a> {
             (kind, expected) => {
                 let ty = self.infer_shallow(body, id, kind, span.clone())?;
                 if let Some(expected) = expected {
-                    self.unify(ty, expected, span.clone());
+                    self.coerce(ty, expected, span.clone());
                 }
                 ty
             }
