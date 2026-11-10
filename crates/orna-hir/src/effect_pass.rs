@@ -7,11 +7,11 @@
 //! perform exactly the same effects. Components are emitted callee-first, so a
 //! component's callees are final when it is computed.
 //!
-//! Direct effects follow the old checker's vocabulary (`orna_check`'s
-//! `effects::host_effect` and its table-operation kinds):
+//! Direct effects follow the `effect` clause each native declaration carries
+//! (ORNA-NATIVE-009):
 //!
-//! - a native or `sys` callee contributes the kind its declaration path maps
-//!   to, plus `MayFail` whenever it has one;
+//! - a native or `sys` callee contributes the kinds its declared clause names,
+//!   plus `MayFail` whenever the clause names any kind;
 //! - a table operation contributes its table kind plus `MayFail`;
 //! - a callee the classification cannot resolve (a member call or a first-class
 //!   value) contributes `Opaque`, which fails closed.
@@ -135,59 +135,20 @@ fn table_kind(op: TableOp) -> EffectKind {
     }
 }
 
-/// The effects of a native declaration, by the same path classification the
-/// old checker applies. A declaration with no host kind contributes nothing.
+/// The effects of a native declaration: the kinds its `effect` clause declares
+/// (ORNA-NATIVE-009), plus `MayFail` whenever it has one. The clause is the
+/// sole source; no path table is consulted, so a new native needs no pass edit.
+/// `effect none` and a non-native callee contribute nothing.
 fn native_effects(program: &Program, def: DefId) -> EffectSet {
-    let definition = &program.defs[def];
-    let module = &program.modules[definition.module];
-    let mut path: Vec<&str> = module
-        .path
-        .segments()
-        .iter()
-        .map(crate::Name::as_str)
-        .collect();
-    path.push(definition.name.as_str());
-    match host_effect(&path) {
-        Some(kind) => EffectSet::single(kind).join(EffectSet::failing()),
-        None => EffectSet::empty(),
+    match &program.defs[def].kind {
+        DefKind::Fn(function) => match &function.body {
+            FnBody::Native(native) if !native.effects.is_empty() => {
+                native.effects.join(EffectSet::failing())
+            }
+            _ => EffectSet::empty(),
+        },
+        _ => EffectSet::empty(),
     }
-}
-
-/// The host effect kind of a native declaration by its full path, as
-/// `orna_check::effects::host_effect` classifies it.
-fn host_effect(path: &[&str]) -> Option<EffectKind> {
-    use EffectKind::{
-        Clock, Filesystem, Git, Network, Process, Randomness, RuntimeAdmin, SecretAccess,
-        StorageAdmin, Ui,
-    };
-    Some(match path {
-        ["std", "net", ..] => Network,
-        ["std", "io", "fs", ..] => Filesystem,
-        ["std", "io", "process" | "environment", ..] => Process,
-        ["std", "concurrent", "sleep"] => Clock,
-        ["std", "random", ..] => Randomness,
-        ["std", "secret", "open"] => SecretAccess,
-        ["sys", "io", ..] => Filesystem,
-        ["sys", "net", ..] => Network,
-        ["sys", "process", ..] => Process,
-        ["sys", "ui", ..] => Ui,
-        ["sys", "clock", ..] => Clock,
-        ["sys", "random", ..] => Randomness,
-        ["sys", "blob", "capture_file"] => Filesystem,
-        [
-            "sys",
-            "admin",
-            "commit" | "commit_reviewed" | "checkout" | "create_branch",
-        ] => Git,
-        ["sys", "admin", "flush" | "compact" | "verify"] => StorageAdmin,
-        [
-            "sys",
-            "admin",
-            "cancel_run" | "pause_stream" | "resume_stream" | "reset_checkpoint" | "retry_failure"
-            | "skip_failure" | "replay_failure" | "resolve_failure",
-        ] => RuntimeAdmin,
-        _ => return None,
-    })
 }
 
 /// Strongly connected components of the call graph, callee-first (Tarjan).

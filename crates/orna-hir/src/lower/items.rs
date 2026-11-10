@@ -12,8 +12,8 @@
 
 use orna_syntax::{
     EnumPayloadField, EnumVariant, Expr, FunctionSignature, GenericParameter, ImplMember,
-    Implementation, Parameter, Pattern, ProtocolMember, SyntaxSpan, TableMember, TypeExpr,
-    TypeMember, TypeRepresentation,
+    Implementation, NativeEffectSet, Parameter, Pattern, ProtocolMember, SyntaxSpan, TableMember,
+    TypeExpr, TypeMember, TypeRepresentation,
 };
 
 use crate::{
@@ -128,7 +128,7 @@ impl Builder<'_> {
                 self.pending[def.index()].kind = PendingKind::Function(Box::new(head));
                 self.body_jobs.push(BodyJob::Function(def));
             }
-            DeclAst::Native(signature) => {
+            DeclAst::Native(signature, clause) => {
                 let mut head = self.build_function_head(def, module, &signature);
                 let key = crate::NativeKey {
                     module: self.program.modules[module].path.clone(),
@@ -137,6 +137,7 @@ impl Builder<'_> {
                 head.native = Some(crate::NativeDecl {
                     abi: self.program.native_abi,
                     key,
+                    effects: declared_effects(clause.as_ref()),
                 });
                 self.pending[def.index()].kind = PendingKind::Function(Box::new(head));
             }
@@ -793,5 +794,24 @@ fn parameter_name(pattern: &Pattern, index: usize) -> String {
     match pattern {
         Pattern::Name(name, _) => name.clone(),
         _ => format!("_arg{index}"),
+    }
+}
+
+/// The effect kinds a native declaration's `effect` clause names (ORNA-NATIVE-009).
+/// A recovered parse with no clause contributes nothing; a class spelling outside
+/// the vocabulary fails closed as `Opaque`.
+fn declared_effects(clause: Option<&NativeEffectSet>) -> crate::EffectSet {
+    match clause {
+        Some(NativeEffectSet::Classes { classes, .. }) => {
+            classes
+                .iter()
+                .fold(crate::EffectSet::empty(), |set, class| {
+                    set.join(match crate::EffectKind::from_class(&class.text) {
+                        Some(kind) => crate::EffectSet::single(kind),
+                        None => crate::EffectSet::opaque(),
+                    })
+                })
+        }
+        Some(NativeEffectSet::None { .. }) | None => crate::EffectSet::empty(),
     }
 }
