@@ -12,8 +12,9 @@
 use std::collections::BTreeMap;
 
 use orna_syntax::{
-    Declaration, EnumVariant, Expr, FunctionSignature, GenericParameter, Item, Parameter, Pattern,
-    ProtocolMember, SyntaxSpan, TableMember, TypeExpr, TypeRepresentation, UnitDefinition, UseTail,
+    Declaration, EnumVariant, Expr, FunctionSignature, GenericParameter, Item, NativeEffectSet,
+    Parameter, Pattern, ProtocolMember, SyntaxSpan, TableMember, TypeExpr, TypeRepresentation,
+    UnitDefinition, UseTail,
 };
 
 use crate::Idx;
@@ -90,7 +91,7 @@ pub(crate) enum DeclAst {
     /// A function.
     Function(FunctionSignature, Expr),
     /// A body-less native function, admitted only in an embedded module.
-    Native(FunctionSignature),
+    Native(FunctionSignature, Option<NativeEffectSet>),
     /// A table.
     Table(Vec<Parameter>, Vec<TableMember>),
     /// A protocol.
@@ -138,7 +139,9 @@ impl DeclAst {
             Declaration::Let {
                 annotation, value, ..
             } => Self::Let(annotation.clone(), value.clone()),
-            Declaration::Native { signature, .. } => Self::Native(signature.clone()),
+            Declaration::Native { signature, effects } => {
+                Self::Native(signature.clone(), effects.clone())
+            }
             // `declare_item` diverts `use` declarations before this mapping runs.
             Declaration::Use { .. } => Self::Dimension,
         }
