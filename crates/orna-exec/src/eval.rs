@@ -148,13 +148,19 @@ impl<'p> Machine<'p> {
                 self.invoke(callee_body, arguments, &[])
             }
             Callee::Value { callee } => {
+                // A pipe evaluates its piped input before the stage's callee, so a failing input never reaches the
+                // callee. A direct call evaluates the callee first.
+                let input = match (call.piped, call.args.first()) {
+                    (true, Some(first)) => Some(self.argument(body, frame, first, &[])?),
+                    _ => None,
+                };
                 let Value::Closure(closure) = self.eval(body, frame, *callee)? else {
                     return Err(Stop::NotYet("call of a non-closure value (H4)"));
                 };
                 let program = self.program;
                 let callee_body = &program.bodies[closure.body];
                 let arguments =
-                    self.closure_arguments(body, frame, call, callee_body.params.len())?;
+                    self.closure_arguments(body, frame, call, input, callee_body.params.len())?;
                 if arguments.len() != callee_body.params.len()
                     || binders::binds_a_name_twice(callee_body)
                 {
@@ -187,17 +193,20 @@ impl<'p> Machine<'p> {
         Ok(arguments)
     }
 
-    /// Evaluates the arguments of a closure call in order. The old evaluator binds positionally and fails at the
-    /// first argument with no parameter before evaluating it, so an excess argument is never evaluated.
+    /// Evaluates the arguments of a closure call in order. `input` is the already-evaluated piped argument 0, when
+    /// the call is a pipe. The old evaluator binds positionally and fails at the first argument with no parameter
+    /// before evaluating it, so an excess argument is never evaluated.
     fn closure_arguments(
         &mut self,
         body: &'p Body,
         frame: &mut Frame,
         call: &Call,
+        input: Option<(usize, Value)>,
         arity: usize,
     ) -> Result<Vec<(usize, Value)>, Stop> {
-        let mut arguments = Vec::with_capacity(call.args.len());
-        for (index, argument) in call.args.iter().enumerate() {
+        let skip = usize::from(input.is_some());
+        let mut arguments: Vec<(usize, Value)> = input.into_iter().collect();
+        for (index, argument) in call.args.iter().enumerate().skip(skip) {
             if index >= arity {
                 return Err(Stop::Error("ORNA-EVAL-ARGUMENT"));
             }

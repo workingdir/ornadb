@@ -117,21 +117,14 @@ fn a_qualified_call_resolves_through_the_module_graph() {
 }
 
 #[test]
-fn an_unresolved_name_is_a_diagnostic_and_an_error_expression() {
+fn an_unresolved_bare_name_is_left_for_typeck() {
     let program = lower_one("fn run(): Int = missing;\n");
     let module = &program.modules[module_of(&program, "main")];
-    assert!(
-        module
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code == "ORNA-S012-UNRESOLVED"),
-        "{:?}",
-        module.diagnostics
-    );
+    assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
     let run = defined(&program, "main", "run");
     let body = program.source_body(run).expect("run has a body");
     let root = &program.bodies[body].exprs[program.bodies[body].root];
-    assert!(matches!(root.kind, ExprKind::Error));
+    assert!(matches!(&root.kind, ExprKind::BareName(name) if name.as_str() == "missing"));
     assert!(
         module
             .name_uses

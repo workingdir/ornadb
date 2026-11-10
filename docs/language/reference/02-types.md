@@ -257,6 +257,21 @@ An enum is closed and nominal. A payload variant is built with named fields
 A `case` over an enum must be exhaustive. Only payload-free enums can be key
 components.
 
+An enum may also declare `impl` blocks after its variants, as a nominal type does. A
+`static` member inside one is a constant of the enum, read as `Shape.name`. Variants
+must come before any `impl` block.
+
+```orna
+pub enum Rounding {
+    half_up,
+    half_even,
+
+    impl Display {
+        fn display(self, context): Str = "rounding";
+    }
+}
+```
+
 ## Generics and protocols
 
 ```orna

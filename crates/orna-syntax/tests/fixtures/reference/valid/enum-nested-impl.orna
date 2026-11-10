@@ -1,0 +1,15 @@
+pub enum Rounding {
+    half_up,
+    half_even,
+
+    impl Display {
+        static label = "rounding";
+
+        fn display(self, context): Str = "rounding";
+    }
+}
+
+pub enum Phase {
+    impl,
+    done { impl: Int },
+}

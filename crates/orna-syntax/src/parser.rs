@@ -280,6 +280,7 @@ pub enum Declaration {
         name: String,
         generics: Vec<GenericParameter>,
         variants: Vec<EnumVariant>,
+        implementations: Vec<Implementation>,
     },
     Dimension {
         name: String,
@@ -1238,7 +1239,10 @@ fn annotate_item(item: &mut Item, source: &SourceLines<'_>, file: &str) {
             }
         }
         Declaration::Enum {
-            generics, variants, ..
+            generics,
+            variants,
+            implementations,
+            ..
         } => {
             for parameter in generics {
                 annotate_generic(parameter, source, file);
@@ -1249,6 +1253,9 @@ fn annotate_item(item: &mut Item, source: &SourceLines<'_>, file: &str) {
                     annotate_span(&mut field.span, source, file);
                 }
                 annotate_span(&mut variant.span, source, file)
+            }
+            for implementation in implementations {
+                annotate_implementation(implementation, source, file);
             }
         }
         Declaration::Type {
@@ -3137,11 +3144,7 @@ impl Parser {
             Vec::new()
         };
         if kind == ItemKind::Enum && self.is_punct("{") {
-            Declaration::Enum {
-                name,
-                generics,
-                variants: self.parse_enum_body(),
-            }
+            self.enum_declaration(name, generics)
         } else if kind == ItemKind::Type && self.is_punct("{") {
             Declaration::Type {
                 name,
@@ -3170,6 +3173,7 @@ impl Parser {
                         name,
                         generics,
                         variants: Vec::new(),
+                        implementations: Vec::new(),
                     }
                 }
             } else if self.is_punct("{") {
@@ -3186,6 +3190,7 @@ impl Parser {
                         name,
                         generics,
                         variants: Vec::new(),
+                        implementations: Vec::new(),
                     }
                 }
             } else {
@@ -3204,16 +3209,13 @@ impl Parser {
                         name,
                         generics,
                         variants: Vec::new(),
+                        implementations: Vec::new(),
                     }
                 }
             }
         } else if self.is_punct("{") {
             if kind == ItemKind::Enum {
-                Declaration::Enum {
-                    name,
-                    generics,
-                    variants: self.parse_enum_body(),
-                }
+                self.enum_declaration(name, generics)
             } else {
                 Declaration::Type {
                     name,
@@ -3230,6 +3232,7 @@ impl Parser {
                     name,
                     generics,
                     variants: Vec::new(),
+                    implementations: Vec::new(),
                 }
             } else {
                 Declaration::Type {
@@ -3240,6 +3243,15 @@ impl Parser {
                     },
                 }
             }
+        }
+    }
+    fn enum_declaration(&mut self, name: String, generics: Vec<GenericParameter>) -> Declaration {
+        let (variants, implementations) = self.parse_enum_body();
+        Declaration::Enum {
+            name,
+            generics,
+            variants,
+            implementations,
         }
     }
 
@@ -4182,14 +4194,27 @@ impl Parser {
         }
         members
     }
-    fn parse_enum_body(&mut self) -> Vec<EnumVariant> {
+    fn parse_enum_body(&mut self) -> (Vec<EnumVariant>, Vec<Implementation>) {
         let mut variants = Vec::new();
+        let mut implementations = Vec::new();
         self.bump();
         while !self.eof() && !self.is_punct("}") {
             if self.reject_nested_native_declaration() {
                 continue;
             }
+            if self.impl_block_follows() {
+                let start = self.current().span.clone();
+                self.bump();
+                implementations.push(self.parse_implementation(start));
+                continue;
+            }
             let start = self.current().span.clone();
+            if !implementations.is_empty() {
+                self.error_here(
+                    "ORNA-PARSE-001",
+                    "enum variants must come before implementation blocks",
+                );
+            }
             if !self.contextual() {
                 self.error_here("ORNA-PARSE-001", "expected enum variant");
                 break;
@@ -4238,7 +4263,7 @@ impl Parser {
             });
             if self.is_punct(",") {
                 self.bump()
-            } else {
+            } else if !self.impl_block_follows() {
                 break;
             }
         }
@@ -4247,7 +4272,7 @@ impl Parser {
         } else {
             self.error_here("ORNA-PARSE-003", "unterminated enum body")
         }
-        variants
+        (variants, implementations)
     }
     fn parse_type_body(&mut self) -> Vec<TypeMember> {
         let mut members = Vec::new();
@@ -5963,6 +5988,16 @@ impl Parser {
             }
         }
         self.is_punct(":") && !self.reported_since(mark)
+    }
+    /// Whether the current `impl` starts an enum's implementation block. An
+    /// `impl` followed by a name is a block; one followed by `,`, `}` or `{`
+    /// is a variant named `impl`, since `contextual_name` admits keywords.
+    fn impl_block_follows(&self) -> bool {
+        self.keyword() == Some(Keyword::Impl)
+            && matches!(
+                self.tokens.get(self.at + 1).map(|token| &token.kind),
+                Some(TokenKind::Identifier { .. })
+            )
     }
     fn contextual(&self) -> bool {
         matches!(

@@ -27,6 +27,9 @@ fn reference(path: &str) -> &'static str {
         "examples/invalid/comparison-chain.orna" => {
             include_str!("fixtures/reference/invalid/comparison-chain.orna")
         }
+        "examples/invalid/enum-variant-after-impl.orna" => {
+            include_str!("fixtures/reference/invalid/enum-variant-after-impl.orna")
+        }
         "examples/invalid/legacy-assert-else.orna" => {
             include_str!("fixtures/reference/invalid/legacy-assert-else.orna")
         }
@@ -124,7 +127,7 @@ fn reference(path: &str) -> &'static str {
     }
 }
 
-const VALID_FIXTURES: [(&str, &str); 86] = [
+const VALID_FIXTURES: [(&str, &str); 87] = [
     (
         "affine-max.orna",
         include_str!("fixtures/reference/valid/affine-max.orna"),
@@ -232,6 +235,10 @@ const VALID_FIXTURES: [(&str, &str); 86] = [
     (
         "enum.orna",
         include_str!("fixtures/reference/valid/enum.orna"),
+    ),
+    (
+        "enum-nested-impl.orna",
+        include_str!("fixtures/reference/valid/enum-nested-impl.orna"),
     ),
     (
         "executable-assertion.orna",
@@ -668,7 +675,7 @@ fn grammar_recovery_codes_are_token_driven_under_layout_variations() {
 fn authoritative_valid_fixture_corpus_parses() {
     assert_eq!(
         VALID_FIXTURES.len(),
-        86,
+        87,
         "authoritative valid corpus changed"
     );
     for (name, source) in VALID_FIXTURES {
@@ -688,6 +695,7 @@ fn authoritative_parse_invalid_fixture_corpus_fails() {
         "assert-missing-semicolon",
         "assignment-expression",
         "comparison-chain",
+        "enum-variant-after-impl",
         "legacy-assert-else",
         "legacy-assert-pipe-bang",
         "legacy-colon-bound",
@@ -720,7 +728,7 @@ fn authoritative_parse_invalid_fixture_corpus_fails() {
         "transaction-block",
         "unparenthesized-lambda-stage",
     ];
-    assert_eq!(files.len(), 35);
+    assert_eq!(files.len(), 36);
     for name in files {
         let source = reference(&format!("examples/invalid/{name}.orna"));
         let diagnostics = if name == "row-declaration" {
