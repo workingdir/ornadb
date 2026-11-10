@@ -205,7 +205,16 @@ impl ExpectedDifference {
 /// Reads `tests/differential/expected-differences.toml`.
 pub fn load_expected_differences() -> Result<Vec<ExpectedDifference>, String> {
     let path = differential_dir().join("expected-differences.toml");
-    let document = toml_lite::parse(&read_file(&path)?)?;
+    parse_expected_differences(&read_file(&path)?)
+}
+
+/// Parses the ratchet file's text.
+///
+/// The checked-in file is empty at H0, so the entry schema is verified by the
+/// unit tests below: when stage H1 adds the first accepted difference, a typo
+/// in a key is a load error and not a silently unmatched entry.
+pub fn parse_expected_differences(source: &str) -> Result<Vec<ExpectedDifference>, String> {
+    let document = toml_lite::parse(source)?;
     let mut entries = Vec::new();
     for table in document.tables_named("difference") {
         let entry = ExpectedDifference {
@@ -339,6 +348,91 @@ mod tests {
         assert_eq!(failures.len(), 2, "{failures:?}");
         assert!(failures[0].contains("new difference"));
         assert!(failures[1].contains("stale expected difference"));
+    }
+
+    #[test]
+    fn a_populated_ratchet_file_parses() {
+        let entries = super::parse_expected_differences(
+            "[[difference]]\n\
+             case = \"reference/valid/affine-max.orna\"\n\
+             field = \"outcome\"\n\
+             first = \"value:00\"\n\
+             second = \"value:01\"\n\
+             reason = \"HIR folds the group step into the child\"\n\
+             bead = \"ornadb-csenl.16\"\n",
+        )
+        .expect("a complete entry parses");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].case, "reference/valid/affine-max.orna");
+        assert_eq!(entries[0].field, "outcome");
+        assert_eq!(entries[0].left, "value:00");
+        assert_eq!(entries[0].right, "value:01");
+        assert_eq!(entries[0].bead, "ornadb-csenl.16");
+    }
+
+    #[test]
+    fn an_entry_without_a_reason_or_bead_is_a_load_error() {
+        for missing in ["reason", "bead"] {
+            let mut entry = String::from(
+                "[[difference]]\ncase = \"c\"\nfield = \"steps\"\nfirst = \"1\"\nsecond = \"2\"\nreason = \"r\"\nbead = \"b\"\n",
+            );
+            if missing == "reason" {
+                entry = entry.replace("reason = \"r\"\n", "reason = \" \"\n");
+            } else {
+                entry = entry.replace("bead = \"b\"\n", "bead = \"\"\n");
+            }
+            let error = super::parse_expected_differences(&entry)
+                .expect_err("an incomplete entry must not parse");
+            assert!(error.contains(missing), "{missing}: {error}");
+        }
+    }
+
+    #[test]
+    fn calls_and_writes_are_compared_in_order() {
+        let call = |start: usize, route: crate::Route| crate::CallRecord {
+            logical_path: "main.orna".to_owned(),
+            start,
+            end: start + 3,
+            route,
+        };
+        let write = |key: u8| crate::Write {
+            table: "Note".to_owned(),
+            key: vec![key],
+            value: Some(vec![key]),
+        };
+        let first = Observation {
+            calls: vec![
+                call(0, crate::Route::Native),
+                call(9, crate::Route::SourceFunction),
+            ],
+            writes: vec![write(1), write(2)],
+            ..Observation::default()
+        };
+        assert!(compare("calls", &first, &first).is_empty());
+
+        let reordered_calls = Observation {
+            calls: vec![call(0, crate::Route::Native), call(9, crate::Route::Native)],
+            ..first.clone()
+        };
+        assert_eq!(
+            compare("calls", &first, &reordered_calls)
+                .iter()
+                .map(|difference| difference.field)
+                .collect::<Vec<_>>(),
+            ["calls"]
+        );
+
+        let reordered_writes = Observation {
+            writes: vec![write(2), write(1)],
+            ..first.clone()
+        };
+        assert_eq!(
+            compare("writes", &first, &reordered_writes)
+                .iter()
+                .map(|difference| difference.field)
+                .collect::<Vec<_>>(),
+            ["writes"]
+        );
     }
 
     #[test]
