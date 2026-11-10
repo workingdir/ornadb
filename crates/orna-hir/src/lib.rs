@@ -33,6 +33,7 @@ mod call;
 mod def;
 pub mod diag;
 mod effects;
+mod embedded;
 mod ids;
 pub mod infer;
 mod lower;
@@ -58,6 +59,7 @@ pub use def::{
 };
 pub use diag::HirDiagnostic;
 pub use effects::{EffectKind, EffectRow, EffectSet, EffectVar};
+pub use embedded::ENGINE_NATIVE_ABI;
 pub use ids::{
     BodyId, DefId, ExprId, Idx, IndexVec, LocalId, ModuleId, ModulePath, Name, PatId, SourceId,
 };

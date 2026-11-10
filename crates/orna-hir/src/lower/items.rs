@@ -110,8 +110,40 @@ impl Builder<'_> {
                     body: Some(body_id),
                     body_expr: Some(body),
                     patterns,
+                    native: None,
                 }));
                 self.body_jobs.push(BodyJob::Function(def));
+            }
+            DeclAst::Native(signature) => {
+                let generics = self.build_generics(module, &signature.generics);
+                let (params, defaults) = self.build_parameters(def, module, &signature.parameters);
+                for (body, expr) in defaults {
+                    self.body_jobs.push(BodyJob::Expression {
+                        def,
+                        body,
+                        expr: Box::new(expr),
+                        self_ty: None,
+                    });
+                }
+                let ret = self.build_result(module, signature.result.as_ref());
+                let key = crate::NativeKey {
+                    module: self.program.modules[module].path.clone(),
+                    name: crate::Name::new(&signature.name),
+                };
+                let native = crate::NativeDecl {
+                    abi: self.program.native_abi,
+                    key,
+                };
+                self.pending[def.index()].kind = PendingKind::Function(Box::new(PendingFunction {
+                    generics,
+                    params,
+                    ret,
+                    effects: crate::EffectSet::empty(),
+                    body: None,
+                    body_expr: None,
+                    patterns: Vec::new(),
+                    native: Some(native),
+                }));
             }
             DeclAst::Table(keys, members) => self.build_table(def, module, &keys, &members),
             DeclAst::Protocol(generics, members) => {
@@ -443,6 +475,7 @@ impl Builder<'_> {
                             body: Some(body_id),
                             body_expr: Some(body.clone()),
                             patterns,
+                            native: None,
                         }));
                     self.body_jobs.push(BodyJob::Function(member_def));
                     members.push(member_def);

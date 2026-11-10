@@ -82,6 +82,11 @@ files = 1
 reason = "an editor example page, not a program the pipeline admits"
 
 [[excluded]]
+scope = "crates/orna-hir/interface"
+files = 12
+reason = "the engine-embedded core and sys interface modules (body-less native declarations, generated from the catalogue) are loaded into every HIR program by the engine, not corpus programs; the typed-share measure reads their outcomes through the case's owned modules only"
+
+[[excluded]]
 scope = "crates/orna-lsp/tests/fixtures"
 files = 66
 reason = "language-server fixtures are an editor library and a tree-sitter corpus; H1 loads them with the LSP on HIR"
@@ -123,7 +128,7 @@ reason = "publication fixtures are journal and store states, not programs"
 
 [[excluded]]
 scope = "crates/orna-syntax/tests/fixtures"
-files = 428
+files = 453
 reason = "parser fixtures are accept/reject sources for the syntax adapter, including a vendored reference copy and a probe grammar; a truncated snippet is not a module, so the module observer would report checker errors that say nothing about the fixture"
 
 [[excluded]]

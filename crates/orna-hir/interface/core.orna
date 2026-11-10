@@ -5,6 +5,13 @@
 // Engine-embedded `core` (D12): body-less `native fn` declarations are admitted only here
 // and in `core/*.orna`. Re-exported by std where stable paths are wanted.
 
+// core.Error: the failure value (language reference 04-effects-and-failure.md).
+pub type Error {
+    pub code: Str,
+    pub message: Str,
+    pub cause: Error?,
+}
+
 // core.Some
 pub native fn Some<T>(value: T): T? effect none;
 

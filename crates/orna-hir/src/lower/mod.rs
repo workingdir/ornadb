@@ -60,11 +60,24 @@ pub struct SourceUnit<'a> {
 
 /// Lowers every source into one program.
 ///
-/// The result satisfies [`Program::validate`]: lowering represents a malformed
-/// input rather than rejecting it, so validation failures are lowering bugs.
+/// The engine-embedded `core` and `sys` modules (D12) are lowered first, so
+/// every caller's sources resolve against them. The result satisfies
+/// [`Program::validate`]: lowering represents a malformed input rather than
+/// rejecting it, so validation failures are lowering bugs.
 #[must_use]
 pub fn lower(sources: &[SourceUnit<'_>]) -> Program {
-    let mut builder = Builder::new(sources);
+    let embedded = crate::embedded::parse_all();
+    let mut units: Vec<SourceUnit<'_>> = embedded
+        .iter()
+        .enumerate()
+        .map(|(index, module)| SourceUnit {
+            source: crate::embedded::source_id(index),
+            tree: &module.tree,
+            path: module.path.clone(),
+        })
+        .collect();
+    units.extend(sources.iter().cloned());
+    let mut builder = Builder::new(&units);
     builder.resolve_imports();
     builder.lower_items();
     builder.finish()

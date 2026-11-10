@@ -189,7 +189,9 @@ def render():
         gaps["excluded_root"].append(f"core.{name}: {reason}")
     root_lines = [header("Root environment natives (hir.md 2.6, D12). Host-implemented; effects per EFFECT_CLASS."),
                   "// Engine-embedded `core` (D12): body-less `native fn` declarations are admitted only here",
-                  "// and in `core/*.orna`. Re-exported by std where stable paths are wanted.", ""]
+                  "// and in `core/*.orna`. Re-exported by std where stable paths are wanted.", "",
+                  "// core.Error: the failure value (language reference 04-effects-and-failure.md).",
+                  "pub type Error {", "    pub code: Str,", "    pub message: Str,", "    pub cause: Error?,", "}", ""]
     for name in ROOT_ROWS:
         root_lines.extend(declaration("core", root_rows[name], {"Some"} | EXTRA_BUILTINS))
     files["core.orna"] = "\n".join(root_lines).rstrip() + "\n"

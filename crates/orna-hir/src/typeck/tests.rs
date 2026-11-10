@@ -1,4 +1,4 @@
-use super::typeck;
+use super::{TypeCheckSummary, typeck};
 use crate::{
     DefId, DefKind, ModuleId, ModulePath, Name, Program, SourceId, SourceUnit, lower, print_type,
 };
@@ -22,8 +22,8 @@ fn definition(program: &Program, name: &str) -> DefId {
         .unwrap_or_else(|| panic!("no definition named {name}"))
 }
 
-/// The module the test source lowered to. Lowering registers the built-in
-/// `sys` module first, so the index is not zero.
+/// The module the test source lowered to. Lowering registers the engine-embedded
+/// `core` and `sys` modules first, so the index is not zero.
 fn test_module(program: &Program) -> ModuleId {
     program
         .modules
@@ -31,6 +31,28 @@ fn test_module(program: &Program) -> ModuleId {
         .find(|(_, module)| module.path.to_string() == "test")
         .map(|(id, _)| id)
         .expect("the test module is registered")
+}
+
+/// Whether every body of the test module types. The embedded `core` and `sys`
+/// bodies belong to the interface, not to the program under test, so one
+/// program's verdict ignores them.
+fn test_accepted(program: &Program, summary: &TypeCheckSummary) -> bool {
+    let module = test_module(program);
+    summary
+        .outcomes
+        .iter()
+        .filter(|outcome| outcome.module == module)
+        .all(|outcome| outcome.typed)
+}
+
+/// How many bodies of the test module the subset cannot type yet.
+fn test_not_yet(program: &Program, summary: &TypeCheckSummary) -> usize {
+    let module = test_module(program);
+    summary
+        .outcomes
+        .iter()
+        .filter(|outcome| outcome.module == module && outcome.not_yet.is_some())
+        .count()
 }
 
 fn result(program: &Program, name: &str) -> String {
@@ -45,7 +67,7 @@ fn result(program: &Program, name: &str) -> String {
 fn annotated_arithmetic_and_result_inference() {
     let mut program = program("pub fn add(a: Int, b: Int) = a + b;\n");
     let summary = typeck(&mut program);
-    assert!(summary.accepts(), "{summary:?}");
+    assert!(test_accepted(&program, &summary), "{summary:?}");
     assert_eq!(result(&program, "add"), "Int");
     assert!(
         program.modules[test_module(&program)]
@@ -58,7 +80,7 @@ fn annotated_arithmetic_and_result_inference() {
 fn let_annotations_are_the_initializer_expected_type() {
     let mut program = program("pub fn scaled(x: Int): Int { let y: Int = x + 1; y * 2 }\n");
     let summary = typeck(&mut program);
-    assert!(summary.accepts(), "{summary:?}");
+    assert!(test_accepted(&program, &summary), "{summary:?}");
     assert_eq!(result(&program, "scaled"), "Int");
 }
 
@@ -67,7 +89,7 @@ fn a_call_is_checked_against_the_resolved_signature() {
     let mut program =
         program("fn twice(x: Int): Int = x * 2;\npub fn f(y: Int): Int = twice(y);\n");
     let summary = typeck(&mut program);
-    assert!(summary.accepts(), "{summary:?}");
+    assert!(test_accepted(&program, &summary), "{summary:?}");
     assert_eq!(result(&program, "f"), "Int");
 }
 
@@ -76,7 +98,7 @@ fn a_lambda_receives_the_element_type_from_the_pipeline() {
     let mut program =
         program("pub fn inc(values: [Int]): [Int] = values | map(value => value + 1);\n");
     let summary = typeck(&mut program);
-    assert!(summary.accepts(), "{summary:?}");
+    assert!(test_accepted(&program, &summary), "{summary:?}");
     assert_eq!(result(&program, "inc"), "[Int]");
 }
 
@@ -84,14 +106,14 @@ fn a_lambda_receives_the_element_type_from_the_pipeline() {
 fn an_empty_list_is_solved_by_its_context() {
     let mut program = program("pub fn f(): [Int] { let xs = []; xs }\n");
     let summary = typeck(&mut program);
-    assert!(summary.accepts(), "{summary:?}");
+    assert!(test_accepted(&program, &summary), "{summary:?}");
 }
 
 #[test]
 fn an_unconstrained_variable_is_an_ambiguity_diagnostic() {
     let mut program = program("pub fn f() { let xs = []; let ys = xs; }\n");
     let summary = typeck(&mut program);
-    assert!(!summary.accepts(), "{summary:?}");
+    assert!(!test_accepted(&program, &summary), "{summary:?}");
     assert!(
         program.modules[test_module(&program)]
             .diagnostics
@@ -106,7 +128,7 @@ fn an_unconstrained_variable_is_an_ambiguity_diagnostic() {
 fn a_constraint_conflict_names_both_sides() {
     let mut program = program("pub fn f(x: Int): Str = x + 1;\n");
     let summary = typeck(&mut program);
-    assert!(!summary.accepts(), "{summary:?}");
+    assert!(!test_accepted(&program, &summary), "{summary:?}");
     let conflict = program.modules[test_module(&program)]
         .diagnostics
         .iter()
@@ -126,7 +148,7 @@ fn an_enum_constructor_and_case_are_typed() {
              };\n",
     );
     let summary = typeck(&mut program);
-    assert!(summary.accepts(), "{summary:?}");
+    assert!(test_accepted(&program, &summary), "{summary:?}");
     assert_eq!(result(&program, "label"), "Str");
 }
 
@@ -134,8 +156,8 @@ fn an_enum_constructor_and_case_are_typed() {
 fn a_construct_outside_the_subset_is_reported_not_rejected() {
     let mut program = program("pub fn f(): Unit = parallel([1, 2]);\n");
     let summary = typeck(&mut program);
-    assert!(!summary.accepts(), "{summary:?}");
-    assert_eq!(summary.not_yet().count(), 1);
+    assert!(!test_accepted(&program, &summary), "{summary:?}");
+    assert_eq!(test_not_yet(&program, &summary), 1);
     assert!(
         program.modules[test_module(&program)]
             .diagnostics

@@ -126,12 +126,12 @@ impl Builder<'_> {
         let origin = self.program.modules[module].origin;
         match &self.pending[def.index()].kind {
             PendingKind::Function(function) => Classified::Declared {
-                callee: match origin {
-                    ModuleOrigin::Core => Callee::Native {
+                callee: match (origin, function.native.is_some()) {
+                    (ModuleOrigin::Core, true) => Callee::Native {
                         def,
                         targs: Box::new([]),
                     },
-                    ModuleOrigin::Sys => Callee::Sys {
+                    (ModuleOrigin::Sys, true) => Callee::Sys {
                         def,
                         targs: Box::new([]),
                     },
