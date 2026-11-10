@@ -174,7 +174,16 @@ pub struct GenericParam {
     /// Its name.
     pub name: Name,
     /// Its protocol bounds, resolved to [`DefKind::Protocol`] definitions.
-    pub bounds: Vec<DefId>,
+    pub bounds: Vec<Bound>,
+}
+
+/// One protocol bound on a generic parameter, such as `T: From<Str>`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Bound {
+    /// The bounding protocol.
+    pub protocol: DefId,
+    /// The protocol's type arguments, in the protocol's parameter order.
+    pub args: Box<[Ty]>,
 }
 
 /// One parameter.
@@ -233,8 +242,13 @@ pub struct VariantDef {
 }
 
 /// A protocol.
+///
+/// A member's generic parameters are the protocol's parameters, then `Self`
+/// (the implementing type, at index `params.len()`), then the member's own.
 #[derive(Clone, Debug)]
 pub struct ProtocolDef {
+    /// Its type parameters, in declaration order.
+    pub params: Vec<GenericParam>,
     /// Its members, in declaration order.
     pub members: Vec<DefId>,
 }
@@ -242,9 +256,13 @@ pub struct ProtocolDef {
 /// One protocol implementation.
 #[derive(Clone, Debug)]
 pub struct ImplDef {
+    /// The type the implementation is declared on.
+    pub owner: DefId,
     /// The protocol implemented, when this is a protocol implementation
     /// rather than a type's own member block.
     pub protocol: Option<DefId>,
+    /// The protocol's type arguments, in the protocol's parameter order.
+    pub protocol_args: Box<[Ty]>,
     /// The implementations it contributes.
     pub members: Vec<DefId>,
 }

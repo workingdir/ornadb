@@ -101,7 +101,7 @@ pub fn classify(case_id: &str, diagnostic: &str) -> Option<&'static str> {
         | "vehicle" | "openbanking" | "bank" => FIXTURE_TABLES,
         _ if is_legacy_case(case_id) => LEGACY_REJECTION,
         "log" | "process" | "read" | "rows" | "get" | "valid_email" | "fallback" | "left"
-        | "middle" | "missing" => HARNESS_ENVIRONMENT,
+        | "middle" | "missing" | "EmailHeader" => HARNESS_ENVIRONMENT,
         "for_each" | "mean" | "ref" | "open" => MISSING_IMPORT,
         "half_even" => PENDING_P3B,
         "Str" if case_id.ends_with("secret-display.orna") => PENDING_P3B,

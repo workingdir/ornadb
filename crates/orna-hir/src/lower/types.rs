@@ -125,6 +125,11 @@ fn lower_named(
                 .tys
                 .intern(TyKind::Param(ParamIdx::new(index as u32)));
         }
+        if spelling == "Self"
+            && let Some(self_ty) = builder.self_ty
+        {
+            return self_ty;
+        }
         if let Some(inner) = language_constructor(&name, &args) {
             return builder.program.tys.intern(inner);
         }

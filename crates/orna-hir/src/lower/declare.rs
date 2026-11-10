@@ -196,6 +196,8 @@ pub(crate) struct Builder<'a> {
     pub(crate) body_jobs: Vec<super::items::BodyJob>,
     /// Unit-family variant expressions, resolved once every definition is built.
     pub(crate) unit_jobs: Vec<super::units::UnitJob>,
+    /// The type `Self` names while an implementation's members are lowered.
+    pub(crate) self_ty: Option<crate::Ty>,
 }
 
 impl<'a> Builder<'a> {
@@ -214,6 +216,7 @@ impl<'a> Builder<'a> {
             std_module: None,
             body_jobs: Vec::new(),
             unit_jobs: Vec::new(),
+            self_ty: None,
         };
         let mut registered = Vec::with_capacity(sources.len());
         for unit in sources {
