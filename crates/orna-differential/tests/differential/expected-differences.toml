@@ -1021,3 +1021,19 @@ first = "examples.valid.pipeline-precedence::increment_count=pure"
 second = "examples.valid.pipeline-precedence::increment_count=TableRead+MayFail"
 reason = "same cause as count_is_positive: `values | count` over a list parameter is classified as a relation terminal by name"
 bead = "ornadb-csenl.18"
+
+[[difference]]
+case = "valid/formatting-does-not-serialize.orna"
+field = "public-signature"
+first = "examples.valid.formatting-does-not-serialize::both=both(Duration) -> {display: Str, encoded: ByteStream}"
+second = "examples.valid.formatting-does-not-serialize::both=both(Duration) -> {display: Str, encoded: Str}"
+reason = "std.encoding.orna.encode is declared `: Str` in the pinned std wrapper and the HIR signature follows it; the checker publishes `ByteStream` for the same call. Which result type is normative is a checker/H2a decision that this slice does not change"
+bead = "ornadb-csenl.17"
+
+[[difference]]
+case = "valid/dependency-query.orna"
+field = "effects"
+first = "examples.valid.dependency-query::impact=TableRead+MayFail"
+second = "examples.valid.dependency-query::impact=pure"
+reason = "`sys.dependents` is declared `effect table_read` in the HIR interface, but the H3a native-effect rule (`effect_pass.rs` host_effect) classifies only host paths such as `sys.io`, `sys.net`, `sys.admin`, so the declared table_read is not applied and the call is pure. The checker assigns `read` (TableRead+MayFail). Closing this is the effect-pass work of H3"
+bead = "ornadb-csenl.18"
