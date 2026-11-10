@@ -127,6 +127,6 @@ and the migration appendix.
 * `docs/design/native-declarations.md`, `docs/design/sys-identity.md`,
   `docs/design/std-native.md`, `docs/design/architecture.md`: paused reform
   designs kept as input; D12 and D2 decide how much of them survives.
-* [../design/kernel-and-library.md](../design/kernel-and-library.md): design proposal for which language features are
-  engine kernel and which are ordinary Orna in `core` and `std`. It waits on five owner answers and bears on chapters
-  4, 5, 6, 7, 15 and 16.
+* [../design/kernel-and-library.md](../design/kernel-and-library.md): design for which language features are engine
+  kernel and which are ordinary Orna in `core` and `std`. Its five open questions are decided as D14 to D18
+  ([DECIDED.md](DECIDED.md)). It bears on chapters 4, 5, 6, 7, 15 and 16.
