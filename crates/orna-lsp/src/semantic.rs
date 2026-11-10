@@ -254,7 +254,7 @@ fn intrinsic_type(occurrence: &NameOccurrence) -> Option<(u32, u32)> {
 fn binding_token_type(kind: LocalBindingKind) -> u32 {
     match kind {
         LocalBindingKind::Parameter => TOKEN_TYPES.parameter,
-        LocalBindingKind::Local | LocalBindingKind::Pattern => TOKEN_TYPES.variable,
+        LocalBindingKind::Local => TOKEN_TYPES.variable,
     }
 }
 

@@ -18,11 +18,11 @@ use std::sync::{Arc, OnceLock};
 
 use lsp_types::Uri;
 use orna_hir::{
-    BodyId, Callee, DefId, DefKind, ExprKind, FnBody, LocalId, ModuleId as HirModuleId, Name,
-    NameTarget, NameUse, Program, SourceId, SourceUnit, TyKind, UseContext, lower,
+    BodyId, DefId, DefKind, LocalId, ModuleId as HirModuleId, Name, NameTarget, NameUse, Program, SourceId, SourceUnit,
+    TyKind, UseContext, lower,
 };
 use orna_syntax::{
-    Declaration, Keyword, SyntaxSpan, SyntaxTree, Token, TokenKind, TypeExpr, UseTail, lex,
+    Declaration, Keyword, SyntaxSpan, SyntaxTree, Token, TokenKind, UseTail, lex,
     parse_module,
 };
 
@@ -201,20 +201,6 @@ pub(crate) enum DeclaredKind {
     Static,
 }
 
-impl DeclaredKind {
-    /// Declarations whose name denotes a type of values.
-    pub(crate) fn is_type(self) -> bool {
-        matches!(
-            self,
-            DeclaredKind::Table
-                | DeclaredKind::Type
-                | DeclaredKind::Enum
-                | DeclaredKind::Protocol
-                | DeclaredKind::Variant
-        )
-    }
-}
-
 /// One declaration of a module.
 #[derive(Clone, Debug)]
 pub(crate) struct Declared {
@@ -239,7 +225,6 @@ pub(crate) struct Declared {
 pub(crate) enum LocalBindingKind {
     Parameter,
     Local,
-    Pattern,
 }
 
 /// One local binding of a module.
@@ -253,6 +238,8 @@ pub(crate) struct LocalBinding {
     pub kind: LocalBindingKind,
     pub body: BodyId,
     pub local: LocalId,
+    /// The lexical extent the binding is visible in.
+    pub scope: SyntaxSpan,
 }
 
 /// One name occurrence and what it resolved to.
@@ -262,7 +249,6 @@ pub(crate) struct NameOccurrence {
     pub key: String,
     pub resolved: Resolved,
     pub context: UseContext,
-    pub body: Option<BodyId>,
     pub written: bool,
     pub callee: bool,
     pub shorthand: bool,
@@ -276,13 +262,6 @@ pub(crate) struct Search {
     /// Occurrences with the same name that may refer to the target but whose
     /// receiver or scope could not be resolved.
     pub uncertain: Vec<(usize, SyntaxSpan)>,
-}
-
-/// One lowered body, for scope questions editor features ask.
-#[derive(Clone)]
-struct BodyInfo {
-    module: usize,
-    span: SyntaxSpan,
 }
 
 /// The modules one request can see.
@@ -307,20 +286,30 @@ pub(crate) struct Workspace {
     bindings_by_local: HashMap<(BodyId, LocalId), (usize, usize)>,
     /// Name occurrences of each module, sorted by span.
     occurrences: Vec<Vec<NameOccurrence>>,
-    /// Body extent and module.
-    bodies: HashMap<BodyId, BodyInfo>,
     /// Top-level declarations of every detached module, by key.
     detached_defs: HashMap<String, Vec<DefId>>,
 }
 
 impl Workspace {
     /// Modules that see each other through imports.
+    #[cfg(test)]
     pub(crate) fn project(
         modules: Vec<Module>,
         standard: Arc<StandardLibrary>,
         incomplete: Option<String>,
     ) -> Self {
         Self::project_with_sources(modules, standard, Vec::new(), incomplete)
+    }
+
+    /// Documents outside a project, sharing one scope and the reference
+    /// standard library.
+    #[cfg(test)]
+    pub(crate) fn detached(files: Vec<Arc<FileAnalysis>>) -> Self {
+        Self::detached_with_sources(
+            files,
+            StandardLibrary::reference(),
+            orna_standard_sources::reference_standard_sources_v1().to_vec(),
+        )
     }
 
     /// Modules that see each other through imports, with the standard sources
@@ -336,16 +325,6 @@ impl Workspace {
             standard,
             std_sources,
             Scope::Project { incomplete },
-        )
-    }
-
-    /// Documents outside a project, sharing one scope and the reference
-    /// standard library.
-    pub(crate) fn detached(files: Vec<Arc<FileAnalysis>>) -> Self {
-        Self::detached_with_sources(
-            files,
-            StandardLibrary::reference(),
-            orna_standard_sources::reference_standard_sources_v1().to_vec(),
         )
     }
 
@@ -414,7 +393,6 @@ impl Workspace {
             bindings: Vec::new(),
             bindings_by_local: HashMap::new(),
             occurrences: Vec::new(),
-            bodies: HashMap::new(),
             detached_defs: HashMap::new(),
         };
         workspace.index();
@@ -470,20 +448,8 @@ impl Workspace {
             else {
                 continue;
             };
-            let root = &body.exprs[body.root];
-            self.bodies.insert(
-                body_id,
-                BodyInfo {
-                    module: module_index,
-                    span: root.span.clone(),
-                },
-            );
             for (local_id, local) in body.locals.iter_enumerated() {
-                let kind = if body
-                    .params
-                    .iter()
-                    .any(|slot| *slot == local_id)
-                {
+                let kind = if body.params.contains(&local_id) {
                     LocalBindingKind::Parameter
                 } else {
                     LocalBindingKind::Local
@@ -499,6 +465,7 @@ impl Workspace {
                     kind,
                     body: body_id,
                     local: local_id,
+                    scope: local.scope.clone(),
                 });
             }
         }
@@ -520,6 +487,24 @@ impl Workspace {
             }
         }
 
+        if matches!(self.scope, Scope::Detached) {
+            for declarations in &self.declarations {
+                // Same-name declarations of one document are one overload
+                // group, as the old shared scope treated them.
+                let mut first_in_module = HashMap::<&str, DefId>::new();
+                for declared in declarations.iter() {
+                    if declared.owner.is_none() {
+                        first_in_module
+                            .entry(declared.key.as_str())
+                            .or_insert(declared.def);
+                    }
+                }
+                for (key, def) in first_in_module {
+                    self.detached_defs.entry(key.to_owned()).or_default().push(def);
+                }
+            }
+        }
+
         for (module, hir_module) in self.hir_modules.iter().enumerate() {
             let Some(hir_module) = hir_module else {
                 continue;
@@ -531,7 +516,6 @@ impl Workspace {
                     key: use_.name.as_str().to_owned(),
                     resolved,
                     context: use_.context,
-                    body: use_.body,
                     written: use_.written,
                     callee: use_.callee,
                     shorthand: use_.shorthand,
@@ -550,20 +534,6 @@ impl Workspace {
                     false
                 }
             });
-        }
-
-        if matches!(self.scope, Scope::Detached) {
-            for declarations in &self.declarations {
-                for declared in declarations.iter() {
-                    if declared.owner.is_some() {
-                        continue;
-                    }
-                    self.detached_defs
-                        .entry(declared.key.clone())
-                        .or_default()
-                        .push(declared.def);
-                }
-            }
         }
     }
 
@@ -635,7 +605,25 @@ impl Workspace {
                     _ => Resolved::Unknown,
                 }
             }
-            NameTarget::Def(def) => self.target_of_def(def),
+            NameTarget::Def(def) => {
+                if matches!(self.scope, Scope::Detached)
+                    && matches!(
+                        use_.context,
+                        UseContext::Value | UseContext::Type | UseContext::Pattern
+                    )
+                {
+                    // Outside a project every document shares one scope; a
+                    // name declared by two documents is ambiguous even when
+                    // one of them is the document that writes the use.
+                    match self.detached_defs.get(use_.name.as_str()).map(Vec::as_slice) {
+                        Some([only]) => self.target_of_def(*only),
+                        Some(_) => Resolved::Ambiguous,
+                        None => self.target_of_def(def),
+                    }
+                } else {
+                    self.target_of_def(def)
+                }
+            }
             NameTarget::Module(hir) => Resolved::Target(Target::Module(
                 self.program.modules[hir]
                     .path
@@ -644,7 +632,21 @@ impl Workspace {
                     .map(|name| name.as_str().to_owned())
                     .collect(),
             )),
-            NameTarget::Intrinsic => Resolved::Unknown,
+            NameTarget::Intrinsic => {
+                if matches!(self.scope, Scope::Detached)
+                    && use_.context == UseContext::Value
+                {
+                    // A declaration in the shared detached scope outranks a
+                    // language-defined form of the same spelling.
+                    match self.detached_defs.get(use_.name.as_str()).map(Vec::as_slice) {
+                        Some([only]) => self.target_of_def(*only),
+                        Some(_) => Resolved::Ambiguous,
+                        None => Resolved::Unknown,
+                    }
+                } else {
+                    Resolved::Unknown
+                }
+            }
             NameTarget::Ambiguous => Resolved::Ambiguous,
             NameTarget::Unresolved => self.detached_lookup(use_),
         }
@@ -684,7 +686,12 @@ impl Workspace {
 
     /// The editor-only flat scope detached documents share.
     fn detached_lookup(&self, use_: &NameUse) -> Resolved {
-        if !matches!(self.scope, Scope::Detached) || use_.context != UseContext::Value {
+        if !matches!(self.scope, Scope::Detached)
+            || !matches!(
+                use_.context,
+                UseContext::Value | UseContext::Type | UseContext::Pattern
+            )
+        {
             return Resolved::Unknown;
         }
         let Some(candidates) = self.detached_defs.get(use_.name.as_str()) else {
@@ -814,8 +821,7 @@ impl Workspace {
                     analysis::declared_symbol(
                         &self.modules[*imported_module].file.symbols,
                         &self.declarations[*imported_module][*index].selection,
-                    )
-                    .into_iter(),
+                    ),
                 );
             }
         }
@@ -903,20 +909,6 @@ impl Workspace {
         ))
     }
 
-    /// The occurrence whose identifier contains `byte`.
-    pub(crate) fn occurrence_at(
-        &self,
-        module: usize,
-        byte: usize,
-    ) -> Option<&NameOccurrence> {
-        let occurrences = self.occurrences(module);
-        let index = occurrences.partition_point(|occurrence| occurrence.span.end < byte);
-        occurrences[index..]
-            .iter()
-            .take_while(|occurrence| occurrence.span.start <= byte)
-            .find(|occurrence| brings(occurrence, byte))
-    }
-
     /// The local binding whose declared name contains `byte`.
     pub(crate) fn binding_containing(&self, module: usize, byte: usize) -> Option<usize> {
         self.bindings(module)
@@ -948,11 +940,9 @@ impl Workspace {
         module: usize,
         span: &SyntaxSpan,
     ) -> Option<&NameOccurrence> {
-        let occurrences = self.occurrences(module);
-        let index = occurrences.binary_search_by_key(&(span.start, span.end), |occurrence| {
-            (occurrence.span.start, occurrence.span.end)
-        });
-        index.ok().map(|index| &occurrences[index])
+        self.occurrences(module)
+            .iter()
+            .find(|occurrence| same_span(&occurrence.span, span))
     }
 
     /// The declaration whose name is at `span`.
@@ -968,11 +958,7 @@ impl Workspace {
             .bindings(module)
             .iter()
             .filter(|binding| binding.selection.start <= byte)
-            .filter(|binding| {
-                self.bodies
-                    .get(&binding.body)
-                    .is_some_and(|body| brings_span(&body.span, byte))
-            })
+            .filter(|binding| brings_span(&binding.scope, byte))
             .collect::<Vec<_>>();
         visible.sort_by_key(|binding| binding.selection.start);
         let mut by_name = HashMap::<&str, usize>::new();
@@ -987,11 +973,6 @@ impl Workspace {
             }
         }
         result
-    }
-
-    /// What one occurrence refers to.
-    pub(crate) fn resolve(&self, _module: usize, occurrence: &NameOccurrence) -> Resolved {
-        occurrence.resolved.clone()
     }
 
     /// Every use of one local binding, without its declaration.
@@ -1191,42 +1172,4 @@ pub(crate) fn declared_type_name(program: &Program, ty: orna_hir::Ty) -> Option<
         TyKind::Adt(def, _) => Some(program.defs.get(*def)?.name.as_str().to_owned()),
         _ => None,
     }
-}
-
-/// The callee of a call expression, for editor features that key by call.
-pub(crate) fn call_callee(expr: &orna_hir::Expr) -> Option<&Callee> {
-    match &expr.kind {
-        ExprKind::Call(call) => Some(&call.callee),
-        _ => None,
-    }
-}
-
-/// Whether a definition has a source body, for call-hierarchy edges.
-pub(crate) fn has_body(definition: &orna_hir::Def) -> bool {
-    matches!(
-        &definition.kind,
-        DefKind::Fn(orna_hir::FnDef {
-            body: FnBody::Source(_),
-            ..
-        })
-    )
-}
-
-/// The declaration name a definition records.
-pub(crate) fn definition_name(definition: &orna_hir::Def) -> &str {
-    definition.name.as_str()
-}
-
-/// A written type as the editor prints it.
-pub(crate) fn type_expr_text(text: &str, ty: &TypeExpr) -> String {
-    let span = match ty {
-        TypeExpr::Name { span, .. }
-        | TypeExpr::Optional { span, .. }
-        | TypeExpr::Product { span, .. }
-        | TypeExpr::List { span, .. }
-        | TypeExpr::Record { span, .. }
-        | TypeExpr::Tuple { span, .. }
-        | TypeExpr::Function { span, .. } => span,
-    };
-    text.get(span.start..span.end).unwrap_or_default().trim().to_owned()
 }

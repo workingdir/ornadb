@@ -624,7 +624,6 @@ pub(crate) fn hover(workspace: &Workspace, module: usize, byte: usize) -> Option
             let kind = match binding.kind {
                 LocalBindingKind::Parameter => "parameter",
                 LocalBindingKind::Local => "local",
-                LocalBindingKind::Pattern => "pattern binding",
             };
             let detail = workspace
                 .binding_type_text(module, binding_index)
@@ -1173,14 +1172,26 @@ pub(crate) fn completion_at(
                     continue;
                 }
                 shadowed.insert(key.clone());
-                let detail = source_slice(text, &binding.context).trim();
+                let binding_index = workspace
+                    .bindings(module)
+                    .iter()
+                    .position(|candidate| std::ptr::eq(candidate, binding))
+                    .unwrap_or(0);
+                let detail = workspace
+                    .binding_type_text(module, binding_index)
+                    .map(|ty| match binding.kind {
+                        LocalBindingKind::Parameter => format!("{}: {ty}", binding.name),
+                        LocalBindingKind::Local => format!("let {}: {ty}", binding.name),
+                    })
+                    .unwrap_or_else(|| {
+                        source_slice(text, &binding.context).trim().to_owned()
+                    });
                 let mut item = CompletionItem {
                     label: binding.name.clone(),
                     kind: Some(CompletionItemKind::VARIABLE),
                     detail: Some(match binding.kind {
                         LocalBindingKind::Parameter => "Parameter".to_owned(),
                         LocalBindingKind::Local => "Local variable".to_owned(),
-                        LocalBindingKind::Pattern => "Pattern binding".to_owned(),
                     }),
                     insert_text: Some(binding.name.clone()),
                     sort_text: Some(completion_sort_text(&prefix_key, 0, &key)),
