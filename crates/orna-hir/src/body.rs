@@ -283,7 +283,7 @@ pub enum UnOp {
     Not,
 }
 
-/// A binary arithmetic, comparison or power operator.
+/// A binary arithmetic, comparison, power or membership operator.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BinOp {
     /// `+`.
@@ -310,6 +310,8 @@ pub enum BinOp {
     Gt,
     /// `>=`.
     Ge,
+    /// `in`: membership. `value in container` is `container.contains(value)`.
+    In,
 }
 
 /// A short-circuiting logical operator.

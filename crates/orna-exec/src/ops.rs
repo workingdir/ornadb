@@ -79,6 +79,7 @@ fn int_binary(op: BinOp, lhs: &BigInt, rhs: &BigInt, limits: &ExecLimits) -> Res
         BinOp::Le => return Ok(Value::Bool(lhs.cmp(rhs) != Ordering::Greater)),
         BinOp::Gt => return Ok(Value::Bool(lhs.cmp(rhs) == Ordering::Greater)),
         BinOp::Ge => return Ok(Value::Bool(lhs.cmp(rhs) != Ordering::Less)),
+        BinOp::In => return Err(Stop::NotYet("membership is a Contains call after typeck")),
     };
     checked(result, limits).map(Value::Int)
 }

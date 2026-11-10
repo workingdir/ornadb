@@ -43,6 +43,44 @@ ROOT_ENUMS = [
     ),
 ]
 
+# Operator protocols (kernel-and-library.md 4.1, D16 P1-A). `a + b` selects the instance of `Add` whose protocol
+# arguments match the right operand; `Out` is the instance's protocol argument, not an associated type.
+# Each row: (protocol, type parameters, member, member parameters after self, result, operators it serves).
+OPERATOR_PROTOCOLS = [
+    ("Add", ["Rhs", "Out"], "add", "right: Rhs", "Out", "a + b"),
+    ("Sub", ["Rhs", "Out"], "sub", "right: Rhs", "Out", "a - b"),
+    ("Mul", ["Rhs", "Out"], "mul", "right: Rhs", "Out", "a * b"),
+    ("Div", ["Rhs", "Out"], "div", "right: Rhs", "Out", "a / b"),
+    ("Rem", ["Rhs", "Out"], "rem", "right: Rhs", "Out", "a % b"),
+    ("Pow", ["Rhs", "Out"], "pow", "right: Rhs", "Out", "a ^ b"),
+    ("Neg", ["Out"], "neg", "", "Out", "-a"),
+    ("Order", [], "compare", "other: Self", "Ordering", "a < b, a <= b, a > b, a >= b"),
+    ("Contains", ["T"], "contains", "value: T", "Bool", "x in r"),
+]
+
+
+def render_operator_protocols():
+    """The `core.ops` module: one protocol per operator family, members as native-free source functions."""
+    lines = [
+        header("Operator protocols (kernel-and-library.md 4.1, D16 P1-A). Source declarations; no natives."),
+        "// `Ordering` is the root `core` enum; `std.numeric` keeps its homogeneous declarations until std re-exports",
+        "// this module (std is a separate repository).",
+        "",
+    ]
+    for protocol, params, member, member_params, result, operators in OPERATOR_PROTOCOLS:
+        generics = f"<{', '.join(params)}>" if params else ""
+        parameters = ", ".join(["self", member_params] if member_params else ["self"])
+        lines.extend(
+            [
+                f"// core.ops.{protocol}: {operators}",
+                f"pub protocol {protocol}{generics} {{",
+                f"    fn {member}({parameters}): {result};",
+                "}",
+                "",
+            ]
+        )
+    return "\n".join(lines).rstrip() + "\n"
+
 # Language-defined native groups (hir.md section 4, `core.orna` row of the table).
 INCLUDED_MODULES = [
     "std.collection",
@@ -216,6 +254,7 @@ def render():
     for name in ROOT_ROWS:
         root_lines.extend(declaration("core", root_rows[name], {"Some"} | EXTRA_BUILTINS))
     files["core.orna"] = "\n".join(root_lines).rstrip() + "\n"
+    files["core/ops.orna"] = render_operator_protocols()
 
     for module in INCLUDED_MODULES:
         rows = by_module.get(module, [])

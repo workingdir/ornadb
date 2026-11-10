@@ -85,8 +85,8 @@ reason = "an editor example page, not a program the pipeline admits"
 
 [[excluded]]
 scope = "crates/orna-hir/interface"
-files = 12
-reason = "the engine-embedded core and sys interface modules (body-less native declarations, generated from the catalogue) are loaded into every HIR program by the engine, not corpus programs; the typed-share measure reads their outcomes through the case's owned modules only"
+files = 13
+reason = "the engine-embedded core and sys interface modules (body-less native declarations and the source-only core.ops operator protocols, generated from the catalogue) are loaded into every HIR program by the engine, not corpus programs; the typed-share measure reads their outcomes through the case's owned modules only"
 
 [[excluded]]
 scope = "crates/orna-lsp/tests/fixtures"
