@@ -53,7 +53,7 @@ impl Builder<'_> {
                 PendingKind::Unbuilt(_) => {
                     match std::mem::replace(
                         &mut self.pending[index].kind,
-                        PendingKind::Built(DefKind::Unit(UnitDef)),
+                        PendingKind::Built(DefKind::Unit(UnitDef::default())),
                     ) {
                         PendingKind::Unbuilt(ast) => Some(ast),
                         _ => None,
@@ -66,6 +66,7 @@ impl Builder<'_> {
             }
             index += 1;
         }
+        self.resolve_unit_jobs();
         let jobs = std::mem::take(&mut self.body_jobs);
         for job in jobs {
             match job {
@@ -165,8 +166,15 @@ impl Builder<'_> {
             DeclAst::Protocol(generics, members) => {
                 self.build_protocol(def, module, &generics, &members);
             }
-            DeclAst::Enum(generics, variants, implementations) => {
-                self.build_enum(def, module, &generics, &variants, &implementations);
+            DeclAst::Enum(generics, variants, implementations, unit_family) => {
+                self.build_enum(
+                    def,
+                    module,
+                    &generics,
+                    &variants,
+                    &implementations,
+                    unit_family,
+                );
             }
             DeclAst::Dimension => {
                 self.pending[def.index()].kind =
@@ -175,7 +183,8 @@ impl Builder<'_> {
             DeclAst::Unit(dimension, definition) => {
                 let ty = super::types::lower_type(self, module, &[], &dimension);
                 let _ = ty;
-                self.pending[def.index()].kind = PendingKind::Built(DefKind::Unit(UnitDef));
+                self.pending[def.index()].kind =
+                    PendingKind::Built(DefKind::Unit(UnitDef::default()));
                 if let orna_syntax::UnitDefinition::Derived { value, offset, .. } = definition {
                     // A derived unit's expression is not part of the value
                     // model, but its names are still written in the module:
@@ -354,7 +363,7 @@ impl Builder<'_> {
                         &signature.name,
                         Visibility::Public,
                         span.clone(),
-                        DefKind::Unit(UnitDef),
+                        DefKind::Unit(UnitDef::default()),
                     );
                     let kind = self.signature_only(module, signature, &inherited);
                     self.pending[member_def.index()].kind = PendingKind::Built(kind);
@@ -378,7 +387,9 @@ impl Builder<'_> {
         }));
     }
 
-    /// Builds an enum, its variants and its nested implementations.
+    /// Builds an enum, its variants and its nested implementations. In a unit family
+    /// (`impl Unit {}`) each variant is a unit, and a derived variant's expression is
+    /// queued for resolution once every definition is built.
     fn build_enum(
         &mut self,
         def: DefId,
@@ -386,10 +397,15 @@ impl Builder<'_> {
         generics: &[GenericParameter],
         variants: &[EnumVariant],
         implementations: &[Implementation],
+        unit_family: bool,
     ) {
         let names = generic_names(generics);
         let mut lowered = Vec::new();
         for variant in variants {
+            if unit_family {
+                lowered.push(self.build_family_unit(module, def, variant));
+                continue;
+            }
             let fields = variant
                 .fields
                 .iter()
@@ -403,6 +419,7 @@ impl Builder<'_> {
                 DefKind::Variant(VariantDef { fields }),
             ));
         }
+        let dimension = unit_family.then(|| super::units::family_dimension(variants, &lowered));
         let mut members = Vec::new();
         for implementation in implementations {
             let span = implementation.span.clone();
@@ -411,6 +428,7 @@ impl Builder<'_> {
         self.pending[def.index()].kind = PendingKind::Built(DefKind::Enum(EnumDef {
             variants: lowered,
             members,
+            dimension,
         }));
     }
 
@@ -534,7 +552,7 @@ impl Builder<'_> {
                         name,
                         Visibility::Public,
                         span.clone(),
-                        DefKind::Unit(UnitDef),
+                        DefKind::Unit(UnitDef::default()),
                     );
                     let body = self.allocate_body(member_def);
                     if let Some(ty) = ty {
@@ -589,7 +607,7 @@ impl Builder<'_> {
             &signature.name,
             Visibility::Public,
             span.clone(),
-            DefKind::Unit(UnitDef),
+            DefKind::Unit(UnitDef::default()),
         );
         let body_id = self.allocate_body(member_def);
         let names = generic_names(&signature.generics);

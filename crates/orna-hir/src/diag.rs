@@ -25,6 +25,8 @@ pub const IMPORT: &str = "ORNA-S010-IMPORT";
 pub const DUPLICATE: &str = "ORNA-S013-DUPLICATE";
 /// A construct the HIR does not represent yet.
 pub const UNSUPPORTED: &str = "ORNA-S022-UNSUPPORTED";
+/// A unit name that names no unit of a family or unit declaration in scope (units.md ORNA-UNIT-UNRESOLVED).
+pub const UNIT_UNRESOLVED: &str = "ORNA-UNIT-UNRESOLVED";
 /// A call whose arguments do not bind to its parameters.
 ///
 /// The classifier keeps the evaluator's code so a consumer sees one

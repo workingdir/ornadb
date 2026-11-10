@@ -1,0 +1,5 @@
+pub enum Acceleration {
+    g = 9.80665 metre / second^2,
+    gal = 0.01 metre / second^2,
+    impl Unit {}
+}
