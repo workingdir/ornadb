@@ -1,15 +1,19 @@
 //! Expression evaluation over one body.
 
+use std::rc::Rc;
+
+use num_traits::ToPrimitive;
 use orna_hir::{
-    Arg, ArgValue, AssignOp, BinOp, Body, Call, Callee, DefKind, ExprId, ExprKind, FnBody, Lit,
-    LogicOp, Pat, PatId, Place, Stmt,
+    Arg, ArgValue, Arm, AssignOp, BinOp, Body, BodyId, Call, Callee, DefKind, ExprId, ExprKind,
+    FieldRef, FnBody, Lit, LocalId, LogicOp, Name, Pat, PatId, Place, Stmt,
 };
 
+use crate::binders;
 use crate::error::Stop;
 use crate::frame::Frame;
 use crate::machine::Machine;
 use crate::ops;
-use crate::value::Value;
+use crate::value::{Closure, Value};
 
 impl<'p> Machine<'p> {
     /// Evaluates one expression of `body` in `frame`.
@@ -48,6 +52,21 @@ impl<'p> Machine<'p> {
             ExprKind::Break(Some(_)) => Err(Stop::NotYet("break with a value")),
             ExprKind::Continue => Err(Stop::Continue),
             ExprKind::Assign { place, op, value } => self.assign(body, frame, place, *op, *value),
+            ExprKind::Tuple(items) => Ok(Value::Tuple(self.elements(body, frame, items)?)),
+            ExprKind::List(items) => Ok(Value::List(self.elements(body, frame, items)?)),
+            ExprKind::Record(fields) => self.record(body, frame, fields),
+            ExprKind::Field { base, field } => self.field(body, frame, *base, field),
+            ExprKind::Index { base, index } => self.index(body, frame, *base, *index),
+            ExprKind::Case { scrutinee, arms } => self.case(body, frame, *scrutinee, arms),
+            ExprKind::Lambda {
+                body: lambda,
+                captured: _,
+            } => self.lambda(frame, *lambda),
+            ExprKind::Recover {
+                body: attempt,
+                handler,
+                arm,
+            } => self.recover(body, frame, *attempt, *handler, *arm),
             _ => Err(Stop::NotYet(kind_name(&body.exprs[id].kind))),
         }
     }
@@ -113,21 +132,44 @@ impl<'p> Machine<'p> {
     }
 
     fn call(&mut self, body: &'p Body, frame: &mut Frame, call: &Call) -> Result<Value, Stop> {
-        let Callee::Source { def, .. } = &call.callee else {
-            return Err(Stop::NotYet("call of a non-source callee"));
-        };
-        let program = self.program;
-        let DefKind::Fn(function) = &program.defs[*def].kind else {
-            return Err(Stop::NotYet("call of a non-function definition"));
-        };
-        let FnBody::Source(callee_body) = function.body else {
-            return Err(Stop::NotYet("call of a function without a source body"));
-        };
+        match &call.callee {
+            Callee::Source { def, .. } => {
+                let program = self.program;
+                let DefKind::Fn(function) = &program.defs[*def].kind else {
+                    return Err(Stop::NotYet("call of a non-function definition"));
+                };
+                let FnBody::Source(callee_body) = function.body else {
+                    return Err(Stop::NotYet("call of a function without a source body"));
+                };
+                let arguments = self.arguments(body, frame, call)?;
+                self.invoke(callee_body, arguments, &[])
+            }
+            Callee::Value { callee } => {
+                let Value::Closure(closure) = self.eval(body, frame, *callee)? else {
+                    return Err(Stop::NotYet("call of a non-closure value"));
+                };
+                let arguments = self.arguments(body, frame, call)?;
+                let callee_body = &self.program.bodies[closure.body];
+                if arguments.len() != callee_body.params.len() {
+                    return Err(Stop::Error("ORNA-EVAL-ARGUMENT"));
+                }
+                self.invoke(closure.body, arguments, &closure.captured)
+            }
+            _ => Err(Stop::NotYet("call of this callee kind")),
+        }
+    }
+
+    fn arguments(
+        &mut self,
+        body: &'p Body,
+        frame: &mut Frame,
+        call: &Call,
+    ) -> Result<Vec<(usize, Value)>, Stop> {
         let mut arguments = Vec::with_capacity(call.args.len());
         for argument in call.args.iter() {
             arguments.push(self.argument(body, frame, argument)?);
         }
-        self.invoke(callee_body, arguments)
+        Ok(arguments)
     }
 
     fn argument(
@@ -156,7 +198,9 @@ impl<'p> Machine<'p> {
             match *stmt {
                 Stmt::Let { pat, init } => {
                     let value = self.eval(body, frame, init)?;
-                    bind(body, frame, pat, value)?;
+                    if !self.matches(body, frame, pat, value)? {
+                        return Err(Stop::NotYet("let pattern that does not match"));
+                    }
                 }
                 Stmt::Assert(id) => match self.eval(body, frame, id)? {
                     Value::Bool(true) => {}
@@ -232,14 +276,247 @@ impl<'p> Machine<'p> {
         frame.set(*slot, new)?;
         Ok(Value::Unit)
     }
-}
 
-/// Binds a pattern this stage runs: a wildcard or a plain binding.
-fn bind(body: &Body, frame: &mut Frame, pat: PatId, value: Value) -> Result<(), Stop> {
-    match &body.pats[pat] {
-        Pat::Wild => Ok(()),
-        Pat::Bind { local } => frame.set(*local, value),
-        _ => Err(Stop::NotYet("pattern kind")),
+    /// Evaluates the items of a tuple or list in order.
+    fn elements(
+        &mut self,
+        body: &'p Body,
+        frame: &mut Frame,
+        items: &[ExprId],
+    ) -> Result<Rc<[Value]>, Stop> {
+        let mut values = Vec::with_capacity(items.len());
+        for item in items {
+            values.push(self.eval(body, frame, *item)?);
+        }
+        Ok(values.into())
+    }
+
+    fn record(
+        &mut self,
+        body: &'p Body,
+        frame: &mut Frame,
+        fields: &[(Name, ExprId)],
+    ) -> Result<Value, Stop> {
+        let mut values = Vec::with_capacity(fields.len());
+        for (name, value) in fields {
+            values.push((name.clone(), self.eval(body, frame, *value)?));
+        }
+        Ok(Value::Record(values.into()))
+    }
+
+    fn field(
+        &mut self,
+        body: &'p Body,
+        frame: &mut Frame,
+        base: ExprId,
+        field: &FieldRef,
+    ) -> Result<Value, Stop> {
+        let Value::Record(fields) = self.eval(body, frame, base)? else {
+            return Err(Stop::NotYet("field access on a value that is not a record"));
+        };
+        let found = match field {
+            FieldRef::Index(index) => fields.get(*index as usize).map(|(_, value)| value),
+            FieldRef::Name(name) => fields
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value),
+            FieldRef::Def(_) => return Err(Stop::NotYet("field access by definition")),
+        };
+        found.cloned().ok_or(Stop::Error("ORNA-EVAL-FIELD"))
+    }
+
+    fn index(
+        &mut self,
+        body: &'p Body,
+        frame: &mut Frame,
+        base: ExprId,
+        index: ExprId,
+    ) -> Result<Value, Stop> {
+        let base = self.eval(body, frame, base)?;
+        let index = self.eval(body, frame, index)?;
+        let (Value::List(values) | Value::Tuple(values)) = base else {
+            return Err(Stop::NotYet(
+                "index access on a value that is not a list or tuple",
+            ));
+        };
+        let Value::Int(index) = index else {
+            return Err(Stop::Error("ORNA-EVAL-TYPE"));
+        };
+        let index = index.to_usize().ok_or(Stop::Error("ORNA-EVAL-INDEX"))?;
+        values
+            .get(index)
+            .cloned()
+            .ok_or(Stop::Error("ORNA-EVAL-INDEX"))
+    }
+
+    fn case(
+        &mut self,
+        body: &'p Body,
+        frame: &mut Frame,
+        scrutinee: ExprId,
+        arms: &[Arm],
+    ) -> Result<Value, Stop> {
+        let value = self.eval(body, frame, scrutinee)?;
+        for arm in arms {
+            if !self.matches(body, frame, arm.pat, value.clone())? {
+                continue;
+            }
+            if let Some(guard) = arm.guard {
+                match self.eval(body, frame, guard)? {
+                    Value::Bool(true) => {}
+                    Value::Bool(false) => continue,
+                    _ => return Err(Stop::Error("ORNA-EVAL-TYPE")),
+                }
+            }
+            return self.eval(body, frame, arm.body);
+        }
+        Err(Stop::Error("ORNA-EVAL-NO-MATCH"))
+    }
+
+    /// Builds a closure over the current values of the names its body
+    /// captures. The old pipeline captures the scope the same way.
+    fn lambda(&self, frame: &Frame, lambda: BodyId) -> Result<Value, Stop> {
+        let program = self.program;
+        if binders::binds_a_name_twice(&program.bodies[lambda]) {
+            return Err(Stop::NotYet("a parameter list binds one name twice"));
+        }
+        let captures = &program.bodies[lambda].captures;
+        let mut captured = Vec::with_capacity(captures.len());
+        for capture in captures.iter() {
+            captured.push(frame.get(capture.outer)?);
+        }
+        Ok(Value::Closure(Rc::new(Closure {
+            body: lambda,
+            captured: captured.into_boxed_slice(),
+        })))
+    }
+
+    /// `attempt |? handler`: a failure of `attempt` reaches the handler as an
+    /// error value. A stop that is not a language error is not a failure and
+    /// passes through.
+    fn recover(
+        &mut self,
+        body: &'p Body,
+        frame: &mut Frame,
+        attempt: ExprId,
+        handler: LocalId,
+        arm: ExprId,
+    ) -> Result<Value, Stop> {
+        match self.eval(body, frame, attempt) {
+            Err(Stop::Error(code)) => {
+                frame.set(handler, Value::Error(code))?;
+                self.eval(body, frame, arm)
+            }
+            other => other,
+        }
+    }
+
+    /// Binds `value` to `pat` when it matches. Bindings made before a later
+    /// mismatch stay in their slots; a pattern binds only its own slots, which
+    /// no other expression reads before the arm that owns them.
+    fn matches(
+        &mut self,
+        body: &'p Body,
+        frame: &mut Frame,
+        pat: PatId,
+        value: Value,
+    ) -> Result<bool, Stop> {
+        match &body.pats[pat] {
+            Pat::Wild => Ok(true),
+            Pat::Bind { local } => {
+                frame.set(*local, value)?;
+                Ok(true)
+            }
+            Pat::Lit(lit) => Ok(self.literal(lit)? == value),
+            Pat::Tuple(pats) => match value {
+                Value::Tuple(values) if values.len() == pats.len() => {
+                    self.matches_seq(body, frame, pats, &values)
+                }
+                _ => Ok(false),
+            },
+            Pat::List {
+                prefix,
+                rest,
+                suffix,
+            } => match value {
+                Value::List(values) => {
+                    self.matches_list(body, frame, prefix, *rest, suffix, &values)
+                }
+                _ => Ok(false),
+            },
+            Pat::Record(fields) => match value {
+                Value::Record(values) => self.matches_record(body, frame, fields, &values),
+                _ => Ok(false),
+            },
+            Pat::Ctor { .. } => Err(Stop::NotYet("constructor pattern")),
+        }
+    }
+
+    /// Matches each pattern against the value at the same position.
+    fn matches_seq(
+        &mut self,
+        body: &'p Body,
+        frame: &mut Frame,
+        pats: &[PatId],
+        values: &[Value],
+    ) -> Result<bool, Stop> {
+        for (pat, value) in pats.iter().zip(values) {
+            if !self.matches(body, frame, *pat, value.clone())? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// A list pattern: prefix, then an optional rest binding, then suffix.
+    /// Without a rest binding the length must be exact.
+    fn matches_list(
+        &mut self,
+        body: &'p Body,
+        frame: &mut Frame,
+        prefix: &[PatId],
+        rest: Option<LocalId>,
+        suffix: &[PatId],
+        values: &[Value],
+    ) -> Result<bool, Stop> {
+        let fixed = prefix.len() + suffix.len();
+        let length_fits = match rest {
+            None => values.len() == fixed,
+            Some(_) => values.len() >= fixed,
+        };
+        if !length_fits {
+            return Ok(false);
+        }
+        let suffix_start = values.len() - suffix.len();
+        if !self.matches_seq(body, frame, prefix, &values[..prefix.len()])?
+            || !self.matches_seq(body, frame, suffix, &values[suffix_start..])?
+        {
+            return Ok(false);
+        }
+        if let Some(rest) = rest {
+            let middle = Value::List(values[prefix.len()..suffix_start].into());
+            frame.set(rest, middle)?;
+        }
+        Ok(true)
+    }
+
+    /// A record pattern: each named field must exist and match.
+    fn matches_record(
+        &mut self,
+        body: &'p Body,
+        frame: &mut Frame,
+        fields: &[(Name, PatId)],
+        values: &[(Name, Value)],
+    ) -> Result<bool, Stop> {
+        for (name, pat) in fields {
+            let Some((_, value)) = values.iter().find(|(key, _)| key == name) else {
+                return Ok(false);
+            };
+            if !self.matches(body, frame, *pat, value.clone())? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 }
 
@@ -248,16 +525,8 @@ fn kind_name(kind: &ExprKind) -> &'static str {
     match kind {
         ExprKind::Def(_) => "value use of a definition",
         ExprKind::Range { .. } => "range",
-        ExprKind::Recover { .. } => "recover",
-        ExprKind::Field { .. } => "field access",
-        ExprKind::Index { .. } => "index access",
-        ExprKind::Tuple(_) => "tuple",
-        ExprKind::List(_) => "list",
-        ExprKind::Record(_) => "record",
         ExprKind::Construct { .. } => "construction",
-        ExprKind::Lambda { .. } => "lambda",
         ExprKind::Interp(_) => "interpolation",
-        ExprKind::Case { .. } => "case",
         ExprKind::For { .. } => "for",
         ExprKind::Loop { .. } => "loop",
         ExprKind::Error => "error expression",

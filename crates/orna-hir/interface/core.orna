@@ -22,4 +22,4 @@ pub native fn now(): Instant effect clock;
 pub native fn uuid7(): Uuid effect randomness;
 
 // core.error
-pub native fn error(code: Str, message: Str): Error effect none;
+pub native fn error(code: Str, message: Str, cause: Error? = null): Error effect none;
