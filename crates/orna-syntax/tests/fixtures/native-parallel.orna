@@ -1,0 +1,1 @@
+pub native fn parallel<T>(callbacks: [fn(): T]): [T] effect none;

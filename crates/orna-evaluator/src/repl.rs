@@ -504,6 +504,12 @@ impl ReplSession {
                 }
                 Ok(())
             }
+            // ORNA-NATIVE-013: a native operation is dispatched by the
+            // identity bound to its resolved declaration, and stage N2 supplies
+            // those bindings. A body-less declaration cannot be retained as
+            // executable source, so this session boundary rejects it rather
+            // than inventing a body.
+            Declaration::Native { .. } => Err(error("ORNA-EVAL-UNSUPPORTED")),
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
     }

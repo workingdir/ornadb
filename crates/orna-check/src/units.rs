@@ -693,6 +693,11 @@ pub(crate) fn declared_symbol(item: &Item) -> Option<(String, SymbolKind, Type)>
             SymbolKind::Let,
             annotation.as_ref().map(type_of).unwrap_or(Type::Error),
         )),
+        // ORNA-NATIVE-008: a native declaration's signature is its type, and
+        // there is no body to infer parameter types from. Stage N3 installs
+        // the symbol from the declaration; stage N1 records none, so a native
+        // name resolves to nothing rather than to a fabricated function type.
+        Declaration::Native { .. } => None,
         _ => None,
     }
 }

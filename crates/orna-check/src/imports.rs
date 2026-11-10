@@ -1106,6 +1106,11 @@ pub(crate) fn check_item(
             representation: TypeRepresentation::Nominal { members },
             ..
         } => check_nominal_type_item(name, members, scope, diagnostics),
+        // ORNA-NATIVE-008 and ORNA-NATIVE-010: the declaration's own signature
+        // and effect clause type and classify a native call. Stage N3 reads
+        // them; stage N1 admits the syntax only. A native declaration has no
+        // body, contributes no symbol here and is never read as a function.
+        Declaration::Native { .. } => {}
         _ => {}
     }
     None

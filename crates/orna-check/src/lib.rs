@@ -2032,6 +2032,14 @@ fn analyze_recording_origins(
                 "source was not admitted by the frozen syntax parser",
             ));
         }
+        for item in &parse.value.items {
+            if matches!(&item.declaration, Declaration::Native { .. }) {
+                result.diagnostics.push(diag(
+                    DIAG_NATIVE_ADMISSION,
+                    "native declaration is admitted only in the engine-embedded core and sys modules",
+                ));
+            }
+        }
         let header = collect_header(
             &namespace,
             &parse.value,

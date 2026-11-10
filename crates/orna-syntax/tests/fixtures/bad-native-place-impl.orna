@@ -1,0 +1,5 @@
+type Length {
+    impl Show {
+        native fn trim(value: Str): Str effect none;
+    }
+}

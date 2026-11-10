@@ -374,6 +374,11 @@ impl ApplicationAuthority {
                     Declaration::Use { .. }
                     | Declaration::Assertion { .. }
                     | Declaration::Let { .. } => continue,
+                    // ORNA-NATIVE-001: a native declaration has no body, so it
+                    // is not a pure function. Stage N2 binds it to its
+                    // implementation by identity; stage N1 admits the syntax
+                    // only, and never reads the declaration as a function.
+                    Declaration::Native { .. } => continue,
                 };
                 if is_public {
                     non_function.insert(format!("{namespace}.{name}"));

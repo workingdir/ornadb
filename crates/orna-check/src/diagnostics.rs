@@ -5,6 +5,8 @@ use orna_value::Diagnostic;
 pub const DIAG_BAD_PATH: &str = "ORNA-S001-PATH";
 pub const DIAG_NAMESPACE: &str = "ORNA-S002-NAMESPACE";
 pub const DIAG_RESERVED: &str = "ORNA-S003-RESERVED";
+/// A `native fn` outside the engine-embedded `core` and `sys` modules (D12).
+pub const DIAG_NATIVE_ADMISSION: &str = "ORNA-NATIVE-004";
 pub const DIAG_IMPORT: &str = "ORNA-S010-IMPORT";
 pub const DIAG_AMBIGUOUS: &str = "ORNA-S011-AMBIGUOUS";
 pub const DIAG_UNRESOLVED: &str = "ORNA-S012-UNRESOLVED";

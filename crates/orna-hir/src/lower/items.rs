@@ -80,39 +80,65 @@ impl Builder<'_> {
         }
     }
 
+    /// Lowers the generics, parameters and result of a function signature. Parameter
+    /// defaults are queued as body jobs.
+    fn build_function_head(
+        &mut self,
+        def: DefId,
+        module: ModuleId,
+        signature: &FunctionSignature,
+    ) -> PendingFunction {
+        let generics = self.build_generics(module, &signature.generics);
+        let (params, defaults) = self.build_parameters(def, module, &signature.parameters, None);
+        for (body, expr) in defaults {
+            self.body_jobs.push(BodyJob::Expression {
+                def,
+                body,
+                expr: Box::new(expr),
+                self_ty: None,
+            });
+        }
+        let ret = self.build_result(module, signature.result.as_ref());
+        PendingFunction {
+            generics,
+            params,
+            ret,
+            effects: crate::EffectSet::empty(),
+            body: None,
+            body_expr: None,
+            patterns: Vec::new(),
+            native: None,
+        }
+    }
+
     /// Builds the kind of one top-level declaration.
     fn build_declaration(&mut self, def: DefId, ast: DeclAst) {
         let module = self.pending[def.index()].module;
         match ast {
             DeclAst::Function(signature, body) => {
                 let body_id = self.allocate_body(def);
-                let generics = self.build_generics(module, &signature.generics);
-                let (params, defaults) =
-                    self.build_parameters(def, module, &signature.parameters, None);
-                for (body, expr) in defaults {
-                    self.body_jobs.push(BodyJob::Expression {
-                        def,
-                        body,
-                        expr: Box::new(expr),
-                        self_ty: None,
-                    });
-                }
-                let ret = self.build_result(module, signature.result.as_ref());
-                let patterns = signature
+                let mut head = self.build_function_head(def, module, &signature);
+                head.body = Some(body_id);
+                head.body_expr = Some(body);
+                head.patterns = signature
                     .parameters
                     .iter()
                     .map(|parameter| parameter.pattern.clone())
                     .collect();
-                self.pending[def.index()].kind = PendingKind::Function(Box::new(PendingFunction {
-                    generics,
-                    params,
-                    ret,
-                    effects: crate::EffectSet::empty(),
-                    body: Some(body_id),
-                    body_expr: Some(body),
-                    patterns,
-                }));
+                self.pending[def.index()].kind = PendingKind::Function(Box::new(head));
                 self.body_jobs.push(BodyJob::Function(def));
+            }
+            DeclAst::Native(signature) => {
+                let mut head = self.build_function_head(def, module, &signature);
+                let key = crate::NativeKey {
+                    module: self.program.modules[module].path.clone(),
+                    name: crate::Name::new(&signature.name),
+                };
+                head.native = Some(crate::NativeDecl {
+                    abi: self.program.native_abi,
+                    key,
+                });
+                self.pending[def.index()].kind = PendingKind::Function(Box::new(head));
             }
             DeclAst::Table(keys, members) => self.build_table(def, module, &keys, &members),
             DeclAst::Protocol(generics, members) => {
@@ -462,6 +488,7 @@ impl Builder<'_> {
                             body: Some(body_id),
                             body_expr: Some(body.clone()),
                             patterns,
+                            native: None,
                         }));
                     self.body_jobs.push(BodyJob::Function(member_def));
                     members.push(member_def);

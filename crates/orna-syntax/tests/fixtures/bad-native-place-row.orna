@@ -1,0 +1,1 @@
+{ native fn trim(value: Str): Str effect none; }

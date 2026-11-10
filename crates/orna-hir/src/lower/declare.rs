@@ -81,12 +81,16 @@ pub(crate) struct PendingFunction {
     pub(crate) body_expr: Option<Expr>,
     /// The declared parameter patterns, in parameter order, for binder slots.
     pub(crate) patterns: Vec<Pattern>,
+    /// The native declaration, for a body-less `native fn` in an embedded module.
+    pub(crate) native: Option<crate::NativeDecl>,
 }
 
 /// The declaration syntax a pending definition retains.
 pub(crate) enum DeclAst {
     /// A function.
     Function(FunctionSignature, Expr),
+    /// A body-less native function, admitted only in an embedded module.
+    Native(FunctionSignature),
     /// A table.
     Table(Vec<Parameter>, Vec<TableMember>),
     /// A protocol.
@@ -134,6 +138,8 @@ impl DeclAst {
             Declaration::Let {
                 annotation, value, ..
             } => Self::Let(annotation.clone(), value.clone()),
+            Declaration::Native { signature, .. } => Self::Native(signature.clone()),
+            // `declare_item` diverts `use` declarations before this mapping runs.
             Declaration::Use { .. } => Self::Dimension,
         }
     }
@@ -181,17 +187,15 @@ impl<'a> Builder<'a> {
             std_module: None,
             body_jobs: Vec::new(),
         };
-        builder.sys_module = builder.add_module(
-            ModulePath::new([Name::new("sys")]),
-            ModuleOrigin::Sys,
-            SourceId::new(BUILTIN_SOURCE),
-        );
         let mut registered = Vec::with_capacity(sources.len());
         for unit in sources {
             let origin = origin_of(&unit.path);
             let module = builder.add_module(unit.path.clone(), origin, unit.source);
             registered.push(module);
         }
+        // `lower` always prepends the embedded interfaces, which include `sys` (D12).
+        builder.sys_module = builder.by_path[&ModulePath::new([Name::new("sys")])];
+        builder.program.native_abi = crate::ENGINE_NATIVE_ABI;
         builder.register_implicit_std();
         let roots = super::imports::implicit_roots(builder.std_module, builder.sys_module);
         for scope in &mut builder.scopes {
@@ -267,6 +271,20 @@ impl<'a> Builder<'a> {
                 tail: tail.clone(),
                 span: item.span.clone(),
             });
+            return;
+        }
+        if let Declaration::Native { signature, .. } = &item.declaration
+            && !crate::embedded::is_embedded_source(self.program.modules[module].source)
+        {
+            self.diagnose(
+                module,
+                crate::diag::NATIVE_ADMISSION,
+                format!(
+                    "native declaration `{}` is admitted only in the engine-embedded core and sys modules",
+                    signature.name
+                ),
+                item.span.clone(),
+            );
             return;
         }
         let Some(name) = item_name(&item.declaration) else {
@@ -477,9 +495,10 @@ impl<'a> Builder<'a> {
                     params: function.params,
                     ret: function.ret,
                     effects: function.effects,
-                    body: match function.body {
-                        Some(body) => FnBody::Source(body),
-                        None => FnBody::Signature,
+                    body: match (function.native, function.body) {
+                        (Some(native), _) => FnBody::Native(native),
+                        (None, Some(body)) => FnBody::Source(body),
+                        (None, None) => FnBody::Signature,
                     },
                 }),
                 PendingKind::Unbuilt(_) => {
@@ -545,6 +564,7 @@ fn item_name(declaration: &Declaration) -> Option<&str> {
         | Declaration::Unit { name, .. }
         | Declaration::Type { name, .. } => Some(name),
         Declaration::Function { signature, .. } => Some(&signature.name),
+        Declaration::Native { signature, .. } => Some(&signature.name),
         Declaration::Assertion { .. } => Some("assert"),
         Declaration::Let { pattern, .. } => match pattern {
             Pattern::Name(name, _) => Some(name),

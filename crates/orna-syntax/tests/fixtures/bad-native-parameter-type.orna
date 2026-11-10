@@ -1,0 +1,1 @@
+pub native fn bit_or(left, right: Int): Int effect none;

@@ -261,6 +261,16 @@ pub(crate) fn symbol_for_item(item: &Item, text: &str, tokens: &[Token]) -> Opti
             signature,
             text,
         ),
+        // ORNA-NATIVE-014: a native declaration is a public declaration with a
+        // declared signature, so it presents as a function symbol. Stage N6
+        // completes hover, completion and signature help from the clause.
+        Declaration::Native { signature, .. } => SymbolHeader::function(
+            &signature.name,
+            EditorSymbolKind::Function,
+            &item.span,
+            signature,
+            text,
+        ),
         Declaration::Table { name, .. } => {
             SymbolHeader::simple(name, EditorSymbolKind::Table, &item.span)
         }
@@ -875,6 +885,8 @@ pub(crate) fn item_bodies(item: &Item) -> Vec<&Expr> {
     let mut bodies = Vec::new();
     match &item.declaration {
         Declaration::Function { body, .. } => bodies.push(body),
+        // A native declaration has no body (ORNA-NATIVE-001).
+        Declaration::Native { .. } => {}
         Declaration::Let { value, .. } | Declaration::Assertion { value } => bodies.push(value),
         Declaration::Table { members, .. } => {
             for member in members {
