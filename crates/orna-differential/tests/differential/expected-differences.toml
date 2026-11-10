@@ -1021,11 +1021,3 @@ first = "examples.valid.pipeline-precedence::increment_count=pure"
 second = "examples.valid.pipeline-precedence::increment_count=TableRead+MayFail"
 reason = "same cause as count_is_positive: `values | count` over a list parameter is classified as a relation terminal by name"
 bead = "ornadb-csenl.18"
-
-[[difference]]
-case = "valid/dependency-query.orna"
-field = "effects"
-first = "examples.valid.dependency-query::impact=TableRead+MayFail"
-second = "examples.valid.dependency-query::impact=pure"
-reason = "the body calls the `sys.dependents` builtin, which the checker publishes as a table read with a may-fail effect; the HIR effect pass has no classification for `sys.dependents` (only the path families in effect_pass.rs), so it publishes pure. The case types on HIR only since the H2 typing fixes, so it is now compared. Closing it needs the sys builtin's effect rule on HIR (H3 rule families)"
-bead = "ornadb-csenl.18"
