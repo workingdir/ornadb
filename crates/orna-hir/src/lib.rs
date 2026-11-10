@@ -32,6 +32,7 @@ mod body;
 mod call;
 mod def;
 pub mod diag;
+mod effect_pass;
 mod effects;
 mod ids;
 pub mod infer;

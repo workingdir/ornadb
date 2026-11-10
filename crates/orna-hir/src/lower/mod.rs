@@ -67,7 +67,9 @@ pub fn lower(sources: &[SourceUnit<'_>]) -> Program {
     let mut builder = Builder::new(sources);
     builder.resolve_imports();
     builder.lower_items();
-    builder.finish()
+    let mut program = builder.finish();
+    crate::effect_pass::run(&mut program);
+    program
 }
 
 /// One lexical scope while a body is lowered.
