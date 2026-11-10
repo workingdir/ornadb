@@ -12484,7 +12484,7 @@ mod tests {
             .expect("owner-scoped Blob reference");
         let blob = orna_value::Blob::from_reference(reference).expect("owner-scoped Blob");
         let source =
-            include_str!("../../orna-cli/tests/fixtures/media/import-song-annotation.orna")
+            include_str!("../tests/fixtures/import-song-annotation.orna")
                 .replace(
                     "sys.blob.capture_file(__MEDIA_ROOT__, \"tone.wav\", 65536)",
                     "blob",
