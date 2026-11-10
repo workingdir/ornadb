@@ -130,7 +130,7 @@ reason = "publication fixtures are journal and store states, not programs"
 
 [[excluded]]
 scope = "crates/orna-syntax/tests/fixtures"
-files = 453
+files = 455
 reason = "parser fixtures are accept/reject sources for the syntax adapter, including a vendored reference copy and a probe grammar; a truncated snippet is not a module, so the module observer would report checker errors that say nothing about the fixture"
 
 [[excluded]]
