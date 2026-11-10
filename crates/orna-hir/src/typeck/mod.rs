@@ -13,9 +13,9 @@
 //!    its `Fn` type, and a member call (`Callee::Pending`) is settled into the
 //!    table operation or relation stage the receiver's type names.
 //! 4. A function whose result annotation is absent gets the result its body
-//!    determines; a function with an unwritten parameter annotation is outside
-//!    H2a and is reported as not yet on HIR (decision D1 puts that policy in
-//!    H2b).
+//!    determines. A private function whose parameter annotation is absent gets
+//!    the type its body or default determines (decision D1); a public one is
+//!    rejected with ORNA-S020-ANNOTATION.
 //!
 //! # The boundary
 //!
@@ -37,10 +37,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use orna_syntax::SyntaxSpan;
 
-use crate::diag::{INFER_AMBIGUOUS, INFER_CONFLICT};
+use crate::diag::{INFER_AMBIGUOUS, INFER_CONFLICT, PUBLIC_ANNOTATION};
 use crate::{
     BinOp, Body, BodyId, DefId, DefKind, ExprId, ExprKind, FnBody, HirDiagnostic, LocalId, LogicOp,
-    ModuleId, Pat, PatId, Program, RelOp, Stmt, TableOp, Ty, TyKind, UnOp,
+    ModuleId, Pat, PatId, Program, RelOp, Stmt, TableOp, Ty, TyKind, UnOp, Visibility,
 };
 
 mod call;
@@ -51,8 +51,8 @@ mod tests;
 /// A body the H2a subset cannot type yet, and why.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NotYetReason {
-    /// The enclosing function omits a parameter annotation (decision D1;
-    /// stage H2b adds the private-parameter policy).
+    /// The enclosing private function omits a parameter annotation whose
+    /// default is not typed yet (decision D1).
     UnannotatedParameter(DefId),
     /// The construct belongs to a later stage.
     Unsupported(Box<str>),
@@ -64,8 +64,7 @@ impl NotYetReason {
     pub fn message(&self) -> String {
         match self {
             Self::UnannotatedParameter(def) => format!(
-                "the declaration omits a parameter annotation (definition {}); stage H2b adds \
-                 the parameter-annotation policy",
+                "the declaration omits a parameter annotation whose default is not typed yet (definition {}); decision D1",
                 def.as_u32()
             ),
             Self::Unsupported(reason) => reason.to_string(),
@@ -159,14 +158,30 @@ fn variant_owners(program: &Program) -> BTreeMap<DefId, DefId> {
     owners
 }
 
+/// The annotation slots of one function a body can determine.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Slot {
+    /// The result type.
+    Ret,
+    /// The parameter at this index.
+    Param(usize),
+}
+
+/// One type a body determined for an omitted annotation.
+struct Solved {
+    def: DefId,
+    slot: Slot,
+    ty: Ty,
+}
+
 /// One attempt at one top-level body.
 enum Attempt {
     /// The body has finished static types.
     Typed {
         /// Every body checked from this one, including nested lambdas.
         bodies: Vec<(BodyId, Body)>,
-        /// The inferred result of a function that omitted its annotation.
-        result: Option<(DefId, Ty)>,
+        /// The annotations this body determined that the source omitted.
+        solved: Vec<Solved>,
     },
     /// The body is inside the program and has a conflict.
     Failed {
@@ -200,9 +215,9 @@ impl TypeChecker<'_> {
                     continue;
                 }
                 match self.attempt(body) {
-                    Attempt::Typed { bodies, result } => {
+                    Attempt::Typed { bodies, solved } => {
                         progressed = true;
-                        self.commit_typed(body, bodies, result);
+                        self.commit_typed(body, bodies, solved);
                     }
                     Attempt::Failed {
                         diagnostics,
@@ -266,34 +281,84 @@ impl TypeChecker<'_> {
         bodies
     }
 
+    /// Whether a parameter or result slot still has no written type.
+    fn is_error(&self, ty: Ty) -> bool {
+        matches!(self.program.tys.kind(ty), Some(TyKind::Error))
+    }
+
     /// Attempts one top-level body.
     fn attempt(&mut self, body_id: BodyId) -> Attempt {
         let owner = self.program.bodies[body_id].owner;
         let owner_kind = self.program.defs[owner].kind.clone();
-        let (expected, infer_result) = match &owner_kind {
+        let public = self.program.defs[owner].vis == Visibility::Public;
+        let body_params = self.program.bodies[body_id].params.clone();
+        let (expected, root_slot, omitted) = match &owner_kind {
             DefKind::Fn(function) => {
-                if function.params.iter().any(|parameter| {
-                    matches!(self.program.tys.kind(parameter.ty), Some(TyKind::Error))
-                }) {
-                    return Attempt::NotYet(NotYetReason::UnannotatedParameter(owner));
-                }
                 let is_main = matches!(function.body, FnBody::Source(id) if id == body_id);
                 if is_main {
-                    let infer = matches!(self.program.tys.kind(function.ret), Some(TyKind::Error));
-                    (if infer { None } else { Some(function.ret) }, infer)
-                } else if let Some(parameter) = function
+                    let omitted = function
+                        .params
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, parameter)| self.is_error(parameter.ty))
+                        .map(|(index, _)| index)
+                        .collect::<Vec<_>>();
+                    if public && !omitted.is_empty() {
+                        let span = self.program.defs[owner].span.clone();
+                        let diagnostics = omitted
+                            .iter()
+                            .map(|&index| {
+                                HirDiagnostic::new(
+                                    PUBLIC_ANNOTATION,
+                                    format!(
+                                        "public function parameter `{}` needs a type annotation (decision D1)",
+                                        function.params[index].name.as_str()
+                                    ),
+                                    span.clone(),
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        return Attempt::Failed {
+                            conflicts: diagnostics.len(),
+                            diagnostics,
+                            detail: "a public function omits a parameter annotation".into(),
+                        };
+                    }
+                    if omitted
+                        .iter()
+                        .any(|&index| function.params[index].default.is_some())
+                    {
+                        return Attempt::NotYet(NotYetReason::UnannotatedParameter(owner));
+                    }
+                    let infer = self.is_error(function.ret);
+                    let expected = if infer { None } else { Some(function.ret) };
+                    (expected, infer.then_some(Slot::Ret), omitted)
+                } else if let Some(index) = function
                     .params
                     .iter()
-                    .find(|parameter| parameter.default == Some(body_id))
+                    .position(|parameter| parameter.default == Some(body_id))
                 {
-                    (Some(parameter.ty), false)
+                    let is_omitted = self.is_error(function.params[index].ty);
+                    if is_omitted && public {
+                        return Attempt::NotYet(NotYetReason::UnannotatedParameter(owner));
+                    }
+                    let expected = if is_omitted {
+                        None
+                    } else {
+                        Some(function.params[index].ty)
+                    };
+                    (
+                        expected,
+                        is_omitted.then_some(Slot::Param(index)),
+                        Vec::new(),
+                    )
                 } else {
                     return Attempt::NotYet(NotYetReason::Unsupported(
                         "this body is not a function body or default".into(),
                     ));
                 }
             }
-            DefKind::Let(_) | DefKind::Assertion(_) => (None, false),
+            DefKind::Let(_) | DefKind::Assertion(_) => (None, None, Vec::new()),
             _ => {
                 return Attempt::NotYet(NotYetReason::Unsupported(
                     "this definition's body is outside the H2a subset".into(),
@@ -307,14 +372,25 @@ impl TypeChecker<'_> {
             Ok(root_ty) => root_ty,
             Err(reason) => return Attempt::NotYet(reason),
         };
-        let result = if infer_result {
-            Some((owner, check.zonk(root_ty)))
-        } else {
-            None
-        };
+        let mut solved = Vec::new();
+        if let Some(slot) = root_slot {
+            solved.push(Solved {
+                def: owner,
+                slot,
+                ty: check.zonk(root_ty),
+            });
+        }
+        for index in omitted {
+            let ty = check.local_ty(body_id, body_params[index]);
+            solved.push(Solved {
+                def: owner,
+                slot: Slot::Param(index),
+                ty,
+            });
+        }
         let (bodies, mut diagnostics, conflicts) = check.finish();
         if conflicts == 0 {
-            Attempt::Typed { bodies, result }
+            Attempt::Typed { bodies, solved }
         } else {
             let detail = diagnostics
                 .iter()
@@ -330,22 +406,20 @@ impl TypeChecker<'_> {
         }
     }
 
-    fn commit_typed(
-        &mut self,
-        body: BodyId,
-        bodies: Vec<(BodyId, Body)>,
-        result: Option<(DefId, Ty)>,
-    ) {
+    fn commit_typed(&mut self, body: BodyId, bodies: Vec<(BodyId, Body)>, solved: Vec<Solved>) {
         let owner = self.program.bodies[body].owner;
         let module = self.program.defs[owner].module;
         for (id, checked) in bodies {
             self.program.bodies[id] = checked;
             self.done.insert(id);
         }
-        if let Some((def, ty)) = result
-            && let DefKind::Fn(function) = &mut self.program.defs[def].kind
-        {
-            function.ret = ty;
+        for Solved { def, slot, ty } in solved {
+            if let DefKind::Fn(function) = &mut self.program.defs[def].kind {
+                match slot {
+                    Slot::Ret => function.ret = ty,
+                    Slot::Param(index) => function.params[index].ty = ty,
+                }
+            }
         }
         self.outcomes.push(BodyOutcome {
             body,
@@ -428,6 +502,15 @@ impl<'a> BodyCheck<'a> {
 
     fn resolved(&self, ty: Ty) -> Ty {
         self.infer.resolve(&self.program.tys, ty)
+    }
+
+    /// The current type of one binding slot of a body checked here, zonked.
+    fn local_ty(&mut self, body: BodyId, local: LocalId) -> Ty {
+        let ty = match self.working.get(&body) {
+            Some(checked) => checked.locals[local].ty,
+            None => self.program.bodies[body].locals[local].ty,
+        };
+        self.zonk(ty)
     }
 
     fn error(&mut self) -> Ty {

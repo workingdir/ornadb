@@ -47,6 +47,14 @@ pub const INFER_CONFLICT: &str = "ORNA-INFER-011";
 /// (ORNA-INFER-007).
 pub const INFER_AMBIGUOUS: &str = "ORNA-INFER-007";
 
+/// A public function parameter omits its type annotation.
+///
+/// Decision D1 requires every `pub` parameter to be annotated; only private
+/// parameters may omit the annotation and have it solved from the body and
+/// defaults. The classification matches the old checker's annotation
+/// diagnostic so the two agree on the same mistake.
+pub const PUBLIC_ANNOTATION: &str = "ORNA-S020-ANNOTATION";
+
 /// One diagnostic raised while lowering a module.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HirDiagnostic {
