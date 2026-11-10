@@ -25,11 +25,26 @@ pub(crate) const EMBEDDED_SOURCE_BASE: u32 = u32::MAX - 64;
 const FILES: [(&str, &str); 12] = [
     ("core", include_str!("../interface/core.orna")),
     ("core.bits", include_str!("../interface/core/bits.orna")),
-    ("core.collection", include_str!("../interface/core/collection.orna")),
-    ("core.encoding.base64", include_str!("../interface/core/encoding/base64.orna")),
-    ("core.encoding.json", include_str!("../interface/core/encoding/json.orna")),
-    ("core.encoding.orna", include_str!("../interface/core/encoding/orna.orna")),
-    ("core.encoding.ovb", include_str!("../interface/core/encoding/ovb.orna")),
+    (
+        "core.collection",
+        include_str!("../interface/core/collection.orna"),
+    ),
+    (
+        "core.encoding.base64",
+        include_str!("../interface/core/encoding/base64.orna"),
+    ),
+    (
+        "core.encoding.json",
+        include_str!("../interface/core/encoding/json.orna"),
+    ),
+    (
+        "core.encoding.orna",
+        include_str!("../interface/core/encoding/orna.orna"),
+    ),
+    (
+        "core.encoding.ovb",
+        include_str!("../interface/core/encoding/ovb.orna"),
+    ),
     ("core.hash", include_str!("../interface/core/hash.orna")),
     ("core.stats", include_str!("../interface/core/stats.orna")),
     ("core.text", include_str!("../interface/core/text.orna")),
@@ -93,7 +108,15 @@ mod tests {
     fn embedded_modules_cover_every_interface_file() {
         let modules = parse_all();
         assert_eq!(modules.len(), FILES.len());
-        assert!(modules.iter().any(|module| module.path == ModulePath::new([Name::new("sys")])));
-        assert!(modules.iter().any(|module| module.path == ModulePath::new([Name::new("core")])));
+        assert!(
+            modules
+                .iter()
+                .any(|module| module.path == ModulePath::new([Name::new("sys")]))
+        );
+        assert!(
+            modules
+                .iter()
+                .any(|module| module.path == ModulePath::new([Name::new("core")]))
+        );
     }
 }
