@@ -503,8 +503,16 @@ pub(crate) fn collect_header(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> ModuleHeader {
     let mut symbols = BTreeMap::new();
+    // Natives carry no symbol: they bind at link. Their names still occupy the module, so a repeat is a duplicate.
+    let mut native_names = BTreeSet::new();
     for item in &tree.items {
         let Some((name, kind, mut ty)) = declared_symbol(item) else {
+            if let Declaration::Native { signature, .. } = &item.declaration
+                && (!native_names.insert(signature.name.clone())
+                    || symbols.contains_key(&signature.name))
+            {
+                diagnostics.push(diag(DIAG_DUPLICATE, "duplicate declaration name"));
+            }
             continue;
         };
         // Nominal types, tables and units carry their module-qualified identity, so
@@ -526,6 +534,10 @@ pub(crate) fn collect_header(
         // retains its dedicated type diagnostic in `check_item`.
         if name == "sys" {
             continue;
+        }
+        // A native binds at link and has no symbol here, but its name still belongs to this module.
+        if native_names.contains(&name) {
+            diagnostics.push(diag(DIAG_DUPLICATE, "duplicate declaration name"));
         }
         let public = matches!(item.visibility, Visibility::Public { .. });
         if symbols

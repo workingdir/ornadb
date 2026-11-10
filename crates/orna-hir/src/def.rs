@@ -3,7 +3,7 @@
 //! Every declaration in a program is one [`Def`] in the program's `defs` table,
 //! and [`DefKind`] states what it is. A function lives here whoever implements
 //! it: [`FnBody::Source`] points at an Orna body, [`FnBody::Native`] records
-//! the ABI and key the link step binds to a host implementation.
+//! how the link step binds it: the engine registry or a shared library.
 
 use orna_syntax::SyntaxSpan as SourceSpan;
 
@@ -119,22 +119,42 @@ pub enum FnBody {
     /// it through a protocol bound, never through a `DefId` call, so there is
     /// nothing to lower or link.
     Signature,
-    /// A `native fn` declaration in `core.orna`, `sys.orna` or the pinned
-    /// `std`: no body, so the signature above is its only signature. The link
-    /// step binds it to a host implementation keyed by this definition.
+    /// A `native fn` declaration in any module unit: no body, so the signature
+    /// above is its only signature. The link step binds it, by its key, to the
+    /// engine registry (`core` and `sys`) or to a shared library.
     Native(NativeDecl),
 }
 
 /// One native declaration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NativeDecl {
-    /// The engine native ABI the declaration was written against.
-    pub abi: NativeAbi,
-    /// The identity the link step binds.
+    /// Who supplies the implementation: the engine registry or a library.
+    pub binding: NativeBinding,
+    /// The identity the link step binds: the declaring module path and name.
     pub key: NativeKey,
     /// The effect kinds the declaration's `effect` clause names. Empty for
     /// `effect none`. The effect pass adds `MayFail` to a non-empty set.
     pub effects: crate::EffectSet,
+}
+
+/// Who supplies the implementation of a native declaration (library natives,
+/// the library document section 1, rules R3 and R4).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum NativeBinding {
+    /// A declaration in the engine-embedded `core` or `sys` module, bound from
+    /// the engine registry against this engine native ABI.
+    Engine {
+        /// The engine native ABI the declaration was written against.
+        abi: NativeAbi,
+    },
+    /// Any other declaration, bound at link to the exported symbol of the
+    /// shared library the root project names.
+    Library {
+        /// The C symbol the library must export: `orna_<key>`, where the key is
+        /// the module path segments and the name joined by `__` (library
+        /// document section 4).
+        symbol: String,
+    },
 }
 
 /// The engine native ABI version (design section 4.5).
