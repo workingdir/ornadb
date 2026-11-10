@@ -50,6 +50,8 @@ mod snapshot;
 pub use snapshot::*;
 mod identity;
 pub use identity::*;
+mod enum_identity;
+pub use enum_identity::*;
 mod schema;
 pub use schema::*;
 mod path;
