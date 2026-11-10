@@ -119,7 +119,7 @@ pub fn signatures(case: &Case) -> Result<BTreeMap<String, String>, String> {
 ///
 /// This mirrors `orna_check`'s `namespace_for_path`: the directory segments plus
 /// the file stem, except that `main.orna` names its directory.
-fn case_namespaces(case: &Case) -> BTreeSet<String> {
+pub(crate) fn case_namespaces(case: &Case) -> BTreeSet<String> {
     case.sources
         .iter()
         .map(|source| {
