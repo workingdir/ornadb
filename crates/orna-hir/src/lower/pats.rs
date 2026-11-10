@@ -141,7 +141,14 @@ fn lower_constructor(
         &path_segments,
         crate::UseContext::Pattern,
     );
-    let def = match builder.resolve_path(module, &segments) {
+    let last_name = segments.last().cloned().unwrap_or_else(|| Name::new(""));
+    let resolved = match builder.resolve_path(module, &segments) {
+        PathKind::Member { base, .. } => builder
+            .member_def(base, &last_name)
+            .map_or(PathKind::Unresolved, PathKind::Def),
+        other => other,
+    };
+    let def = match resolved {
         PathKind::Def(def) => {
             super::record_body_use(
                 &mut builder.program,

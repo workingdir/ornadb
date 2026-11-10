@@ -116,6 +116,14 @@ fn lower_named(
     if path.len() == 1 {
         let spelling = path[0].as_str();
         if let Some(scalar) = builtin(spelling) {
+            super::record_use(
+                &mut builder.program,
+                module,
+                span.clone(),
+                Name::new(spelling),
+                crate::UseContext::Type,
+                NameTarget::Unresolved,
+            );
             return match scalar {
                 "Bool" => builder.program.tys.intern(TyKind::Bool),
                 "Int" => builder.program.tys.intern(TyKind::Int),

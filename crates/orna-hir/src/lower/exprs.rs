@@ -181,6 +181,7 @@ fn lower_operator(
             )
         }
         AstExpr::Field { base, name, span } => {
+            let member_of_path = qualified_member(builder, state, base.as_ref(), name);
             let base = lower_expr(builder, state, base);
             let field_name = Name::new(name);
             let name_span = SyntaxSpan::new(span.end.saturating_sub(name.len()), span.end);
@@ -209,6 +210,7 @@ fn lower_operator(
                     )
                 }
                 None => {
+                    let member = member_of_path;
                     super::record_body_use(
                         &mut builder.program,
                         state.module,
@@ -216,7 +218,7 @@ fn lower_operator(
                         name_span,
                         field_name.clone(),
                         crate::UseContext::Field,
-                        NameTarget::Unresolved,
+                        member.map_or(NameTarget::Unresolved, NameTarget::Def),
                     );
                     push(
                         builder,
@@ -345,6 +347,44 @@ fn field_of_type(builder: &Builder<'_>, ty: Ty, name: &Name) -> Option<DefId> {
         | TyKind::Range(inner)
         | TyKind::Relation(inner)
         | TyKind::Stream(inner) => field_of_type(builder, *inner, name),
+        _ => None,
+    }
+}
+
+/// The definition a `base.name` access that has no field type names: a
+/// member of the type or enum the dotted `base` path names (`Status.draft`),
+/// or the unit a numeric literal's suffix names (`1000.metre`).
+fn qualified_member(
+    builder: &Builder<'_>,
+    state: &BodyState,
+    base: &AstExpr,
+    name: &str,
+) -> Option<DefId> {
+    if matches!(
+        base,
+        AstExpr::Literal {
+            kind: orna_syntax::LiteralKind::Integer
+                | orna_syntax::LiteralKind::Decimal
+                | orna_syntax::LiteralKind::Float,
+            ..
+        }
+    ) {
+        return builder.resolve_unit(state.module, &Name::new(name));
+    }
+    let mut segments = Vec::new();
+    if !flatten_path(base, &mut segments) {
+        return None;
+    }
+    let root = Name::new(segments.first()?.0);
+    if state.local(&root).is_some() {
+        return None;
+    }
+    let names = segments
+        .iter()
+        .map(|(text, _)| Name::new(text))
+        .collect::<Vec<_>>();
+    match builder.resolve_path(state.module, &names) {
+        crate::resolve::PathKind::Def(owner) => builder.member_def(owner, &Name::new(name)),
         _ => None,
     }
 }
@@ -535,12 +575,12 @@ fn lower_recover(
     span: &SyntaxSpan,
 ) -> ExprId {
     let body = lower_expr(builder, state, lhs);
-    state.push_scope();
+    state.push_scope(span.start);
     let error_ty = builder.program.tys.error();
     let handler = state.add_local(Name::new(ERROR_SLOT), error_ty, span.clone());
     let error_value = push(builder, state, ExprKind::Local(handler), span.clone());
     let arm = lower_stage(builder, state, rhs, Some(error_value), span);
-    state.pop_scope();
+    state.pop_scope(span.end);
     push(
         builder,
         state,
@@ -587,18 +627,21 @@ fn lower_stage(
 /// The segments of a dotted path, when the expression is one.
 pub(crate) fn flatten_path<'a>(
     expr: &'a AstExpr,
-    out: &mut Vec<(&'a str, &'a SyntaxSpan)>,
+    out: &mut Vec<(&'a str, SyntaxSpan)>,
 ) -> bool {
     match expr {
         AstExpr::Name { text, span } => {
-            out.push((text, span));
+            out.push((text, span.clone()));
             true
         }
         AstExpr::Field { base, name, span } => {
             if !flatten_path(base, out) {
                 return false;
             }
-            out.push((name, span));
+            // A field expression's span covers the receiver too; the name is
+            // its last `name.len()` bytes.
+            let name_span = SyntaxSpan::new(span.end.saturating_sub(name.len()), span.end);
+            out.push((name, name_span));
             true
         }
         AstExpr::Group { inner, .. } => flatten_path(inner, out),
@@ -621,7 +664,15 @@ fn lower_call(
     let target = classify_callee(builder, state, callee, span);
     let (callee, params) = match target {
         Some(classified) => classified,
-        None => return error_expr(builder, state, span.clone()),
+        None => {
+            // The callee did not resolve: keep the occurrence the callee
+            // wrote, and lower the arguments so their names are still indexed.
+            super::mark_callee(&mut builder.program, module, &callee_span);
+            for argument in arguments {
+                let _ = lower_expr(builder, state, &argument.value);
+            }
+            return error_expr(builder, state, span.clone());
+        }
     };
     super::mark_callee(&mut builder.program, module, &callee_span);
     let callee = attach_type_arguments(builder, state, callee, type_arguments);
@@ -746,7 +797,13 @@ fn lower_construct(
         &path_segments,
         crate::UseContext::Value,
     );
-    let def = match builder.resolve_path(module, &segments) {
+    let resolved = match builder.resolve_path(module, &segments) {
+        crate::resolve::PathKind::Member { base, .. } => builder
+            .member_def(base, &last)
+            .map_or(crate::resolve::PathKind::Unresolved, crate::resolve::PathKind::Def),
+        other => other,
+    };
+    let def = match resolved {
         crate::resolve::PathKind::Def(def) => {
             super::record_value_use(
                 &mut builder.program,
@@ -838,7 +895,7 @@ fn lower_lambda(
     let module = state.module;
     let id = builder.allocate_body(owner);
     let mut lambda = BodyState::new(id, owner, module);
-    lambda.push_scope();
+    lambda.push_scope(body.span().start);
     for (index, parameter) in parameters.iter().enumerate() {
         let ty = match &parameter.annotation {
             Some(annotation) => super::types::lower_type(builder, module, &[], annotation),
@@ -905,7 +962,7 @@ fn lower_lambda(
             body.span(),
         )
     });
-    lambda.pop_scope();
+    lambda.pop_scope(body.span().end);
     let error_ty = builder.program.tys.error();
     builder.complete_body(lambda, error_ty);
     push(
@@ -927,18 +984,31 @@ fn lower_block(
     tail: Option<&AstExpr>,
     span: &SyntaxSpan,
 ) -> ExprId {
-    state.push_scope();
+    state.push_scope(span.start);
     let mut lowered = Vec::with_capacity(statements.len());
     for statement in statements {
         match statement {
             Statement::Let {
                 pattern,
-                annotation: _,
+                annotation,
                 value,
                 ..
             } => {
                 let init = lower_expr(builder, state, value);
                 let pat = pats::lower_pattern(builder, state, pattern);
+                if let Some(annotation) = annotation {
+                    let ty = super::types::lower_type(
+                        builder,
+                        state.module,
+                        &[],
+                        annotation,
+                    );
+                    if let orna_syntax::Pattern::Name(name, _) = pattern
+                        && let Some(local) = state.local(&Name::new(name))
+                    {
+                        state.locals[local].ty = ty;
+                    }
+                }
                 lowered.push(Stmt::Let { pat, init });
             }
             Statement::Assert { value, .. } => {
@@ -997,7 +1067,7 @@ fn lower_block(
         }
     }
     let tail = tail.map(|tail| lower_expr(builder, state, tail));
-    state.pop_scope();
+    state.pop_scope(span.end);
     push(
         builder,
         state,

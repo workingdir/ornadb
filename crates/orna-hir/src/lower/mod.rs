@@ -69,6 +69,13 @@ pub fn lower(sources: &[SourceUnit<'_>]) -> Program {
     builder.finish()
 }
 
+/// One lexical scope while a body is lowered.
+pub(crate) struct ScopeFrame {
+    start: usize,
+    names: BTreeMap<Name, LocalId>,
+    locals: Vec<LocalId>,
+}
+
 /// One body while it is being lowered: expressions, patterns, slots and the
 /// local scopes currently in force.
 pub(crate) struct BodyState {
@@ -89,7 +96,7 @@ pub(crate) struct BodyState {
     /// Captures, for a lambda body.
     pub(crate) captures: Vec<crate::Capture>,
     /// The local scopes, innermost last.
-    pub(crate) scopes: Vec<BTreeMap<Name, LocalId>>,
+    pub(crate) scopes: Vec<ScopeFrame>,
     /// The body's root expression, once it has one.
     pub(crate) root: Option<ExprId>,
 }
@@ -111,14 +118,23 @@ impl BodyState {
         }
     }
 
-    /// Enters a local scope.
-    pub(crate) fn push_scope(&mut self) {
-        self.scopes.push(BTreeMap::new());
+    /// Enters a local scope beginning at `start`.
+    pub(crate) fn push_scope(&mut self, start: usize) {
+        self.scopes.push(ScopeFrame {
+            start,
+            names: BTreeMap::new(),
+            locals: Vec::new(),
+        });
     }
 
-    /// Leaves the innermost local scope.
-    pub(crate) fn pop_scope(&mut self) {
-        self.scopes.pop();
+    /// Leaves the innermost local scope, which ends at `end`.
+    pub(crate) fn pop_scope(&mut self, end: usize) {
+        let Some(frame) = self.scopes.pop() else {
+            return;
+        };
+        for local in frame.locals {
+            self.locals[local].scope = SyntaxSpan::new(frame.start, end);
+        }
     }
 
     /// Adds one local slot with `name`.
@@ -128,9 +144,11 @@ impl BodyState {
             ty,
             mutable: false,
             span,
+            scope: SyntaxSpan::new(0, 0),
         });
         if let Some(scope) = self.scopes.last_mut() {
-            scope.insert(name, id);
+            scope.names.insert(name, id);
+            scope.locals.push(id);
         }
         id
     }
@@ -140,7 +158,7 @@ impl BodyState {
         self.scopes
             .iter()
             .rev()
-            .find_map(|scope| scope.get(name).copied())
+            .find_map(|scope| scope.names.get(name).copied())
     }
 
     /// Adds one expression and returns its id.

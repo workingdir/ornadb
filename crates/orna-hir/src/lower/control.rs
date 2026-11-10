@@ -107,7 +107,7 @@ fn lower_for(
         Some(iter) => lower_expr(builder, state, iter),
         None => error_expr(builder, state, span.clone()),
     };
-    state.push_scope();
+    state.push_scope(span.start);
     let pat = match binding {
         Some(pattern) => pats::lower_pattern(builder, state, pattern),
         None => state.push_pat(crate::Pat::Wild),
@@ -116,7 +116,7 @@ fn lower_for(
         Some(body) => lower_expr(builder, state, body),
         None => error_expr(builder, state, span.clone()),
     };
-    state.pop_scope();
+    state.pop_scope(span.end);
     push(
         builder,
         state,
@@ -138,14 +138,14 @@ fn lower_case(
     };
     let mut lowered = Vec::with_capacity(arms.len());
     for arm in arms {
-        state.push_scope();
+        state.push_scope(arm.body.span().start);
         let pat = pats::lower_pattern(builder, state, &arm.pattern);
         let guard = arm
             .guard
             .as_ref()
             .map(|guard| lower_expr(builder, state, guard));
         let body = lower_expr(builder, state, &arm.body);
-        state.pop_scope();
+        state.pop_scope(arm.body.span().end);
         lowered.push(Arm { pat, guard, body });
     }
     push(

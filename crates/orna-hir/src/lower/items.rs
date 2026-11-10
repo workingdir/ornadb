@@ -124,10 +124,30 @@ impl Builder<'_> {
                 self.pending[def.index()].kind =
                     PendingKind::Built(DefKind::Dimension(DimensionDef { unit: None }));
             }
-            DeclAst::Unit(dimension, _definition) => {
+            DeclAst::Unit(dimension, definition) => {
                 let ty = super::types::lower_type(self, module, &[], &dimension);
                 let _ = ty;
                 self.pending[def.index()].kind = PendingKind::Built(DefKind::Unit(UnitDef));
+                if let orna_syntax::UnitDefinition::Derived {
+                    value, offset, ..
+                } = definition
+                {
+                    // A derived unit's expression is not part of the value
+                    // model, but its names are still written in the module:
+                    // lower it so the editor index sees them.
+                    let expressions = std::iter::once(value.clone())
+                        .chain(offset.clone())
+                        .collect::<Vec<_>>();
+                    for expr in expressions {
+                        let body = self.allocate_body(def);
+                        self.body_jobs.push(BodyJob::Expression {
+                            def,
+                            body,
+                            expr: Box::new(expr),
+                            self_ty: None,
+                        });
+                    }
+                }
             }
             DeclAst::Type(generics, representation) => {
                 self.build_type(def, module, &generics, &representation);
@@ -340,7 +360,10 @@ impl Builder<'_> {
         let params = self.build_generics(module, generics);
         let mut members = Vec::new();
         let type_members = match representation {
-            TypeRepresentation::Alias { refinements, .. } => refinements.as_slice(),
+            TypeRepresentation::Alias { ty, refinements } => {
+                let _ = super::types::lower_type(self, module, &[], ty);
+                refinements.as_slice()
+            }
             TypeRepresentation::Nominal { members } => members.as_slice(),
         };
         for member in type_members {
@@ -399,7 +422,7 @@ impl Builder<'_> {
                     span.end.saturating_sub(last.as_str().len()),
                     span.end,
                 );
-                let resolved = match self.resolve_path(module, &segments) {
+                match self.resolve_path(module, &segments) {
                     super::super::resolve::PathKind::Def(def) => {
                         super::record_use(
                             &mut self.program,
@@ -422,8 +445,7 @@ impl Builder<'_> {
                         );
                         None
                     }
-                };
-                resolved
+                }
             }
             _ => None,
         };
@@ -635,7 +657,7 @@ impl Builder<'_> {
             )
         };
         let mut state = BodyState::new(body_id, def, module);
-        state.push_scope();
+        state.push_scope(body_expr.span().start);
         let mut prologue = Vec::new();
         for (index, (param, pattern)) in params.iter().zip(patterns.iter()).enumerate() {
             let span = pattern.span().clone();
@@ -678,7 +700,7 @@ impl Builder<'_> {
                 body_expr.span(),
             )
         });
-        state.pop_scope();
+        state.pop_scope(body_expr.span().end);
         let error_ty = self.program.tys.error();
         self.complete_body(state, error_ty);
     }
@@ -693,7 +715,7 @@ impl Builder<'_> {
     ) {
         let module = self.pending[def.index()].module;
         let mut state = BodyState::new(body_id, def, module);
-        state.push_scope();
+        state.push_scope(expr.span().start);
         if let Some(owner) = self_ty {
             // An assertion's owner row is written as `self` (design section
             // 2.4); the slot is the body's only parameter.
@@ -707,7 +729,7 @@ impl Builder<'_> {
         }
         let root = lower_expr(self, &mut state, expr);
         state.root = Some(root);
-        state.pop_scope();
+        state.pop_scope(expr.span().end);
         let error_ty = self.program.tys.error();
         self.complete_body(state, error_ty);
     }

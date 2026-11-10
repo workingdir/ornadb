@@ -43,6 +43,8 @@ pub struct Local {
     pub mutable: bool,
     /// Where it was declared.
     pub span: SourceSpan,
+    /// The lexical extent the binding is visible in.
+    pub scope: SourceSpan,
 }
 
 /// One captured slot of a lambda.

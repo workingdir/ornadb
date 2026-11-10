@@ -128,7 +128,7 @@ fn classify_name(
 fn classify_path(
     builder: &mut Builder<'_>,
     state: &mut BodyState,
-    segments: &[(&str, &SyntaxSpan)],
+    segments: &[(&str, SyntaxSpan)],
     span: &SyntaxSpan,
 ) -> ClassifiedCallee {
     let module = state.module;
@@ -139,11 +139,11 @@ fn classify_path(
     let last = names.last().cloned().unwrap_or_else(|| Name::new(""));
     let last_span = segments
         .last()
-        .map_or_else(|| span.clone(), |(_, span)| (*span).clone());
+        .map_or_else(|| span.clone(), |(_, span)| span.clone());
     let path_segments = segments
         .iter()
         .zip(&names)
-        .map(|((_, span), name)| (name.clone(), (*span).clone()))
+        .map(|((_, span), name)| (name.clone(), span.clone()))
         .collect::<Vec<_>>();
     if state.local(&names[0]).is_some() {
         let base = lower_path_value(builder, state, &segments[..segments.len() - 1]);
@@ -277,14 +277,14 @@ fn classified_def(
 fn lower_path_value(
     builder: &mut Builder<'_>,
     state: &mut BodyState,
-    segments: &[(&str, &SyntaxSpan)],
+    segments: &[(&str, SyntaxSpan)],
 ) -> ExprId {
     let Some((first, first_span)) = segments.first() else {
         return error_expr(builder, state, SyntaxSpan::new(0, 0));
     };
     let mut value = super::exprs::lower_name(builder, state, first, first_span);
     for (name, span) in &segments[1..] {
-        let span = (*span).clone();
+        let span = span.clone();
         value = push(
             builder,
             state,
