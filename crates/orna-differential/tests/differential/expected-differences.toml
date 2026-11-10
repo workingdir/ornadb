@@ -981,3 +981,43 @@ first = "examples.valid.empty-record-lambda::do_nothing=do_nothing() -> () -> {}
 second = "examples.valid.empty-record-lambda::do_nothing=do_nothing() -> () -> Unit"
 reason = "the checker gives an empty braced lambda body `{}` the empty record type; the HIR lowers that body as a block with no tail, whose value is Unit (ORNA-CFLOW-001). Which reading is normative is a checker rule that H3 decides; H2a does not guess"
 bead = "ornadb-csenl.18"
+
+[[difference]]
+case = "valid/computed-field.orna"
+field = "effects"
+first = "examples.valid.computed-field::names=TableRead+MayFail"
+second = "examples.valid.computed-field::names=pure"
+reason = "the checker publishes the table read of `Contact | map(Contact.full_name)` through its computed-field member, which the H1 classification does not produce as a relation call; the HIR effect pass sees no table-touching callee in the body. Closing it needs the computed-field member resolved on HIR (H3 rule families)"
+bead = "ornadb-csenl.18"
+
+[[difference]]
+case = "valid/computed-and-defaulted-fields.orna"
+field = "effects"
+first = "examples.valid.computed-and-defaulted-fields::names=TableRead+MayFail"
+second = "examples.valid.computed-and-defaulted-fields::names=pure"
+reason = "same cause as computed-field.orna: the computed field read through the table source is not a classified HIR callee, so the effect pass publishes pure"
+bead = "ornadb-csenl.18"
+
+[[difference]]
+case = "valid/default-and-computed-fields.orna"
+field = "effects"
+first = "examples.valid.default-and-computed-fields::british_names=TableRead+MayFail"
+second = "examples.valid.default-and-computed-fields::british_names=pure"
+reason = "same cause as computed-field.orna: the computed-field table read is not a classified HIR callee"
+bead = "ornadb-csenl.18"
+
+[[difference]]
+case = "valid/pipeline-precedence.orna"
+field = "effects"
+first = "examples.valid.pipeline-precedence::count_is_positive=pure"
+second = "examples.valid.pipeline-precedence::count_is_positive=TableRead+MayFail"
+reason = "H1 classifies `count` as a relation terminal by name, so the effect pass marks `values | count` over a [Int] parameter as a table read; the checker applies the relation rule only to a relation receiver. Only typed receivers (H2/H3) can tell them apart"
+bead = "ornadb-csenl.18"
+
+[[difference]]
+case = "valid/pipeline-precedence.orna"
+field = "effects"
+first = "examples.valid.pipeline-precedence::increment_count=pure"
+second = "examples.valid.pipeline-precedence::increment_count=TableRead+MayFail"
+reason = "same cause as count_is_positive: `values | count` over a list parameter is classified as a relation terminal by name"
+bead = "ornadb-csenl.18"

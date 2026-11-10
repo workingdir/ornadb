@@ -103,7 +103,8 @@ pub fn compare(case_id: &str, first: &Observation, second: &Observation) -> Vec<
     differences
 }
 
-fn difference(case: &str, field: &'static str, left: String, right: String) -> Difference {
+/// One disagreement between two pipelines on one case field.
+pub fn difference(case: &str, field: &'static str, left: String, right: String) -> Difference {
     Difference {
         case: case.to_owned(),
         field,
