@@ -46,7 +46,12 @@ impl BodyCheck<'_> {
         name: &Name,
         span: SyntaxSpan,
     ) -> Result<Option<Callee>, NotYetReason> {
-        let implementations = self.program.instances.get(&owner).cloned().unwrap_or_default();
+        let implementations = self
+            .program
+            .instances
+            .get(&owner)
+            .cloned()
+            .unwrap_or_default();
         let mut candidates = Vec::new();
         for implementation in implementations {
             let DefKind::Impl(declared) = &self.program.defs[implementation].kind else {
@@ -57,7 +62,11 @@ impl BodyCheck<'_> {
             };
             let args = declared.protocol_args.clone();
             if let Some(member) = self.protocol_member(protocol, args.len(), name) {
-                candidates.push(Candidate { protocol, args, member });
+                candidates.push(Candidate {
+                    protocol,
+                    args,
+                    member,
+                });
             }
         }
         if candidates.len() > 1 {
@@ -66,7 +75,8 @@ impl BodyCheck<'_> {
                 return Ok(None);
             }
             return Err(NotYetReason::Unsupported(
-                format!("choosing between protocol implementations of `.{name}` is not on HIR yet").into(),
+                format!("choosing between protocol implementations of `.{name}` is not on HIR yet")
+                    .into(),
             ));
         }
         let Some(candidate) = candidates.into_iter().next() else {
@@ -74,7 +84,8 @@ impl BodyCheck<'_> {
         };
         let mut targs = candidate.args.into_vec();
         targs.push(receiver);
-        self.protocol_callee(candidate.member, targs, span).map(Some)
+        self.protocol_callee(candidate.member, targs, span)
+            .map(Some)
     }
 
     /// Selects the one protocol bound on a generic parameter that supplies the member.
@@ -130,7 +141,12 @@ impl BodyCheck<'_> {
     ///
     /// `targs` holds the protocol's arguments then the `Self` type; the member's own generics
     /// are solved by unification at the call.
-    fn protocol_callee(&mut self, member: DefId, mut targs: Vec<Ty>, span: SyntaxSpan) -> Result<Callee, NotYetReason> {
+    fn protocol_callee(
+        &mut self,
+        member: DefId,
+        mut targs: Vec<Ty>,
+        span: SyntaxSpan,
+    ) -> Result<Callee, NotYetReason> {
         let generics = match &self.program.defs[member].kind {
             DefKind::Fn(function) => function.generics.len(),
             _ => {
@@ -174,5 +190,7 @@ fn overlapping(candidates: &[Candidate]) -> bool {
 }
 
 fn not_yet(name: &Name) -> NotYetReason {
-    NotYetReason::Unsupported(format!("no protocol member `.{name}` applies to this receiver type yet").into())
+    NotYetReason::Unsupported(
+        format!("no protocol member `.{name}` applies to this receiver type yet").into(),
+    )
 }

@@ -94,7 +94,9 @@ impl<'a> BodyCheck<'a> {
             call.callee = settled;
         }
         match &call.callee {
-            Callee::Source { def, targs } => self.source_call_ty(body, call, *def, targs, span, protocol_member),
+            Callee::Source { def, targs } => {
+                self.source_call_ty(body, call, *def, targs, span, protocol_member)
+            }
             Callee::Native { def, targs } | Callee::Sys { def, targs } => {
                 self.source_call_ty(body, call, *def, targs, span, false)
             }

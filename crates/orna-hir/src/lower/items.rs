@@ -481,50 +481,7 @@ impl Builder<'_> {
                     body,
                     span,
                 } => {
-                    let member_def = self.declare_nested(
-                        module,
-                        &signature.name,
-                        Visibility::Public,
-                        span.clone(),
-                        DefKind::Unit(UnitDef),
-                    );
-                    let body_id = self.allocate_body(member_def);
-                    let names = generic_names(&signature.generics);
-                    let generics = self.build_generics(module, &names, &signature.generics);
-                    let (params, defaults) = self.build_parameters(
-                        member_def,
-                        module,
-                        &signature.parameters,
-                        Some(receiver),
-                        &names,
-                    );
-                    for (default_body, expr) in defaults {
-                        self.body_jobs.push(BodyJob::Expression {
-                            def: member_def,
-                            body: default_body,
-                            expr: Box::new(expr),
-                            self_ty: None,
-                        });
-                    }
-                    let ret = self.build_result(module, &names, signature.result.as_ref());
-                    let patterns = signature
-                        .parameters
-                        .iter()
-                        .map(|parameter| parameter.pattern.clone())
-                        .collect();
-                    self.pending[member_def.index()].kind =
-                        PendingKind::Function(Box::new(PendingFunction {
-                            generics,
-                            params,
-                            ret,
-                            effects: crate::EffectSet::empty(),
-                            body: Some(body_id),
-                            body_expr: Some(body.clone()),
-                            patterns,
-                            native: None,
-                        }));
-                    self.body_jobs.push(BodyJob::Function(member_def));
-                    members.push(member_def);
+                    members.push(self.build_impl_function(module, receiver, signature, body, span))
                 }
                 ImplMember::Static {
                     name,
@@ -576,6 +533,60 @@ impl Builder<'_> {
                 .push(implementation_def);
         }
         implementation_def
+    }
+
+    /// Builds one function member of a protocol implementation.
+    fn build_impl_function(
+        &mut self,
+        module: ModuleId,
+        receiver: crate::Ty,
+        signature: &FunctionSignature,
+        body: &Expr,
+        span: &SyntaxSpan,
+    ) -> DefId {
+        let member_def = self.declare_nested(
+            module,
+            &signature.name,
+            Visibility::Public,
+            span.clone(),
+            DefKind::Unit(UnitDef),
+        );
+        let body_id = self.allocate_body(member_def);
+        let names = generic_names(&signature.generics);
+        let generics = self.build_generics(module, &names, &signature.generics);
+        let (params, defaults) = self.build_parameters(
+            member_def,
+            module,
+            &signature.parameters,
+            Some(receiver),
+            &names,
+        );
+        for (default_body, expr) in defaults {
+            self.body_jobs.push(BodyJob::Expression {
+                def: member_def,
+                body: default_body,
+                expr: Box::new(expr),
+                self_ty: None,
+            });
+        }
+        let ret = self.build_result(module, &names, signature.result.as_ref());
+        let patterns = signature
+            .parameters
+            .iter()
+            .map(|parameter| parameter.pattern.clone())
+            .collect();
+        self.pending[member_def.index()].kind = PendingKind::Function(Box::new(PendingFunction {
+            generics,
+            params,
+            ret,
+            effects: crate::EffectSet::empty(),
+            body: Some(body_id),
+            body_expr: Some(body.clone()),
+            patterns,
+            native: None,
+        }));
+        self.body_jobs.push(BodyJob::Function(member_def));
+        member_def
     }
 
     /// Resolves the protocol an implementation names, recording the use.
@@ -669,7 +680,8 @@ impl Builder<'_> {
             .iter()
             .map(|segment| crate::Name::new(segment))
             .collect::<Vec<_>>();
-        let super::super::resolve::PathKind::Def(protocol) = self.resolve_path(module, &segments) else {
+        let super::super::resolve::PathKind::Def(protocol) = self.resolve_path(module, &segments)
+        else {
             return None;
         };
         let args = arguments
@@ -754,7 +766,9 @@ impl Builder<'_> {
             .position(|name| *name == crate::Name::new("Self"))
             .map(|index| {
                 let index = u32::try_from(index).expect("generic parameters fit u32");
-                self.program.tys.intern(crate::TyKind::Param(crate::ParamIdx::new(index)))
+                self.program
+                    .tys
+                    .intern(crate::TyKind::Param(crate::ParamIdx::new(index)))
             });
         let params = signature
             .parameters
@@ -765,7 +779,9 @@ impl Builder<'_> {
                 let is_receiver = index == 0 && name == "self";
                 let written = parameter.annotation.is_some() || is_receiver;
                 let ty = match (&parameter.annotation, self_ty) {
-                    (Some(annotation), _) => super::types::lower_type(self, module, &names, annotation),
+                    (Some(annotation), _) => {
+                        super::types::lower_type(self, module, &names, annotation)
+                    }
                     (None, Some(self_ty)) if is_receiver => self_ty,
                     (None, _) => self.program.tys.error(),
                 };

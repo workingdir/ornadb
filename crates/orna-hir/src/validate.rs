@@ -230,6 +230,8 @@ pub enum ValidationError {
     },
 }
 
+mod generics;
+
 impl Program {
     /// Checks every structural invariant and returns all violations.
     ///
@@ -371,7 +373,11 @@ impl Program {
                 self.validate_def_refs(&protocol.members, "protocol member", errors)
             }
             DefKind::Impl(implementation) => {
-                self.validate_def_refs(std::slice::from_ref(&implementation.owner), "impl owner", errors);
+                self.validate_def_refs(
+                    std::slice::from_ref(&implementation.owner),
+                    "impl owner",
+                    errors,
+                );
                 if let Some(protocol) = implementation.protocol {
                     self.validate_kinds(
                         std::slice::from_ref(&protocol),
@@ -380,9 +386,10 @@ impl Program {
                         errors,
                     );
                 }
-                for ty in &implementation.protocol_args {
-                    self.validate_ty(*ty, "impl protocol argument", errors);
-                }
+                implementation
+                    .protocol_args
+                    .iter()
+                    .for_each(|ty| self.validate_ty(*ty, "impl argument", errors));
                 self.validate_def_refs(&implementation.members, "impl member", errors);
             }
             DefKind::Dimension(dimension) => {
@@ -403,26 +410,6 @@ impl Program {
                 self.validate_owned_body(assertion.body, from, "assertion body", errors);
             }
             DefKind::Field(field) => self.validate_ty(field.ty, "field.ty", errors),
-        }
-    }
-
-    fn validate_generics(
-        &self,
-        generics: &[crate::GenericParam],
-        errors: &mut Vec<ValidationError>,
-    ) {
-        for generic in generics {
-            for bound in &generic.bounds {
-                self.validate_kinds(
-                    std::slice::from_ref(&bound.protocol),
-                    "generic bound",
-                    DefKind::is_protocol,
-                    errors,
-                );
-                for ty in &bound.args {
-                    self.validate_ty(*ty, "generic bound argument", errors);
-                }
-            }
         }
     }
 

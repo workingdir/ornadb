@@ -473,7 +473,11 @@ struct BodyCheck<'a> {
 }
 
 impl<'a> BodyCheck<'a> {
-    fn new(program: &'a mut Program, variant_owner: &'a BTreeMap<DefId, DefId>, owner: DefId) -> Self {
+    fn new(
+        program: &'a mut Program,
+        variant_owner: &'a BTreeMap<DefId, DefId>,
+        owner: DefId,
+    ) -> Self {
         Self {
             program,
             variant_owner,
