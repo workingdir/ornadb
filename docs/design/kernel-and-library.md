@@ -13,7 +13,7 @@ Owner direction, quoted (2026-11-10):
 Input documents: [hir.md](hir.md), [native-declarations.md](native-declarations.md),
 [DECIDED.md](../language/DECIDED.md), [DECISIONS.md](../language/DECISIONS.md), the language reference
 ([README](../language/README.md)), the frozen 1.1.0 text under `reference/Orna-1.1.0/source`, and the units design on
-PR #9854 (file docs/design/units.md on branch docs/units-ordinary-declarations, head `9cd0fddfc`).
+PR #9854 (file docs/design/units.md on branch docs/units-ordinary-declarations, head `97ada5ca7`).
 
 Evidence base:
 
@@ -22,7 +22,7 @@ Evidence base:
   `orna-hir/src/`.
 * The pinned standard library is `stdlib/std` at `fdf63e87`. Counts of its contents are in Appendix A.
 * Two facts come from open PRs and are marked: #9850 (HIR typeck fixes, head `cc718ae26`) and #9854 (units, head
-  `9cd0fddfc`; its section and rule numbers were read at `86be7f979`, and the later commit changed one line).
+  `97ada5ca7`; the first revision of this document read `9cd0fddfc`, and section 10 records what changed).
 * A claim marked `[probe]` comes from running a prebuilt `orna check` binary on a small module. The binary is
   `target/FixAppLive/debug/orna`, built on 2026-11-09 from a lane branch. It is not a build of main. Appendix B lists
   every probe with its output. Re-run a probe before you rely on it.
@@ -66,8 +66,8 @@ whether the unit is in the type or the value, who computes a product of units, a
 decided. The unit is in the type and erased at run time (the D8 amendment on PR #9854). The algebra is PR #9854's
 unit-key kernel now (P4-A, D14) and Orna evaluated at check time later (P4-B). The surface is enum-shaped families
 (D15): `Length.kilometre`, `5.kilometre` and user-declared families, one declaration form. Both algebras sit behind a
-four-item kernel interface, so the move from A to B changes no library or user source. Section 10 lists twelve changes
-to units.md and accepts each; none overwrites it.
+four-item kernel interface, so the move from A to B changes no library or user source. Section 10 records how PR #9854
+applied the twelve changes of the first revision, and it lists four gaps that remain.
 
 **What lands when** (section 8.2). H1 takes the grammar and resolver work. Impls in enums (P3a) are the first parser
 change (D15). H2 takes protocol member calls, operators, suffixes, interpolation and the unit-key kernel. H3 takes the
@@ -82,6 +82,7 @@ diagnostics and the effect chain. H4 takes the executor rules and the step charg
   protocols and has no `impl` block (Appendix A).
 * `"{n}"` with an `Int` fails in the checker and the evaluator. Three components disagree about interpolation.
 * `1.day` is a calendar `Period` in the checker and the evaluator, and a `Duration` in reference chapters 1 and 2.
+  Owner direction (`units.md` Q1) settled it: the elapsed 24-hour `Duration`.
 * A generic nominal type cannot use its parameter as a field type in the probed checker (`type Box<T> { value: T }`).
 * `std.option.flatten` takes `T? ?`, which D3 makes an error. `pub use` is decided but not yet in the parser.
 * Money, Duration, Instant, Range and Quantity have fixed canonical tags. A library definition must keep them or the
@@ -137,7 +138,7 @@ A candidate feature is library when all three hold.
 | D3 flat options | Unchanged. `T?` and lifting stay kernel. `std.option` already is library. |
 | D5 no overloading | Operator protocols are not overloading (D16). Section 4, P1 states why and what it costs. |
 | D8 units | Amended by owner direction on PR #9854. D15 sets the surface: enum-shaped families. Sections 5 and 10. |
-| D11 `pub use`, replaceable std | Used for re-exports such as `pub use TimeUnit.hour as hours;`. |
+| D11 `pub use`, replaceable std | Used for re-exports such as `pub use Length.kilometre as km;`. |
 | D12 natives in `core` and `sys` | Extended to `native type` and to body-less impl members in `core` (P9). |
 | D14 to D18 | Decided on 2026-11-10 under the owner's delegation. Section 11 states each; sections 4 and 5 use them. |
 
@@ -168,7 +169,7 @@ Sources: reference chapters 1 to 4 under [../language/reference/](../language/re
 | U01 | Nominal type, private fields, nested `impl` | 02-types "Nominal, alias and refined" | Money, Range, Duration |
 | U02 | Refined nominal type `type A = B { assert ..; }` | 02-types; ORNA-REFINE-001..005 | Percent, `Money<C>` |
 | U03 | Transparent alias `type A = B;` | 02-types | names for keys |
-| U04 | Enum: closed, nominal, payload variants, `case` | 02-types "Enums" | Rounding, Ordering, TimeUnit |
+| U04 | Enum: closed, nominal, payload variants, `case` | 02-types "Enums" | Rounding, Ordering, Duration |
 | U05 | Protocol: functions, `static` properties, `Self` | 02-types "Generics and protocols" | Currency, Display, Add |
 | U06 | Generics with `impl` bounds, explicit type arguments | 02-types; D5 | `sum<T>`, `Range<T>` |
 | U07 | `From<S>` and `Target.from(source)` | 02-types; ORNA-CONVERT-001..010 | Email, `12.34.GBP` |
@@ -473,8 +474,8 @@ replace it.
 **The rule.** Look up `name` in the import context, in this order. Two hits in one step are an ambiguity error.
 
 1. A payload-free enum variant whose enum implements `Suffix<N, R>`, where `N` is the literal's numeric type. The
-   result is `variant.apply(n)`. A variant of an enum that implements `Unit` (section 5.5) is also a suffix. Its result
-   is a `Quantity` of that unit's key, and `5.kilometre` is `of<Length.kilometre>(5)`.
+   result is `variant.apply(n)`. A variant of a unit family (section 5.5) is also a suffix. Its result is a `Quantity`
+   of that unit's key, and `5.kilometre` is `Length.kilometre(5)`.
 2. A type `T` with a registered literal target (P10). `T impl Currency` gives `Money<T>.from(n)`. This is the
    explicit-target syntax that ORNA-CONVERT-006 already allows ("such as `12.34.GBP`"). Any other `T impl From<N>` gives
    `T.from(n)`, so `50.Percent` works.
@@ -484,7 +485,7 @@ replace it.
 
 * **P2-A, value suffix and type target** (the rule above). Buys: no boilerplate per unit; the enum is the list of
   suffixes. Costs: needs P3a (impl in enums); two lookup cases; plural spellings need re-exports
-  (`pub use TimeUnit.hour as hours;`).
+  (`pub use Length.kilometre as km;`).
 * **P2-B, a `suffix fn` declaration.** `pub suffix fn kilometre(n: Decimal): Length = ...;`. `suffix` is a contextual
   word recognised by two-token lookahead, as `native` is (native-declarations.md, ORNA-NATIVE-002). Buys: explicit,
   greppable, needs no enum. Costs: one declaration per spelling and per currency; `1.hour` and `1.hours` are two lines.
@@ -493,9 +494,10 @@ replace it.
 
 `decimal` names a numeral form, not a unit. It stays kernel under A and C. Under B it is one line in `core`.
 
-**Open point inside P2.** `day` and `days` are a calendar `Period` in the checker (`C:lib.rs:5344`, `:5389`) and in the
-evaluator (`E:lib.rs:5891`). Chapter 1 and chapter 2 of the reference say `1.day` is a `Duration`. units.md (PR #9854,
-Q1) follows the checker. Under P2 the answer is one library line, so the owner can decide without touching the kernel.
+**Decided by owner direction** (`units.md` Q1): `day` and `days` are the elapsed 24-hour `Duration`, as the
+reference chapters 1 and 2 say. The checker and the evaluator read them as a calendar `Period` today (`C:lib.rs:5344`,
+`:5389`; `E:lib.rs:5891`). Calendar arithmetic uses `months`, `years` and `Period.days(n)`. Under P2 the change is one
+library line.
 
 **Follows from D15:** P2-A. Unit variants are suffixes (rule 1), and P3a is accepted, so P2-B is not needed. Section
 5.5.3 says which families are in scope and how an ambiguity is resolved.
@@ -543,7 +545,7 @@ D5 describes it). A `Rounding` enum needs one rule instead.
   allows importing a variant by name). Buys: no new rule. Costs: common words enter every module that imports them.
 
 **P3c. The base of a refined type.** A refined type is "represented by" its base, but the checker offers only
-`Port.from(value)` (`C:lib.rs:5224-5230`) `[probe]`. A library type such as `Duration = Int { ... }` cannot read its own
+`Port.from(value)` (`C:lib.rs:5224-5230`) `[probe]`. A library type such as `Percent = Int { ... }` cannot read its own
 integer. The 1.1.0 text itself assumes it can: `std.time.duration.compact(self, context)` inside
 `type FriendlyDuration = Duration { impl Display ... }` (`reference/Orna-1.1.0/source/13-presentation.md:74-79`).
 
@@ -563,13 +565,15 @@ no value of type `C`, so a value witness cannot work. D5 forbids passing a type 
 **P3e. A payload-free variant as a type argument.** Needed by enum-shaped unit families (D15), where
 `Quantity<Decimal, Length.kilometre>` names a unit. Option i: yes, a variant is a singleton type
 (other languages do this, for example Scala 3 enum cases and TypeScript enum members `[INFERENCE: no page fetched]`).
-Option ii: no; the unit is a name in the type namespace, as PR #9854 declares it. Option iii: the unit slot of
-`Quantity`, and of the numeric shorthand `Decimal<U>`, accepts a variant of a unit family, and no other type position
-does. Buys: no general singleton types, so no subtyping question. Costs: one resolver rule that is specific to units.
+Option ii: no; the unit is a name in the type namespace, as the first draft of PR #9854 declared it. Option iii: the
+unit slot of `Quantity`, and of the numeric shorthand `Decimal<U>`, accepts a variant of a unit family, and no other
+type position does. Buys: no general singleton types, so no subtyping question. Costs: one resolver rule that is
+specific to units, and `to` takes its target as a type argument, `to<Length.mile>(q)`.
 
 **Decided (D15):** part a, as the first parser change. Part e is needed.
 
-**What I do until told otherwise:** b (option i), c (option i) and d (option i). For e, option iii.
+**What I do until told otherwise:** b (option i), c (option i) and d (option i). For e, option i, as `units.md`
+section 2 assumes. Option iii is the narrower choice if general singleton types are judged too large.
 
 **Cost** `[INFERENCE]`: a is a grammar and lowering change of about 100 lines. b is a small resolver rule. c and d are
 member-lookup rules in typeck.
@@ -586,7 +590,7 @@ section defines them.
 * **P4-A, unit-key algebra in the kernel.** The checker owns `Quantity<N, U>`, where `U` is a key (exponents over base
   axes and an exact scale; PR #9854 adds an offset and an affine flag, which C6 moves to the library). It implements the
   typing rules for `+ - * / ^` over keys. Units are erased at run time. PR #9854 specifies this in rules `ORNA-UNIT-001`
-  to `-019` and estimates 900 to 1,200 lines in one HIR module.
+  to `-020` and estimates 900 to 1,200 lines in one HIR module.
 * **P4-B, compile-time evaluation.** A pure `core` function (an empty inferred effect set) takes and returns canonical
   value types, and runs at check time under a step quota. The earlier draft marked such a function `const fn`; D14 drops
   the marker. A type may take a value parameter. A type argument may be a call to a pure `core` function. The checker
@@ -833,11 +837,11 @@ library type that moves or is renamed therefore changes identity and bytes. The 
   quantity type to their legacy adapters. The library has no syntax for it. A build script checks that each registered
   path exists and has the expected fields and parameters; a mismatch fails the build. Buys: bytes unchanged; no grammar.
   Costs: a hidden coupling; a `core` rename breaks bytes unless the guard runs; four or five adapters.
-* **P9-B, a `wire` clause legal only in `core`.** For example `pub type Duration = Int wire 60005 { ... }`. PR #9854
-  already proposes this shape for units as `repr NAME` on `dim` and `alias` declarations, "checked against the wire-form
-  table and nothing else" (units.md section 5). Buys: the coupling is visible in source. Costs: new syntax; Money still
+* **P9-B, a `wire` clause legal only in `core`.** For example `pub enum Duration wire 60005 { ... }`.
+  The first draft of PR #9854 proposed this shape for units as `repr NAME` on `dim` and `alias` declarations, "checked
+  against the wire-form table and nothing else". Buys: the coupling is visible in source. Costs: new syntax; Money still
   needs a Rust adapter because its shape differs. A clause would have to serve every legacy-tagged type, not only
-  quantities.
+  quantities. Not chosen (D17).
 * **P9-C, no registry.** Library types use the generic encodings. Buys: simplest and most honest. Costs: a format change
   for Money, Duration, Range and Quantity: new descriptors, new fingerprints, new golden vectors, and a migration in
   `orna-evolution` for stored data.
@@ -926,7 +930,7 @@ the options as the record. Section 5.5 spells out the surface.
   and no type for a quantity (`H:ty.rs:65-126`). `H:ops.rs:19-22` says units are outside its table.
 * The 1.1.0 text has `ORNA-UNIT-001` to `-008` (`reference/Orna-1.1.0/source/05-types.md:189-252`), tag 60006 and the
   descriptor `[7, numeric_type, unit_id]`.
-* PR #9854 re-specifies the feature as `ORNA-UNIT-001` to `-019`, with the algebra in one HIR module of 900 to 1,200
+* PR #9854 re-specifies the feature as `ORNA-UNIT-001` to `-020`, with the algebra in one HIR module of 900 to 1,200
   lines (its estimate).
 
 ### 5.2 What a unit system needs, and who provides it
@@ -991,139 +995,141 @@ executor and runs any pure `core` body.
 
 ### 5.5 Decision 3: the surface (decided: enum-shaped families, D15)
 
-**Decided (D15):** S2. S1 and S3 stay below as the record of the options. S1 is not shipped.
+**Decided (D15):** enum-shaped families (S2). S1 is not shipped. `units.md` section 2 holds the grammar, and its
+ORNA-UNIT-009, -010 and -020 hold the rules (PR #9854, head `97ada5ca7`). This section keeps the options as the record,
+states the surface, and lists the points that D15 and `units.md` leave open (5.5.1 and 5.5.4).
 
-**S1, keyword forms** (PR #9854, which extends the 1.1.0 grammar with `canonical` and `repr` clauses and an `alias`):
-
-```orna
-pub dim Length;
-pub unit metre : Length base;
-pub unit kilometre : Length = 1000.metre;
-pub dim Speed = Length / Time;
-```
-
-Buys: short; the parser has it (`Declaration::Dimension` and `Declaration::Unit`, `orna-syntax/src/parser.rs:284-292`);
-it reads like the spec. Costs: five words (`dim`, `unit`, `base`, `offset`, `affine`) stay meaningful; it is one more
-declaration the library cannot imitate; the owner's enum idea is unused.
-
-**S2, enum-shaped families** (decided). A family is an enum and a unit is a variant. A definition after `=` gives the
-scale, and the definition is an ordinary expression that names a quantity: `kilometre = 1000.metre` says that one
-kilometre is 1000 metres. Section 5.5.1 gives the exact form.
-
-Buys: the family is a list that `case` and tools can walk; user code can match on units; the declaration form is one the
-user already knows. Needs P3a and, where a unit appears in a type, P3e. Costs depend on the algebra: under P4-A the
-checker accepts a small set of expression forms after `=` (rule 5 of 5.5.1); under P4-B it accepts any pure
-expression. The source is the same under both.
-
-**S3, a marker type with an impl.** `pub type Kilometre { impl Scale { static scale = ...; } }`. Buys: no new syntax at
-all. Costs: no unit list and no `case`; one type per unit.
+* **S1, keyword forms** (the first draft of PR #9854): `pub dim Length; pub unit kilometre : Length = 1000.metre;`.
+  Buys: short; the parser has it (`Declaration::Dimension`, `Declaration::Unit`; `orna-syntax/src/parser.rs:284-292`);
+  it reads like the 1.1.0 text. Costs: five words (`dim`, `unit`, `base`, `offset`, `affine`) stay meaningful, and it is
+  one more declaration that the library cannot imitate. Not shipped.
+* **S2, enum-shaped families** (decided). A family is an enum and a unit is a variant. A definition after `=` gives the
+  scale: `kilometre = 1000 metre` says that one kilometre is 1000 metres. Buys: the family is a list that `case` and
+  tools can walk, and the declaration form is one the user already knows. Needs P3a and P3e. The text after `=` is a
+  unit expression under P4-A and an ordinary Orna expression under P4-B (D15).
+* **S3, a marker type with an impl.** `pub type Kilometre { impl Scale { static scale = ...; } }`. Buys: no new syntax.
+  Costs: no unit list and no `case`; one type per unit.
 
 #### 5.5.1 The declarations
 
-A unit family is an enum that implements the core protocol `Unit`. Built-in and user families use this one form.
+The surface of `units.md` section 2, with one base family and one derived family:
 
 ```orna
-// A base family. The one variant without a definition is the base unit. It starts a new axis.
 pub enum Length {
-    metre,
-    kilometre = 1000.metre,
-    mile = 1609.344.metre,
-
-    impl Unit {}
+    metre,                               // the one bare variant: the base unit. It starts a new axis
+    kilometre = 1000 metre,              // one kilometre is 1000 metres
+    mile = 1609.344 metre,
 }
 
-// A derived family. The header gives the dimension. Each definition is checked against it.
-pub enum Energy = Mass * Length^2 / Time^2 {
-    joule = 1.kilogram * 1.metre^2 / 1.second^2,
-    kilowatt_hour = 3_600_000.joule,
-
-    impl Unit {}
+pub enum Speed {                         // derived: no bare variant. The dimension comes from the variants
+    kmh = Length.kilometre / Duration.hour,
+    mph = Length.mile / Duration.hour,
 }
 ```
 
-The rules restate ORNA-UNIT-009 and -010 for enums.
+A derived dimension needs no declaration of its own. `dim Speed = Length / Time;` of 1.1.0 is the family `Speed`: its
+dimension is the common dimension of its variants (ORNA-UNIT-009 and -010). The grammar impact is in 5.5.5. Two points
+are not settled by D15 or by `units.md`, and 5.5.4 adds two more. Each states its default as "what I do until told
+otherwise".
 
-1. A family is a payload-free enum that implements `Unit`. Under P4-A `Unit` has no members: the line is a marker. It
-   links the enum to its explanation, because go-to-definition on `Unit` lands on the doc comment in `core`. `Currency`
-   marks a currency type the same way.
-2. A variant without `=` is a base variant. A family has at most one. If it has one, it is a base family: the variant
-   starts a new axis, and every other variant must reduce to that axis alone (ORNA-UNIT-010).
-3. A family with no base variant is a derived family. It needs a header, `= dimension_expression`, which names families
-   and uses `*`, `/` and `^` with an integer literal. Each definition must have that dimension. If one does not, the
-   error is ORNA-UNIT-DIM and names both printed dimensions. A base family has no header.
-4. A definition `v = e` says that one `v` equals the value of `e`. The expression `e` has a quantity type. The key of
-   `v` takes its exponents from that type, and its scale from the scale of that type times the value of `e`. So
-   `kilometre = 1000.metre` has scale 1000, and `joule = 1.kilogram * 1.metre^2 / 1.second^2` has scale 1.
-5. Under P4-A a definition may use only numeric literals (exact decimals), unit suffixes, `*`, `/`, `^` with an integer
-   literal, and parentheses. Anything else is an error that names the allowed forms. Under P4-B any expression with an
-   empty effect set is allowed. The text that P4-A accepts is also valid P4-B text with the same meaning, so the move
-   changes no source (D14).
-6. A definition cycle is ORNA-UNIT-CYCLE. A definition on a variant of an enum that does not implement `Unit` is an
-   error, because the clause has no meaning there. A variant with a payload cannot be a unit.
-7. A definition has no offset, so there are no affine variants. Temperature scales are library types (C6, listing 10).
+**Point 1. Which enums are unit families?** ORNA-UNIT-009 says a family with two or more bare variants is
+ORNA-UNIT-BASE. Read literally, that rejects every ordinary payload-free enum. Listing 5 declares
+`enum Ordering { less, equal, greater }`, and candidate 8 declares `Rounding`. Something must tell a unit family apart.
+
+* **M-a, a marker impl.** The family implements the core protocol `Unit`: `impl Unit {}` as the last line of the enum.
+  Under P4-A `Unit` has no members. Buys: explicit; a reader follows `Unit` to its doc comment in `core`, which is the
+  open-the-box path; `Currency` marks a currency type the same way; it needs P3a, which D15 already makes the first
+  parser change. Costs: one line per family.
+* **M-b, by content.** An enum is a family when at least one variant has `=`. Buys: no extra line. Costs: a family of
+  one bare variant (`enum Pixel { pixel }`) is not a family until it gains a definition, and the error then says only
+  that the suffix cannot be resolved.
+* **M-c, by use.** Any payload-free enum is checked as a family where a suffix or a unit type argument names one of its
+  variants. Buys: nothing to write. Costs: every payload-free enum puts its variant names in the suffix namespace
+  (`3.less`), and the errors appear at the use, not at the declaration.
+
+**What I do until told otherwise:** M-a. The listings in section 7 show the marker.
+
+**Point 2. The text after `=` and P4-B.** D15 says the text is a unit expression under P4-A and an ordinary Orna
+expression under P4-B. `1000 metre` is a number followed by a name. That is not an ordinary Orna expression: it has no
+meaning in Orna today.
+
+* **U-a, keep `unit_expr` under P4-B.** P4-B parses the same production and evaluates it with Orna functions. Buys: the
+  source of every family stays as `units.md` writes it. Costs: a second expression sublanguage stays in the grammar.
+* **U-b, write definitions as quantity literals now:** `kilometre = 1000.metre` and `kmh = 1.kilometre / 1.hour`. These
+  are ordinary Orna expressions today (probe 12 accepts `5.kilometre / 2.hour`). P4-A restricts the allowed forms with
+  a check, and P4-B removes the check. Buys: no second sublanguage, and the P4-A text is valid P4-B text. Costs:
+  `units.md` sections 2, 7 and 8 change spelling, and a derived unit reads `1.kilometre / 1.hour`.
+
+**What I do until told otherwise:** U-a, as `units.md` is written. U-b costs nothing to adopt before H2c-2 ships.
 
 #### 5.5.2 Where a unit appears
 
-* **As a suffix.** `5.kilometre` follows the P2 rule: a variant of a unit family in scope. The result is a `Quantity`
-  of that unit's key. The qualified form is `core.units.of<Length.kilometre>(5)`, a generic call in which the unit is a
-  type argument (D5). Symbols are re-exports, not second variants: `pub use Length.kilometre as km;` (D11).
+* **As a suffix.** `5.kilometre` follows the P2 rule: a variant of a unit family in scope. The result is a
+  `Quantity<Int, Length.kilometre>`. The qualified form is `Length.kilometre(5)`. It names the family, so it resolves
+  an ambiguity (5.5.3). Short spellings are extra variants (`s = second`) or re-exports (`pub use Length.kilometre as
+  km;`, D11).
 * **In a type.** `Decimal<Length.kilometre>` is `Quantity<Decimal, Length.kilometre>`. A product or quotient of units is
-  a key product: `Decimal<Length.kilometre / Time.hour>`. The type grammar has `*` and `/` already. Only the unit slot
-  of `Quantity` and of the numeric shorthand accepts a unit. This is P3e in its narrowest form (section 4.3, option
-  iii).
-* **As a value.** `Length.kilometre` is an ordinary enum value. It can be matched with `case`, stored and put in a list.
-  It carries no number.
+  a key product: `Decimal<Length.kilometre / Duration.hour>` (the type grammar has `*` and `/` already). A family name
+  in a type position is the membership type of that family's quantities (ORNA-UNIT-020): `elapsed: Duration`.
+* **As a value.** `Length.kilometre` is an ordinary enum value of zero size. It can be matched with `case`, stored and
+  put in a list. `to(q, Length.mile)` passes one as an argument. Its static type is a singleton, so the type of the
+  result is known (P3e, option i).
 
 #### 5.5.3 Which names are in scope
 
 The suffix `5.m` looks for `m` among the variants of the unit families in scope, and among the names that the module
 imports and that denote such variants.
 
-* A family is in scope when the module declares it or imports it. The families of `core` are in scope everywhere: they
-  are the intrinsic environment, the outermost level.
-* Two families at the same level that both define the suffix are an ambiguity error, ORNA-S011. There is no
-  last-import-wins rule, so the result never depends on the order of imports. The qualified form resolves it.
-* A name that the module declares or imports shadows the same name in the intrinsic environment, as every `core` name
-  is shadowed (R11). A shadowed family is not in scope for that name. So a module that imports the physics `Time`
-  family of listing 1 gets `3.hour` as a time quantity. A module that does not gets the `Duration` of listing 3.
+* A family is in scope when the module declares it or imports it, or when it belongs to the prelude. The families of
+  `core` (time and data size) are in the prelude.
+* Two families in scope that both define the suffix are an ambiguity error, ORNA-S011 (`units.md` section 7.3). There is
+  no last-import-wins rule, so the result never depends on the order of imports. The qualified form resolves it.
+* Considered and not adopted: a name that the module declares shadows the prelude name (R11). Buys: a user family can
+  use `s` or `min` without qualifying. Costs: the same text means different things in two modules, and the change is
+  silent. The cost of the chosen rule is that a user family that reuses a `core` suffix must be qualified at each use.
 
-#### 5.5.4 Derived dimensions: what was considered
+#### 5.5.4 Derived dimensions and the form of P3e
 
-`dim Speed = Length / Time;` of 1.1.0 becomes the header of the family `Speed`. A dimension with no unit cannot be
-declared. Nothing could have its type.
+**Derived dimensions.** `units.md` infers the dimension of a derived family from its variants (option H0).
 
-* **H0, no header.** The dimension is inferred from the definitions. Buys: nothing extra to write, and the closest shape
-  to a plain enum. Costs: a family with one variant and a wrong definition names the wrong dimension without any error,
-  and ORNA-UNIT-010 has nothing to check against.
-* **H1, a header** (the form above). Buys: the declaration reads like the owner's `Speed = Length / Time`; each
-  definition is checked against a stated dimension; it reuses the `dimension_expression` production of the 1.1.0
-  grammar. Costs: one optional production in the enum header, and a derived family states its dimension twice (header
-  and definitions). The second statement is the check.
+* **H0, no header** (`units.md`). Buys: nothing extra to write, and the closest shape to a plain enum. Costs: a family
+  with one variant and a wrong definition names the wrong dimension without any error, because ORNA-UNIT-010 has
+  nothing to check against.
+* **H1, an optional header.** `pub enum Speed = Length / Duration { ... }`, using the `dimension_expression` production
+  of the 1.1.0 grammar. Buys: the declaration reads like `Speed = Length / Duration`, and each definition is checked
+  against a stated dimension. Costs: one production in the enum header, and a derived family states its dimension twice.
 * **H2, a static in the impl.** `impl Unit { static dimension = ...; }`. Buys: no header syntax. Costs: a dimension is
-  not a value, so the static would need a type for dimensions. That type does not exist.
+  not a value, so the static needs a type for dimensions. That type does not exist.
 
-**What I do until told otherwise:** H1.
+**What I do until told otherwise:** H0, as `units.md` is written. H1 can be added later as an optional header, and it
+breaks no source.
+
+**The form of P3e.** `units.md` section 2 says that unit variants are singleton types (option i of 4.3). That lets
+`to(q, Length.mile)` take the unit as a value: the static type of the argument is the singleton, so the result key is
+known. Option iii (only the unit slot of `Quantity` accepts a variant) is smaller, and it forces `to<Length.mile>(q)`.
+
+**What I do until told otherwise:** option i, as `units.md` assumes.
 
 #### 5.5.5 Grammar impact
 
-Against the frozen 1.1.0 grammar (`reference/Orna-1.1.0/grammar/orna.ebnf`):
+Against the frozen 1.1.0 grammar (`reference/Orna-1.1.0/grammar/orna.ebnf`), as `units.md` section 2 specifies:
 
 | Change | Production | Needed by |
 |---|---|---|
 | Add | `enum_declaration` takes nested impls after the variants | P3a, `impl Unit` |
-| Add | `enum_variant`: an optional `"=" , expression` after the name | the definition clause |
-| Add | `enum_declaration`: an optional `"=" , dimension_expression` after the name | derived families |
-| Reuse | `dimension_expression` and `dimension_term`, now used by the header | the header |
+| Add | `enum_variant`: an optional `"=" , unit_expr` after the name (payload-free variants only) | the definition |
+| Add | `unit_expr`, `unit_term` and `unit_name` | the text after `=` (U-a) |
 | None | `type_product` has `*` and `/`; `Length.kilometre` is a `qualified_name` | unit types |
 | Not shipped | `dimension_declaration` and `unit_declaration` | S1 |
 
-D15 adds no keyword. `dim`, `unit`, `base`, `offset` and `affine` keep their present status in the lexical chapter. A
-later release may free them. Beyond the grammar the change touches the resolver (the suffix scope of 5.5.3, and a
-variant in the unit slot), the checker (the family rules of 5.5.1) and `core` (the `Unit` protocol, `Quantity` and
-`of`).
+Under U-b the three `unit_expr` rows become one change: the clause takes an ordinary `expression`. With H1, one row
+adds the header and `dimension_expression` is reused. D15 adds no keyword. `units.md` section 11.2 frees `dim`, `unit`,
+`base`, `offset` and `affine` in the same change that adds the productions. Beyond the grammar the change touches the
+resolver (the suffix scope of 5.5.3, and a variant as a type argument), the checker (ORNA-UNIT-009, -010 and -020) and
+`core` (the `Unit` protocol under M-a, `Quantity`, `erase` and `unerase`).
 
 Cost `[INFERENCE]`: the enum changes are the P3a estimate of section 4.3, about 100 lines of grammar and lowering, plus
-a small addition for the clause and the header. PR #9854 no longer needs its declaration parser.
+a small addition for the clause. PR #9854 no longer needs its declaration parser.
 
 ### 5.6 The interface the kernel keeps in every option
 
@@ -1131,37 +1137,37 @@ Four items. They are the same under A and B. Under B items 2 and 3 move into `co
 user or library author writes changes.
 
 1. **`Quantity<N, U>`**: a type constructor over `N` in `{Int, Decimal, Float}` and a key `U`. Erased at run time.
-2. **Keys**: an exponent map over base axes and an exact rational scale. An axis is a base variant of a unit family or a
-   type that implements `Currency`. Equal keys are one type. Key arithmetic for `*`, `/` and `^n` with an integer
-   literal exponent. The family rules of section 5.5.1 are checked here.
+   Library code reads and builds a quantity only through two casts, `erase` and `unerase<U>`.
+2. **Keys**: an exponent map over base units and an exact rational scale. Equal keys are one type. Key arithmetic for
+   `*`, `/` and `^n` with an integer literal exponent. The family rules (ORNA-UNIT-009 and -010) and the membership
+   rule (ORNA-UNIT-020) are checked here.
 3. **Exactness and ratio queries**: for two keys of one dimension, the finer key, and the exact ratio or "inexact". Used
    by mixed-unit `+`, `-` and comparison, and by `to`.
 4. **Suffix resolution**: the P2 rule yields a key for a unit variant.
 
-Everything else is library: unit data, `Duration`, `Money`, size units, affine types (listing 10), `to`, aggregates,
-`Display` and diagnostic text.
+Everything else is library: unit data, `Duration`, `Money`, `Rate`, size units, affine types (listing 10), `to`,
+aggregates, `Display` and diagnostic text. There is no currency axis in the kernel (section 5.7).
 
-### 5.7 Money and the currency axis
+### 5.7 Money and the currency axis (decided by owner direction, `units.md` O4)
 
-PR #9854 (`ORNA-UNIT-017`) makes `Money<C>` equal to `Quantity<Decimal, C>`, so a currency is a base axis. MONEY-003
-then follows from the algebra: `Decimal<kWh> * (Money<GBP> / kWh)` reduces to `Money<GBP>`. The other shape keeps
-`Money<C>` a library type (listing 4) and adds a library `Rate<C, U>`.
+**Decided:** `Money<C>` is a library type (listing 4) with a library `Rate<C, U>`. The kernel has no currency axis, and
+ORNA-UNIT-017 is withdrawn. Wire tag 60007 is kept by the P9 registry (D17). The first draft of PR #9854 made
+`Money<C>` equal to `Quantity<Decimal, C>`, so a currency was a base axis, and MONEY-003 followed from the algebra:
+`Decimal<kWh> * (Money<GBP> / kWh)` reduces to `Money<GBP>`. The table is the record of the two shapes.
 
-| | Currency as an axis | Money as a library type |
+| | Currency as an axis (first draft) | Money as a library type (decided) |
 |---|---|---|
 | MONEY-003 | falls out of the algebra | a `Rate<C, U>` impl, plus the ratio query for `kWh` against `J` |
 | `Money<GBP> * Money<GBP>` | valid as `GBP^2` unless a rule forbids it | no such impl, so an error |
-| Kernel size | one more rule (PR #9854 O4) | none |
-| Tag 60007 | kept by `repr Money` (PR #9854) | kept by P9 |
-
-This document does not decide it. Both keep tag 60007.
+| Kernel size | one more rule | none |
+| Tag 60007 | kept by `repr Money` | kept by P9 |
 
 ### 5.8 Staging (decided: D14 and D15)
 
 1. **H2c-1.** The P4-A unit-key kernel behind the four-item interface. It needs none of P1 to P3.
 2. **H2c-2, after P1, P2 and P3.** The unit families as enums (listing 1), then `Duration`, size units, affine types and
    `to` as library (listings 3 and 10). The surface is S2 (section 5.5). It needs P3a, which is the first parser
-   change, then P3e and the `Unit` protocol. Keep the unit data in a `core.units` module.
+   change, then P3e and the marker of 5.5.1. Keep the unit data in `core` modules (`units.md` section 8).
 3. **After H4 and H5.** Build P4-B and move items 2 and 3 of the interface into Orna. Library source and user source do
    not change.
 
@@ -1172,7 +1178,7 @@ keyword forms `dim` and `unit` of PR #9854 are not shipped.
 
 | Design | Go-to-definition on `kilometre` lands on | The algebra is |
 |---|---|---|
-| P4-A with S2 (now) | `kilometre = 1000.metre,` in an enum | in Rust |
+| P4-A with S2 (now) | `kilometre = 1000 metre,` in an enum | in Rust |
 | P4-B with S2 (after H4 and H5) | the same enum line, then `times` in `algebra.orna` | in Orna (listing 2) |
 | S1 keyword forms (not shipped) | `pub unit kilometre : Length = 1000.metre;` | in Rust |
 
@@ -1243,41 +1249,33 @@ listing 7, which is real. Each names the primitives it uses: `U` for what exists
 
 ### 7.1 Listing 1: a unit family and its derived dimension
 
-Uses: enums with `impl` and a definition clause (P3a, D15), and the P4-A kernel behind them. The shape is that of
-section 5.5. The user types `5.kilometre + 200.metre` and never sees this file until the first go-to-definition.
+Uses: enums with `impl` and the unit text after `=` (P3a, D15), and the P4-A kernel behind them. The shape is that of
+`units.md` section 2, with the marker of 5.5.1. The user types `5.kilometre + 200.metre` and never sees this file until
+the first go-to-definition.
 
 ```orna
-// std/units.orna (excerpt). ILLUSTRATION. Enum-shaped families (D15). The algebra is the kernel's (P4-A).
+// core/units.orna (excerpt). ILLUSTRATION. Enum-shaped families (D15). The algebra is the kernel's (P4-A).
 /// Length. `metre` has no definition: it is the base unit and starts the axis.
 pub enum Length {
     metre,
-    kilometre = 1000.metre,              // one kilometre is 1000 metres
-    mile = 1609.344.metre,
+    kilometre = 1000 metre,              // one kilometre is 1000 metres
+    mile = 1609.344 metre,
 
-    impl Unit {}
+    impl Unit {}                         // the marker of 5.5.1
 }
 
-/// Physical time. Importing it shadows the core `second`, `minute` and `hour`, which return `Duration`.
-pub enum Time {
-    second,
-    minute = 60.second,
-    hour = 60.minute,
-
-    impl Unit {}
-}
-
-/// A derived family states its dimension in the header. Each definition is checked against it.
-pub enum Speed = Length / Time {
-    kilometre_per_hour = 1.kilometre / 1.hour,
-    mile_per_hour = 1.mile / 1.hour,
+/// A derived family has no bare variant. Its dimension, Length / Duration, comes from its variants.
+pub enum Speed {
+    kmh = Length.kilometre / Duration.hour,
+    mph = Length.mile / Duration.hour,
 
     impl Unit {}
 }
 
 // User code, same forms:
 //   5.kilometre + 200.metre    a Length: 5200 metre (the finer unit)
-//   5.kilometre / 2.hour       a Speed, with this family's Time in scope
-//   5.metre + 3.second         error: cannot add Length and Time
+//   60.kmh + 10.mph            a Speed in kmh (listing 3 declares `Duration`)
+//   5.metre + 3.second         error: cannot add Length and Duration
 ```
 
 ### 7.2 Listing 2: the unit algebra written in Orna
@@ -1319,49 +1317,37 @@ pub type Quantity<N impl Number, const U: Key> {
 no marker: the check-time evaluator runs any pure `core` body (D14). How a type takes a value parameter (`const U`) is
 part of the P4-B design.
 
-### 7.3 Listing 3: `Duration` with its built-in units
+### 7.3 Listing 3: time as a unit family, and `Instant` as a native type
 
-Uses: U01, U02, U04; P1, P2, P3a, P3c, P9. The enum is the suffix table: `3.hour` is `TimeUnit.hour.apply(3)`.
+Uses: U01, U02, U04; P1, P2, P3a, P9. `Duration` is the nominal name of the time family (`units.md` sections 8.1 and
+8.4; owner direction). The enum is the suffix table: `3.hour` is a `Quantity<Int, Duration.hour>` with the value 3.
+`Instant` keeps its kernel representation and its codec (D17), and its operators are ordinary impls.
 
 ```orna
-// core/time.orna. ILLUSTRATION. The wire form [seconds, nanosecond] is kept by the P9 registry.
-/// Elapsed time in whole nanoseconds. A calendar day is a `Period`, not a `Duration`.
-pub type Duration = Int {
-    impl Add<Duration, Duration> {
-        fn add(self, other: Duration): Duration = Duration.from(self.base + other.base);
-    }
-    impl Sub<Duration, Duration> {
-        fn sub(self, other: Duration): Duration = Duration.from(self.base - other.base);
-    }
-    impl Mul<Int, Duration> {
-        fn mul(self, count: Int): Duration = Duration.from(self.base * count);
-    }
-    impl Neg<Duration> {
-        fn neg(self): Duration = Duration.from(-self.base);
-    }
-    impl Nanoseconds {
-        fn nanoseconds(self): Int = self.base;
-    }
-}
-
-/// The suffixes. The enum is the list; `case` makes it exhaustive.
-pub enum TimeUnit {
-    nanosecond,
+// core/time.orna. ILLUSTRATION. The wire form [seconds, nanosecond] is bound to the `Duration` DefId by the registry.
+/// Elapsed time. `second` is the base unit. A calendar day is a `Period`, not a `Duration`.
+pub enum Duration {
     second,
-    minute,
-    hour,
+    minute = 60 second,
+    hour = 3600 second,
+    day = 86400 second,                  // elapsed 24 hours (units.md Q1)
 
-    impl Suffix<Int, Duration> {
-        fn apply(self, count: Int): Duration = Duration.from(count * case self {
-            TimeUnit.nanosecond: 1,
-            TimeUnit.second: 1_000_000_000,
-            TimeUnit.minute: 60_000_000_000,
-            TimeUnit.hour: 3_600_000_000_000,
-        });
+    impl Unit {}
+}
+
+/// A native type: the engine owns the representation and the codec. The impls are ordinary Orna.
+pub native type Instant {
+    impl Sub<Instant, Duration> {
+        native fn sub(self, other: Instant): Duration effect none;
+    }
+    impl Add<Duration, Instant> {
+        native fn add(self, length: Duration): Instant effect none;
     }
 }
-pub use TimeUnit.hour as hours;      // plural spellings are re-exports (D11)
 ```
+
+The short and plural spellings (`s`, `seconds`, `min`, `minutes`, `hours`, `days`) are further variants in `units.md`
+section 8.1. They are left out here.
 
 ### 7.4 Listing 4: `Money<C>` with a currency protocol
 
@@ -1524,8 +1510,9 @@ pub fn second_page(): Relation<Reading> = page(Reading, r => r.taken, 2, size: 2
 
 ### 7.9 Listing 9: a formatter in Orna
 
-Uses: U15, U19; P1 (`Neg`), P5. It replaces one of the four natives `duration_*_format`
-(`orna-hir/interface/core/time.orna`). The native context argument is only validated, so none is needed here.
+Uses: U15, U19; P1 (`Neg`), P5; the casts `erase` and `to` (section 5.6). It replaces one of the four natives
+`duration_*_format` (`orna-hir/interface/core/time.orna`). The native context argument is only validated, so none is
+needed here.
 
 ```orna
 // std/time/duration/compact.orna. ILLUSTRATION. 8_040 seconds is "2h 14m".
@@ -1533,7 +1520,7 @@ pub fn format(duration: Duration): Str {
     if duration < 0.seconds {
         "-{format(-duration)}"
     } else {
-        let seconds = duration.nanoseconds() / 1_000_000_000;
+        let seconds = erase(to(duration, Duration.second));
         let hours = seconds / 3600;
         let minutes = seconds % 3600 / 60;
         let rest = seconds % 60;
@@ -1589,24 +1576,24 @@ section 2, not from the grammar.
 
 | Listing | Parses today | What stops it | Gap |
 |---|---|---|---|
-| 1 units | no | enum `impl` (`ORNA-PARSE-003`); the `=` clause; the family header | P3a, D15 |
+| 1 units | no | enum `impl` (`ORNA-PARSE-003`); the unit text after `=` | P3a, D15 |
 | 2 algebra | no (`ORNA-PARSE-001`) | a value parameter on a type; impl variable `V` | P4-B, P1 |
-| 3 Duration | type yes, enum no | enum `impl` (`ORNA-PARSE-003`); `self.base`; operators; `pub use` | G3, G5, G1, D11 |
+| 3 Duration | no | enum `impl` and the unit text (`ORNA-PARSE-003`); `native type`; operators | G3, G1, P9 |
 | 4 Money | yes | `C.code`; `Display` and `Explain` calls; `Decimal` interpolation | G4, G8 |
 | 5 Range | shape yes | generic type with `T` fields; the name `Range`; `value.compare(..)` | G13, G7 |
 | 6 Percent | yes | `self.base`; `Mul` instance; `50.Percent` | G5, G1, G2 |
 | 7 Option | real | none | none |
 | 8 Table helpers | yes; checks today | none | none |
-| 9 Formatter | yes | `duration.nanoseconds()`; `Int` interpolation | G7, G8 |
+| 9 Formatter | yes | `erase`, `to` and `Neg`; `Int` interpolation | G1, G7, G8 |
 | 10 Temperature | yes | instance resolution; forward reference to `Delta` | G1, G7 |
 
 The enum form of listing 1 does not parse today. Probes 12, 13 and 21 ran the 1.1.0 keyword form of the same
 module, which D15 does not ship. The probed checker accepted it and the first two user lines, and rejected the third
 with `E5001`. That shows the algebra exists. It says nothing about the enum surface.
 
-Three listings could not be made to fit: listing 1 (enums cannot own impls and have no `=` clause), listing 2 (it needs
-syntax that does not exist) and the `TimeUnit` half of listing 3 (enums cannot own impls). All three are the point: they
-show what P3a, the definition clause and P4-B add.
+Three listings could not be made to fit: listings 1 and 3 (enums cannot own impls and have no unit text after `=`) and
+listing 2 (it needs syntax that does not exist). All three are the point: they show what P3a, the unit text and P4-B
+add.
 
 `pub use` itself is decided (D11) but the parser at `a4cf733b1` has no code for it (no `pub use` in
 `orna-syntax/src/parser.rs`), and the probed binary rejects it.
@@ -1636,7 +1623,7 @@ Cost words: **S** is none, or under 200 lines of Rust. **M** is 200 to 1,000. **
 
 * The user sees: `1.hour + 30.minutes`, `now() - 7.days`, `deadline - now()`, `"{elapsed}"` printing `2h 14m`.
 * Library: listings 3 and 9.
-* Needs: step zero, P1, P2, P3a, P3c, P5, P9; D11 for plural spellings; PR #9854 Q1.
+* Needs: step zero, P1, P2, P3a, P5, P9; the `Duration` family (owner direction, `units.md` Q1 and Q5).
 * Cost: M. It deletes about 190 evaluator lines (`E:lib.rs:7097-7288`), a checker table of 17 lines and four natives.
 * Risk: tags 60002 and 60005; hosting `Instant` (P9); the nanosecond-grid rules of `E:lib.rs:5919-5972` must be copied
   exactly.
@@ -1655,7 +1642,7 @@ Cost words: **S** is none, or under 200 lines of Rust. **M** is 200 to 1,000. **
 * Library: listing 1 with P4-A now, and listing 2 when P4-B takes over (D14).
 * Needs: P2, P4-A, P1, P7; P3a and P3e for the enum surface (D15); P4-B later.
 * Cost: L for A (PR #9854 estimates 900 to 1,200 lines); larger for B.
-* Risk: exactness rules; `Float` quantities; dynamic boundaries; time suffixes are `Duration`, not quantities (C11).
+* Risk: exactness rules; `Float` quantities; dynamic boundaries; the representation of the `Duration` type (C14).
 
 **5. Table helpers.**
 
@@ -1704,7 +1691,7 @@ Cost words: **S** is none, or under 200 lines of Rust. **M** is 200 to 1,000. **
 
 * The user sees: `compact`, `clock`, `words`, `iso` output, unchanged.
 * Library: listing 9, four times.
-* Needs: P5 for `Int` display; an accessor (listing 3's `Nanoseconds`).
+* Needs: P5 for `Int` display; the casts `erase` and `to` (section 5.6).
 * Cost: S. It removes four natives.
 * Risk: output must equal today's natives for every input; the `{locale, time_zone}` context.
 
@@ -1767,7 +1754,7 @@ default consumer follows the harness rules of hir.md 6.1. The decisions D14 to D
 * **H2 (typing):** step zero, protocol member calls resolve (D16), and G13 (H2b); P1 selection with implicit impl
   variables; P2 resolution in place of `builtin_postfix`; P3c, P3d and P3e; P5 in place of `displayable`. H2c-1, the
   P4-A unit-key kernel behind the four-item interface (D14), needs none of the above and can land first. H2c-2, the
-  unit families, needs P2, P3a, P3e and the `Unit` protocol. Waits: P4-B.
+  unit families, needs P2, P3a, P3e and the marker of 5.5.1. Waits: P4-B.
 * **H3 (checks):** P7 diagnostics; the effect chain naming implicit calls; the `core` purity check; the refined-literal
   report. Waits: const-based checks (P4-B).
 * **H4 (executor):** P8 R1 to R4 in the operator-tree builder; the step charge of D18 (one step per call of a loop-free
@@ -1906,66 +1893,51 @@ frozen at the first release that ships `core` as source.
 
 --------------------------------------------------------------------------
 
-## 10. Changes to the units design (PR #9854): status and concrete list
+## 10. Changes to the units design (PR #9854): status and what remains
 
-Conclusion: all twelve changes are accepted under D14 to D18. This is the concrete list that the author of PR #9854
-applies to `units.md`. This document edits none of that file. Section and rule numbers are those of `units.md` at head
-`9cd0fddfc` (file docs/design/units.md on branch docs/units-ordinary-declarations). The only change from `86be7f979`,
-where this review began, is the colon bound in C3. Where the delegation did not name an item, the rule used is "keep one
-declaration form and fewer keywords", and the item says so.
+Conclusion: `units.md` at head `97ada5ca7` applies the twelve changes that the first revision of this section listed, C1
+to C12, most of them as proposed. Where it differs, owner direction decided the point (Q1, Q5, Q6 and O4 of `units.md`),
+and this document follows it. Four gaps remain (C13 to C16). They were found while reconciling the two documents, and
+they are a concrete list for the author of PR #9854. This document edits none of that file. Rule and section numbers
+are those of `units.md` at `97ada5ca7`.
 
-After these changes `units.md` section 12 keeps Q1 (`day` and `days`) as open. Q2 and Q3 are answered by C7. Q4 goes
-with C5. Q5 and Q6 go with C11.
+| Change | Status at `97ada5ca7` | Note |
+|---|---|---|
+| C1 surface | applied (section 2) | enum-shaped families, D15 |
+| C2 `alias` | applied | `Money` is a `type` declaration; there is no `alias` |
+| C3 colon bound | applied | `Money<C impl Currency>` |
+| C4 postfix lookup | applied (ORNA-UNIT-008) | the qualified form is `Family.name(n)` |
+| C5 `canonical` | applied (ORNA-UNIT-018 withdrawn) | `1.hour` keeps its key, with the value 1 |
+| C6 affine units | applied (ORNA-UNIT-005 withdrawn) | library types (section 8.5) |
+| C7 `to` | applied (ORNA-UNIT-015) | `to(q, U)`, a library function; the unit is a singleton value |
+| C8 currency axis | superseded by owner direction (O4) | `Money` and `Rate` are library types; 017 withdrawn |
+| C9 native minimum | applied (section 5) | the currency axis is out; the casts and the membership rule are in |
+| C10 stage plan | applied (section 11.2) | H2c-1 and H2c-2 |
+| C11 `Duration` | applied in part (Q5, owner direction) | the family `Duration`, not a library integer type |
+| C12 questions | applied (section 12) | Q7 is answered by D17 |
 
-* **C1. Surface (section 2). ACCEPTED (D15).** Replace the declaration forms and their grammar with the enum-shaped
-  surface of section 5.5 here. Delete `dim_decl`, `unit_decl`, `alias_decl`, `clause`, `offset_clause` and `affine`.
-  Restate ORNA-UNIT-009 and -010 for families (section 5.5.1). Rewrite the examples of sections 7 and 8 in the enum
-  form; listing 1 is the model. Reason: one declaration form, and no program declares a unit yet, so nothing migrates.
-  The frozen 1.1.0 examples `examples/valid/units.orna` and `examples/valid/affine-unit.orna` use the keyword forms.
-  They stay frozen and go to the 1.2 migration appendix (D13).
-* **C2. `alias_decl` (section 2). ACCEPTED.** Delete the `alias` declaration. Write
-  `pub type Money<C impl Currency> = Quantity<Decimal, C>;` with the existing alias form (U03). Reason: one way to do a
-  thing (DECIDED principle 1), and `repr` is gone (D17), so `alias` has nothing left to carry. Of the two options this
-  is the one with fewer keywords.
-* **C3. Colon bound (section 8.3). ACCEPTED and done.** The author changed `Money<C: Currency>` to
-  `Money<C impl Currency>` in `9cd0fddfc` after this review. Reason: 1.1.0 removed the colon bound (ORNA-GENERIC-006,
-  `ORNA091-E-BOUND-COLON`).
-* **C4. Postfix lookup (section 5 item 3; ORNA-UNIT-008). ACCEPTED.** State the lookup as the P2 rule: a variant of a
-  unit family in scope, then a type target. "Then as a currency, then as a calendar period" become library lines (a
-  `Suffix` enum for `Period`). Two hits in one step are ORNA-S011, and the qualified form resolves it (section 5.5.3).
-  Reason: the kernel keeps one rule, and `day` is a declaration returning `Period`, so Q1 is one line to change.
-* **C5. `canonical` (ORNA-UNIT-018; Q4; `DimensionDef.canonical`). ACCEPTED: removed.** Delete the clause, the field and
-  the clause number 018 (leave the number unused, so 019 keeps its number). A library suffix normalises where a family
-  wants it (listing 3). Reason: only time declared one, and C11 moves time out of the algebra. One clause and one field
-  fewer in the kernel, and no new word in the grammar.
-* **C6. Affine units (ORNA-UNIT-005 and -007; section 3.3). ACCEPTED.** Realise the point and vector rules as library
-  types (listing 10). Drop `offset` and `affine` from the key (`UnitKey` loses `o` and `a`; sections 3.3 and 3.4
-  shrink). Reason: D15 makes a definition a plain quantity expression, which has no offset form, and the other way
-  needs two more clauses. Cost: affine units no longer share `Quantity`, and the aggregation matrix becomes library
-  functions. The results of ORNA-UNIT-005 and -007 do not change.
-* **C7. `to` (ORNA-UNIT-015; Q2; Q3). ACCEPTED, with one form.** Realise it as a library function over two kernel casts
-  (erase, unerase) and the ratio query. The target unit is a type argument: `to<Length.mile>(distance)`. D5 allows a
-  type only as a type argument, and a unit passed as a value would make the result type depend on a value. The name
-  `to` stays. The rounding form takes a `Rounding` enum (candidate 8). Reason: conversion is data and arithmetic, not a
-  typing rule.
-* **C8. Currency axis (ORNA-UNIT-017; O4). ACCEPTED.** Keep the axis as the default. Add "Money as a library type plus
-  `Rate<C, U>`" (section 5.7 here) to O4 as a second option. Which one ships is still open (section 11). Reason: the
-  reader sees both with their costs.
-* **C9. Native minimum (section 5). ACCEPTED, corrected.** Restate it as the four-item interface of section 5.6 here.
-  Item 5 (`canonical` and `repr`) leaves the list (C5, D17). The currency axis stays: an axis is a base variant or a
-  type that implements `Currency`, and that is part of interface item 2. Reason: a frozen, minimal interface lets P4-B
-  replace items 2 and 3 later with no change to any source.
-* **C10. Stage plan (section 11.2). ACCEPTED.** Split H2c into H2c-1 (the kernel interface; needs none of P1 to P3) and
-  H2c-2 (the `core.units` listings; needs P2, P3a, P3e and the `Unit` protocol). Reason: the kernel can land first.
-* **C11. `Duration` (section 5 item 5; O6; Q5; Q6). ACCEPTED.** Make `Duration` a library type over a kernel integer,
-  registered to tag 60005 (D17; listing 3). The time suffixes return `Duration`. Replace the "time view" rule with
-  explicit conversions. Q5 is answered (a separate type, O6's default). Q6 disappears: `1.hour + 30.minute` is a
-  `Duration`, so a `Duration` annotation fits. Reason: it matches O6's default and removes a checker rule. Consequence:
-  time suffixes are not quantities, so `5.kilometre / 2.hour` with the core `hour` is an error (a length divided by a
-  `Duration`). Physics code imports a `Time` family (listing 1), and an import shadows the intrinsic suffixes
-  (section 5.5.3).
-* **C12. Questions (section 12). ACCEPTED.** Replace Q2 to Q6 by the answers above and keep Q1. Add a pointer to D17 for
-  wire forms. Reason: one decision about wire forms for all legacy-tagged types.
+C8 and C11 differ from the first revision of this document. In both the owner chose the other shape. `Money<C>` is a
+library type. Time is a unit family, so `1.hour` is a quantity of `Duration.hour` and `5.kilometre / 2.hour` is a speed.
+This revision follows `units.md`. Q2 to Q4 of `units.md` stand at their defaults. Q7 is answered by D17: the registry is
+keyed by DefId, there is no `repr` clause, and the `core` paths it names are ABI.
+
+* **C13. Which enums are unit families (section 2, ORNA-UNIT-009).** Add a discriminator. As written, a payload-free
+  enum with several bare variants, such as `Ordering` or `Rounding`, is ORNA-UNIT-BASE. Section 5.5.1 gives three
+  options. The default is M-a, a marker impl: `impl Unit {}` as the last line of the family.
+* **C14. The representation of the `Duration` membership type (ORNA-UNIT-020, -019, section 8.4).** Units are erased at
+  run time (ORNA-UNIT-019), and `1.hour` has the value 1 (ORNA-UNIT-018 is withdrawn). A stored or passed value of type
+  `Duration` is then a bare number whose unit the run time does not know. The addition of two such values and the codec
+  of tag 60005 (`[seconds, nanosecond]`) have nothing to read the unit from. State one rule: (a) the checker converts to
+  the base unit of the family where a quantity enters a family-typed position, which is exact for integer scales and is
+  canonical normalisation at the annotation instead of at the literal; (b) a family-typed value carries its unit at run
+  time; (c) a family type is accepted only where the static type already names one unit. Default: (a).
+* **C15. `==` on quantities of different keys (ORNA-UNIT-011, D16).** ORNA-UNIT-011 converts for compare, and section
+  10.4 says `1.hour` compares equal to `3600.second`. D16 keeps `==` as canonical equality, which compares stored bytes
+  (1 against 3600). State that `==` and `!=` need equal keys and `to` converts first, or that they convert as `<` does.
+  Default: equal keys are required.
+* **C16. The text after `=` and P4-B (section 2).** `unit_expr` is not an ordinary expression, and D15 says the text is
+  an ordinary expression under P4-B. Choose U-a (P4-B keeps `unit_expr`) or U-b (definitions are quantity literals, such
+  as `kilometre = 1000.metre`). Section 5.5.1 gives both. Default: U-a.
 
 --------------------------------------------------------------------------
 
@@ -2033,19 +2005,24 @@ and what reopening costs. This section states each decision and what it unblocks
 * A private function with an unresolved numeric operand type stays a diagnostic that asks for an annotation (D1
   unchanged). There is no defaulting to `Int` or `Decimal`.
 
-**The twelve changes to units.md** are all accepted (section 10). C2, C5, C7, C9 and C11 carry a stated form or
-correction.
+**The twelve changes to units.md** were applied on PR #9854 at `97ada5ca7` (section 10). Two follow the owner's
+direction and not the first revision of this document: C8 (`Money<C>` is a library type) and C11 (`Duration` is the
+time family). Four gaps remain (C13 to C16).
 
-**Proposed, not decided.** D15 fixes the principle. Section 5.5 proposes the spelling: the derived-dimension header
-(5.5.4), the `Unit` marker (5.5.1), the narrow form of P3e (4.3) and the shadowing rule (5.5.3). Each states its default
-as "what I do until told otherwise".
+**Decided by owner direction after the first revision** (`units.md` section 12): `day` and `days` are the elapsed
+24-hour `Duration` (Q1); `Duration` is the nominal name of the time family (Q5); an `Int` does not flow into a
+`Duration` annotation (Q6); `Money<C>` is a library type with a library `Rate<C, U>` (O4).
+
+**Proposed, not decided.** D15 fixes the principle, and `units.md` holds the spelling. Section 5.5 proposes four points
+beyond it. Each states its default as "what I do until told otherwise": the marker that tells a unit family apart
+(5.5.1, M-a, C13), the text after `=` under P4-B (5.5.1, U-a or U-b, C16), the optional derived-dimension header
+(5.5.4, H0 now and H1 later) and the form of P3e (5.5.4, option i).
 
 **Still open.** These are smaller questions. Each has a default in the section named, and none blocks a stage.
 
 * The `Display` signature, with or without `DisplayContext`, and interpolation of every displayable type (P5).
-* `day` and `days` as `Period` or `Duration` (PR #9854 Q1; P2).
-* The currency axis against Money as a library type (section 5.7).
 * `base` access for refined types (P3c) and static access through a type parameter (P3d).
+* The representation of the `Duration` membership type, and `==` on quantities of different keys (C14, C15).
 * Whether stage-producing relation operators need a lazy-relation primitive (section 3.3).
 * `std.option.flatten<T>(value: T? ?)` against D3 (listing 7).
 * When `pub use` lands (D11 is decided, the parser at `a4cf733b1` has no code for it).

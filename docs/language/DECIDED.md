@@ -99,8 +99,9 @@ to 4,000 lines of Rust (an estimate) and a layering hook, before H4 and H5 exist
 Why. The owner asked for `Band.cold`-style names, `5.kilometre` and user-defined families, and wants the box to open
 onto plain Orna. An enum is the declaration form that every user already knows. A keyword form is one more declaration
 that the library cannot imitate (principle 1). D8 cut user units and the owner's direction of 2026-11-10 brought them
-back, so no program declares one yet and nothing migrates. The text after `=` uses the existing `expression`
-production, and the P4-A subset of it is also valid under P4-B, so P4-B changes the evaluator and not the source.
+back, so no program declares one yet and nothing migrates. The text after `=` is a unit expression under P4-A, a new
+production in the units design (PR #9854, section 2), and an ordinary Orna expression under P4-B. Whether the P4-A text
+stays valid under P4-B is not settled: `docs/design/kernel-and-library.md` section 5.5.1 (point 2) gives the two ways.
 
 Reopening costs. Nothing until H2c-2 ships. After it, every declared family needs a migration. The parser work for
 `impl` in enums is not lost, because `Duration`, `Money` and the suffix enums need it anyway. The definition clause and
