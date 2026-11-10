@@ -105,7 +105,7 @@ pub fn classify(case_id: &str, diagnostic: &str) -> Option<&'static str> {
         "for_each" | "mean" | "ref" | "open" => MISSING_IMPORT,
         "half_even" => PENDING_P3B,
         "Str" if case_id.ends_with("secret-display.orna") => PENDING_P3B,
-        "Ordering" | "Self" | "List" | "all_unique" => IMPLEMENT,
+        "Ordering" | "List" | "all_unique" => IMPLEMENT,
         _ => UNCLASSIFIED,
     })
 }
@@ -244,7 +244,7 @@ mod tests {
         assert_eq!(
             classify(
                 "valid/generic-protocol.orna",
-                "m: ORNA-S012-UNRESOLVED: `Self` is not in scope"
+                "m: ORNA-S012-UNRESOLVED: `Ordering` is not in scope"
             ),
             Some(IMPLEMENT)
         );

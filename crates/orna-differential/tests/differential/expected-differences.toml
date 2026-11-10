@@ -1109,8 +1109,8 @@ bead = "ornadb-csenl.16"
 
 [[environment]]
 category = "implement-declaration-names"
-count = 4
-reason = "names the HIR must declare before they resolve: Ordering and Self (generic protocol), List (live page fallback) and all_unique (table assertions). These are real declarations, not environment; each is open work"
+count = 3
+reason = "names the HIR must declare before they resolve: Ordering (core enum), List (live page fallback) and all_unique (table assertions). These are real declarations, not environment; each is open work"
 bead = "ornadb-csenl.16"
 
 [[environment]]
