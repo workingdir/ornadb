@@ -1,6 +1,6 @@
 {
   "schema": "orna.std_intrinsics.v1",
-  "source_digest": "fc911a31a01761bb",
+  "source_digest": "acf9cfee9c9fdde7",
   "intrinsics": [
     {
       "id": "CoreSome",
@@ -411,7 +411,7 @@
         "arities": []
       },
       "effect": "Pure",
-      "dispatch": { "kind": "Native" },
+      "dispatch": { "kind": "SourceOnly" },
       "justification": "SourceExpressible",
       "note": "consecutive nonempty chunks; the pinned source form is scheduled for the std repo",
       "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
@@ -429,7 +429,7 @@
         "arities": []
       },
       "effect": "Pure",
-      "dispatch": { "kind": "Native" },
+      "dispatch": { "kind": "SourceOnly" },
       "justification": "SourceExpressible",
       "note": "one level of concatenation preserving outer and inner order",
       "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
@@ -447,7 +447,7 @@
         "arities": []
       },
       "effect": "Pure",
-      "dispatch": { "kind": "Native" },
+      "dispatch": { "kind": "SourceOnly" },
       "justification": "SourceExpressible",
       "note": "returns matching and remaining values in input order",
       "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
@@ -465,7 +465,7 @@
         "arities": []
       },
       "effect": "Pure",
-      "dispatch": { "kind": "Native" },
+      "dispatch": { "kind": "SourceOnly" },
       "justification": "SourceExpressible",
       "note": "ordered pairs until the shorter input ends",
       "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
@@ -483,7 +483,7 @@
         "arities": []
       },
       "effect": "Pure",
-      "dispatch": { "kind": "Native" },
+      "dispatch": { "kind": "SourceOnly" },
       "justification": "SourceExpressible",
       "note": "ordered pairs and a failure when the inputs differ in length",
       "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
@@ -501,7 +501,7 @@
         "arities": []
       },
       "effect": "Pure",
-      "dispatch": { "kind": "Native" },
+      "dispatch": { "kind": "SourceOnly" },
       "justification": "SourceExpressible",
       "note": "first-occurrence semantics identical to core distinct",
       "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
@@ -519,7 +519,7 @@
         "arities": []
       },
       "effect": "Pure",
-      "dispatch": { "kind": "Native" },
+      "dispatch": { "kind": "SourceOnly" },
       "justification": "SourceExpressible",
       "note": "adjacent overlapping pairs; length n produces max(0, n-1) pairs",
       "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
@@ -537,7 +537,7 @@
         "arities": [2, 3]
       },
       "effect": "Pure",
-      "dispatch": { "kind": "Native" },
+      "dispatch": { "kind": "SourceOnly" },
       "justification": "SourceExpressible",
       "note": "complete positional windows only, with positive size and step",
       "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
@@ -555,7 +555,7 @@
         "arities": []
       },
       "effect": "Pure",
-      "dispatch": { "kind": "Native" },
+      "dispatch": { "kind": "SourceOnly" },
       "justification": "SourceExpressible",
       "note": "starts a new group before a matching item and never inserts an empty group",
       "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }

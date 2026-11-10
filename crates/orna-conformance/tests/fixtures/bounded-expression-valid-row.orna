@@ -1,1 +1,1 @@
-{ total: std.math.increment(1) }
+{ total: 1 + 1 }

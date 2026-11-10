@@ -1,1 +1,0 @@
-std.collection.asof_join(left, right, value => value, value => 0)
