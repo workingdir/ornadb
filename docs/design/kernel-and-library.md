@@ -2033,7 +2033,8 @@ and what reopening costs. This section states each decision and what it unblocks
 * A private function with an unresolved numeric operand type stays a diagnostic that asks for an annotation (D1
   unchanged). There is no defaulting to `Int` or `Decimal`.
 
-**The twelve changes to units.md** are all accepted (section 10). C2, C5, C7 and C11 carry a stated form.
+**The twelve changes to units.md** are all accepted (section 10). C2, C5, C7, C9 and C11 carry a stated form or
+correction.
 
 **Proposed, not decided.** D15 fixes the principle. Section 5.5 proposes the spelling: the derived-dimension header
 (5.5.4), the `Unit` marker (5.5.1), the narrow form of P3e (4.3) and the shadowing rule (5.5.3). Each states its default
