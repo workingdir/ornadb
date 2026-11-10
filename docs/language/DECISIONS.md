@@ -1120,3 +1120,661 @@ defines the scoped form.
   `Error`; cancellation never reaches it by construction.
 
 --------------------------------------------------------------------------
+
+## D5. Overloading and type-as-value arguments
+
+Bead `ornadb-csenl.5`. Critique F28, section 3.5 "Overloading" and "Types as
+values".
+
+### Specification today
+
+* `09-standard-library.md:19`: "Each listed collection operation has those
+  two explicit overloads", one for `[T]` and one for `Relation<T>`, and
+  preserves the container kind.
+* `09-standard-library.md:21`: "A pipeline supplies argument one: `rows |
+  filter(test)` calls `filter(rows, test)`. It does not first call
+  `filter(test)` and guess a missing collection. Predicate factories
+  explicitly listed below are genuine one-argument calls."
+* Arity overloads: `one(rows)` and `one(rows, predicate)` (`:36`);
+  `every(rows, predicate)` (`:39`) beside the factory `every(test)` that
+  builds a `Predicate<Relation<T>>` (`:50`), and `all_unique(selector)`.
+* Type overloads in `sys`: ORNA-SYS-136 (`15-system.md:114`) "Snapshot
+  selection is represented by explicit overloads for `SnapshotRef`,
+  `CommitRef`, `BranchRef`, `TagRef`, `GitOid` and `Str`".
+  `api/sys.json` lists 36 of its 82 function entries as members of an
+  overload family (`sys.snapshot` x6, `sys.admin.checkout` x6,
+  `sys.admin.create_branch` x6, `sys.admin.plan_checkout` x6, `sys.explain`
+  x3, `sys.source`, `sys.history`, `sys.blame` x2 each, `sys.invoke` and
+  `sys.start` x2 each).
+* Types passed as values: `decode(raw, as: Message)`
+  (`06-expressions.md:381`, also `09-standard-library.md:148`);
+  `sys.invoke<T>(..., as: T)` and `sys.start(worker, arguments, as: Int)`
+  (`10-execution.md:55`, ORNA-SYS-132 at `15-system.md:297`, "The result
+  witness `as: T` selects a typed boundary" at `:254`). The same spec says
+  generics are explicit and protocol dispatch is static
+  (`06-expressions.md:161-167`).
+* Bare words as values: `rounding: half_even` (`05-types.md:91-97`).
+* No clause says whether a user may declare two functions with one name.
+
+### Implementation today
+
+* The checker special-cases the argument name `as`: it is read as a type
+  expression, not a value (`orna-check/src/inference.rs:491-493`, also
+  `orna-check/src/flow.rs:972` and `orna-check/src/system_calls.rs:240-499`).
+  The evaluator has the same special case (`orna-evaluator/src/lib.rs:9060`).
+  Nothing in the type system says why `as` is different; it is the
+  spelling.
+* The pinned std declares `pub fn decode<T>(input: Str): T` and documents
+  the call form `decode(input, as: T)` in a comment
+  (`encoding/json.orna:7-8,17`): the declaration has no `as` parameter, so
+  the call form and the declaration disagree and only the special case
+  reconciles them.
+* Relation operators are resolved by the callee name at each call
+  (`orna-evaluator/src/lib.rs:9675-9683` for root intrinsics); `std.query`
+  redeclares 16 of them as marker-bodied functions because the language has
+  no re-export (`query.orna:251-288`; see D11 and D12).
+* A user-declared duplicate function name is a diagnostic in the REPL
+  (`orna-check/src/repl.rs:253`) and a `DuplicateDeclaration` error for the
+  standard catalogue (`orna-check/src/catalogue.rs:170`); I did not find an
+  overload rule for user source.
+* The `sys` overloads are not language overloads: the checker has a
+  separate parser and type model for `api/sys.json` signatures
+  (`orna-check/src/system_api.rs`), so the six `sys.snapshot` entries are
+  six rows in a table the checker searches by argument type.
+* The stats module accepts the bare words `half_even`, `linear`, `lower`,
+  `higher`, `nearest`, `midpoint` as string values only when the call is a
+  stats operation and the argument name is `rounding`, `interpolation` or
+  `method` (`orna-evaluator/src/lib.rs:10136-10149`); decimal division has
+  its own `half_even` case (`:7680-7683`).
+
+### The problem
+
+Fact: the platform overloads by arity and by type, users cannot declare
+overloads (or the rule is unstated), and types appear as value arguments
+through a name-based special case. Judgement (critique): users cannot write
+what the library uses, and a reader must memorise which names are which.
+
+Two questions are independent and are separated below:
+
+* Q1. Is overloading a language feature, and for whom?
+* Q2. How does a program pass a type to a function: type application only,
+  or a value-level witness?
+
+### Options for Q1: overloading
+
+#### D5-A. No overloading anywhere
+
+What it is. One name, one function in a scope. Arity variants get distinct
+names (`one` and `one_where`), or one function with a default parameter.
+Type variants use a generic (`snapshot<R impl SnapshotSelector>(reference:
+R)`) or distinct names (`snapshot_commit`). `Collection<T>` for `[T]` and
+`Relation<T>` is either a protocol bound or one type.
+
+Prior art.
+* Elm has no overloading; `Dict.map` and `List.map` are different names
+  (https://package.elm-lang.org/packages/elm/core/latest/Dict).
+* OCaml has none; modules separate namespaces
+  (https://ocaml.org/manual/5.3/modules.html).
+* Gleam has none; labelled arguments and defaults cover arity cases
+  (https://tour.gleam.run/functions/labelled-arguments/).
+* Rust has none for free functions; traits provide type-directed dispatch
+  (https://doc.rust-lang.org/reference/items/traits.html).
+
+For.
+* A call resolves by name alone; the HIR call-resolution step has no
+  candidate set. Pipelines (ORNA-PIPE-003) need no overload explanation.
+* The ORNA-SYS-136 sentence ("no implicit `SnapshotLike` union") stops being
+  an exception.
+
+Against.
+* The `sys` surface changes shape: 36 entries collapse into generics or new
+  names, and the typed `sys.invoke` / `sys.start` pairs become one function
+  with a type argument (Q2).
+* The `[T]`/`Relation<T>` pair is not a type-parameter difference today;
+  without a protocol or a unified type each operator needs two names or a
+  new core type relationship (see D6).
+* Breaks any program that calls the overloaded platform names by their
+  current arity or type, unless the old names are kept.
+
+Risks. API redesign of the largest family (`sys.admin.*`) is not mechanical.
+
+Reversibility. High: adding overloading later is compatible with programs
+that never relied on it.
+
+Rests on.
+* Protocol bounds (ORNA-GENERIC-005) are expressive enough for selector
+  families, or distinct names are acceptable.
+
+#### D5-B. One stated overloading rule for everyone
+
+What it is. Users and the platform may declare several functions with one
+name in one scope, distinguished by arity and/or the static types of
+arguments. The reference states the resolution algorithm (exact match,
+then at most one applicable candidate after the declared coercions, else an
+ambiguity diagnostic) and forbids overloads that could overlap, matching
+the style of ORNA-GENERIC-002 and ORNA-CONVERT-003.
+
+Prior art.
+* PostgreSQL function overloading with a documented resolution algorithm
+  (https://www.postgresql.org/docs/current/typeconv-func.html,
+  https://www.postgresql.org/docs/current/xfunc-overload.html). It is also
+  the cautionary tale: the algorithm is long and implicit casts make it
+  surprising.
+* Swift, Java, C++ overload by type with ranking rules (not cited).
+
+For.
+* Preserves every current platform signature and call.
+* Users get what the library has.
+
+Against.
+* Interacts with inference (D1-A): the type of an argument may depend on
+  the chosen overload. With D3-B's `T` to `T?` coercion, `f(x)` and
+  `f(Some(x))` may both apply.
+* Every overload set is an ABI surface for D12: a native binds to a
+  `DefId`, so overloads need distinct ids.
+* Pipe stages (`x | f`) must resolve with the piped value as argument one.
+
+Risks. The rule itself is the product: a PostgreSQL-sized algorithm to
+write, test and keep stable.
+
+Reversibility. Low: once users rely on it, removal breaks programs.
+
+Rests on.
+* No implicit coercions beyond D3's, or a ranking rule.
+* Owner accepts the cost of an algorithm chapter in the reference.
+
+#### D5-C. Overloading is a platform feature with a closed, declared list
+
+What it is. Only declarations in `core`/`sys` interface files (D12) may
+carry an `overload` marker; the set of overloaded names is part of the
+engine; user declarations may not overload. The reference lists the
+overloaded names and why.
+
+Prior art. Lua's core functions behave this way by implementation
+(`tostring`, `type`), and PostgreSQL built-in operators are overloaded in a
+catalogue users can extend only through `CREATE OPERATOR`
+(https://www.postgresql.org/docs/current/extend-type-system.html).
+
+For. Smallest change from today; keeps `sys` as written; the HIR classifies
+overloaded call targets by the declaration marker.
+
+Against. Keeps the critique's objection exactly: users cannot write what
+the library uses.
+
+Weak as an end state, reasonable as a transition: it is the status quo with
+a list.
+
+Reversibility. High (opens to B later).
+
+### Options for Q2: passing a type
+
+#### D5-X. Type application only
+
+What it is. A type is passed with angle-bracket arguments:
+`decode<Message>(raw)`, `sys.invoke<Int>(f, args)`. `as: T` is removed; a
+type is never a value argument. The declaration `decode<T>(input: Str): T`
+already has the shape.
+
+Prior art. Rust turbofish `parse::<i32>()`
+(https://doc.rust-lang.org/reference/paths.html); OCaml uses annotations
+(`(x : t)`) and first-class modules.
+
+For. One rule, matches existing declarations, no special argument name;
+ORNA-GENERIC-001 already says type arguments are explicit.
+
+Against. Pipelines read less well: `raw | decode<Message>` or
+`raw | std.encoding.json.decode<Message>()`; existing docs use the
+witness form; every example and diagnostic about `as:` changes.
+
+Reversibility. Medium.
+
+#### D5-Y. Types are values with a stated rule
+
+What it is. A type name in expression position is a value of a core type
+`Type<T>`; `as: Message` is an ordinary named argument of parameter type
+`Type<T>`; the checker resolves `T` from it. The reference defines what
+operations exist on a `Type<T>` (none beyond passing it).
+
+Prior art. Zig `comptime` type parameters
+(https://ziglang.org/documentation/master/#comptime); Python classes as
+values (not typed the same way).
+
+For. Reads as today in pipelines (`| decode(as: Message)`); one mechanism
+with `sys.invoke` witnesses.
+
+Against. A new core type, and a rule that `T` in `Type<T>` is statically
+known (otherwise generics become dependent); `Message` as both a type and
+a value needs a resolution rule; nothing else in the language is
+compile-time evaluated.
+
+Reversibility. Low.
+
+#### D5-Z. Keep `as:` as a declared parameter form
+
+What it is. A declaration may mark a parameter `as: T`-style (for example
+`witness as: T`) to say it names the result type; the checker treats
+exactly that parameter as a type argument. No new core type; the special
+case becomes a declared one.
+
+For. Smallest change; the declaration and the call form agree.
+
+Against. A third way to pass a type next to `<T>` and `Type<T>`; the
+parameter is "not a value" without a type that says so.
+
+Weak unless the owner wants the pipeline spelling and does not want X or Y.
+
+### Bare words
+
+`half_even`, `linear` and the other bare words have three possible
+readings, independent of Q1 and Q2: ordinary enum variants of declared enum
+types (`Rounding.half_even`, shortened by a scoped import), string
+literals, or a keyword-argument sugar for a closed set. Only the first
+needs no special case; it needs the owner to accept either qualified names
+or a "variant of the parameter's enum type may be written bare" rule.
+
+### Migration cost
+
+| Option | Pinned std | `sys` | Spec text |
+|---|---|---|---|
+| A | every arity or type overload pair renamed or merged (`query.orna` has 16 re-declared operators; `one` and `every` forms) | 36 entries restructured | remove "two explicit overloads" and SYS-136 |
+| B | none | none | add a resolution algorithm chapter |
+| C | none | none | list overloaded names |
+| X | every `decode(input, as: T)` call and comment (json, orna, ovb encodings) | `sys.invoke`, `sys.start` witness form | rewrite `as:` text in 06, 09, 10, 15 |
+| Y | none at call sites | none | define `Type<T>` |
+| Z | declarations gain a marker | none | grammar |
+
+### What the HIR needs from the answer
+
+* A: each call resolves to exactly one `DefId` by name and scope.
+* B and C: call resolution yields a candidate set resolved after type
+  checking; the HIR must store which candidate was chosen, because the
+  executor must not re-resolve (critique F01, F17).
+* X: calls carry explicit type arguments in a dedicated slot; no named
+  argument is special.
+* Y: `Ty::Type(T)` and a constant-type expression form.
+* Z: a flag on a parameter that moves it from the value list to the type
+  argument list during lowering.
+* Bare words: either enum variant resolution against the expected type, or
+  a literal form.
+
+--------------------------------------------------------------------------
+
+## D6. Collections
+
+Bead `ornadb-csenl.6`. Critique F25.
+
+### Specification today
+
+* The core type list (`05-types.md:7-43`) has `List<T>` written `[T]`,
+  `Range<T>`, `Relation<T>`, `Query<T>`, `Stream<T>`, records, tuples and
+  `Blob`. It has no `Map`, no `Set` and no byte-string type apart from `Blob`.
+* `Blob` is "immutable binary content with canonical declared media type
+  and optional suffix" (`05-types.md:130`).
+* ORNA-VALUE-001 (`05-types.md:65`): lists, records and rows have value
+  semantics; ORNA-VALUE-004 (`:71`): cyclic ordinary values are not
+  constructible.
+* `union(left, right)` "Concatenate left then right; duplicates remain"
+  (`09-standard-library.md:33`); there is no append or index-update
+  operation in the core table (`:23-40`).
+* ORNA-FLOAT-003 (`05-types.md:107`): `Float` is not accepted as a primary
+  key component or default hash key type.
+* `sys.blob.to_bytes(value: Blob): [Int]` and `sys.blob.from_bytes(values:
+  [Int]): Blob` (`api/sys.json`); `sys.blob.read(value, offset, length):
+  Blob`.
+
+### Implementation today
+
+* The evaluator's `Value` has `List` (shared storage; "clones and appends at
+  the end of the longest view do not copy existing elements",
+  `orna-evaluator/src/lib.rs:3634-3636`), `Record` as a `BTreeMap`
+  (`:3649`), `Tuple`, `Blob(Vec<u8>)` (`:3601`) and no map or set variant.
+* The pinned std fills the gap with lists. `std.map` is a list of pairs with
+  at most one entry per key; "Lookup is linear" (`map.orna:1-7`), and
+  `size` is `count(from_entries(entries))` (`:11-12`). `std.set` is `[T]`
+  with duplicates removed and "Membership is linear" (`set.orna:1-4`).
+* `std.bytes` is "immutable lists of unsigned octets, each in 0...255"
+  (`bytes.orna:1`) and builds buffers with `output = union(output, [0])`
+  inside `while` loops (`bytes.orna:24`); `std.map` does the same
+  (`map.orna:41`); `list.append` is `union(values, [value])`
+  (`list.orna:12-13`).
+* The Blob bridge returns a `List` of `Value::Int(BigInt)`, one big integer
+  per byte (`orna-evaluator/src/lib.rs:9431-9440`).
+* Step budgets are per call and per element (`orna-evaluator/src/lib.rs:117-124`
+  comment: appends reuse list storage, "No quadratic term is needed"), so
+  the append idiom is made cheap by a storage optimisation in the evaluator,
+  not by the language.
+
+### The problem
+
+Fact: associative lookup and set membership are linear in std; bytes are
+lists of arbitrary-precision integers; the append idiom is a union. The
+critique's argument (judgement): basic programs are quadratic by
+construction, and the performance fix lives in an evaluator trick that a
+second implementation would not have.
+
+### Options
+
+#### D6-A. Core `Map`, `Set` and `Bytes` types
+
+What it is. Add `Map<K, V>`, `Set<T>` and `Bytes` (distinct from `Blob`, or
+`Blob`'s in-memory form) to the core type list with defined literals or
+constructors, operations (get, insert, remove, keys, merge, slice, append,
+indexing), equality, order and canonical encoding. Key types must satisfy
+the same lawful-equality rule `distinct` uses. Iteration order is defined
+(insertion order, or key order).
+
+Prior art.
+* Elm `Dict` and `Set` are core, tree-based and ordered by `comparable`
+  (https://package.elm-lang.org/packages/elm/core/latest/Dict), and
+  `elm/bytes` has a `Bytes` type
+  (https://package.elm-lang.org/packages/elm/bytes/latest/).
+* Gleam has `Dict`, `Set` in the standard library and `BitArray` in the
+  language (https://hexdocs.pm/gleam_stdlib/gleam/dict.html,
+  https://tour.gleam.run/data-types/bit-arrays/).
+* Erlang maps are a built-in type
+  (https://www.erlang.org/doc/apps/stdlib/maps.html).
+* OCaml: `Map.Make` and `Hashtbl` in the standard library, `bytes` in the
+  language (https://ocaml.org/docs/maps,
+  https://ocaml.org/manual/5.3/api/Bytes.html).
+
+For.
+* Fixes the asymptotics where it matters, in the specification.
+* Gives `sys` and codecs a real type for maps and byte strings (JSON
+  objects, headers, `sys.ArgumentMap`).
+* Canonical encoding and equality become defined, not inherited from list
+  shape; the value formats already have a map concept in the OVB wire
+  format `[INFERENCE: std.map references std.encoding.ovb for map encoding
+  at map.orna:22-35; I did not read the format chapter for a map tag]`.
+
+Against.
+* Largest specification, evaluator and format change of the three options:
+  each new core type touches the checker, value codec, equality, order,
+  hashing, presentation and storage types (critique F16, eight type
+  representations).
+* Generic key requirements need a protocol (`Hash`/`Order`), which today
+  exists only as hard-coded rules for `Float` and keys.
+* `Map<K, Option<V>>` meets D3 (get returns an option of an option).
+
+Risks. Scope creep: every collection added becomes a permanent part of
+the 1.x surface.
+
+Reversibility. Low: types and their encodings are forever.
+
+Rests on.
+* Programs need these types for correctness or speed, not just
+  convenience.
+* D7 and D12 are settled enough to define element and native details.
+
+#### D6-B. Library types over a small native core
+
+What it is. `Map`, `Set` and `Bytes` are nominal types declared in std (or
+`core`) as opaque wrappers whose operations are native functions (D12).
+Only a minimal core capability is specified: an ordered key-value store
+primitive and a byte buffer primitive with documented complexity. The core
+type list does not change.
+
+Prior art. Gleam (types in the standard library, implemented over Erlang or
+JavaScript maps through `@external`
+(https://tour.gleam.run/advanced-features/externals/)); Rust
+(`HashMap` in `std`, `Vec<u8>` in `alloc`,
+https://doc.rust-lang.org/std/collections/index.html).
+
+For.
+* Core stays small; the types can change between std pins without a
+  language change.
+* Matches how the owner's native-declarations design treats natives.
+
+Against.
+* Complexity guarantees live in a library, so a replaceable std (D11-Q,
+  D12-A) could silently drop them.
+* Needs a story for equality, ordering and codecs of opaque types
+  (ORNA-NOMINAL-009 already says protocols supply them).
+* Binds D6 to D12: it cannot be done until a native form exists.
+
+Risks. The same asymptotics problem returns if the native implementation is
+not specified.
+
+Reversibility. High: types can be promoted into the core later.
+
+Rests on. D12 answered with a native declaration form (either A or B there).
+
+#### D6-C. Defer: fix `List` and the byte API only
+
+What it is. No new collection types in 1.x. Add `List` operations (`append`,
+`concat`, `get`, `set`, `slice`) to the core with stated complexity so the
+append idiom is specified; give `Blob` a typed byte view (`Blob.bytes()`
+returning a lightweight `Bytes`) so `sys.blob.to_bytes` stops producing
+`[Int]`. `std.map`/`std.set` stay as documented linear structures.
+
+For. Smallest change; removes the worst defect (bytes as big integers and
+the `union` loop) without new equality rules.
+
+Against. Maps and sets stay quadratic for programs that grow them; the
+critique's claim that basic programs are quadratic stays true for lookup.
+
+Reversibility. High.
+
+Weak as a final answer for a database language, since a keyed lookup is the
+native operation of the domain; reasonable as a first step before A or B.
+
+### Migration cost
+
+| Option | Pinned std | Evaluator and formats | Spec text |
+|---|---|---|---|
+| A | `map.orna` (181 lines), `set.orna`, `bytes.orna` (127) rewritten on core operations; many `union(x, [y])` loops removed | new `Value` variants, codecs, equality, canonical ordering | core type list, formats chapter |
+| B | the same files become native declarations | native table plus opaque handle type | std contract |
+| C | `list.orna` gains core-backed operations; `bytes.orna` shrinks | `Blob` byte view; list ops | core operation table |
+
+### What the HIR needs from the answer
+
+* A: `Ty::Map(K, V)`, `Ty::Set(T)`, `Ty::Bytes` as builtin constructors;
+  literal forms if any; key-protocol bounds.
+* B: opaque nominal types in the DefId table; nothing in `Ty`.
+* C: list operations as core `DefId`s; `Ty::Blob` unchanged.
+* All: element-type unification for generic builtin constructors (it is the
+  same machinery as `Ty::List`); no `Value::Int(BigInt)` per byte at the
+  boundary.
+
+--------------------------------------------------------------------------
+
+## D7. Integers and the numeric tower
+
+Bead `ornadb-csenl.7`. Critique section 3.5 "Collections" (last sentence)
+and section 3.7 (numeric tower).
+
+### Specification today
+
+* ORNA-NUM-001 (`05-types.md:81`): "`Int` MUST represent exact integers."
+  Nothing bounds it. ORNA-LIT-001 (`04-lexical.md:57`): "Integer source
+  numerals have arbitrary-precision parse semantics and are range-checked
+  when checked against a bounded integer type." No bounded integer type is
+  defined in the core list.
+* `std.bits` is defined "over Int using an unbounded signed two's-complement
+  model", "Right shift is arithmetic; left shift is exact subject to
+  resource limits" (`09-standard-library.md:132`).
+* `Decimal`: "finite exact base-10 values with implementation resource
+  limits" (`05-types.md:83`); `Float`: IEEE-754 binary64 (`:85`); fractional
+  literals default to `Decimal`, `f` suffix selects `Float`
+  (`04-lexical.md:59`).
+* ORNA-INFER-008 (`05-types.md:325`): contextual numeric inference "MUST
+  preserve the exactness rules". ORNA-CONVERT-006 (`:442`): arbitrary `From`
+  conversions are not implicit.
+* The specification says nothing about `Int` division and remainder on
+  negative operands, nothing about `Int + Decimal`, `Int * Float` or
+  `Int / Int` result types, and states no digit cap or overflow behaviour
+  beyond "implementation resource limit" for `Decimal`.
+
+### Implementation today
+
+* Evaluator: `Value::Int(BigInt)` (`orna-evaluator/src/lib.rs:3593`). After
+  every operation `integer()` renders the result in base 10 and compares
+  the length with `max_integer_digits` (default 1,024,
+  `DEFAULT_INTEGER_DIGITS` at `:130`; check at `:255` and `:5955-5961`).
+  Exceeding it is `ORNA-EVAL-LIMIT`.
+* Integer division is `a / b` on `BigInt` and remainder `a % b`
+  (`lib.rs:7549-7560`), which truncates toward zero in the `num-bigint`
+  crate; division by zero is `ORNA-EVAL-DIVIDE-BY-ZERO`. That is the
+  behaviour; no clause states it.
+* Checker: `Int`, `Decimal`, `Float` "never mix implicitly" and each
+  arithmetic operator is defined only for equal operand types
+  (`orna-check/src/inference.rs:1062-1065`). `Int / Int` is `Int`
+  (truncating). Money and quantities add their own rows
+  (`:1066-1080`).
+* `Decimal` division by a non-terminating result fails unless
+  `.divide(scale:, rounding:)` is used (ORNA-NUM-005; the evaluator matches
+  the field name `divide`, `lib.rs:9593-9594`).
+* The integer step budget makes every `Int` operation O(digits), because of
+  the decimal rendering (`:5955-5961`); the critique counts this under F26
+  (interpreter overhead).
+* Storage: keys permit `Int` (`07-tables.md:272`); the value codec encodes
+  arbitrary precision integers `[INFERENCE: CBOR bignum tags; not read in
+  full]`.
+
+### The problem
+
+Fact: the specification has one integer type of unbounded size and
+mentions a bounded integer type that does not exist; `Int` division
+semantics and the cross-type arithmetic table are only in code. Fact: the
+implementation's digit cap is a resource limit, observable as an error.
+Judgement (critique): a database wants fixed-width integers for storage and
+interop (counts, ids, ports, protocol fields), and unbounded `Int` as the
+only integer is unusual.
+
+### Options
+
+#### D7-A. Unbounded `Int` with a stated cap and stated operations
+
+What it is. Keep one `Int`. The reference states: the cap (a minimum
+guaranteed size and the failure code), `/` and `%` semantics (truncating or
+floored, pick one), exponent and shift rules, and the numeric tower:
+`Int`, `Decimal`, `Float` never mix implicitly; conversions are explicit
+functions (`Decimal.from(i)`), and literal typing follows ORNA-LIT-002.
+
+Prior art.
+* Python `int` is unbounded (https://docs.python.org/3/library/stdtypes.html,
+  https://peps.python.org/pep-0237/).
+* Erlang integers are bignums
+  (https://www.erlang.org/doc/system/data_types.html).
+* Haskell `Integer` (https://www.haskell.org/onlinereport/haskell2010/haskellch6.html).
+
+For.
+* Matches the spec and the implementation; no new type; no overflow
+  semantics to define.
+* Money, counts and keys never silently wrap.
+
+Against.
+* No exact match for a 64-bit column or wire field: values outside the
+  range must be checked at the boundary by a refined type
+  (`type U16 = Int { assert >= 0; assert <= 65535; }` is already legal,
+  ORNA-REFINE-001).
+* Every operation is allocation and digit-bounded; a cap check by bit
+  length (not decimal rendering) is an implementation detail but the
+  1,024-digit cap is observable.
+
+Risks. Low. The decision is mostly to write down what exists.
+
+Reversibility. High: fixed-width types can be added later (B).
+
+Rests on.
+* Refined types over `Int` are an acceptable way to model bounded domains.
+
+#### D7-B. Add fixed-width integer types beside `Int`
+
+What it is. Core types `Int8` .. `Int64` and `UInt8` .. `UInt64` (or a
+subset), with defined overflow behaviour (fail, wrap or saturate; pick one
+per operator family) and explicit conversions to and from `Int`. `Int`
+stays unbounded. Literal typing gets a contextual rule (ORNA-LIT-001 already
+anticipates a "bounded integer type").
+
+Prior art.
+* Rust numeric types with checked, wrapping and saturating methods
+  (https://doc.rust-lang.org/reference/types/numeric.html).
+* PostgreSQL `smallint`, `integer`, `bigint` and `numeric`; overflow is an
+  error (https://www.postgresql.org/docs/current/datatype-numeric.html).
+* SQLite stores integers in 1 to 8 bytes by magnitude
+  (https://www.sqlite.org/datatype3.html).
+* Gleam deliberately has one `Int` per target
+  (https://tour.gleam.run/basics/ints/); an example of the choice not to.
+
+For.
+* Exact storage and interop types; the checker can reject `Int` to
+  `UInt8` without a conversion.
+* Bounded arithmetic is O(1) and removes the digit-rendering check for
+  those types.
+
+Against.
+* Many operator/type combinations to define (the checker has no numeric
+  protocol, D1), and bitwise operations (`std.bits`) must be restated per
+  width.
+* A second set of literal and suffix rules; overlap with unit suffixes (D8).
+* Every table, codec and `sys` signature gains a choice of integer type.
+
+Risks. Large surface; each type is permanent.
+
+Reversibility. Low once stored in tables.
+
+Rests on.
+* Programs need bounded semantics (wrapping, exact interop) that refined
+  types over `Int` cannot give.
+
+#### D7-C. `Int` is 64-bit; a separate `BigInt` for unbounded values
+
+What it is. Reverse the default: `Int` is 64-bit signed with checked
+arithmetic (overflow fails), `BigInt` is the unbounded type. Literals
+default to `Int` and fail to check if they do not fit.
+
+Prior art.
+* Rust's `i64` default with a separate big-integer crate; Go `int` and
+  `math/big` (https://go.dev/ref/spec); Lua 5.4 64-bit integers
+  (https://www.lua.org/manual/5.4/manual.html).
+* PostgreSQL `bigint` versus `numeric`
+  (https://www.postgresql.org/docs/current/datatype-numeric.html).
+
+For.
+* Fast, bounded, matches storage engines; makes the digit cap unnecessary
+  for the common type.
+
+Against.
+* Reverses ORNA-NUM-001 and every example that relies on exact integers;
+  `sum` and factorial-style code now fail at 2^63.
+* The existing `std.bits`, money allocation (exact integer weights,
+  `09-standard-library.md:138`) and `Decimal` coefficients rely on
+  unbounded integers; they move to `BigInt`.
+
+Risks. Behaviour change in every program that exceeds 2^63 (rare, but
+silent only until it fails).
+
+Reversibility. Low.
+
+Rests on. 64 bits suffices for the domain's ordinary integers.
+
+### Numeric tower sub-decision (applies to every option)
+
+Independent of the width: whether `Int` operands may meet `Decimal` or
+`Float` operands. Current behaviour is never. Options: (T1) never, explicit
+conversions only (status quo, what NUM-001..003 and CONVERT-006 imply);
+(T2) `Int` widens to `Decimal` implicitly (exact, so no information is
+lost) but never to `Float`; (T3) a numeric protocol with a defined result
+type per pair. T1 needs no new rule; T2 and T3 need rules and interact with
+D1 (principal types) and D5 (overload resolution).
+
+### Migration cost
+
+| Option | Pinned std | Corpus | Spec text |
+|---|---|---|---|
+| A | none | none | state division, shift, cap, conversions |
+| B | `std.bits` and `std.bytes` gain width-specific forms; the byte API can use `UInt8` | none until adopted | new types, overflow rules |
+| C | any code that needs unbounded values moves to `BigInt` (money, bits, stats exact sums) | fixtures that exceed 2^63 | reverses NUM-001 |
+
+### What the HIR needs from the answer
+
+* `Ty::Int(kind)` with a kind enum (A: one kind; B: many; C: two) so the
+  checker's operator table is keyed by kind, not by spelling.
+* A numeric-literal node that stores the exact value and is typed by
+  context (ORNA-LIT-001/002), not a string.
+* A binary-operator enum (not `op: String`, critique F36) whose typing rule
+  is a table lookup.
+* Resource limits as a runtime concern: the digit cap check by bit length
+  at the executor, not in the type.
+
+--------------------------------------------------------------------------
