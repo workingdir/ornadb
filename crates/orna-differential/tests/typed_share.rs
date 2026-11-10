@@ -1,16 +1,18 @@
 //! The H2a typed-share ratchet (`docs/design/hir.md` section 6.3, stage H2).
 //!
-//! "Anything the subset cannot type is reported as 'not yet on HIR' and the
-//! harness counts it, so the ratchet is: typed share of the corpus only grows."
-//! This test runs the type pass over every corpus case the HIR lowers and
-//! checks the count against `tests/differential/typed-share.toml`. It prints
-//! why each remaining case is untyped, so the growth work is visible rather than
-//! being a number in a file.
+//! The denominator is the corpus cases the old checker accepts and the HIR
+//! lowers. The numerator is those the HIR type pass finishes with no lowering
+//! diagnostic. Cases the old checker rejects are excluded from both: a program
+//! that must fail is diagnosed, and its rejection is owned by the rule and code
+//! parity tests, not by the typed share. The ratchet is checked against
+//! `tests/differential/typed-share.toml`; it prints why each remaining case is
+//! untyped, so the growth work is visible rather than being a number in a file.
 
 use std::collections::BTreeMap;
 
 use orna_differential::case::{CaseKind, Corpus};
 use orna_differential::compare::{self, TypedShare};
+use orna_differential::observe_checker;
 use orna_differential::observe_new;
 
 #[test]
@@ -19,10 +21,24 @@ fn typed_share_of_the_corpus_only_grows() {
     let recorded = compare::load_typed_share().expect("the typed-share ratchet parses");
     let mut lowered = 0usize;
     let mut typed = 0usize;
+    let mut rejected = 0usize;
     let mut unlowered = Vec::new();
     let mut reasons: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut examples: BTreeMap<&'static str, String> = BTreeMap::new();
     for case in &corpus.cases {
+        if case.kind != CaseKind::Repl {
+            match observe_checker::accepts(case) {
+                Ok(true) => {}
+                Ok(false) => {
+                    rejected += 1;
+                    continue;
+                }
+                Err(error) => {
+                    unlowered.push(error);
+                    continue;
+                }
+            }
+        }
         let mut program = match observe_new::lower_case(case) {
             Ok(program) => program,
             Err(error) => {
@@ -48,8 +64,11 @@ fn typed_share_of_the_corpus_only_grows() {
         }
     }
     println!(
-        "typed share: {typed}/{lowered} lowered cases ({} cases are not lowered)",
+        "typed share: {typed}/{lowered} old-checker-accepted cases ({} cases are not lowered)",
         unlowered.len()
+    );
+    println!(
+        "rejected by the old checker and excluded: {rejected} (owned by the rule and code parity tests)"
     );
     for (category, count) in &reasons {
         println!("  {count:>5} {category}");
