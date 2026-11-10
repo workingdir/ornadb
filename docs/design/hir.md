@@ -900,3 +900,369 @@ only has to replace the 369-line binding.
 | `orna run` | `FnDef.effects` of the entry decides read-only versus read-write | `entry_references_tables()` / `requires_publication_metadata()` path selection (`orna-cli/src/main.rs:2028-2060`), and the substring test on source text (`orna-application/src/lib.rs:471-472`) |
 | `sys.Function`, semantic catalogue | `FnDef` signature, effects, `ObjectId` | `ModuleHeader` (`orna-check/src/types.rs:150-162`) |
 | Formatter | nothing: it works on syntax | nothing |
+
+--------------------------------------------------------------------------
+
+## 4. Host functions: one declaration mechanism, bound by `DefId`
+
+### 4.1 The question
+
+"Which functions does the runtime implement, and how does a program name
+them?" has three answers today (critique 3.6):
+
+| Surface | Declared in | Bound by | Where |
+|---|---|---|---|
+| root intrinsics, `std` natives | Rust: 124 `IntrinsicId` variants, 4,015 lines of `Intrinsic` rows (`orna-intrinsics/src/modules/*.rs`), 109 rows with `Dispatch::Native`, 56 with a private `leaf` | catalogue lookup by `(Module, name)` at admission, gated by a pin range that equals one hard-coded commit hash (`orna-application/src/lib.rs:345-352`, `orna-intrinsics/src/pin.rs:7`) | the evaluator's `dispatch` matches the id to a family and the family matches the name string (`orna-evaluator/src/lib.rs:10175-10327`) |
+| `std` bodies that cannot be written in Orna | `.orna` with `fail(error(..))` bodies, forwarders and self-calls | by spelling | [native-declarations.md](native-declarations.md) sections 1.2 to 1.8 |
+| `sys` | `api/sys.json` (82 functions, 78 relations, 4 singletons) holding Orna signatures as strings, decoded at run time by the checker's own parser (`orna-check/src/system_api.rs:16-24`, `:97-148`) | generated ids (`orna-sys-id`, 973 lines), a generator (`orna-sys-codegen`, 4,089 lines), a build script (`orna-sys/build.rs`, 211 lines), and `SysHostBindingRegistry` (`orna-evaluator/src/sys_bindings.rs:1344`, 2,942 lines) | `call_system_host` by spelled path (`orna-evaluator/src/lib.rs:9795`) |
+
+Each has its own signature type (`SigType`, `SystemType`, `AbiType`), its own
+effect vocabulary and its own shadowing rule (root intrinsics shadowable;
+`sys` not, ORNA-NS-006). The owner's native-declarations design already chose
+the repair for the first two rows. This section extends it to the third and
+states how the result meets the HIR.
+
+### 4.2 One declaration form, in source
+
+A host-implemented function is a body-less declaration in ordinary Orna syntax,
+parsed and lowered by the same front end as every other function
+([native-declarations.md](native-declarations.md) sections 3.1 and 3.2):
+
+```orna
+pub native fn trim(value: Str): Str effect none;
+pub native fn integer(lo: Int, hi: Int): Int effect randomness;
+pub native fn filter<T>(rows: Relation<T>, keep: fn(T): Bool): Relation<T> effect none;
+```
+
+Three modules of such declarations exist, in three packages:
+
+| Module | Package | Versioned with | Replaces |
+|---|---|---|---|
+| `core.orna` | `PackageKind::Core`, embedded in `orna-exec` | the engine | `orna-intrinsics` tables for the root environment and for every native that is language-defined (collections, text, bits, hash, codecs, stats, time) |
+| `sys.orna` | `PackageKind::Sys`, embedded in the engine, never shadowable | the engine | `api/sys.json` as a source of truth, `SystemType`, `AbiType`, the signature half of `orna-sys-codegen` |
+| the pinned `std` | `PackageKind::Std`, captured with the project | the project's std pin | the `fail(..)` marker bodies; only if D12 keeps natives there |
+
+`[D12]` decides the third row and nothing else. Under D12 option "core and
+`sys` with the engine, pure-Orna `std`", the 113 std natives move into
+`core.orna`, `std` becomes ordinary replaceable source (ORNA-NS-007), and the
+historical-pin problem (ORNA-LIB-001) becomes a question about the engine's
+native ABI alone (section 4.4). Under "std keeps natives" the std package also
+contains `native fn`s, subject to the admission scope check of
+native-declarations.md 3.5. The HIR is identical in both: `FnBody::Native`
+(section 2.2) in a function of some package. `Callee::Native` versus
+`Callee::Sys` (section 2.6) is decided by the package kind of the declaring
+module, not by a spelling.
+
+What this removes, concretely: `leaf`, `binds_declaration`, `Dispatch`,
+`Justification` and the signature and effect fields of `Intrinsic`;
+`SigType`; the `__x` leaves and forwarders in the pinned std; the JSON as
+source of truth (`api/sys.json` is generated from `sys.orna`, so the
+specification's machine-readable file is derived, never parsed at run time).
+`sys.orna` goes through `orna-hir::lower` like any module, so a `sys`
+function is a `DefId` like any other and "typed sys id" is not a separate
+project (critique 4.2).
+
+### 4.3 Binding: once, at link, by `DefId`
+
+```rust
+// orna-exec (the link step lives beside the executor; it needs both)
+pub struct Linked {
+    pub program: Arc<Program>,
+    natives: IndexVec<DefId, Option<Bound>>,   // None for every non-native def
+}
+enum Bound { Native(NativeFn), Sys(SysFnId) }
+
+pub fn link(program: Program, host: &HostManifest) -> Result<Linked, Vec<LinkError>>;
+```
+
+`link` walks every `FnBody::Native(NativeDecl { abi, key })` in the program and
+binds it:
+
+- **Engine natives.** `key = (declaring module path, declared name)` indexes a
+  table that a small build script in `orna-exec` generates from the embedded
+  `core.orna`: `enum NativeId` plus `static NATIVES: [NativeFn; N]`, where each
+  entry names a Rust function `natives::<module>::<name>`. A declaration without
+  an implementation does not compile; an implementation without a declaration
+  is dead code under `-D warnings`. The script uses `orna-syntax` directly: no
+  `syn`, no JSON, no proc-macro crate (budget: 200 lines, replacing
+  `orna-sys-codegen`, `orna-sys-macros` and the 211-line `orna-sys/build.rs`).
+- **`sys` functions.** The same table gives a `SysFnId`; the call goes through
+  `Host::sys_call` (below). Whether the host implements it is read from
+  `HostManifest`, so an unavailable member is a link error naming the
+  declaration, not a run-time `sys.version.incompatible` for a function the
+  checker already admitted (`orna-check/src/system_api.rs`, the
+  `SystemProviders::{DeclaredSurface, Production}` split at `lib.rs:1351-1362`
+  exists only to paper over this).
+- **Both directions are load errors**, before anything runs
+  (native-declarations.md 3.6): a declaration at the current ABI with no
+  implementation, and an implementation with no declaration. Error codes are
+  that document's `ORNA-STD-NATIVE-*` family.
+
+After link nothing consults a name. The operator tree (section 7.2) is built
+from `Linked`: a `Callee::Native { def }` call node stores the `NativeFn`
+pointer itself, so a native call is one indirect call after its arguments are
+evaluated.
+
+```rust
+pub type NativeFn = fn(&mut NativeCx<'_>, &[Value]) -> Step;
+pub struct NativeCx<'a> {
+    pub limits: &'a Quotas,          // charge steps, retained bytes
+    pub host: &'a mut dyn Host,      // clock, entropy, tables; only for declared effects
+    pub targs: &'a [Ty],             // type arguments, e.g. `decode<T>`, [D5]
+}
+```
+
+Arguments arrive already bound and ordered by the one binder (section 2.7), so
+no native re-implements positional or named matching; `order_arguments` and the
+Blob binder go away.
+
+### 4.4 The `Host` trait
+
+One trait replaces `EffectHandler`, `Ovb2EffectHandler`,
+`ContextValueEffectHandler`, `Ovb2EffectHandlerAdapter`,
+`ContextValueEffectHandlerAdapter` (`orna-evaluator/src/lib.rs:1331-1850`) and
+the `system-host-bindings` Cargo feature (`:9864-9873`):
+
+```rust
+pub trait Host {
+    fn manifest(&self) -> &HostManifest;       // native ABI, sys declarations implemented
+    fn sys_call(&mut self, id: SysFnId, cx: &mut HostCx<'_>, args: &[Value]) -> Step;
+    fn now(&self) -> Instant;                  // fixed per activation (ORNA-TXN-005)
+    fn entropy(&mut self, out: &mut [u8]) -> Result<(), Error>;
+    fn io(&mut self) -> Option<&mut dyn HostIo>;   // filesystem, network, process; None in a browser build
+    fn store(&mut self) -> &mut dyn TableStore;    // section 5
+    /// One host per `parallel` child: each child is a separate activation and
+    /// transaction (ORNA-CONCUR-003, `source/10-execution.md:87`).
+    fn fork(&mut self, child: usize) -> Option<Box<dyn Host + Send>>;
+}
+```
+
+Key differences from the handlers it replaces:
+
+- It receives a `SysFnId`, never `&Expr`. A host cannot pattern-match syntax
+  because it is not given any (today `handle(callee: &Expr, ..)`,
+  `orna-evaluator/src/lib.rs:1332`).
+- Table access is not an effect call: it is `store()` (section 5), reached by
+  `TableOp` and relational nodes, not by offering a callee to whichever handler
+  claims it.
+- One value type. Values cross the boundary as `Value` and are converted to
+  `CanonicalValue` or `ContextValue` by the host where it needs them, so the
+  value profile is not encoded in which trait object the caller holds.
+- The browser build (`orna-evaluator/src/browser_profile.rs`) is a `Host` with
+  `io() = None` and `store()` over memory, not a different crate configuration.
+
+### 4.5 Versioning the native ABI
+
+Today `CURRENT_STD_PIN` is a 40-character commit hash compiled into the binary
+(`orna-intrinsics/src/pin.rs:7`), `PinRange::contains` compares two strings, and
+`route_call` tests the constant (`orna-evaluator/src/lib.rs:9903`). That cannot
+honour both ORNA-LIB-001 (a historical program keeps its library) and
+ORNA-NS-007 (std replaceable).
+
+The replacement is a number on the engine. `NativeAbi(u32)` is bumped when a
+native's behaviour or signature changes incompatibly; each declaration in
+`core.orna` carries `since` and optionally `until`; a captured program records
+the ABI it was admitted with in its dependency snapshot, and `link` refuses a
+program whose recorded ABI the engine does not implement, with a message naming
+both numbers. `orna-sys-model::AbiVersion { major, minor }`
+(`orna-sys-model/src/abi_version.rs:4`) already exists for provider negotiation
+and is reused for `sys`. A historical program that needs an older native keeps
+it as a second `core.orna` entry under a retired name with an `until` bound; the
+native-declarations.md legacy-reading rule (section 3.14) covers old std pins.
+
+### 4.6 Effects on declarations
+
+The `effect` clause draws from the 12 `sys.EffectKind` values or `none`
+(native-declarations.md 3.8). It is mandatory for a body-less declaration
+because there is no call graph to infer from, and the effect pass of section
+2.5 reads it into `FnDef.effects`. `[D2]` decides whether the clause is also
+*permitted on source functions*; the critique's objection (a clause that exists
+for natives alone) is met either way because the field and the checker rule are
+shared. A native with callback parameters is declared with an effect variable
+under D2-signature and is treated as `Opaque` for its callback under D2-hidden
+(section 2.5).
+
+### 4.7 Deleted when this lands (stage H5)
+
+`orna-intrinsics` (4,894 lines; the crate keeps only `NativeAbi` if anything),
+`orna-sys-macros`, the generation half of `orna-sys-codegen`, `SystemType` and
+the decode half of `system_api.rs`, `SysHostBindingRegistry`'s string dispatch,
+the three effect-handler traits and two adapters, `call_system_host`,
+`route_call`, `root_intrinsic`, `call_native`, `dispatch`, `order_arguments`,
+`ordered_host_arguments`, `call_blob_operation`'s binder, and the
+`system-host-bindings` feature. `orna-sys` keeps the providers themselves
+(`host_filesystem.rs`, `host_network.rs`, `host_process.rs` and so on); only how
+they are named and reached changes.
+
+--------------------------------------------------------------------------
+
+## 5. The table engine: cursors and one mutation path
+
+### 5.1 What is wrong today
+
+Reads. Every table an activation may touch is read whole before the evaluator
+starts. `committed_rows_at` (`orna-cli/src/main.rs:2638-2672`) loads every row of
+every admitted table and refuses the first row past
+`ApplicationAuthority::committed_read_limits()` (2,048 rows per table, the
+project source byte limit in bytes, `orna-application/src/lib.rs:711-717`). The
+SQLite side does the same: `committed_table_rows` is documented "reads one
+complete committed relation" and returns `Vec<(Vec<u8>, Vec<u8>)>`
+(`orna-runtime/src/table_store.rs:1642-1685`). The assertion gate encodes every
+table at `HEAD` on every gated commit (`orna-cli/src/assertion_gate.rs:77-110`).
+The result is `RuntimeTableRows = BTreeMap<String, Vec<(Vec<u8>, Vec<u8>)>>`
+(`orna-runtime/src/table_snapshot.rs:14`), and "paging" is a merge of that
+vector with a write overlay (`query_page`, `:188`), requested one row at a time
+(`RELATION_SCAN_PAGE_ROWS = 1`, `orna-evaluator/src/lib.rs:128`).
+
+Writes. Section 1.7 counts the paths. A write is an `Expr::Field` callee
+matched against five names by whichever of six handlers the caller holds
+(`orna-application/src/lib.rs:2781`, `repl_transaction.rs:750`,
+`orna-conformance/src/semantic_adapter.rs:4590, 4695, 6318`, and the async
+variant at `lib.rs:2478`), accumulating into a per-handler `overlay` map, then
+committed through one of eight entry points in `orna-runtime`
+(`src/lib.rs:925, 939, 1010, 1272, 1325, 1351, 1365`, `src/catalogue.rs:1627`).
+
+Limits. Three distinct bounds produce the "2,048" symptom (section 1.12). Only
+one of them, the evaluator's `max_collection_items`, is a language-level
+resource bound; the other two exist because the reads are whole-table.
+
+### 5.2 The store interface
+
+```rust
+// orna-exec defines it; the production implementation lives with orna-runtime.
+pub trait TableStore {
+    /// Open a cursor over `table` within `bounds`, in canonical key order or
+    /// reverse. Sees the activation's own writes (read-your-writes).
+    fn scan(&mut self, table: TableId, bounds: KeyBounds, dir: Direction)
+        -> Result<CursorId, StoreError>;
+    /// The next row as borrowed key and row bytes, or `None` at the end.
+    fn next(&mut self, cursor: CursorId) -> Result<Option<RowRef<'_>>, StoreError>;
+    fn close(&mut self, cursor: CursorId);
+
+    fn get(&mut self, table: TableId, key: &[u8]) -> Result<Option<Vec<u8>>, StoreError>;
+    fn put(&mut self, table: TableId, key: &[u8], row: &[u8], expect: Expect)
+        -> Result<(), StoreError>;           // Expect::{Absent, Present, Any}
+    fn delete(&mut self, table: TableId, key: &[u8]) -> Result<(), StoreError>;
+    fn next_auto_id(&mut self, table: TableId) -> Result<i64, StoreError>;
+}
+```
+
+Properties, each traced to a requirement or a present behaviour:
+
+- **Cursors, not pages.** A cursor advances one row at a time; the store
+  decides read-ahead. The evaluator's "one row per page" and the runtime's
+  1,024-row page cap (`table_snapshot.rs:188`) disappear because no vector is
+  being paged.
+- **Read-your-writes.** A cursor merges committed rows with the activation's
+  staged writes in key order, as `RuntimeQuerySession::query_page` does now
+  (`table_snapshot.rs:188-270`); the merge moves from a vector of pairs to two
+  ordered iterators.
+- **No savepoints.** The specification rolls back only at the activation
+  boundary: an unhandled failure rolls back every Orna-controlled write
+  (ORNA-ERR-006, `source/06-expressions.md:403`; ORNA-TXN-002,
+  `source/10-execution.md:9`). `|?` recovers a value and does not undo writes,
+  so the store needs begin, commit and rollback only, at the activation.
+- **Parallel children** each get their own `Host` and therefore their own
+  store transaction (ORNA-CONCUR-003); the store never has two writers inside
+  one activation.
+- **Row bytes are canonical.** The store traffics in the existing canonical
+  key and row encodings (`orna-value`); schema decoding happens in
+  `orna-exec`, from `TableDef`. The store knows tables by `TableId` mapped to
+  `ObjectId` at link, replacing the name-keyed maps and the
+  `table_storage_key` string mapping.
+
+Implementations: SQLite tail plus committed Git rows (production), an
+in-memory store (tests, browser profile, the differential harness), and a
+read-only store over a historical snapshot (`as_of`). The production
+implementation exposes the committed base as an ordered iterator over the
+existing storage (the `table_row` table is already `ORDER BY row_key`,
+`table_store.rs:1665-1671`; the committed Git tree is already key-ordered
+`[INFERENCE]: the format-3 reader's ordering contract was not re-read for this
+document`). Stage H6 verifies that contract and records it in the stage bead
+before any code depends on it.
+
+### 5.3 One mutation path
+
+```rust
+// orna-exec/src/table.rs: the only caller of TableStore::put and ::delete
+pub fn apply(
+    op: &TableOp, def: &TableDef, input: Value, store: &mut dyn TableStore, cx: &mut Cx,
+) -> Step;
+```
+
+`apply` implements, once: default evaluation (field defaults are `Body`s,
+section 2.3), rejection of computed-field writes, schema check, key derivation
+(declared or automatic via `next_auto_id`), the duplicate-key and missing-row
+rules for each of `Insert | Upsert | Update | Delete | Rekey`, and then `put` or
+`delete`. It is reached from exactly one place: the operator for
+`Callee::TableOp` (section 7.2). Because the HIR has already resolved the table
+(`TableRef::Static(DefId)` or a `Handle` expression whose type is the table), `let t = Note;
+t.insert(..)` and `Note.insert(..)` are the same node (critique F07). The
+differences between `orna run`, the REPL, `serve` and the mount are which
+`Host` supplies the `TableStore` and when it commits, never how a write is
+interpreted.
+
+Assertion validation at commit uses the same `TableDef` and `Body`s through
+the same store, so `orna-conformance` stops owning assertion admission
+(critique F08).
+
+### 5.4 Relations are operator trees pulled from cursors
+
+A relation value is a tree, built when the pipeline is evaluated and pulled
+when a terminal observes it:
+
+```rust
+enum RelNode {
+    Scan    { table: TableId, bounds: KeyBounds, at: Option<SnapshotRef> },
+    Values  (List),                                   // a list used as a relation
+    Filter  { input: Rc<RelNode>, pred: Callable },
+    Map     { input: Rc<RelNode>, f: Callable },
+    FlatMap { input: Rc<RelNode>, f: Callable },
+    Take    { input: Rc<RelNode>, n: usize },
+    Drop    { input: Rc<RelNode>, n: usize },
+    Distinct(Rc<RelNode>),
+    SortBy  { input: Rc<RelNode>, key: Callable },    // blocking
+    GroupBy { input: Rc<RelNode>, key: Callable },    // blocking
+    BucketBy{ input: Rc<RelNode>, spec: BucketSpec }, // streaming, one bucket retained
+    Union   (Vec<Rc<RelNode>>),
+}
+```
+
+Terminals (`count`, `first`, `one`, `sum`, `every`, `exists`, `collect`,
+`for_each`) open the cursor chain and pull. `take(n)` stops pulling after `n`
+rows, so `Note | take(10)` reads ten rows whatever the table holds. This is the
+behaviour the evaluator's relation plans already have in miniature
+(`orna-evaluator/src/relation.rs`, 1,375 lines, `RelationPlan` with stages
+and a streaming/sorted/bucket driver choice at `lib.rs:5562-5635`); the change
+is that the leaf is a store cursor and not a vector of 2,048 evaluator values.
+`sys.explain` prints this tree (section 3.5): the same value, not a model of it.
+
+Pushdown is not part of this design. A `Filter` over `Scan` still evaluates
+its callback per row. Key-range bounds are set only when the HIR shows a key
+comparison the typechecker can prove, and indexes wait on D9. Assertions
+remain whole-relation by ASSERT-004/005 (critique F24); this design removes the
+accidental caps, not the semantic cost.
+
+### 5.5 What happens to the three limits
+
+| Limit today | After | Why |
+|---|---|---|
+| `max_collection_items = 2,048`, checked at every retained collection (`orna-evaluator/src/lib.rs:5767`) | `Quotas.max_retained_bytes`, charged by operators that retain (`collect`, `SortBy`, `GroupBy`, a list literal, a string) and reported in `Usage` | a streaming `count` over a million rows retains nothing and needs no cap; a `sort_by` over a million rows retains them and must be bounded by memory, not by an item count |
+| `max_rows_per_table = 2,048` and the byte bound on the committed read (`orna-application/src/lib.rs:711-717`) | deleted, with `committed_read_limits`, `CommittedReadLimits` (`orna-project/src/table_storage.rs:66`) and the whole-table `committed_rows_at` | no whole-table read exists |
+| one row per page, 1,024 maximum | deleted | cursors |
+
+`Limits::default()` is passed at eleven production call sites (section 1.12).
+After H6 they construct `Quotas` from one function in `orna-exec`, with defaults
+chosen from the section 7 benchmarks and reported when exceeded
+(ORNA-CLOSURE-004: limits "must remain observable"). The one remaining
+item-count rule is the language's own: none, unless the language reference
+adds one.
+
+### 5.6 What this does not claim
+
+It does not make a million-row insert fast. The gate-C evidence (565 s
+admission, 343 s publication, 918 s cold scan locally, critique F20) is
+dominated by Git object writing and by the admission path that bypasses the
+language; that is stream E/F work. What this section delivers is that the
+language path can address a million rows at all, with memory bounded by the
+operators that retain, so the gate can be re-earned through `orna run`.
