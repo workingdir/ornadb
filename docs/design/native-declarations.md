@@ -91,7 +91,7 @@ Pinned `stdlib/std` at `fdf63e87` (80 `.orna` files):
 | `native fn` declarations the migration must write | 129 |
 | distinct catalogue identities those declarations bind | 113 |
 
-The 129 is 113 plus 16, not 113: 16 of the pin's native markers are the core
+The 129 is 113 plus 16, not 113 alone: 16 of the pin's native markers are the core
 relation re-exports in `stdlib/std/query.orna:254-284`, which are `REEXPORTS`
 rows rather than catalogue rows. The language has no `pub use`, so
 `std.query.filter` cannot re-export `std.collection.filter`; it needs its own
@@ -130,7 +130,7 @@ pinned source are dead code, and 74 one-line forwarders exist only to move
 the call one frame down to a `__` name.
 
 `std.hash` shows the inconsistency inside one module: it declares five marker
-leaves with the two-way body (`stdlib/std/hash.orna:12-17`) and the catalogue
+leaves with the two-way body (`stdlib/std/hash.orna:12-54`) and the catalogue
 nevertheless binds the five public names
 (`crates/orna-intrinsics/src/modules/hash.rs`), so its five leaves are
 unreachable guards rather than entry points.
@@ -336,7 +336,7 @@ error, not a run-time surprise.
 Lang items are the opposite arrangement: an identity (a `LangItem` enum
 variant) that the standard library binds by an attribute, so the name in
 source is not the identity.
-<https://github.com/rust-lang/rust/blob/master/compiler/rustc_hir/src/lang_items.rs>
+<https://doc.rust-lang.org/unstable-book/language-features/lang-items.html>
 
 Transfer: the identity is separate from the spelling, which is exactly the
 `IntrinsicId`-plus-declaration split; and a signature on a body-less
