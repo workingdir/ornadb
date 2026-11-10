@@ -105,7 +105,7 @@ pub fn classify(case_id: &str, diagnostic: &str) -> Option<&'static str> {
         "for_each" | "mean" | "ref" | "open" => MISSING_IMPORT,
         "half_even" => PENDING_P3B,
         "Str" if case_id.ends_with("secret-display.orna") => PENDING_P3B,
-        "Ordering" | "List" | "all_unique" => IMPLEMENT,
+        "Ordering" | "List" => IMPLEMENT,
         _ => UNCLASSIFIED,
     })
 }

@@ -180,22 +180,6 @@ reason = "the fixture-catalogue environment the reference corpus is admitted aga
 bead = "ornadb-csenl.15"
 
 [[difference]]
-case = "invalid/legacy-assert-owner-pipe.orna"
-field = "resolution-unresolved"
-first = "all_unique:0"
-second = "all_unique:1"
-reason = "the name is a language-defined native; its declaration moves into `core.orna` in stage H5 (D12)"
-bead = "ornadb-csenl.20"
-
-[[difference]]
-case = "invalid/legacy-assert-self-pipe.orna"
-field = "resolution-unresolved"
-first = "all_unique:0"
-second = "all_unique:1"
-reason = "the name is a language-defined native; its declaration moves into `core.orna` in stage H5 (D12)"
-bead = "ornadb-csenl.20"
-
-[[difference]]
 case = "invalid/legacy-result.orna"
 field = "resolution-unresolved"
 first = "Ok:0"
@@ -676,14 +660,6 @@ reason = "`HEAD` is a contextual selector word the checker resolves as the argum
 bead = "ornadb-csenl.20"
 
 [[difference]]
-case = "valid/table-assertions.orna"
-field = "resolution-unresolved"
-first = "all_unique:0"
-second = "all_unique:1"
-reason = "the name is a language-defined native; its declaration moves into `core.orna` in stage H5 (D12)"
-bead = "ornadb-csenl.20"
-
-[[difference]]
 case = "valid/transactional-scope.orna"
 field = "resolution-unresolved"
 first = "Audit:0"
@@ -1031,14 +1007,6 @@ reason = "the pinned std module does not export `http.get`, so the call does not
 bead = "ornadb-csenl.18"
 
 [[difference]]
-case = "invalid/legacy-assert-owner-pipe.orna"
-field = "rules"
-first = "ORNA-A091-002: remove the repeated table owner before the assertion predicate"
-second = ""
-reason = "`all_unique` is not in scope in the case, so the piped call does not lower (`ORNA-S012-UNRESOLVED`) and the owner-pipe rule has no call to judge; closed when the resolver carries the fixture-catalogue environment"
-bead = "ornadb-csenl.15"
-
-[[difference]]
 case = "invalid/legacy-assert-self-pipe.orna"
 field = "rules"
 first = "ORNA-A091-002: remove `self |`; the table already supplies its candidate relation"
@@ -1085,8 +1053,8 @@ bead = "ornadb-csenl.15"
 
 [[environment]]
 category = "legacy-rejection-names"
-count = 12
-reason = "legacy 1.0.0 programs (invalid/legacy-*) use names the HIR does not declare (DecodeError, Ok, Result, decode, ensure, match, name, var, all_unique). The HIR does not reject them with the published code; the environment test asserts each published code against the old checker, which is the evidence for the legacy class"
+count = 10
+reason = "legacy 1.0.0 programs (invalid/legacy-*) use names the HIR does not declare (DecodeError, Ok, Result, decode, ensure, match, name, var). The HIR does not reject them with the published code; the environment test asserts each published code against the old checker, which is the evidence for the legacy class"
 bead = "ornadb-csenl.16"
 
 [[environment]]
@@ -1109,8 +1077,8 @@ bead = "ornadb-csenl.16"
 
 [[environment]]
 category = "implement-declaration-names"
-count = 3
-reason = "names the HIR must declare before they resolve: Ordering (core enum), List (live page fallback) and all_unique (table assertions). These are real declarations, not environment; each is open work"
+count = 2
+reason = "names the HIR must declare before they resolve: Ordering (core enum) and List (live page fallback). These are real declarations, not environment; each is open work"
 bead = "ornadb-csenl.16"
 
 [[environment]]
