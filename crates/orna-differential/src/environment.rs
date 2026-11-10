@@ -94,7 +94,7 @@ pub fn is_legacy_case(case_id: &str) -> bool {
 pub fn classify(case_id: &str, diagnostic: &str) -> Option<&'static str> {
     let name = unresolved_name(diagnostic)?;
     Some(match name {
-        "mail" | "google" | "finance" | "energy" | "HEAD" | "CWD" | "work" => CONNECTOR_AND_HOST,
+        "mail" | "google" | "finance" | "energy" | "HEAD" | "CWD" | "work" | "EmailHeader" => CONNECTOR_AND_HOST,
         "Money" | "GBP" | "EUR" | "USD" | "kWh" | "mph" | "A" | "C" => CURRENCY_AND_UNIT,
         "Contact" | "contacts" | "Message" | "Audit" | "Order" | "Note" | "Page" | "Customer"
         | "Account" | "Payment" | "Reading" | "Status" | "Locale" | "DisplayContext" | "Europe"

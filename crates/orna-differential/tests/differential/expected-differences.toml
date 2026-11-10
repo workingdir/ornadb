@@ -1067,8 +1067,8 @@ bead = "ornadb-csenl.18"
 
 [[environment]]
 category = "connector-and-host-names"
-count = 25
-reason = "connector and host names (mail, google, finance, energy, HEAD, CWD, work) are a documented not-in-scope class: they name external connectors and host paths that the reference fixture supplies, and HIR does not invent declarations for them. They are not resolvable in HIR until a connector surface is declared"
+count = 26
+reason = "connector and host names (mail, google, finance, energy, HEAD, CWD, work) and the mail header type EmailHeader are a documented not-in-scope class: they name external connectors and host paths that the reference fixture supplies, and HIR does not invent declarations for them. They are not resolvable in HIR until a connector surface is declared"
 bead = "ornadb-csenl.15"
 
 [[environment]]
@@ -1109,8 +1109,8 @@ bead = "ornadb-csenl.16"
 
 [[environment]]
 category = "implement-declaration-names"
-count = 4
-reason = "names the HIR must declare before they resolve: Ordering and Self (generic protocol), List (live page fallback) and all_unique (table assertions). These are real declarations, not environment; each is open work"
+count = 3
+reason = "names the HIR must declare before they resolve: Ordering (generic protocol), List (live page fallback) and all_unique (table assertions). These are real declarations, not environment; each is open work"
 bead = "ornadb-csenl.16"
 
 [[environment]]
