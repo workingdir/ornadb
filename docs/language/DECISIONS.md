@@ -1778,3 +1778,554 @@ D1 (principal types) and D5 (overload resolution).
   at the executor, not in the type.
 
 --------------------------------------------------------------------------
+
+## D8. Units of measure
+
+Bead `ornadb-csenl.8`. Critique F10, section 3.2.
+
+### Specification today
+
+* `05-types.md:189-252`: `dim` and `unit` declarations with base, scaled,
+  composite and affine units (`unit C : Temperature = K offset 273.15
+  affine;` at `:211`); eight clauses ORNA-UNIT-001 to 008:
+  compatibility by reduced dimension exponents, rational scale and affine
+  behaviour (`:215`); compile-time error on incompatible addition (`:221`);
+  point/vector algebra for affine units (`:223-238`); integration reduces
+  dimensions (`:240`); an aggregation matrix over affine values
+  (`:242-250`); static, unambiguous unit suffix resolution that does not
+  perform `From` (`:252`).
+* `Quantity<N, U>` and the surface form `Float<kWh>` are core type forms
+  (`05-types.md:34`, `:134`).
+* Money interacts: ORNA-MONEY-003 (`05-types.md:280`) requires dimensional
+  algebra to reduce `Decimal<kWh> * (Money<GBP> / kWh)` to `Money<GBP>`.
+* The wire format has a Quantity value: tag 60006 `[number,
+  unit_object_id]` and a type descriptor `[7, numeric_type, unit_id]`
+  (`29-formats.md:28`, `:110`). Unit identities are stable ObjectIds
+  (ORNA-OBJECT-001, `07-tables.md:350`).
+* Time units (`1.day`, `5.minutes`) are described separately as Duration and
+  calendar period (ORNA-TIME-001 to 004, `05-types.md:141-161`).
+
+### Implementation today
+
+* Checker: `Type::Quantity` carries numeric type, dimension basis, scale and
+  offset (`orna-check/src/types.rs:38-44`); `units.rs` is 1,498 lines of
+  declaration reduction, and `quantity_operator_type` /
+  `quantity_sum_type` implement the operator tables
+  (`orna-check/src/inference.rs:1117-1250`). The checker's own comment on
+  money rates says `MoneyPerUnit` "is not a general dimensional-algebra
+  representation: unsupported products still remain Error"
+  (`types.rs:45-51`).
+* Evaluator: there is no quantity value in `enum Value`
+  (`orna-evaluator/src/lib.rs:3589-3665`). A numeric postfix is resolved by
+  its last path segment against a fixed list: `decimal`, `day(s)`,
+  `hour(s)`, `minute(s)`, `min`, `second(s)`, `s`; anything else is
+  `ORNA-EVAL-TYPE` (`lib.rs:5867-5900`). So the declared `unit m` of the
+  spec's own example parses and type-checks, and `1000.m` fails when run.
+  Note also that `s` and `min` are hard-coded names, not the declared
+  units.
+* `orna-value` has a Quantity schema test
+  (`orna-value/src/lib.rs:200`), so the canonical type descriptor exists;
+  the evaluator never constructs one.
+
+### Corpus
+
+No unit or dimension declaration exists in the pinned std (0 matches over 80
+modules). The spec examples `examples/valid/units.orna` and
+`affine-unit.orna` are the only source declaring units; these are parsed and
+checked, not executed (critique F31).
+
+### The problem
+
+Fact: a headline specified feature type-checks and cannot run. Judgement
+(critique): F# units of measure were a research programme, specified here
+in eight clauses; the checker's money-rate comment already records that the
+general case was not built.
+
+Note what is not in question: `Duration`, calendar periods and `Money` are
+runtime values today. The question is user-declared dimensions and units.
+
+### Options
+
+#### D8-A. Implement with runtime quantities
+
+What it is. Add `Value::Quantity { number, unit }` to the executor, with
+arithmetic that carries units, conversion on comparison and sum of
+compatible units, affine point/vector rules and the aggregation matrix.
+Numeric postfix resolves against declared units (including time units as
+declared in std or core), replacing the hard-coded list.
+
+Prior art.
+* F# measures are erased at run time and checked statically (see B).
+  Runtime-carrying systems exist in libraries (Python `pint` is one)
+  `[INFERENCE: no page fetched]`.
+
+For. Matches the specification and the wire format (tag 60006 carries a
+unit id), so a quantity read from storage or sent to a peer has a runtime
+identity.
+
+Against.
+* A new value kind across equality, order, hashing, presentation, codecs,
+  aggregation and every native that touches numbers.
+* Every unit conversion is an exact rational (UNIT-001), so the executor
+  needs exact scaled arithmetic over `Int`, `Decimal` and `Float`.
+* Aggregates over affine values need the ORNA-UNIT-007 matrix per
+  aggregate.
+
+Risks. Largest of the four; critique estimate M for the evaluator part,
+larger once codecs and storage are included.
+
+Reversibility. Low.
+
+Rests on.
+* Quantities must exist as stored values (columns of type `Float<kWh>`), not
+  only as checked expressions.
+
+#### D8-B. Implement erased: units are checked, values are plain numbers
+
+What it is. The checker keeps the full dimension and unit algebra; after
+checking, a quantity is lowered to its numeric value expressed in a
+declared canonical unit (scale and offset applied at elaboration time, by
+the HIR). The executor has no quantity value. Storage keeps the unit
+identity in the column type descriptor (`[7, numeric_type, unit_id]`), not
+in each value.
+
+Prior art.
+* F# units of measure are erased after type checking
+  (https://learn.microsoft.com/en-us/dotnet/fsharp/language-reference/units-of-measure).
+
+For.
+* Reuses the checker's 1,498 lines; the executor does not change.
+* Compatible with the wire descriptor.
+
+Against.
+* Anything dynamic loses the unit: a value from `sys.invoke`, a JSON
+  decode, or an aggregate over a polymorphic column needs a typed
+  boundary; `sys.Value` cannot carry units unless the boundary conversion
+  is specified.
+* Conversion at elaboration needs the HIR to know every operand's unit, so
+  it needs D1 (types known statically for every unit expression).
+* The tag 60006 value (number plus unit id) either is produced at the
+  boundary or is unused.
+
+Risks. Medium: the elaboration pass is new; dynamic boundaries need rules.
+
+Reversibility. Medium: moving to A later is compatible for programs.
+
+Rests on.
+* Programs use units in statically typed code; dynamic quantity values are
+  rare or boundary-converted.
+
+#### D8-C. Restrict: a fixed set of built-in dimensions
+
+What it is. Keep `Duration`, calendar `Period`, `Money<C>`, and a closed set
+of standard units declared in `core`/std as ordinary declarations (time,
+information size, maybe length and mass) with fixed conversions. Users
+cannot declare `dim` or `unit`; `Float<kWh>` is accepted only for the
+listed units. Affine units are either limited to temperature or cut.
+
+Prior art.
+* Rust `std::time::Duration` is a single built-in quantity; units beyond
+  time are left to crates (no page cited). SQL's `INTERVAL` is likewise a
+  fixed built-in.
+
+For. Covers the real uses in the corpus (time, size, money) with a bounded
+implementation and no user-visible dimension algebra.
+
+Against. Removes user-declared units (`dim`, `unit`) and the energy and
+power examples in the spec; the checker's `units.rs` shrinks but is not
+free; MONEY-003's `kWh` rate example needs `kWh` in the set.
+
+Reversibility. High: the closed set can open into A or B later.
+
+Rests on. The domain's units are few and known.
+
+#### D8-D. Cut units from 1.x
+
+What it is. Remove UNIT-001 to 008, `dim`/`unit` declarations and the
+`Quantity` type form from 1.x; reserve the keywords. `Duration`, `Period`
+and `Money` stay. Reintroduce in a later minor version.
+
+For. Removes the largest unexecutable surface (critique F10: "Implement in
+the evaluator or cut from 1.x"); `units.rs` and its tests leave the
+critical path of the HIR.
+
+Against. Loses a differentiator; `Money<GBP> / kWh` (MONEY-003) needs a
+replacement story; wire tag 60006 stays reserved and unused.
+
+Reversibility. Medium: re-adding a removed feature in a minor release is
+allowed only if 1.x versioning permits additive features (an owner
+question under D13).
+
+### Migration cost
+
+| Option | Pinned std | Spec examples | Checker and evaluator |
+|---|---|---|---|
+| A | time units re-declared as ordinary units in std or core | none | new `Value`, arithmetic, codecs |
+| B | none | none | new elaboration pass; units erased after check |
+| C | none | `examples/valid/units.orna` and `affine-unit.orna` removed or rewritten | delete user-declared unit machinery |
+| D | none | same two examples removed | delete `units.rs` (1,498 lines) and tests |
+
+### What the HIR needs from the answer
+
+* A: `Ty::Quantity { numeric, unit }` with unit `DefId`s and a conversion
+  table; executor value for quantities.
+* B: `Ty::Quantity` in the HIR, and an elaboration step that rewrites
+  unit arithmetic to plain numeric operations; no executor value.
+* C: `Ty::Quantity` over a closed enum of units, no user `unit` `DefId`s.
+* D: no quantity type; `dim`/`unit` are reserved words.
+* Under every option, the numeric-postfix rule must resolve through
+  declared names, not the hard-coded list at `lib.rs:5867-5900`.
+
+--------------------------------------------------------------------------
+
+## D9. Table keys and indexes
+
+Bead `ornadb-csenl.9`. Critique F24, F41, section 3.5 "Tables".
+
+Two questions with separate answers: Q1 the default key; Q2 how uniqueness
+and indexes are declared.
+
+### Specification today
+
+* ORNA-AUTOID-001 (`07-tables.md:53`): a table without key parameters
+  receives an implicit monotonically increasing `Int` key `id`.
+  AUTOID-002 (`:55`): allocated ids are never reused. AUTOID-004 (`:59`):
+  the allocator high-water mark is stored outside rewindable branch trees,
+  suggested ref `refs/orna/ids/<table-object-id>`. AUTOID-006 (`:69`):
+  "Independent offline clones have independent allocators and MAY allocate
+  the same integer. A merge of different rows with the same automatic ID
+  MUST create a typed row conflict and MUST NOT silently renumber".
+* The spec's own answer for collision-free creation is an explicit key:
+  `pub table Event(id: Uuid = uuid7())` (`:71-78`). ORNA-KEYDEF-004
+  (`:97`): key defaults that inspect table state "MAY allocate colliding or
+  different keys".
+* Permitted key components: `Bool`, `Int`, canonical `Decimal`, `Str`,
+  `Uuid`, `Date`, `Instant`, payload-free enums, references, tuples
+  (`:268-281`); never `Float` (ORNA-KEY-003, `:283`).
+* ORNA-MUT-009 (`:338`): the implicit integer key cannot be re-keyed.
+* There is no index declaration. ORNA-ASSERT-018 (`:206`): dedicated
+  `unique` and `check` field modifiers are not grammar; ORNA-ASSERT-057
+  (`:448`): "Assertion failure MUST NOT be encoded as a hidden stored
+  Boolean column, synthetic row or implicit index"; ORNA-ASSERT-058
+  (`:450`): an optimizer MAY implement `all_unique`, `every` and
+  cross-table predicates through indexes, anti-joins or incremental plans
+  when results and witnesses equal the reference evaluation. The only
+  mention of "secondary indexes" is ORNA-ROW-008 (`23-storage.md:19`):
+  they must use the same ordered store profile and commit with their rows.
+* Uniqueness is `assert all_unique(selector)` (`07-tables.md:152`); ORNA-
+  ASSERT-004/005 (`:178`, `:180`) define the subject as the complete
+  candidate relation. `null` equals `null` in `all_unique`
+  (`09-standard-library.md:52`).
+
+### Implementation today
+
+* The automatic key allocator is implemented as a hidden Git ref prefix:
+  `AUTOMATIC_ID_REF_PREFIX = "refs/orna/ids/"`
+  (`orna-repository/src/allocator.rs:22`).
+* Assertion validation reads whole tables. The commit gate's
+  `head_table_rows` "encodes every admitted table at `HEAD`" for every
+  gated commit in a project that declares assertions, bounded by a
+  committed-read limit and past it "treats every candidate table as
+  changed" (`orna-cli/src/assertion_gate.rs:77-90`, bead `ornadb-t5tz`).
+  I did not find an index structure that serves `all_unique` (nothing in
+  the checker or evaluator names one) `[INFERENCE: negative search only]`.
+* The evaluator's relation scans cap at 2,048 collection items and 419,600
+  steps by default (`orna-evaluator/src/lib.rs:124-126`); this is D9-adjacent
+  because `all_unique` is evaluated by the same machinery (critique F03,
+  F24).
+
+### The problem
+
+Q1. Fact: automatic keys are integers from a per-clone allocator, and the
+spec itself says offline clones collide and a merge of different rows with
+one id is a conflict. Judgement (critique): the default key breaks the
+product's central workflow of branch and merge; Dolt documents UUID keys as
+the answer for the same reason.
+
+Q2. Fact: uniqueness is a full-relation assertion whose cost grows with the
+table, and nothing in the language lets a user state "this lookup is
+indexed". An optimiser is allowed to recognise `all_unique` but is not
+required to, and users cannot tell whether one did.
+
+### Options for Q1: the default key
+
+#### D9-A. Keep the automatic `Int` key as the default
+
+What it is. As specified.
+
+Prior art. SQLite `AUTOINCREMENT` and rowid
+(https://www.sqlite.org/autoinc.html); PostgreSQL identity columns
+(https://www.postgresql.org/docs/current/ddl-identity-columns.html).
+
+For. Compact, ordered, human-readable ids; matches single-writer SQL
+expectations; implemented.
+
+Against. The spec's own collision rule (AUTOID-006); the allocator needs a
+hidden ref (AUTOID-004) that survives branch switches.
+
+Reversibility. Low once rows exist with integer ids.
+
+#### D9-B. Default to `Uuid = uuid7()`
+
+What it is. A table without key parameters gets `id: Uuid = uuid7()`
+(time-ordered, RFC 9562). The integer allocator becomes opt-in, or is
+removed together with AUTOID-001..006 and `refs/orna/ids`.
+
+Prior art.
+* Dolt: UUID keys recommended over auto increment for a versioned database
+  (https://www.dolthub.com/blog/2023-10-27-uuid-keys/;
+  https://docs.dolthub.com/concepts/dolt/git/conflicts).
+* PostgreSQL `uuid` type
+  (https://www.postgresql.org/docs/current/datatype-uuid.html); UUIDv7 in
+  RFC 9562 (https://www.rfc-editor.org/rfc/rfc9562).
+
+For. Merge-safe by construction; removes the hidden ref, AUTOID-002 to 006
+and the associated recovery surface; already the spec's own recommended
+form.
+
+Against. Ids are 16 bytes and not human friendly; `uuid7()` is an effect
+(clock and randomness) evaluated inside the insertion transaction
+(ORNA-KEYDEF-001, `:91`), so default key evaluation reaches the effect
+system (D2); changes `table Note { ... }` from `id: Int` to `id: Uuid` in
+every example and test.
+
+Reversibility. Medium: a later switch of default changes the type of every
+implicit key.
+
+#### D9-C. No default key: every table declares its key
+
+What it is. `table Note { .. }` without a key list is an error; a table
+must write `table Note(id: Uuid = uuid7())` or another key. Automatic keys
+are removed.
+
+Prior art. SQLite `WITHOUT ROWID` tables
+(https://sqlite.org/withoutrowid.html) and Datomic, where identity is
+attributes you choose (https://docs.datomic.com/schema/identity.html).
+
+For. No hidden allocator and no hidden default; every table says what
+identifies it.
+
+Against. More text for every table; breaks the minimal `table Note { }`
+example; the REPL start-up story gets longer.
+
+Reversibility. High: a default can be added later.
+
+### Options for Q2: uniqueness and indexes
+
+#### D9-X. Assertion only, as specified
+
+What it is. Uniqueness and lookup constraints are `assert all_unique(..)`;
+the optimiser MAY use indexes (ASSERT-058); no user-visible index
+declaration.
+
+For. One mechanism for integrity; no second vocabulary; matches ASSERT-018.
+
+Against. Cost is a scan unless an optimiser recognises the form, and users
+cannot require it; there is no way to ask for an index to speed a query.
+
+Reversibility. High.
+
+#### D9-Y. Add `unique` and `index` declarations
+
+What it is. A table body gains declarations such as `unique(field, ..)`
+and `index(field, ..)`; `unique` is sugar defined as the equivalent
+`all_unique` assertion plus a required index; `index` is a performance
+declaration with no semantic effect. Witnesses are unchanged (ASSERT-058).
+
+Prior art.
+* PostgreSQL `CREATE UNIQUE INDEX` and unique constraints
+  (https://www.postgresql.org/docs/current/indexes-unique.html,
+  https://www.postgresql.org/docs/current/sql-createindex.html,
+  https://www.postgresql.org/docs/current/ddl-constraints.html).
+* SQLite `CREATE INDEX`
+  (https://www.sqlite.org/lang_createindex.html).
+* Datomic schema attributes `:db/unique` and `:db/index`
+  (https://docs.datomic.com/schema/schema-reference.html).
+
+For. Users state the cost model; uniqueness checks can be incremental and
+O(log n); matches ORNA-ROW-008's reference to secondary indexes.
+
+Against. Reverses ORNA-ASSERT-018's "dedicated `unique` modifier" for
+table-level declarations (it forbade field modifiers; a table-level form is
+a new decision); adds storage objects (stable ObjectIds, ORNA-OBJECT-001),
+merge rules for index definitions and an index maintenance obligation in
+the store.
+
+Reversibility. Low: declarations become part of schema history.
+
+#### D9-Z. Key-shaped assertions only
+
+What it is. Keep assertions as the only syntax but specify that
+`assert all_unique(r => r.field)` over a single field or tuple of fields,
+exactly in that shape, is required to be index-backed; other shapes are
+allowed and scan. The reference states the recognised shapes.
+
+For. No new declaration; the cost model is written down; reuses ASSERT-058.
+
+Against. Costs depend on spelling (the critique's F17 complaint in another
+place); every recogniser is a normative rule.
+
+Weak: it recreates an index declaration through a syntactic pattern.
+
+### Migration cost
+
+| Option | Pinned std | Corpus | Spec text |
+|---|---|---|---|
+| Q1-A | none | none | none |
+| Q1-B | none | every implicit-key table example and fixture (`id: Int` to `id: Uuid`) | rewrite AUTOID-001..006, remove ref layout |
+| Q1-C | none | every keyless table gains a key | remove AUTOID, MUT-009 |
+| Q2-X | none | none | none |
+| Q2-Y | none | optional adoption | grammar, schema identity, storage |
+| Q2-Z | none | none | recognised-shape clause |
+
+I did not count keyless tables in the corpus.
+
+### What the HIR needs from the answer
+
+* `TableDef` with an ordered key list and, per key component, an optional
+  default expression (all of Q1 reduces to this).
+* Q1-A: a synthetic key component with allocator semantics; Q1-B/C: none.
+* Q2-Y: index and unique declarations as `TableDef` members with
+  `DefId`s; assertion lowering may reference them.
+* Q2-X/Z: assertions lower to `Predicate<Relation<Row>>` expressions
+  only; the planner (stream E) decides index use.
+
+--------------------------------------------------------------------------
+
+## D10. Bindings and closures
+
+Bead `ornadb-csenl.10`. Critique section 3.5 "Bindings".
+
+### Specification today
+
+* `05-types.md:63`: "A local name introduced by `let` is a function-local
+  slot whose binding may be reassigned by an assignment statement;
+  reassignment replaces the entire immutable value". ORNA-VALUE-006
+  (`:75`): reassigning a `let` MUST NOT mutate any value previously
+  captured, returned, stored or observed through another binding.
+* ORNA-VALUE-007 (`:77`) and ORNA-CFLOW-011 (`06-expressions.md:237`):
+  `var` is not a declaration; `ORNA091-E-VAR` proposes `let`.
+* ORNA-CFLOW-005 and -006 (`06-expressions.md:217-219`): `let` creates a
+  slot; assignment is a statement targeting an existing local `let`
+  binding, not an expression.
+* ORNA-VALUE-003 (`05-types.md:69`): "Closures capture values at creation
+  time." ORNA-LAMBDA-003 (`06-expressions.md:269`): "Anonymous functions
+  capture immutable lexical values."
+* Example at `06-expressions.md:203-206`: `let total = 0; for item in items
+  { total = total + item; }`.
+
+### Implementation today
+
+* Checker: assignment looks up the target in the current local map and
+  checks the value type (`orna-check/src/inference.rs:1972-2069`, lookup at
+  `:1984`). A lambda body is checked with a clone of the enclosing locals
+  (`:237`), so an assignment to an enclosing local inside a lambda
+  type-checks against the clone. I found no diagnostic for "assignment to a
+  captured variable" `[INFERENCE: negative search in inference.rs and
+  flow.rs]`.
+* Evaluator: closure creation clones the whole scope (`captured =
+  scope.clone()`, `orna-evaluator/src/lib.rs:6149`), and calls clone the
+  captured scope again (`:10040`), so a closure body that assigns to a
+  captured name updates its own copy and the enclosing binding is unchanged
+  `[INFERENCE from the clones; I did not run a probe]`.
+* Closure scope is a `BTreeMap<String, Value>` that is cloned wholesale
+  (`lib.rs:4795` per critique F26): capture cost grows with scope size.
+
+### The problem
+
+Fact: `let` is reassignable and closures capture by value, so an assignment
+inside a closure to an outer binding compiles and is silently local to the
+closure. Fact: there is no immutable binding at all; a reader cannot tell
+from a declaration whether a name will change. Judgement (critique): Rust's
+`let`/`let mut` or Gleam's no-reassignment are both more coherent.
+
+### Options
+
+#### D10-A. Keep reassignable `let`; add a rule for captured assignment
+
+What it is. Status quo, plus one reference rule: assigning to a binding
+from a scope outside the closure is either a static error, or defined as
+assignment to the closure's private copy (documented as such). Optionally
+add a lint.
+
+For. No source changes; smallest specification delta.
+
+Against. No immutable bindings; every `let` might be reassigned, so
+nothing is "constant" for readers or optimisers (the HIR cannot treat
+bindings as single-assignment).
+
+Risks. Low. Reversibility: high (B or C are tightenings).
+
+Rests on. Reassignment is a convenience for loops, not a safety concern.
+
+#### D10-B. `let` is immutable; `let mut` is reassignable
+
+What it is. Two declarations. Assignment targets only `let mut`; a closure
+may not assign to a captured binding (static error), or captures `let mut`
+by value with a documented copy. `var` stays unused (ORNA-VALUE-007 is
+reworded).
+
+Prior art.
+* Rust `let` and `let mut`
+  (https://doc.rust-lang.org/book/ch03-01-variables-and-mutability.html);
+  closures borrow or move
+  (https://doc.rust-lang.org/reference/types/closure.html).
+
+For. Intent is in the declaration; the HIR has an immutable-binding fact
+to optimise on; closure assignment becomes an obvious error.
+
+Against. Reintroduces a second declaration form the owner removed (`var` was
+deleted in 1.1; see ORNA-VALUE-007 and ORNA-CFLOW-011, which say a second
+mutability system is unwanted); every existing counter loop changes.
+
+Reversibility. Medium.
+
+Rests on. The reason for removing `var` was spelling, not the existence of
+a mutability distinction. `[INFERENCE: the clauses give no reason]`.
+
+#### D10-C. No reassignment: loops use folds and recursion
+
+What it is. `let` is the only binding and is immutable; assignment and
+compound assignment are removed. Iteration uses `reduce`, `fold`, recursion
+or `for` with a defined accumulator construct.
+
+Prior art.
+* Gleam: no reassignment; names can be shadowed by a later `let`
+  (https://tour.gleam.run/basics/assignments/).
+* Elm and OCaml (the immutable `let`; mutation only through explicit
+  `ref`, https://ocaml.org/docs/mutability-imperative-control-flow).
+* Erlang single assignment (https://www.erlang.org/doc/system/expressions.html).
+
+For. Closure capture is trivially sound; the HIR bindings are
+single-assignment; no mutable-capture rule.
+
+Against. Removes `while` and `for` accumulation idioms used throughout the
+pinned std (`bytes.orna:20-28`, `map.orna:35-50`, `list.orna:34-42` all
+loop with `index += 1` and `result = append(result, ..)`), so every such
+function is rewritten; stack depth for recursion is 64 active calls by
+default (`orna-evaluator/src/lib.rs:125`), so loops cannot just become
+recursion without raising the bound.
+
+Risks. Large std rewrite, and a language-level answer to accumulation.
+
+Reversibility. Low.
+
+### Migration cost
+
+| Option | Pinned std | Corpus | Spec text |
+|---|---|---|---|
+| A | none | none | add one captured-assignment rule |
+| B | every reassigned local becomes `let mut` (count: not measured; at least the loop functions in `bytes`, `map`, `list`) | the same in fixtures | CFLOW-005/006, VALUE-006/007 |
+| C | every loop with an accumulator | every loop | remove assignment from grammar |
+
+### What the HIR needs from the answer
+
+* A binding node with `mutable: bool` (A: always true; B: declared;
+  C: always false), and an assignment node that references a binding
+  `DefId` and is rejected during lowering if it targets a captured one.
+* A closure node with an explicit capture list (names and modes), computed
+  once, replacing the cloned-scope capture of today; this is needed under
+  every option for performance (critique F26).
+* Under C: no assignment node.
+
+--------------------------------------------------------------------------
