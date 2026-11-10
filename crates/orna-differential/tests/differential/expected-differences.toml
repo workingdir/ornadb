@@ -1023,6 +1023,29 @@ reason = "same cause as count_is_positive: `values | count` over a list paramete
 bead = "ornadb-csenl.18"
 
 [[difference]]
+case = "invalid/assert-effectful-table.orna"
+field = "rules"
+first = "ORNA-A091-007: declaration assertion uses forbidden network effect"
+second = ""
+reason = "the pinned std module does not export `http.get`, so the call does not lower (`ORNA-S012-UNRESOLVED`) and the effect pass cannot see the network effect; closed when H2 resolves std exports"
+bead = "ornadb-csenl.18"
+
+[[difference]]
+case = "invalid/legacy-assert-owner-pipe.orna"
+field = "rules"
+first = "ORNA-A091-002: remove the repeated table owner before the assertion predicate"
+second = ""
+reason = "`all_unique` is not in scope in the case, so the piped call does not lower (`ORNA-S012-UNRESOLVED`) and the owner-pipe rule has no call to judge; closed when the resolver carries the fixture-catalogue environment"
+bead = "ornadb-csenl.15"
+
+[[difference]]
+case = "invalid/legacy-assert-self-pipe.orna"
+field = "rules"
+first = "ORNA-A091-002: remove `self |`; the table already supplies its candidate relation"
+second = ""
+reason = "`all_unique` is not in scope in the case, so the piped call does not lower (`ORNA-S012-UNRESOLVED`) and the `self |` rule has no call to judge; closed when the resolver carries the fixture-catalogue environment"
+bead = "ornadb-csenl.15"
+[[difference]]
 case = "valid/formatting-does-not-serialize.orna"
 field = "public-signature"
 first = "examples.valid.formatting-does-not-serialize::both=both(Duration) -> {display: Str, encoded: ByteStream}"

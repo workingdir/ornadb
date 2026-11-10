@@ -268,6 +268,9 @@ pub struct LetDef {
 pub struct AssertionDef {
     /// The assertion body.
     pub body: BodyId,
+    /// The row the assertion belongs to: its table, or the assertion itself for a
+    /// module assertion. The body is owned by the assertion, so this is not `body.owner`.
+    pub owner: DefId,
 }
 
 /// A field of a table, a nominal type or an enum payload.
