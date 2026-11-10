@@ -16,7 +16,8 @@ use orna_differential::observe_old;
 #[test]
 fn executor_agreement_with_the_old_pipeline_only_grows() {
     let corpus = Corpus::load().expect("the corpus loads and reconciles");
-    let recorded = compare::load_exec_agreed().expect("the exec-share ratchet parses");
+    let recorded = compare::load_exec_share().expect("the exec-share ratchet parses");
+    let evaluable = corpus.cases.iter().filter(|case| case.evaluate).count();
     let mut ran = 0usize;
     let mut agreed = 0usize;
     let mut mismatches = Vec::new();
@@ -53,7 +54,8 @@ fn executor_agreement_with_the_old_pipeline_only_grows() {
         "the executor disagrees with the old pipeline:\n{}",
         mismatches.join("\n")
     );
-    let failures = compare::exec_share_ratchet(recorded, agreed);
+    let observed = compare::ExecShare { agreed, evaluable };
+    let failures = compare::exec_share_ratchet(recorded, observed);
     assert!(
         failures.is_empty(),
         "the exec-share ratchet failed:\n{}",
