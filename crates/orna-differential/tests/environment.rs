@@ -34,7 +34,7 @@ fn environment_names_only_shrink_as_declarations_arrive() {
                 && let Some(length) = diagnostic[start + 1..].find('`')
             {
                 let name = &diagnostic[start + 1..start + 1 + length];
-                *names.entry(format!("{category}: {name}")).or_insert(0) += 1;
+                *names.entry(format!("{category}: {name} @ {}", case.id)).or_insert(0) += 1;
             }
         }
     }
