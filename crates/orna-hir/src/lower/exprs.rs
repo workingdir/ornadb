@@ -199,6 +199,9 @@ fn lower_field(
     name: &str,
     span: &SyntaxSpan,
 ) -> ExprId {
+    if let Some(call) = super::units::lower_suffix_unit(builder, state, base, name, span) {
+        return call;
+    }
     if let AstExpr::Literal { text, kind, .. } = base
         && let Some(literal) = super::literals::lower_numeric_postfix(text, *kind, name)
     {
@@ -206,10 +209,10 @@ fn lower_field(
     }
     let member_of_path = qualified_member(builder, state, base, name);
     let base = lower_expr(builder, state, base);
-    if let Some(member) =
-        member_of_path.filter(|def| builder.is_variant(*def) || builder.is_static(*def))
+    if let Some(member) = member_of_path
+        .filter(|def| builder.is_variant(*def) || builder.is_static(*def) || builder.is_unit(*def))
     {
-        // `Enum.variant` and `Type.static` name the member itself; the owner path is only recorded.
+        // `Enum.variant`, `Type.static` and `Family.unit` name the member itself; the owner path is only recorded.
         let name_span = SyntaxSpan::new(span.end.saturating_sub(name.len()), span.end);
         super::record_body_use(
             &mut builder.program,
@@ -396,26 +399,14 @@ fn field_of_type(builder: &Builder<'_>, ty: Ty, name: &Name) -> Option<DefId> {
     }
 }
 
-/// The definition a `base.name` access that has no field type names: a
-/// member of the type or enum the dotted `base` path names (`Status.draft`),
-/// or the unit a numeric literal's suffix names (`1000.metre`).
+/// The definition a `base.name` access that has no field type names: a member of the type or enum the
+/// dotted `base` path names (`Status.draft`, `Length.kilometre`).
 fn qualified_member(
     builder: &Builder<'_>,
     state: &BodyState,
     base: &AstExpr,
     name: &str,
 ) -> Option<DefId> {
-    if matches!(
-        base,
-        AstExpr::Literal {
-            kind: orna_syntax::LiteralKind::Integer
-                | orna_syntax::LiteralKind::Decimal
-                | orna_syntax::LiteralKind::Float,
-            ..
-        }
-    ) {
-        return builder.resolve_unit(state.module, &Name::new(name));
-    }
     let mut segments = Vec::new();
     if !flatten_path(base, &mut segments) {
         return None;
@@ -797,7 +788,9 @@ fn call_type(builder: &mut Builder<'_>, callee: &crate::Callee) -> Ty {
             super::declare::PendingKind::Built(DefKind::Fn(function)) => function.ret,
             _ => builder.program.tys.error(),
         },
-        crate::Callee::Ctor { def } => builder.program.tys.intern(TyKind::Adt(*def, Box::new([]))),
+        crate::Callee::Ctor { def } if !builder.is_unit(*def) => {
+            builder.program.tys.intern(TyKind::Adt(*def, Box::new([])))
+        }
         _ => builder.program.tys.error(),
     }
 }

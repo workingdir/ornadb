@@ -56,8 +56,8 @@ pub enum Length {
     metre,                               // the base unit: the one bare variant
     kilometre = 1000 metre,
     mile = 1609.344 metre,
+    impl Unit {}
 }
-impl Unit {}
 
 pub enum Duration {                      // the time family; the nominal name of its quantities
     second,
@@ -70,14 +70,14 @@ pub enum Duration {                      // the time family; the nominal name of
     hours = 3600 second,
     day = 86400 second,                  // elapsed 24 hours, not a calendar day (Q1)
     days = 86400 second,
+    impl Unit {}
 }
-impl Unit {}
 
 pub enum Speed {                         // derived: no bare variant
     kmh = Length.kilometre / Duration.hour,
     mph = Length.mile / Duration.hour,
+    impl Unit {}
 }
-impl Unit {}
 ```
 
 Calls and literals, same for built-in and user families:
@@ -104,7 +104,7 @@ Rules on the surface:
 
 * A variant is either payload (1.2 enum) or unit (unit family). A family may not mix
   payload variants with unit variants.
-* A unit family is an enum followed by the marker `impl Unit {}` as its last line (C13, default
+* A unit family is an enum whose last entry, written inside its braces, is the marker `impl Unit {}` (C13, default
   M-a; ORNA-UNIT-009). `Unit` is a marker trait of `core`. An enum without the marker is ordinary:
   its bare variants are payload-free variants, and a `=` variant in it is rejected.
 * `RATIONAL` is an exact decimal literal such as `0.125`. Fractions are not written.
@@ -369,8 +369,8 @@ pub enum Length {
     metre,
     kilometre = 1000 metre,
     mile = 1609.344 metre,
+    impl Unit {}
 }
-impl Unit {}
 
 let a = 2.kilometre + 300.metre;      // finer metre (ORNA-UNIT-011): Quantity<Int, metre>, 2300
 let b = 1.mile + 1.kilometre;         // finer kilometre; ratio 1.609344 is exact: Decimal 2.609344
@@ -384,8 +384,8 @@ let bad = 3.metre + 2.second;         // ORNA-UNIT-DIM: Length and Duration
 pub enum Speed {
     kmh = Length.kilometre / Duration.hour,      // scale 1000/3600, that is 5/18
     mph = Length.mile / Duration.hour,           // scale 1609.344/3600
+    impl Unit {}
 }
-impl Unit {}
 
 let v = 60.kmh + 10.mph;      // finer kmh; mph ratio exact: Decimal 76.09344 kmh
 let bad = 60.kmh + 2.metre;   // ORNA-UNIT-DIM: Speed and Length
@@ -398,12 +398,21 @@ let bad = 60.kmh + 2.metre;   // ORNA-UNIT-DIM: Speed and Length
 ### 7.3 Ambiguous suffix
 
 ```orna
-pub enum Length { metre, kilometre = 1000 metre }
-impl Unit {}
-pub enum Storage { byte, kilobyte = 1000 byte }
-impl Unit {}
-pub enum Stream { chunk, kilometre = 3 chunk }    // a second family with the suffix kilometre
-impl Unit {}
+pub enum Length {
+    metre,
+    kilometre = 1000 metre,
+    impl Unit {}
+}
+pub enum Storage {
+    byte,
+    kilobyte = 1000 byte,
+    impl Unit {}
+}
+pub enum Stream {
+    chunk,
+    kilometre = 3 chunk,    // a second family with the suffix kilometre
+    impl Unit {}
+}
 
 let ok = Length.kilometre(5);       // qualified form resolves the name
 let bad = 5.kilometre;              // ORNA-S011: suffix kilometre is in two families in scope
@@ -436,12 +445,12 @@ pub enum Data {
     bit = 0.125 byte,
     kB = 1000 byte,
     KiB = 1024 byte,
+    impl Unit {}
 }
-impl Unit {}
 pub enum DataRate {
     Mbps = 1000000 bit / Duration.second,
+    impl Unit {}
 }
-impl Unit {}
 
 let total = 8.bit + 1.byte;          // finer bit; byte ratio 8 is an integer: Int 16 bit
 let mixed = 1.KiB + 1.kB;            // finer kB; KiB ratio 1.024 exact: Decimal 2.024 kB
@@ -470,8 +479,8 @@ pub enum Duration {
     hours = 3600 second,
     day = 86400 second,
     days = 86400 second,
+    impl Unit {}
 }
-impl Unit {}
 ```
 
 The names listed are the intrinsic duration suffixes of the 1.1.0 checker
@@ -510,8 +519,8 @@ pub enum Data {
     KiB = 1024 byte,
     MiB = 1048576 byte,
     GiB = 1073741824 byte,
+    impl Unit {}
 }
-impl Unit {}
 ```
 
 ### 8.3 Currency and money (library)
@@ -563,13 +572,13 @@ pub type GBP {
 // core.money: energy, used by the rate examples. Library example, not part of the native core.
 pub enum Mass {
     kg,
+    impl Unit {}
 }
-impl Unit {}
 pub enum Energy {
     J = Mass.kg * Length.metre^2 / Duration.second^2,
     kilowatt_hour = 3600000 J,
+    impl Unit {}
 }
-impl Unit {}
 ```
 
 `Money<C>` is `Decimal` with impls, so `Money<GBP> * Money<GBP>` has no impl and is an

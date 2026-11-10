@@ -1,0 +1,4 @@
+pub enum Length {
+    metre,
+    kilometre = 1000 metre,
+}

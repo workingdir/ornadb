@@ -14,8 +14,8 @@
 # families whose driving is already data-driven: the published reference corpus
 # (169 cases), the evaluator's expression fixtures (42), the REPL admission
 # fixtures (14) and the pinned standard modules (77). 5,399 programs were excluded
-# at H0; the embedded interface tree (12) and the native parser fixtures (27) were
-# added later, so 5,438 programs are excluded here. The follow-up PRs move them
+# at H0; the embedded interface tree (12), the native parser fixtures (27) and the
+# unit-family parser fixtures (12) were added later, so 5,450 programs are excluded here. The follow-up PRs move them
 # across family by family.
 
 [[excluded]]
@@ -130,7 +130,7 @@ reason = "publication fixtures are journal and store states, not programs"
 
 [[excluded]]
 scope = "crates/orna-syntax/tests/fixtures"
-files = 455
+files = 467
 reason = "parser fixtures are accept/reject sources for the syntax adapter, including a vendored reference copy and a probe grammar; a truncated snippet is not a module, so the module observer would report checker errors that say nothing about the fixture"
 
 [[excluded]]
