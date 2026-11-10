@@ -1622,6 +1622,7 @@ dependencies = [
  "num-bigint 0.4.8",
  "orna-syntax",
  "orna-value",
+ "unicode-casefold",
  "unicode-normalization",
 ]
 

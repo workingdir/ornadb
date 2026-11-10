@@ -1,5 +1,9 @@
 # reform(native-decl): first-class native declarations for the pinned standard library
 
+Amended 2026-11-10: any module unit may declare a native; keys outside `core` and
+`sys` bind at link. Where this file and [`docs/design/native-libraries.md`](native-libraries.md)
+differ, that file governs.
+
 Status: design proposal. Successor to section 3.4 of
 [`docs/design/std-native.md`](std-native.md), whose `fail(...)` marker
 convention the owner rejected on 2026-11-10.
@@ -655,8 +659,9 @@ Added:
 * a new subsection in chapter 9 (standard library) carrying ORNA-NATIVE-001 to
   015;
 * the grammar production above in chapter 42 and in `grammar/orna.ebnf`;
-* three load diagnostics: `ORNA-STD-NATIVE-UNBOUND`,
-  `ORNA-STD-NATIVE-UNDECLARED`, `ORNA-STD-NATIVE-SCOPE`, plus the parser
+* load diagnostics: `ORNA-STD-NATIVE-UNBOUND`, `ORNA-STD-NATIVE-UNDECLARED`, and
+  the link codes of `docs/design/native-libraries.md` section 11
+  (`ORNA-STD-NATIVE-SCOPE` is retired), plus the parser
   diagnostics `ORNA091-E-NATIVE-BODY`, `-NATIVE-TYPE`, `-NATIVE-SELF`,
   `-NATIVE-EFFECT`, `-NATIVE-PLACE`.
 
@@ -692,13 +697,21 @@ Three layers, each with a distinct failure mode:
    `grammar/orna.ebnf:7-11`) does not admit it, so a prompt cannot declare
    one. `impl_member` and `protocol_member` do not admit it, so a nested
    implementation cannot either.
-2. **Admission**: only a module whose logical path is an engine-embedded module, `core.orna` or `sys.orna`, may contain one (ORNA-NATIVE-004). Standard modules such as `std` may not. The check is one branch in the loader.
-3. **Pin**: only the engine-embedded sources. A module loaded from the project's own tree, from an attachment, from a generated stub, or from a pinned std module is not a native carrier.
+2. **Admission**: any module unit may contain a body-less `native fn` (amended
+   2026-11-10; ORNA-NATIVE-004's earlier `std`-only rule is withdrawn). The check
+   that rejected non-embedded modules is removed under
+   `docs/design/native-libraries.md` option A.
+3. **Binding**: the key `(module path, name)` is bound at link. Keys in `core` and
+   `sys` bind to the engine registry; any other key binds to a symbol in a shared
+   library that the root project names in its manifest, with a pinned digest. An
+   unbound key is a link error before evaluation (`docs/design/native-libraries.md`,
+   sections 5 to 10).
 
-Consequence: "user code may not declare native" is not a policy, it is a
-parse error followed by a load error. A test asserts both.
+Consequence: "user code may not declare native" is no longer a rule. A test
+asserts that a user-module declaration is admitted and that an unbound one fails
+at link.
 
-### 3.6 Binding key and the two admission errors
+### 3.6 Binding key and the load errors
 
 The binding key is `(declaring module namespace path, declared name)`.
 
@@ -720,8 +733,8 @@ Admission, at load, before any evaluation:
 flowchart TD
     A[parse admitted module] --> B{native declaration?}
     B -->|no| C[ordinary function<br/>body is the implementation]
-    B -->|yes| D{module is a verified<br/>standard module?}
-    D -->|no| E["ORNA-STD-NATIVE-SCOPE<br/>names module path + name + file:line"]
+    B -->|yes| D{key in core or sys?}
+    D -->|no| E["deferred to link<br/>(native-libraries.md section 10)"]
     D -->|yes| F{catalogue entry for<br/>(module path, name)?}
     F -->|no| G["ORNA-STD-NATIVE-UNBOUND<br/>names module path, name, pin"]
     F -->|yes| H{catalogue says Native<br/>and pin admits it?}
@@ -999,7 +1012,7 @@ Case by case:
 | v4/v5 module-upgrade fixtures | `fn __list_length = 0;`, marker-bodied `pub fn map` | legacy path, per `PinRange::HISTORICAL_V4_V5` |
 | the first pin after stage N4 | `native fn x ... effect E;` | modern path |
 | a head-pinned project | its own captured text | whatever its text says |
-| a replaced `std` (ORNA-NS-007) | ordinary functions; a `native fn` is rejected by ORNA-NATIVE-004 | source |
+| a replaced `std` (ORNA-NS-007) | ordinary functions; a `native fn` binds at link as in any module (ORNA-NATIVE-004, amended) | source |
 
 So no historical pin is broken by the migration, and no historical pin can be
 *acquired* by it either: an old capture keeps the old behaviour because its
@@ -1071,12 +1084,19 @@ stage depends on a later one. "Corpus gate" means: the full
 `cargo test -p orna-syntax -p orna-check -p orna-evaluator -p orna-project`
 suite plus the byte-identical REPL golden outputs and
 `python3 scripts/check_fixture_manifest.py`.
-D12 of the owner's language decisions (DECIDED.md, PR #9832) supersedes the earlier decision that natives may be declared in pinned std modules. Native declarations are accepted only in engine-embedded `core.orna` and `sys.orna`. This plan moves every native there and adds a re-export stage (N8).
+D12 of the owner's language decisions (DECIDED.md, PR #9832) first decided that
+native declarations are accepted only in engine-embedded `core.orna` and
+`sys.orna`. Amended 2026-11-10 (DECIDED.md): any module unit may declare a
+native; keys outside `core` and `sys` bind at link (`docs/design/native-libraries.md`).
+This plan's N2 wording, its N4 migration and the test `std_declares_no_native`
+are kept as written; whether `std` may keep native declarations is NOT decided
+by the amendment [OWNER]. The plan moves every engine native to `core` and `sys`
+and adds a re-export stage (N8).
 
 | Stage | Title | Depends on |
 |---|---|---|
 | N1 | grammar, AST, parser, corpus tests | - |
-| N2 | admission binding (native accepted only in engine-embedded `core.orna` and `sys.orna`), both load errors, evaluator dispatch | N1 |
+| N2 | admission binding (any module may declare a native; `core`/`sys` keys bind to the engine, other keys at link to a manifest library, see `docs/design/native-libraries.md`), both load errors, evaluator dispatch | N1 |
 | N3 | checker types from the declaration and consumes the effect clause | N1 (typing), N4 (effect clause) |
 | N4 | migrate the natives into engine-embedded `core.orna` and `sys.orna`; pin bump | N2 |
 | N5 | delete the duplicated tables and the marker machinery | N3, N4 |
@@ -1135,7 +1155,7 @@ cargo test -p orna-check -p orna-evaluator --locked
     implementation_without_declaration_is_a_load_error names the same, at the reference pin
     duplicate_declaration_of_one_key_is_rejected
     two_spellings_of_one_identity_bind_one_id        std.query.count == std.collection.count
-    native_outside_engine_modules_is_rejected        user module, std module, attachment, generated stub
+    native_in_any_module_is_admitted        user module, std module: declared, bound at link (amended)
     historical_pin_still_loads                       v4/v5 fixtures unchanged
     qualified_spelling_without_a_declaration_is_unresolved
 ```
@@ -1201,7 +1221,8 @@ Acceptance:
 ```
 cargo test -p orna-check -p orna-evaluator --locked
     std_reexport_binds_core_declaration    std.bits.bit_or resolves to core.bits.bit_or, same DefId
-    user_module_cannot_declare_native      parse error plus load error
+    user_module_native_binds_at_link        declared in user module; library named in manifest binds it
+    user_module_native_missing_library      link error naming declaration and library; before evaluation
     std_declares_no_native                 grep 'native fn' stdlib/std returns nothing
 ```
 
@@ -1378,7 +1399,7 @@ cannot do. Proposal: `orna std api-export` in `crates/orna-cli`, so the
 artefact is produced by the production loader. Alternative: keep a small tool
 crate above `orna-standard-sources`.
 
-**Q5. Does a user package ever get to declare a native?** Resolved by D12: no. Natives are declared only in the engine-embedded `core.orna` and `sys.orna`, so neither user code nor `std` may declare one (ORNA-NATIVE-004/012). D12 also records that there is no third-party native code.
+**Q5. Does a user package ever get to declare a native?** Resolved by D12, amended 2026-11-10: yes. Any module unit may declare a `native fn` (the owner: "any .orna should be able to use native functions, you just gotta load the .so with the declaration"). The engine supplies `core` and `sys`; a project-named shared library supplies every other key (`docs/design/native-libraries.md`). Only the root project supplies code; a package may declare but not supply.
 
 
 --------------------------------------------------------------------------
