@@ -270,3 +270,16 @@ fn root_intrinsics_classify_without_a_declaration() {
         Callee::Intrinsic(orna_hir::IntrinsicForm::OptionSome)
     ));
 }
+
+#[test]
+fn a_named_function_called_through_a_value_joins_its_effects() {
+    let program = lower_one(
+        "table Note(id: Int, body: Str) { }\nfn reader(): Int = Note.count();\nfn run(): Int = (reader)();\n",
+    );
+    let run = defined(&program, "main", "run");
+    let DefKind::Fn(function) = &program.defs[run].kind else {
+        panic!("run is a function");
+    };
+    assert!(!function.effects.is_opaque(), "a named callee resolves statically");
+    assert!(function.effects.kinds().any(|kind| kind == orna_hir::EffectKind::TableRead));
+}

@@ -38,6 +38,10 @@ pub(crate) fn run(program: &mut Program) {
             };
             match &call.callee {
                 Callee::Source { def, .. } => calls[owner].push(*def),
+                Callee::Value { callee } => match value_target(program, &body.exprs[*callee].kind) {
+                    ValueTarget::Source(def) => calls[owner].push(def),
+                    ValueTarget::Effects(effects) => direct[owner] = direct[owner].join(effects),
+                },
                 callee => direct[owner] = direct[owner].join(direct_effects(program, callee)),
             }
         }
@@ -88,6 +92,32 @@ fn direct_effects(program: &Program, callee: &Callee) -> EffectSet {
         | Callee::Relational { .. }
         | Callee::Intrinsic(_)
         | Callee::Ctor { .. } => EffectSet::empty(),
+    }
+}
+
+/// What a call through a first-class value contributes: a named source function
+/// is joined through the call graph, anything else is settled here.
+enum ValueTarget {
+    Source(DefId),
+    Effects(EffectSet),
+}
+
+/// Resolves a value callee statically when its expression names the callee:
+/// a `Def` function or a lambda. A lambda's body belongs to the definition that
+/// contains it, so its effects are already in that definition's set. Any other
+/// value (a local, a parameter, a member) stays opaque and fails closed.
+fn value_target(program: &Program, kind: &ExprKind) -> ValueTarget {
+    match kind {
+        ExprKind::Def(def) => match &program.defs[*def].kind {
+            DefKind::Fn(function) => match function.body {
+                FnBody::Source(_) => ValueTarget::Source(*def),
+                FnBody::Native(_) => ValueTarget::Effects(native_effects(program, *def)),
+                FnBody::Signature => ValueTarget::Effects(EffectSet::opaque()),
+            },
+            _ => ValueTarget::Effects(EffectSet::opaque()),
+        },
+        ExprKind::Lambda { .. } => ValueTarget::Effects(EffectSet::empty()),
+        _ => ValueTarget::Effects(EffectSet::opaque()),
     }
 }
 
