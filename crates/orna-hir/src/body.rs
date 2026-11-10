@@ -54,6 +54,11 @@ pub struct Capture {
     pub outer: LocalId,
     /// The slot in the lambda's own body.
     pub inner: LocalId,
+    /// Whether the lambda is created inside a concurrent body, or inside a
+    /// lambda that itself captures this slot from one. Assigning through a
+    /// blocked capture is a compile error (design 03, "Concurrent bodies
+    /// capture snapshots").
+    pub blocked: bool,
 }
 
 /// One expression.

@@ -27,6 +27,23 @@ use super::exprs::{error_expr, flatten_path, lower_expr, push};
 /// One callee and the parameters its arguments bind to, when it declares them.
 pub(crate) type ClassifiedCallee = Option<(Callee, Option<Vec<ParamInfo>>)>;
 
+/// Whether a callee starts concurrent bodies: the lambdas it receives run as
+/// separate activations that capture snapshots (design 03, "Concurrent bodies
+/// capture snapshots"). These are `parallel`, `race` and `timeout`, and
+/// `sys.start`.
+pub(crate) fn starts_concurrent_bodies(builder: &Builder<'_>, callee: &Callee) -> bool {
+    match callee {
+        Callee::Intrinsic(form) => matches!(
+            form,
+            crate::IntrinsicForm::Parallel
+                | crate::IntrinsicForm::Race
+                | crate::IntrinsicForm::Timeout
+        ),
+        Callee::Sys { def, .. } => builder.def_name(*def).as_str() == "start",
+        _ => false,
+    }
+}
+
 /// Resolves and classifies the callee of a call.
 pub(crate) fn classify_callee(
     builder: &mut Builder<'_>,

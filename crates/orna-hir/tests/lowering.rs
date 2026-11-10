@@ -141,6 +141,28 @@ fn an_unresolved_name_is_a_diagnostic_and_an_error_expression() {
 }
 
 #[test]
+fn assigning_an_outer_variable_in_a_concurrent_body_is_unsupported() {
+    let program =
+        lower_one("fn run(): Int { let count = 0; parallel([() => { count += 1; }]); count }\n");
+    let module = &program.modules[module_of(&program, "main")];
+    assert!(
+        module
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "ORNA-S022-UNSUPPORTED"),
+        "{:?}",
+        module.diagnostics
+    );
+}
+
+#[test]
+fn reading_an_outer_variable_in_a_concurrent_body_is_allowed() {
+    let program = lower_one("fn run(): Int { let count = 0; parallel([() => count]); count }\n");
+    let module = &program.modules[module_of(&program, "main")];
+    assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+}
+
+#[test]
 fn a_piped_value_binds_parameter_zero() {
     let program = lower_one("fn f(x: Int, y: Int): Int = x + y;\nfn run(): Int = 1 | f(2);\n");
     let run = defined(&program, "main", "run");

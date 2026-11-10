@@ -10,15 +10,14 @@
 //! [`crate::ExprKind::Recover`]: the handler receives the failure through one
 //! synthetic slot, which is what the evaluator's `|?` does today.
 
-use orna_syntax::{
-    AssignmentOperator, AssignmentTarget, Expr as AstExpr, Statement, SyntaxSpan, TypeExpr,
-};
+use orna_syntax::{Expr as AstExpr, SyntaxSpan, TypeExpr};
 
 use crate::{
-    AssignOp, BinOp, Call, Capture, DefId, DefKind, Expr, ExprId, ExprKind, FieldRef, Idx,
-    InterpPart, LogicOp, Name, NameTarget, Place, Stmt, Ty, TyKind, UnOp,
+    BinOp, Call, Capture, DefId, DefKind, Expr, ExprId, ExprKind, FieldRef, Idx, InterpPart,
+    LogicOp, Name, NameTarget, Stmt, Ty, TyKind, UnOp,
 };
 
+use super::blocks::lower_block;
 use super::calls::{attach_type_arguments, classify_callee};
 use super::control::lower_control;
 use super::declare::Builder;
@@ -27,7 +26,7 @@ use super::literals::lower_literal;
 use super::{BodyState, pats};
 
 /// The synthetic slot name a `|?` handler binds its failure to.
-const ERROR_SLOT: &str = "_error";
+pub(super) const ERROR_SLOT: &str = "_error";
 
 /// Lowers one expression.
 pub(crate) fn lower_expr(
@@ -702,6 +701,37 @@ pub(crate) fn flatten_path<'a>(expr: &'a AstExpr, out: &mut Vec<(&'a str, Syntax
     }
 }
 
+/// Lowers one argument of a concurrent call. A lambda there, or a lambda in a
+/// list literal, is a concurrent body; any other argument lowers as usual, so
+/// a nested lambda never inherits the flag.
+fn lower_concurrent_argument(
+    builder: &mut Builder<'_>,
+    state: &mut BodyState,
+    value: &AstExpr,
+) -> ExprId {
+    match value {
+        AstExpr::Lambda { .. } => {
+            state.lowering_concurrent_argument = true;
+            let id = lower_expr(builder, state, value);
+            state.lowering_concurrent_argument = false;
+            id
+        }
+        AstExpr::List { elements, span } => {
+            let elements = elements
+                .iter()
+                .map(|element| lower_concurrent_argument(builder, state, element))
+                .collect::<Vec<_>>();
+            push(
+                builder,
+                state,
+                ExprKind::List(elements.into_boxed_slice()),
+                span.clone(),
+            )
+        }
+        _ => lower_expr(builder, state, value),
+    }
+}
+
 /// Lowers one call, including its classified callee and bound arguments.
 fn lower_call(
     builder: &mut Builder<'_>,
@@ -729,12 +759,18 @@ fn lower_call(
     };
     super::mark_callee(&mut builder.program, module, &callee_span);
     let callee = attach_type_arguments(builder, state, callee, type_arguments);
+    let concurrent = super::calls::starts_concurrent_bodies(builder, &callee);
     let lowered = arguments
         .iter()
         .map(|argument| {
+            let value = if concurrent {
+                lower_concurrent_argument(builder, state, &argument.value)
+            } else {
+                lower_expr(builder, state, &argument.value)
+            };
             (
                 argument.name.as_ref().map(|name| Name::new(name)),
-                lower_expr(builder, state, &argument.value),
+                value,
                 argument.span.clone(),
             )
         })
@@ -961,6 +997,7 @@ fn lower_lambda(
     let module = state.module;
     let id = builder.allocate_body(owner);
     let mut lambda = BodyState::new(id, owner, module);
+    lambda.concurrent = std::mem::take(&mut state.lowering_concurrent_argument);
     lambda.push_scope(body.span().start);
     for (index, parameter) in parameters.iter().enumerate() {
         let ty = match &parameter.annotation {
@@ -996,7 +1033,15 @@ fn lower_lambda(
         if let Some(outer) = state.local(&name) {
             let outer_local = state.locals[outer].clone();
             let inner = lambda.add_local(outer_local.name.clone(), outer_local.ty, free_span);
-            lambda.captures.push(Capture { outer, inner });
+            // A capture is blocked when this lambda is created inside a concurrent body, or when the
+            // enclosing body reached the slot through its own blocked capture.
+            let blocked =
+                state.concurrent || state.captures.iter().any(|c| c.inner == outer && c.blocked);
+            lambda.captures.push(Capture {
+                outer,
+                inner,
+                blocked,
+            });
         }
     }
     let mut prologue = Vec::new();
@@ -1047,177 +1092,4 @@ fn lower_lambda(
         },
         span.clone(),
     )
-}
-
-/// Lowers a block: statements in order and an optional tail.
-fn lower_block(
-    builder: &mut Builder<'_>,
-    state: &mut BodyState,
-    statements: &[Statement],
-    tail: Option<&AstExpr>,
-    span: &SyntaxSpan,
-) -> ExprId {
-    state.push_scope(span.start);
-    let mut lowered = Vec::with_capacity(statements.len());
-    for statement in statements {
-        match statement {
-            Statement::Let {
-                pattern,
-                annotation,
-                value,
-                ..
-            } => {
-                // The annotation is the initializer's expected type and the
-                // binding slots' written type; a pattern without one leaves
-                // the slots to the type pass (stage H2).
-                let expected = annotation.as_ref().map(|annotation| {
-                    super::types::lower_type(builder, state.module, &[], annotation)
-                });
-                let init = lower_expr(builder, state, value);
-                let pat = pats::lower_pattern_with(builder, state, pattern, expected);
-                lowered.push(Stmt::Let { pat, init });
-            }
-            Statement::Assert { value, .. } => {
-                lowered.push(Stmt::Assert(lower_expr(builder, state, value)));
-            }
-            Statement::Expression { value, .. } | Statement::Control { value, .. } => {
-                lowered.push(Stmt::Expr(lower_expr(builder, state, value)));
-            }
-            Statement::Return {
-                value,
-                span: stmt_span,
-            } => {
-                let value = value
-                    .as_ref()
-                    .map(|value| lower_expr(builder, state, value));
-                let expr = push(builder, state, ExprKind::Return(value), stmt_span.clone());
-                lowered.push(Stmt::Expr(expr));
-            }
-            Statement::Break {
-                value,
-                span: stmt_span,
-            } => {
-                let value = value
-                    .as_ref()
-                    .map(|value| lower_expr(builder, state, value));
-                let expr = push(builder, state, ExprKind::Break(value), stmt_span.clone());
-                lowered.push(Stmt::Expr(expr));
-            }
-            Statement::Continue { span: stmt_span } => {
-                let expr = push(builder, state, ExprKind::Continue, stmt_span.clone());
-                lowered.push(Stmt::Expr(expr));
-            }
-            Statement::Assignment {
-                target,
-                operator,
-                value,
-                span: stmt_span,
-            } => {
-                let place = lower_place(builder, state, target);
-                let value = lower_expr(builder, state, value);
-                let op = match operator {
-                    AssignmentOperator::Set => AssignOp::Set,
-                    AssignmentOperator::Add => AssignOp::Add,
-                    AssignmentOperator::Subtract => AssignOp::Subtract,
-                    AssignmentOperator::Multiply => AssignOp::Multiply,
-                    AssignmentOperator::Divide => AssignOp::Divide,
-                };
-                let expr = push(
-                    builder,
-                    state,
-                    ExprKind::Assign { place, op, value },
-                    stmt_span.clone(),
-                );
-                lowered.push(Stmt::Expr(expr));
-            }
-        }
-    }
-    let tail = tail.map(|tail| lower_expr(builder, state, tail));
-    state.pop_scope(span.end);
-    push(
-        builder,
-        state,
-        ExprKind::Block {
-            stmts: lowered.into_boxed_slice(),
-            tail,
-        },
-        span.clone(),
-    )
-}
-
-/// Lowers an assignment target to a place.
-fn lower_place(
-    builder: &mut Builder<'_>,
-    state: &mut BodyState,
-    target: &AssignmentTarget,
-) -> Place {
-    match target {
-        AssignmentTarget::Name { name, span } => {
-            let name = Name::new(name);
-            match state.local(&name) {
-                Some(local) => {
-                    super::record_body_use(
-                        &mut builder.program,
-                        state.module,
-                        state.id,
-                        span.clone(),
-                        name,
-                        crate::UseContext::Value,
-                        NameTarget::Local(local),
-                    );
-                    super::mark_written(&mut builder.program, state.module, span);
-                    Place::Local(local)
-                }
-                None => {
-                    super::record_body_use(
-                        &mut builder.program,
-                        state.module,
-                        state.id,
-                        span.clone(),
-                        name.clone(),
-                        crate::UseContext::Value,
-                        NameTarget::Unresolved,
-                    );
-                    builder.diagnose(
-                        state.module,
-                        crate::diag::UNRESOLVED,
-                        format!("`{name}` is not an assignable local"),
-                        span.clone(),
-                    );
-                    let error_ty = builder.program.tys.error();
-                    Place::Local(state.add_local(Name::new(ERROR_SLOT), error_ty, span.clone()))
-                }
-            }
-        }
-        AssignmentTarget::Field {
-            base, name, span, ..
-        } => {
-            let name_span = SyntaxSpan::new(span.end.saturating_sub(name.len()), span.end);
-            super::record_body_use(
-                &mut builder.program,
-                state.module,
-                state.id,
-                name_span.clone(),
-                Name::new(name),
-                crate::UseContext::Field,
-                NameTarget::Unresolved,
-            );
-            super::mark_written(&mut builder.program, state.module, &name_span);
-            Place::Field {
-                base: Box::new(lower_place(builder, state, base)),
-                field: FieldRef::Name(Name::new(name)),
-            }
-        }
-        AssignmentTarget::Index {
-            base, index, span, ..
-        } => {
-            let base = lower_place(builder, state, base);
-            let index = lower_expr(builder, state, index);
-            let _ = span;
-            Place::Index {
-                base: Box::new(base),
-                index,
-            }
-        }
-    }
 }

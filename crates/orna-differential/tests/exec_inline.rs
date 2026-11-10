@@ -104,7 +104,9 @@ fn module_case(id: &str, text: &str) -> Case {
 fn executor_outcome(case: &Case) -> Result<Vec<u8>, String> {
     match observe_exec::run_case(case) {
         ExecOutcome::Ran { outcome, .. } => outcome,
-        ExecOutcome::NotYet(reason) => panic!("{}: the executor did not run the case: {reason}", case.id),
+        ExecOutcome::NotYet(reason) => {
+            panic!("{}: the executor did not run the case: {reason}", case.id)
+        }
     }
 }
 
@@ -143,12 +145,30 @@ fn d10_a_closure_reads_the_slot_reassigned_after_capture() {
     assert_ne!(Some(executor), old, "the difference is real");
 }
 
+// Design 03, "Concurrent bodies capture snapshots": assigning to an outer variable inside a body started
+// by `parallel` is a compile error. The executor must not run such a program, so the lowering diagnostic
+// keeps it at `NotYet`.
+#[test]
+fn assigning_an_outer_variable_in_a_parallel_body_is_a_lowering_error() {
+    let case = module_case(
+        "concurrent-assign-outer",
+        "fn main() { let count = 0; parallel([() => { count += 1; }]); count }",
+    );
+    assert!(
+        matches!(observe_exec::run_case(&case), ExecOutcome::NotYet(_)),
+        "the executor must not run a concurrent body that assigns an outer variable"
+    );
+}
+
 #[test]
 fn d10_a_closure_mutates_the_captured_slot() {
     let text = "fn main() { let seed = 1; let mutate = () => { let bump = 1; seed = seed + bump; seed }; mutate() }";
     assert_eq!(
         executor_outcome(&module_case("d10-mutate-capture", text)),
-        executor_outcome(&module_case("d10-mutate-capture-value", "fn main() { let seed = 2; seed }")),
+        executor_outcome(&module_case(
+            "d10-mutate-capture-value",
+            "fn main() { let seed = 2; seed }"
+        )),
         "D10: the closure assigns the shared slot"
     );
     assert_eq!(
