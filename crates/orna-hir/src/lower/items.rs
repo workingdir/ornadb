@@ -622,7 +622,7 @@ impl Builder<'_> {
                     crate::ExprKind::Local(local),
                     pattern.span().clone(),
                 );
-                let pat = pats::lower_pattern(self, &mut state, pattern);
+                let pat = pats::lower_pattern_with(self, &mut state, pattern, Some(param.ty));
                 prologue.push(Stmt::Let { pat, init });
             }
             let _ = index;
