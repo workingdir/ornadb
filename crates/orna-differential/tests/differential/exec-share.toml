@@ -13,5 +13,6 @@
 # are not part of `agreed`.
 
 [[exec-share]]
-agreed = 35
+agreed = 41
 evaluable = 110
+steps-exact = 41

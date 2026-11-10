@@ -6,7 +6,7 @@
 //! payload construction and `case` patterns agree on one identity.
 
 use orna_syntax::{Declaration, Item};
-use sha2::{Digest, Sha256};
+use orna_value::{enum_type_id, enum_variant_id, qualified_name};
 
 use crate::{NominalDefinition, NominalDefinitions, NominalVariant};
 
@@ -15,9 +15,10 @@ use crate::{NominalDefinition, NominalDefinitions, NominalVariant};
 /// Plans are keyed by the qualified declaration name (`main.Level`), or by
 /// the bare name in an unnamed root module. The product identity manifest
 /// does not allocate enum or variant ObjectIds, so both identities are
-/// derived from that qualified name with domain separation: every host
-/// derives the same identity for the same declaration. An enum without
-/// variants has no value to construct and receives no plan.
+/// derived from that qualified name with domain separation (`orna_value`
+/// owns the derivation, shared with the executor): every host derives the
+/// same identity for the same declaration. An enum without variants has no
+/// value to construct and receives no plan.
 #[must_use]
 pub fn source_enum_definitions(namespace: Option<&str>, items: &[Item]) -> NominalDefinitions {
     let mut definitions = NominalDefinitions::new();
@@ -28,18 +29,12 @@ pub fn source_enum_definitions(namespace: Option<&str>, items: &[Item]) -> Nomin
         if variants.is_empty() {
             continue;
         }
-        let namespace = namespace.filter(|namespace| !namespace.is_empty());
-        let identity =
-            namespace.map_or_else(|| name.clone(), |namespace| format!("{namespace}.{name}"));
+        let identity = qualified_name(namespace, name);
         let variants = variants
             .iter()
             .map(|variant| {
                 NominalVariant::new(
-                    derived_id(&[
-                        b"orna.enum.variant",
-                        identity.as_bytes(),
-                        variant.name.as_bytes(),
-                    ]),
+                    enum_variant_id(&identity, &variant.name),
                     variant.name.clone(),
                 )
                 .with_payload_fields(
@@ -51,8 +46,9 @@ pub fn source_enum_definitions(namespace: Option<&str>, items: &[Item]) -> Nomin
                 )
             })
             .collect();
+        let namespace = namespace.filter(|namespace| !namespace.is_empty());
         let definition = NominalDefinition::new(
-            derived_id(&[b"orna.enum.type", identity.as_bytes()]),
+            enum_type_id(&identity),
             namespace.map(str::to_owned),
             Vec::new(),
         )
@@ -60,17 +56,6 @@ pub fn source_enum_definitions(namespace: Option<&str>, items: &[Item]) -> Nomin
         definitions.insert(identity, definition);
     }
     definitions
-}
-
-fn derived_id(parts: &[&[u8]]) -> [u8; 16] {
-    let mut digest = Sha256::new();
-    for part in parts {
-        digest.update((part.len() as u64).to_be_bytes());
-        digest.update(part);
-    }
-    digest.finalize()[..16]
-        .try_into()
-        .expect("truncated digest has the ObjectId width")
 }
 
 #[cfg(test)]
@@ -98,5 +83,34 @@ mod tests {
         assert_ne!(main["main.Level"], other["other.Level"]);
         let root = source_enum_definitions(None, &parsed.value.items);
         assert_eq!(root.keys().collect::<Vec<_>>(), ["Level", "SyncResult"]);
+    }
+
+    #[test]
+    fn enum_ids_keep_the_domain_separated_derivation() {
+        use sha2::{Digest, Sha256};
+        // The length-prefixed SHA-256 over the domain tag and each part, as
+        // the evaluator derived these ids before the derivation moved to
+        // orna_value. A change here would silently re-key every enum value.
+        let expect = |parts: &[&[u8]]| {
+            let mut digest = Sha256::new();
+            for part in parts {
+                digest.update((part.len() as u64).to_be_bytes());
+                digest.update(part);
+            }
+            let mut id = [0_u8; 16];
+            id.copy_from_slice(&digest.finalize()[..16]);
+            id
+        };
+        let parsed = parse_module("pub enum Level { low, }");
+        let definitions = source_enum_definitions(Some("main"), &parsed.value.items);
+        let level = &definitions["main.Level"];
+        assert_eq!(
+            level.type_id,
+            crate::object_id_raw(expect(&[b"orna.enum.type", b"main.Level"]))
+        );
+        assert_eq!(
+            level.variants[0].variant_id,
+            crate::object_id_raw(expect(&[b"orna.enum.variant", b"main.Level", b"low"]))
+        );
     }
 }

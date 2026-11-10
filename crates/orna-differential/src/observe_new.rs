@@ -80,6 +80,18 @@ static FIXTURE_UNITS: LazyLock<StandardModule> = LazyLock::new(|| {
 });
 
 /// The namespace a logical path declares (`ORNA-NS-001` to `ORNA-NS-004`).
+///
+/// This is the authoritative identity rule, `orna-project`'s
+/// `object_identity::module_namespace`: a file named `main` declares its
+/// directory's namespace in any directory, so `std/concurrent/main.orna` is
+/// `std.concurrent`, which the standard library's imports require.
+///
+/// DIVERGENCE: `orna-conformance`'s `semantic_adapter::module_namespace` drops
+/// `main` only at the root and gives `a/main.orna` the namespace `a.main`. That
+/// rule applies to owned fixture units only. It is deliberately not applied
+/// here: doing so breaks `std.concurrent.parallel` resolution (the
+/// `hir_call_classification_matches_the_route_trace` test). Pinned by
+/// `module_path_tests`.
 #[must_use]
 pub fn module_path_of(logical: &str) -> ModulePath {
     let trimmed = logical.strip_suffix(".orna").unwrap_or(logical);
@@ -91,6 +103,36 @@ pub fn module_path_of(logical: &str) -> ModulePath {
         segments.pop();
     }
     ModulePath::new(segments.into_iter().map(Name::new))
+}
+
+#[cfg(test)]
+mod module_path_tests {
+    use super::module_path_of;
+
+    fn names(logical: &str) -> Vec<String> {
+        module_path_of(logical)
+            .segments()
+            .iter()
+            .map(|name| name.as_str().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn root_main_declares_the_empty_namespace() {
+        assert!(names("main.orna").is_empty());
+    }
+
+    #[test]
+    fn a_nested_main_declares_its_directory_in_any_directory() {
+        assert_eq!(names("std/concurrent/main.orna"), ["std", "concurrent"]);
+        assert_eq!(names("a/main.orna"), ["a"]);
+    }
+
+    #[test]
+    fn other_modules_keep_every_segment() {
+        assert_eq!(names("a/b.orna"), ["a", "b"]);
+        assert_eq!(names("valid/enum.orna"), ["valid", "enum"]);
+    }
 }
 
 /// One case lowered to HIR, with the bookkeeping the comparisons need.

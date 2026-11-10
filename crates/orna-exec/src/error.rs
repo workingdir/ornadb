@@ -9,16 +9,22 @@ pub enum ExecError {
     Code(&'static str),
     /// The program reached a construct this stage does not execute yet.
     NotYet(&'static str),
+    /// The owner requested cancellation. This is a completion of its own, not
+    /// a language error, so no `|?` recovers from it.
+    Cancelled,
 }
 
 /// Internal non-local exits. `Return`, `Break` and `Continue` are control
 /// flow, not errors; they are caught by the function, loop that owns them.
 #[derive(Debug)]
 pub(crate) enum Stop {
-    /// A language error with its canonical code.
+    /// A language error with its canonical code. `|?` recovers from it.
     Error(&'static str),
     /// A construct this stage does not execute yet.
     NotYet(&'static str),
+    /// The owner requested cancellation. Only the run's entry point receives
+    /// it; no recovery arm catches it.
+    Cancelled,
     /// `return` with its value.
     Return(Value),
     /// `break`, which a loop catches.
@@ -32,6 +38,7 @@ impl From<Stop> for ExecError {
         match stop {
             Stop::Error(code) => Self::Code(code),
             Stop::NotYet(reason) => Self::NotYet(reason),
+            Stop::Cancelled => Self::Cancelled,
             Stop::Return(_) | Stop::Break | Stop::Continue => {
                 Self::NotYet("control flow outside a loop")
             }

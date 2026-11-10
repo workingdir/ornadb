@@ -20,6 +20,7 @@
 //! it resolves, so the language server and the H1 resolution comparison read one
 //! table.
 
+mod blocks;
 mod calls;
 mod classify;
 mod control;
@@ -112,6 +113,12 @@ pub(crate) struct BodyState {
     pub(crate) params: Vec<LocalId>,
     /// Captures, for a lambda body.
     pub(crate) captures: Vec<crate::Capture>,
+    /// Whether this body is a concurrent body: the lambda passed directly to
+    /// `parallel`, `race`, `timeout` or `sys.start`.
+    pub(crate) concurrent: bool,
+    /// Set while a direct argument of a concurrent call is lowered, so that a
+    /// lambda there becomes a concurrent body. Consumed by the lambda.
+    pub(crate) lowering_concurrent_argument: bool,
     /// The local scopes, innermost last.
     pub(crate) scopes: Vec<ScopeFrame>,
     /// The body's root expression, once it has one.
@@ -130,6 +137,8 @@ impl BodyState {
             locals: IndexVec::new(),
             params: Vec::new(),
             captures: Vec::new(),
+            concurrent: false,
+            lowering_concurrent_argument: false,
             scopes: Vec::new(),
             root: None,
         }
@@ -178,6 +187,14 @@ impl BodyState {
             .find_map(|scope| scope.names.get(name).copied())
     }
 
+    /// Whether assigning `local` is an error: it is a capture of this body and either this body is a
+    /// concurrent body, or the capture was blocked when the lambda was created.
+    pub(crate) fn is_blocked_capture(&self, local: LocalId) -> bool {
+        self.captures
+            .iter()
+            .any(|capture| capture.inner == local && (self.concurrent || capture.blocked))
+    }
+
     /// Adds one expression and returns its id.
     pub(crate) fn push_expr(&mut self, expr: Expr) -> ExprId {
         self.exprs.push(expr)
@@ -196,6 +213,7 @@ impl BodyState {
                 kind: crate::ExprKind::Error,
                 ty: error_ty,
                 span: SyntaxSpan::new(0, 0),
+                weight: 1,
             })
         });
         Body {

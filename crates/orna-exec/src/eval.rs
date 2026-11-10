@@ -4,8 +4,9 @@ use std::rc::Rc;
 
 use num_traits::ToPrimitive;
 use orna_hir::{
-    Arg, ArgValue, Arm, AssignOp, BinOp, Body, BodyId, Call, Callee, DefKind, ExprId, ExprKind,
-    FieldRef, FnBody, Lit, LocalId, LogicOp, Name, ParamDef, Pat, PatId, Place, Stmt,
+    Arg, ArgValue, Arm, AssignOp, BinOp, Body, BodyId, Call, Callee, DefId, DefKind, ExprId,
+    ExprKind, FieldRef, FnBody, IntrinsicForm, Lit, LocalId, LogicOp, Name, ParamDef, Pat, PatId,
+    Place, Stmt,
 };
 
 use crate::binders;
@@ -13,7 +14,7 @@ use crate::error::Stop;
 use crate::frame::Frame;
 use crate::machine::Machine;
 use crate::ops;
-use crate::value::{Closure, Value};
+use crate::value::{Closure, Payload, Value};
 
 impl<'p> Machine<'p> {
     /// Evaluates one expression of `body` in `frame`.
@@ -23,7 +24,7 @@ impl<'p> Machine<'p> {
         frame: &mut Frame,
         id: ExprId,
     ) -> Result<Value, Stop> {
-        self.tick()?;
+        self.tick(body.exprs[id].weight)?;
         match &body.exprs[id].kind {
             ExprKind::Lit(lit) => self.literal(lit),
             ExprKind::Local(slot) => frame.get(*slot),
@@ -49,7 +50,7 @@ impl<'p> Machine<'p> {
                 Err(Stop::Return(value))
             }
             ExprKind::Break(None) => Err(Stop::Break),
-            ExprKind::Break(Some(_)) => Err(Stop::NotYet("break with a value")),
+            ExprKind::Break(Some(_)) => Err(Stop::NotYet("break with a value (H4)")),
             ExprKind::Continue => Err(Stop::Continue),
             ExprKind::Assign { place, op, value } => self.assign(body, frame, place, *op, *value),
             ExprKind::Tuple(items) => Ok(Value::Tuple(self.elements(body, frame, items)?)),
@@ -92,7 +93,7 @@ impl<'p> Machine<'p> {
             | Lit::Date(_)
             | Lit::Instant { .. }
             | Lit::Period(_)
-            | Lit::Duration { .. } => Err(Stop::NotYet("literal kind")),
+            | Lit::Duration { .. } => Err(Stop::NotYet("literal kind (H4)")),
         }
     }
 
@@ -119,7 +120,7 @@ impl<'p> Machine<'p> {
         let short_circuit = match op {
             LogicOp::And => false,
             LogicOp::Or => true,
-            LogicOp::Coalesce => return Err(Stop::NotYet("coalesce operator")),
+            LogicOp::Coalesce => return Err(Stop::NotYet("coalesce operator (H4)")),
         };
         match self.eval(body, frame, lhs)? {
             Value::Bool(value) if value == short_circuit => Ok(Value::Bool(value)),
@@ -136,26 +137,45 @@ impl<'p> Machine<'p> {
             Callee::Source { def, .. } => {
                 let program = self.program;
                 let DefKind::Fn(function) = &program.defs[*def].kind else {
-                    return Err(Stop::NotYet("call of a non-function definition"));
+                    return Err(Stop::NotYet("call of a non-function definition (H4)"));
                 };
                 let FnBody::Source(callee_body) = function.body else {
-                    return Err(Stop::NotYet("call of a function without a source body"));
+                    return Err(Stop::NotYet(
+                        "call of a function without a source body (H5)",
+                    ));
                 };
                 let arguments = self.arguments(body, frame, call, &function.params)?;
                 self.invoke(callee_body, arguments, &[])
             }
             Callee::Value { callee } => {
-                let Value::Closure(closure) = self.eval(body, frame, *callee)? else {
-                    return Err(Stop::NotYet("call of a non-closure value"));
+                // A pipe evaluates its piped input before the stage's callee, so a failing input never reaches the
+                // callee. A direct call evaluates the callee first.
+                let input = match (call.piped, call.args.first()) {
+                    (true, Some(first)) => Some(self.argument(body, frame, first, &[])?),
+                    _ => None,
                 };
-                let arguments = self.arguments(body, frame, call, &[])?;
-                let callee_body = &self.program.bodies[closure.body];
-                if arguments.len() != callee_body.params.len() {
+                let Value::Closure(closure) = self.eval(body, frame, *callee)? else {
+                    return Err(Stop::NotYet("call of a non-closure value (H4)"));
+                };
+                let program = self.program;
+                let callee_body = &program.bodies[closure.body];
+                let arguments =
+                    self.closure_arguments(body, frame, call, input, callee_body.params.len())?;
+                if arguments.len() != callee_body.params.len()
+                    || binders::binds_a_name_twice(callee_body)
+                {
                     return Err(Stop::Error("ORNA-EVAL-ARGUMENT"));
                 }
                 self.invoke(closure.body, arguments, &closure.captured)
             }
-            _ => Err(Stop::NotYet("call of this callee kind")),
+            Callee::Native { .. } => Err(Stop::NotYet("native call (H5)")),
+            Callee::Sys { .. } => Err(Stop::NotYet("sys call (H5)")),
+            Callee::TableOp { .. } => Err(Stop::NotYet("table operation (H6)")),
+            Callee::Relational { .. } => Err(Stop::NotYet("relation stage (H7)")),
+            Callee::Intrinsic(IntrinsicForm::Fail) => self.fail(body, frame, call),
+            Callee::Intrinsic(_) => Err(Stop::NotYet("intrinsic form (H4)")),
+            Callee::Pending { .. } => Err(Stop::NotYet("member call awaiting the type pass (H2)")),
+            Callee::Ctor { def } => self.construct(body, frame, call, *def),
         }
     }
 
@@ -169,6 +189,28 @@ impl<'p> Machine<'p> {
         let mut arguments = Vec::with_capacity(call.args.len());
         for argument in call.args.iter() {
             arguments.push(self.argument(body, frame, argument, params)?);
+        }
+        Ok(arguments)
+    }
+
+    /// Evaluates the arguments of a closure call in order. `input` is the already-evaluated piped argument 0, when
+    /// the call is a pipe. The old evaluator binds positionally and fails at the first argument with no parameter
+    /// before evaluating it, so an excess argument is never evaluated.
+    fn closure_arguments(
+        &mut self,
+        body: &'p Body,
+        frame: &mut Frame,
+        call: &Call,
+        input: Option<(usize, Value)>,
+        arity: usize,
+    ) -> Result<Vec<(usize, Value)>, Stop> {
+        let skip = usize::from(input.is_some());
+        let mut arguments: Vec<(usize, Value)> = input.into_iter().collect();
+        for (index, argument) in call.args.iter().enumerate().skip(skip) {
+            if index >= arity {
+                return Err(Stop::Error("ORNA-EVAL-ARGUMENT"));
+            }
+            arguments.push(self.argument(body, frame, argument, &[])?);
         }
         Ok(arguments)
     }
@@ -188,7 +230,7 @@ impl<'p> Machine<'p> {
             }
             ArgValue::Default => {
                 let Some(default) = params.get(slot).and_then(|param| param.default) else {
-                    return Err(Stop::NotYet("default argument without a default body"));
+                    return Err(Stop::NotYet("default argument without a default body (H4)"));
                 };
                 let value = self.invoke(default, Vec::new(), &[])?;
                 Ok((slot, value))
@@ -208,7 +250,7 @@ impl<'p> Machine<'p> {
                 Stmt::Let { pat, init } => {
                     let value = self.eval(body, frame, init)?;
                     if !self.matches(body, frame, pat, value)? {
-                        return Err(Stop::NotYet("let pattern that does not match"));
+                        return Err(Stop::Error("ORNA-EVAL-TYPE"));
                     }
                 }
                 Stmt::Assert(id) => match self.eval(body, frame, id)? {
@@ -233,7 +275,7 @@ impl<'p> Machine<'p> {
         els: Option<ExprId>,
     ) -> Result<Value, Stop> {
         let Some(els) = els else {
-            return Err(Stop::NotYet("if without else"));
+            return Err(Stop::NotYet("if without else (H4)"));
         };
         match self.eval(body, frame, cond)? {
             Value::Bool(true) => self.eval(body, frame, then),
@@ -275,7 +317,7 @@ impl<'p> Machine<'p> {
             Place::Local(slot) => {
                 let rhs = self.eval(body, frame, value)?;
                 let new = self.combine(op, rhs, || frame.get(*slot))?;
-                frame.set(*slot, new)?;
+                frame.assign(*slot, new)?;
                 Ok(Value::Unit)
             }
             Place::Field { base, field } => self.assign_field(body, frame, base, field, op, value),
@@ -311,10 +353,12 @@ impl<'p> Machine<'p> {
         value: ExprId,
     ) -> Result<Value, Stop> {
         let Place::Local(slot) = base else {
-            return Err(Stop::NotYet("assignment to a nested field"));
+            return Err(Stop::NotYet("assignment to a nested field (H4)"));
         };
         let FieldRef::Name(name) = field else {
-            return Err(Stop::NotYet("assignment to a field by index or definition"));
+            return Err(Stop::NotYet(
+                "assignment to a field by index or definition (H4)",
+            ));
         };
         let Value::Record(fields) = frame.get(*slot)? else {
             return Err(Stop::NotYet(
@@ -329,7 +373,7 @@ impl<'p> Machine<'p> {
         let new = self.combine(op, rhs, || Ok(fields[position].1.clone()))?;
         let mut updated = fields.to_vec();
         updated[position].1 = new;
-        frame.set(*slot, Value::Record(updated.into()))?;
+        frame.assign(*slot, Value::Record(updated.into()))?;
         Ok(Value::Unit)
     }
 
@@ -362,7 +406,7 @@ impl<'p> Machine<'p> {
         let new = self.combine(op, rhs, || Ok(values[index].clone()))?;
         let mut updated = values.to_vec();
         updated[index] = new;
-        frame.set(*slot, Value::List(updated.into()))?;
+        frame.assign(*slot, Value::List(updated.into()))?;
         Ok(Value::Unit)
     }
 
@@ -393,6 +437,106 @@ impl<'p> Machine<'p> {
         Ok(Value::Record(values.into()))
     }
 
+    /// A call of a source enum variant. Its arguments fill the payload fields
+    /// by slot; a variant with no fields takes no arguments.
+    fn construct(
+        &mut self,
+        body: &'p Body,
+        frame: &mut Frame,
+        call: &Call,
+        variant: DefId,
+    ) -> Result<Value, Stop> {
+        let Some(ids) = self.variant_ids_of(variant) else {
+            return Err(Stop::NotYet("money or type constructor (H4)"));
+        };
+        let program = self.program;
+        let DefKind::Variant(variant_def) = &program.defs[variant].kind else {
+            return Err(Stop::NotYet("money or type constructor (H4)"));
+        };
+        let arguments = self.arguments(body, frame, call, &[])?;
+        let payload = self.payload(&variant_def.fields, arguments)?;
+        Ok(Value::Enum {
+            type_id: ids.type_id,
+            variant_id: ids.variant_id,
+            payload,
+        })
+    }
+
+    /// Orders constructor arguments into the payload record of a variant. Each
+    /// argument fills the field at its slot; every field is filled exactly once.
+    /// The record is sorted by field name, as the old pipeline stores it.
+    fn payload(&self, fields: &[DefId], arguments: Vec<(usize, Value)>) -> Result<Payload, Stop> {
+        if fields.is_empty() {
+            return if arguments.is_empty() {
+                Ok(None)
+            } else {
+                Err(Stop::Error("ORNA-EVAL-ARGUMENT"))
+            };
+        }
+        let mut slots: Vec<Option<Value>> = vec![None; fields.len()];
+        for (slot, value) in arguments {
+            let Some(cell) = slots.get_mut(slot) else {
+                return Err(Stop::Error("ORNA-EVAL-ARGUMENT"));
+            };
+            if cell.replace(value).is_some() {
+                return Err(Stop::Error("ORNA-EVAL-ARGUMENT"));
+            }
+        }
+        let mut record = Vec::with_capacity(fields.len());
+        for (field, slot) in fields.iter().zip(slots) {
+            let Some(value) = slot else {
+                return Err(Stop::Error("ORNA-EVAL-ARGUMENT"));
+            };
+            record.push((self.program.defs[*field].name.clone(), value));
+        }
+        record.sort_by(|left, right| left.0.cmp(&right.0));
+        Ok(Some(record.into()))
+    }
+
+    /// A constructor pattern: the value must be the same variant, and each field
+    /// pattern must match the payload field it names. A pattern with no field
+    /// patterns matches only a payload-free variant.
+    fn matches_variant(
+        &mut self,
+        body: &'p Body,
+        frame: &mut Frame,
+        variant: DefId,
+        fields: &[(DefId, PatId)],
+        value: Value,
+    ) -> Result<bool, Stop> {
+        let Some(ids) = self.variant_ids_of(variant) else {
+            return Err(Stop::NotYet("money or type constructor pattern (H4)"));
+        };
+        let Value::Enum {
+            type_id,
+            variant_id,
+            payload,
+        } = value
+        else {
+            return Ok(false);
+        };
+        if type_id != ids.type_id || variant_id != ids.variant_id {
+            return Ok(false);
+        }
+        match (fields.is_empty(), payload) {
+            (true, None) => Ok(true),
+            (true, Some(_)) | (false, None) => Ok(false),
+            (false, Some(record)) => {
+                let program = self.program;
+                for (field, pat) in fields {
+                    let name = &program.defs[*field].name;
+                    let Some((_, value)) = record.iter().find(|(key, _)| key == name) else {
+                        return Ok(false);
+                    };
+                    if !self.matches(body, frame, *pat, value.clone())? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+        }
+    }
+
     fn field(
         &mut self,
         body: &'p Body,
@@ -401,7 +545,9 @@ impl<'p> Machine<'p> {
         field: &FieldRef,
     ) -> Result<Value, Stop> {
         let Value::Record(fields) = self.eval(body, frame, base)? else {
-            return Err(Stop::NotYet("field access on a value that is not a record"));
+            return Err(Stop::NotYet(
+                "field access on a value the type pass rejects (H2)",
+            ));
         };
         let found = match field {
             FieldRef::Index(index) => fields.get(*index as usize).map(|(_, value)| value),
@@ -462,17 +608,14 @@ impl<'p> Machine<'p> {
         Err(Stop::Error("ORNA-EVAL-NO-MATCH"))
     }
 
-    /// Builds a closure over the current values of the names its body
-    /// captures. The old pipeline captures the scope the same way.
-    fn lambda(&self, frame: &Frame, lambda: BodyId) -> Result<Value, Stop> {
+    /// Builds a closure over the variables its body captures. The closure shares
+    /// each variable's slot, so an assignment on either side is seen by the other.
+    fn lambda(&self, frame: &mut Frame, lambda: BodyId) -> Result<Value, Stop> {
         let program = self.program;
-        if binders::binds_a_name_twice(&program.bodies[lambda]) {
-            return Err(Stop::NotYet("a parameter list binds one name twice"));
-        }
         let captures = &program.bodies[lambda].captures;
         let mut captured = Vec::with_capacity(captures.len());
         for capture in captures.iter() {
-            captured.push(frame.get(capture.outer)?);
+            captured.push(frame.cell(capture.outer)?);
         }
         Ok(Value::Closure(Rc::new(Closure {
             body: lambda,
@@ -493,10 +636,30 @@ impl<'p> Machine<'p> {
     ) -> Result<Value, Stop> {
         match self.eval(body, frame, attempt) {
             Err(Stop::Error(code)) => {
-                frame.set(handler, Value::Error(code))?;
+                frame.bind(handler, Value::Error(code))?;
                 self.eval(body, frame, arm)
             }
             other => other,
+        }
+    }
+
+    /// `fail(e)`: raises the error value `e` names, which a recovery handler
+    /// binds. Any other value is a type error, as in the old pipeline. The
+    /// argument is the only input; a defaulted or missing argument is an
+    /// argument error.
+    fn fail(&mut self, body: &'p Body, frame: &mut Frame, call: &Call) -> Result<Value, Stop> {
+        let [
+            Arg {
+                value: ArgValue::Expr(argument),
+                ..
+            },
+        ] = &call.args[..]
+        else {
+            return Err(Stop::Error("ORNA-EVAL-ARGUMENT"));
+        };
+        match self.eval(body, frame, *argument)? {
+            Value::Error(code) => Err(Stop::Error(code)),
+            _ => Err(Stop::Error("ORNA-EVAL-TYPE")),
         }
     }
 
@@ -513,7 +676,7 @@ impl<'p> Machine<'p> {
         match &body.pats[pat] {
             Pat::Wild => Ok(true),
             Pat::Bind { local } => {
-                frame.set(*local, value)?;
+                frame.bind(*local, value)?;
                 Ok(true)
             }
             Pat::Lit(lit) => Ok(self.literal(lit)? == value),
@@ -537,7 +700,7 @@ impl<'p> Machine<'p> {
                 Value::Record(values) => self.matches_record(body, frame, fields, &values),
                 _ => Ok(false),
             },
-            Pat::Ctor { .. } => Err(Stop::NotYet("constructor pattern")),
+            Pat::Ctor { def, fields } => self.matches_variant(body, frame, *def, fields, value),
         }
     }
 
@@ -584,7 +747,7 @@ impl<'p> Machine<'p> {
         }
         if let Some(rest) = rest {
             let middle = Value::List(values[prefix.len()..suffix_start].into());
-            frame.set(rest, middle)?;
+            frame.bind(rest, middle)?;
         }
         Ok(true)
     }
