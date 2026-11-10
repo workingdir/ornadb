@@ -1441,7 +1441,11 @@ type, and H4 only needs types from H2 for arithmetic selection; section 7.2).
 
 - **Delivers.** `Ty` interning, `InferCtxt`, operator tables over `Ty`,
   expression typing, call checking per `Callee`, `Pending` calls settled,
-  diagnostics with spans (ORNA-INFER-011). Three parts, in order:
+  diagnostics with spans (ORNA-INFER-011). The interface modules `core.orna` and
+  `sys.orna` first appear here as checked-in files generated mechanically from
+  the old catalogue (`api/sys.json` for `sys`, the `orna-intrinsics` rows for
+  `core`), so that typing a native or `sys` call needs no second type language;
+  they become the source of truth in H5. Three parts, in order:
   - **H2a, no decision needed.** Fully annotated programs and the
     annotation-required solver (2.3), first-order and local to a body.
   - **H2b, needs D1, D3, D5.** The parameter-annotation policy, the option
@@ -1478,10 +1482,12 @@ type, and H4 only needs types from H2 for arithmetic selection; section 7.2).
 - **Deletes.** In `orna-check`: `inference.rs` (3,294), `calls.rs` (2,877),
   `intrinsics.rs` (1,255), `flow.rs` (1,234), `imports.rs` (1,112),
   `collections.rs` and `collection_calls.rs` (439), `scope.rs` (137),
-  `types.rs` (162) and the matching parts of `lib.rs`: 10,510 lines in nine
-  files plus. `checkpoint.rs`, `semantic_payload.rs` and `secrets.rs` (5,819)
-  follow when their rules are ported. `located.rs` (235) goes with
-  span-carrying diagnostics.
+  `types.rs` (162): 10,510 lines in nine files; then `system_api.rs` (3,544)
+  and `system_calls.rs` (1,915), whose job the lowered `sys.orna` takes over;
+  then `checkpoint.rs`, `semantic_payload.rs` and `secrets.rs` (5,819) when
+  their rules are ported; and `located.rs` (235) with span-carrying
+  diagnostics. Total 22,023 of the crate's 36,352 lines, plus the matching
+  parts of `lib.rs`.
 - **Risk.** Rule parity at the margins (checkpoint topology, snapshot context
   maps, `checkpoint.rs` 3,574 lines of pairwise rules). Mitigation: the
   adapter above and the harness; nothing is switched until the corpus agrees.
@@ -1616,7 +1622,7 @@ becomes the definition: baselines are re-recorded once, in one reviewed PR, and
 | H0 | a corpus-wide differential harness; published benchmark numbers for the old evaluator |
 | H1 | one resolver, proved against the old evaluator's routing on every corpus call; the editor and the engine agree; about 2,000 lines of second resolver deleted (`names.rs` 1,485, `standard.rs` 375, the resolver half of `workspace.rs`; the critique counts about 2,950 for the whole resolving layer) |
 | H2 | spans on type errors; real inference for annotated programs; the `fn same(name) = name == "admin"` rejection (`inference.rs:1455`) gone |
-| H3 | `orna check` on HIR; about 10,500 lines of checker deleted; per-function effects available to every consumer |
+| H3 | `orna check` on HIR; about 22,000 lines of checker deleted; per-function effects available to every consumer |
 | H4 | an executor with slot locals; B1 and B2 numbers |
 | H5 | one declaration mechanism for host functions; `api/sys.json` derived |
 | H6 | no 2,048-row read cap; one write path; `orna-cli` without `orna-conformance` |
@@ -1946,3 +1952,125 @@ language server later without changing the data model.
 **Add types to the syntax tree.** Rejected: the AST is a faithful parse tree
 shared with the formatter and the tolerant editor parse; resolved names, slots
 and types belong in a separate structure with a different lifetime.
+
+--------------------------------------------------------------------------
+
+## 10. Crate and file layout, and what each stage deletes
+
+### 10.1 New crates
+
+```
+crates/orna-hir/                     layer 3 (beside orna-sys-id); deps: orna-base, orna-syntax, orna-value
+  interface/core.orna                body-less declarations of language-defined natives
+  interface/sys.orna                 body-less declarations of the sys surface
+  src/ids.rs program.rs def.rs       2.2, 2.3
+  src/ty.rs effects.rs               2.3, 2.5
+  src/body.rs call.rs pat.rs         2.4, 2.6, 2.7
+  src/lower/ (items, exprs, pats)    AST to HIR; total; never fails
+  src/resolve/ (imports, scope, bind) the one resolver and the one argument binder
+  src/query.rs                       use_at, expr_at, scope_at, references (section 3.4)
+  src/validate.rs print.rs           the invariants of 2.12; a printer shared by diagnostics and hover
+crates/orna-exec/                    layer 5, replaces orna-evaluator; deps: orna-hir, orna-value, orna-base; no orna-syntax
+  build.rs                           generates NativeId and the table from interface/core.orna
+  src/value.rs frame.rs completion.rs
+  src/op/ (build, expr, call, control, pattern)   the operator tree of 7.2
+  src/natives/ (bits text hash ... )  one module per family
+  src/host.rs link.rs store.rs table.rs relation.rs quota.rs
+crates/orna-differential/            layer 14, role harness, never in orna-cli's closure
+  src/corpus.rs observe_old.rs observe_new.rs compare.rs
+  src/bin/bench.rs                   the three benchmarks of 7.4
+  tests/differential/expected-differences.toml
+```
+
+`orna-check` keeps its name and public API and gains `check(..)` (3.1); it
+depends on `orna-hir`. `docs/design/layers.toml` gets one entry per new crate in
+H0 and `scripts/check_architecture.py` enforces them from the same PR.
+`orna-exec` is a lower layer than the providers in `orna-sys` (layer 6) and the
+store in `orna-runtime` (layer 9), so it defines `Host` and `TableStore`
+(sections 4.4, 5.2) and they implement them; no upward dependency is created.
+
+### 10.2 What each stage deletes
+
+Line counts are the files' current sizes at `026faee90`; "of" gives the file or
+crate total where only part goes.
+
+| Stage | Deleted | Lines |
+|---|---|---|
+| H0 | nothing | 0 |
+| H1 | `orna-lsp/src/names.rs` 1,485; `standard.rs` 375; the resolver half of `workspace.rs` (`:382-561`, about 180 of 1,108); the `Hint` use in `analysis.rs` | about 2,040 |
+| H2 | nothing | 0 |
+| H3 | `orna-check`: `inference.rs`, `calls.rs`, `intrinsics.rs`, `flow.rs`, `imports.rs`, `collections.rs`, `collection_calls.rs`, `scope.rs`, `types.rs`, `system_api.rs`, `system_calls.rs`, `checkpoint.rs`, `semantic_payload.rs`, `secrets.rs`, `located.rs` | 22,023 of 36,352 |
+| H4 | nothing | 0 |
+| H5 | `orna-sys-macros` 19; the JSON-scraping and id-generation steps of `orna-sys-codegen` (4,089) and `orna-sys/build.rs` (211) once `sys.orna` is the source; the `fail(..)` marker bodies in the pinned std (separate repository) | up to 4,319 |
+| H6 | the conformance crate's three table handlers and their use for assertion admission (`semantic_adapter.rs:4590, 4695, 6318`); `committed_read_limits` and `CommittedReadLimits` (`orna-project/src/table_storage.rs:66`) | to be counted in the PR |
+| H7 | `orna-evaluator/src/explain_bindings.rs` 369 | 369 |
+| H8 | `orna-check/src/repl.rs` 564; `orna-evaluator/src/repl.rs` 1,766; the admission and alias code of `orna-project-repl` (2,605 total); the write path at `orna-application/src/repl_transaction.rs:525-560` | about 2,330 plus the project-repl share |
+| H9 | `orna-evaluator` entire (30,818, including `sys_bindings.rs` 2,942 and `relation.rs` 1,375); `orna-intrinsics` (4,894); `SourceMutationEffectHandler` and its async wrapper (`orna-application/src/lib.rs:1599-2963`, about 1,360), `Functions`, `StandardLayer`, `with_standard_sources` (`:294-406`); the three effect-handler traits and their adapters; `contextual_snapshot.rs` handler (668); the `route-trace` feature; `Expr.weight`; the legacy `analyze*` bodies; `ORNA_CHECK_LEGACY` | about 38,000 |
+
+Totals from the rows above that carry a number: about 69,000 lines deleted, from
+the 107,875 lines of the six crates of section 1.1 plus the 4,089 of
+`orna-sys-codegen`. The new crates' size is not estimated here; it should be
+recorded when H4 lands, because the plan's claim is fewer resolution sites and
+one pipeline, not fewer lines.
+
+### 10.3 Ownership of the CI additions
+
+| Addition | Stage | Where |
+|---|---|---|
+| differential job | H0 | `.github/workflows/cli-tests.yml`, nightly in `nightly-gates.yml` |
+| benchmark job and baseline comparison | H0 | `scripts/` comparison script, same workflow |
+| `route-trace` feature build | H0 | removed in H9 |
+| architecture check for the new crates | H0 | `scripts/check_architecture.py` |
+| shadow-mode nightly (old and new both run) | H9 | `nightly-gates.yml` |
+| wasm parity for `orna-exec` | H4 | `browser-profile-wasm-parity.yml` |
+
+--------------------------------------------------------------------------
+
+## Appendix A: stage beads
+
+| Stage | Bead |
+|---|---|
+| H0 scaffold, differential harness, baseline benchmarks | `ornadb-csenl.15` |
+| H1 lowering, resolver, call classification; LSP on HIR | `ornadb-csenl.16` |
+| H2 `Ty`, inference, expression typing | `ornadb-csenl.17` |
+| H3 effects pass, checker rules on HIR | `ornadb-csenl.18` |
+| H4 `orna-exec` pure core | `ornadb-csenl.19` |
+| H5 `Host`, native declarations, link, native families | `ornadb-csenl.20` |
+| H6 `TableStore`, one mutation path | `ornadb-csenl.21` |
+| H7 relational operators, `sys.explain` | `ornadb-csenl.22` |
+| H8 REPL as incremental module | `ornadb-csenl.23` |
+| H9 cutover and deletion | `ornadb-csenl.24` |
+
+Language decisions D1 to D13 are `ornadb-csenl.1` to `.13`.
+
+## Appendix B: commands used for counts
+
+Run from the repository root at `026faee90`; counts are of lines matched unless
+stated.
+
+1. Crate sizes: `cat crates/<crate>/src/*.rs crates/<crate>/src/*/*.rs | wc -l`.
+2. Name-resolution sites: read, not counted by command; the table of 1.2 lists
+   each with `file:line`.
+3. `grep -c -E 'scope\.names' crates/orna-check/src/*.rs`, summed: 33.
+4. `grep -c -E 'scope\.modules|available_modules' crates/orna-check/src/*.rs`,
+   summed: 36.
+5. `grep -c 'self.transfer.is_some()' crates/orna-evaluator/src/lib.rs`: 43.
+6. `grep -c 'error("ORNA-EVAL-UNSUPPORTED")' crates/orna-evaluator/src/lib.rs`: 78.
+7. `grep -c 'to_str_radix(10)' crates/orna-evaluator/src/lib.rs`: 5.
+8. Scope fields: `awk 'NR>=6 && NR<=117 && /^    pub\(crate\) [a-z_]+:/' crates/orna-check/src/scope.rs`:
+   35 fields; piped through `grep -c -E 'BTreeMap|BTreeSet'`: 31.
+9. `use` implementations: `grep -n 'UseTail::'` in `orna-check/src/imports.rs`,
+   `orna-application/src/lib.rs`, `orna-evaluator/src/repl.rs`,
+   `orna-project-repl/src/lib.rs`, `orna-lsp/src/workspace.rs`,
+   `orna-lsp/src/standard.rs`: matches in all six.
+10. Fixture files: `find crates -name '*.orna' -not -path '*/archive/*'`
+    grouped by directory; reference examples: `find
+    reference/Orna-1.1.0/examples/{valid,invalid} -type f | wc -l`: 92 and 80.
+11. Native rows: `grep -c 'Dispatch::Native' crates/orna-intrinsics/src/modules/*.rs`
+    summed: 109; `grep -c 'leaf: Some'` summed: 56.
+12. `sys` surface: counts of the `functions`, `relations` and `singletons`
+    arrays of `reference/Orna-1.1.0/api/sys.json`: 82, 78, 4.
+13. The table-write name match: `grep -n '"insert" | "upsert"'` and
+    `grep -n '"insert" =>'` over `crates` excluding tests: the seven files of 1.7.
+
+Counts not produced by a command are marked `[INFERENCE]` where they occur.
