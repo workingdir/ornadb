@@ -580,7 +580,7 @@ normative content of `docs/ARCHITECTURE.md` and the data source for
 | 0 | primitives | `orna-base` | nothing external except `sha2`, `hex`, `base64`, `unicode-normalization` |
 | 1 | value | `orna-value` | 0 |
 | 2 | syntax | `orna-syntax` | 0, 1 |
-| 3 | identity | `orna-sys-id`, `orna-std-sources`, `orna-sys-macros` | 0 (and 1 only for `orna-std-sources`) |
+| 3 | identity and IR | `orna-hir`, `orna-sys-id`, `orna-std-sources`, `orna-sys-macros` | 0 (and 1 only for `orna-std-sources`; `orna-hir` also 2) |
 | 4 | analysis | `orna-check` (was `orna-semantic`) | 0-3 |
 | 5 | evaluation | `orna-eval`, `orna-std`, `orna-query` | 0-4 |
 | 6 | hosts (I/O adapters) | `orna-sys`, `orna-security` | 0-5 |
@@ -1655,7 +1655,7 @@ R3. A crate name states its layer or its subject, never a metaphor. "core",
 | 0 | primitives | orna-base |
 | 1 | value | orna-value |
 | 2 | syntax | orna-syntax |
-| 3 | identity | orna-sys-id, orna-std-sources, orna-sys-macros |
+| 3 | identity and IR | orna-hir, orna-sys-id, orna-std-sources, orna-sys-macros |
 | 4 | analysis | orna-check |
 | 5 | evaluation | orna-eval, orna-std, orna-query |
 | 6 | hosts (I/O) | orna-sys, orna-security |

@@ -1602,6 +1602,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "orna-hir"
+version = "1.0.0"
+dependencies = [
+ "num-bigint 0.4.8",
+ "orna-syntax",
+ "orna-value",
+ "unicode-normalization",
+]
+
+[[package]]
 name = "orna-intrinsics"
 version = "1.0.0"
 

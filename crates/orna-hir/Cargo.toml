@@ -1,0 +1,13 @@
+[package]
+name = "orna-hir"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.95"
+license.workspace = true
+description = "Typed, resolved intermediate representation for the Orna 1.1.0 language"
+
+[dependencies]
+num-bigint = "0.4.6"
+orna-syntax = { path = "../orna-syntax" }
+orna-value = { path = "../orna-value" }
+unicode-normalization = "=0.1.24"

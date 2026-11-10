@@ -60,6 +60,24 @@ mod sys_dispatch;
 mod timezone;
 mod ui;
 mod unicode_16_case_properties;
+
+#[cfg(feature = "route-trace")]
+pub mod route_trace;
+
+/// Records which branch of [`Context::call`] served a call, when the
+/// `route-trace` feature is on (HIR design section 6.2).
+#[cfg(feature = "route-trace")]
+macro_rules! route_trace {
+    ($callee:expr, $kind:ident) => {
+        crate::route_trace::record($callee, crate::route_trace::CallKind::$kind)
+    };
+}
+
+/// With `route-trace` off, the recording is compiled out.
+#[cfg(not(feature = "route-trace"))]
+macro_rules! route_trace {
+    ($callee:expr, $kind:ident) => {};
+}
 pub use browser_profile::{BrowserProfileError, execute_browser_profile};
 pub use cancellation::CancellationToken;
 #[cfg(feature = "system-host-bindings")]
@@ -9599,6 +9617,7 @@ impl Context<'_, '_> {
             }
             match receiver {
                 Value::Decimal(numerator) => {
+                    route_trace!(callee, DecimalDivide);
                     return self.decimal_divide_method(numerator, arguments, scope, depth + 1);
                 }
                 receiver => {
@@ -9609,6 +9628,7 @@ impl Context<'_, '_> {
         if let Some((codec, supports_options)) =
             resolved.as_deref().and_then(codec_decode_operation)
         {
+            route_trace!(callee, CodecDecode);
             return self.decode_with_type_witness(
                 codec,
                 supports_options,
@@ -9632,12 +9652,14 @@ impl Context<'_, '_> {
             if input.is_some() {
                 return Err(error("ORNA-EVAL-ARGUMENT"));
             }
+            route_trace!(callee, UiAction);
             return self.ui_action(arguments, scope, depth);
         }
         if let Some(intrinsic) = self.root_intrinsic(&site, scope)
             && let Some(value) =
                 self.call_root_intrinsic(intrinsic, &site, input.is_some(), scope, depth)?
         {
+            route_trace!(callee, RootIntrinsic);
             return Ok(value);
         }
         if is_relation_source(callee) {
@@ -9648,19 +9670,26 @@ impl Context<'_, '_> {
             let Value::String(source) = source else {
                 return Err(error("ORNA-EVAL-TYPE"));
             };
+            route_trace!(callee, RelationSource);
             return Ok(Value::Relation(RelationPlan::new(source)));
         }
         if let Some(result) = self.relation_call(callee, arguments, input.clone(), scope, depth) {
+            route_trace!(callee, RelationStage);
             return result;
         }
         if let Some(value) = self.call_system_host(&site, &mut input, scope, depth)? {
+            route_trace!(callee, SystemHost);
             return Ok(value);
         }
         match self.route_call(&site, input.as_ref(), scope)? {
             CallRoute::Source => {
+                route_trace!(callee, Source);
                 self.call_source_function(&site, input, pre_evaluated_callee, scope, depth)
             }
-            CallRoute::Native(id) => self.call_native(&site, id, input, scope, depth),
+            CallRoute::Native(id) => {
+                route_trace!(callee, Native);
+                self.call_native(&site, id, input, scope, depth)
+            }
         }
     }
 

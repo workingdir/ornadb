@@ -1,0 +1,20 @@
+{
+  "note": "H0 baseline of the three benchmarks of the HIR design section 7.4, measured on the old evaluator through its public API by crates/orna-evaluator/src/bin/orna_bench.rs. steps is the evaluator's StepBudget debit; calls is the number of executed calls recorded by the route-trace feature. The old evaluator memoises admitted named calls within one activation (ORNA-CALL-001..003), so fib(25) executes 48 calls, not the design's 242,785 source-level calls; the route trace observes executed calls, which is what a differential comparison needs. Wall time is recorded by the run and is not part of this baseline: shared runners are noisy and the design gates it loosely only on a pinned runner label. Re-record only in a PR that explains why the counters changed.",
+  "benchmarks": {
+    "b1_fib_25": {
+      "steps": 397,
+      "calls": 48,
+      "gated": true
+    },
+    "b2_fold_1000000": {
+      "steps": 6000008,
+      "calls": 0,
+      "gated": true
+    },
+    "b3_filter_100000": {
+      "steps": 900004,
+      "calls": 2,
+      "gated": true
+    }
+  }
+}

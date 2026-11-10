@@ -9,6 +9,14 @@ description = "Bounded deterministic evaluator for the Orna 1.0 expression subse
 [lib]
 crate-type = ["rlib", "cdylib"]
 
+# The H0 baseline benchmarks of the HIR design (section 7.4). They print one
+# JSON record of deterministic step and call counters; `route-trace` is
+# required, so no default build compiles or ships them.
+[[bin]]
+name = "orna_bench"
+path = "src/bin/orna_bench.rs"
+required-features = ["route-trace"]
+
 [features]
 default = ["system-host-bindings"]
 system-host-bindings = ["dep:orna-sys", "dep:orna-repository"]
@@ -17,6 +25,9 @@ test-evidence = []
 browser-wasm = ["getrandom/wasm_js", "dep:uuid", "uuid/js"]
 # Unstable test seam for orna-project-repl: exposes CancellationToken::request_after_checks.
 cancellation-test-hooks = []
+# Test-only call-route recording for the HIR differential harness (HIR design
+# section 6.2, stage H0). Off in every shipped build; deleted in stage H9.
+route-trace = []
 
 [dependencies]
 num-bigint = "0.4.6"
