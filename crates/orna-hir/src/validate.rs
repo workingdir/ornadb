@@ -3,10 +3,13 @@
 //! Lowering is total: it never fails, and a malformed program is represented
 //! rather than rejected. This module states the invariants every lowered
 //! program must satisfy, so a lowering bug surfaces as a failed validation in
-//! a test instead of as a wrong answer in production. It is the invariant set
-//! of design section 2.12 (the ids, tables and bodies of sections 2.2, 2.4,
-//! 2.6 and 2.7); the type and effect passes of H2 and H3 add their own
-//! invariants to the same entry point.
+//! a test instead of as a wrong answer in production. The invariants are the
+//! ones the design states for the ids and tables (section 2.2), bodies and
+//! patterns (section 2.4), and calls and the one argument binder (sections 2.6
+//! and 2.7). The stage text calls this "the validator of 2.12"; the design
+//! revision this crate implements has no section 2.12, so no invariants are
+//! claimed from a section that does not state them. The type and effect passes
+//! of H2 and H3 add their own invariants to the same entry point.
 //!
 //! The invariants checked here are:
 //!
