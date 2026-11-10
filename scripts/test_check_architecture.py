@@ -306,6 +306,18 @@ class LayerRuleTests(unittest.TestCase):
         allowed = exempt.run("--mode=deny")
         self.assertEqual(allowed.returncode, 0, allowed.stdout + allowed.stderr)
 
+    def test_declared_harness_role_exempts_the_orphan_rule(self) -> None:
+        # orna-differential is a test-support harness with no production consumer
+        # by design (docs/design/hir.md section 6.2); the role declaration is what
+        # the rule asks for, and R2 still refuses it in the shipped closure.
+        for role in ("harness", "oracle", "archive"):
+            fixture = Fixture(self)
+            fixture.crate("demo-shipped", 1)
+            fixture.crate("demo-support", 1, role=role)
+            fixture.shipped = "demo-shipped"
+            result = fixture.run("--mode=deny")
+            self.assertEqual(result.returncode, 0, f"{role}: " + result.stdout + result.stderr)
+
     def test_shipped_binary_with_no_dependent_is_exempt(self) -> None:
         fixture = Fixture(self)
         fixture.crate("demo-cli", 1)

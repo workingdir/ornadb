@@ -1,0 +1,147 @@
+# Programs the differential harness does not load, with the reason.
+#
+# `orna_differential::case::Corpus::load` walks every `.orna` file under
+# `crates/` and `stdlib/`, subtracts the files it turns into cases, and requires
+# the remainder to be covered exactly once by a scope below. `files` is the
+# number of *excluded* files in that scope: a scope may also contain loaded
+# files, which are not counted.
+#
+# The count is a ratchet. Adding a fixture to one of these families, or
+# extracting one of them into the corpus, fails the corpus test until this file
+# is updated in the same PR, so the excluded total can only move deliberately.
+#
+# Each family below names what the follow-up work has to supply. H0 loads the
+# families whose driving is already data-driven: the published reference corpus
+# (169 cases), the evaluator's expression fixtures (42), the REPL admission
+# fixtures (14) and the pinned standard modules (77). 5,399 programs are
+# excluded here; the follow-up PRs move them across family by family.
+
+[[excluded]]
+scope = "crates/archive/orna-compat-v1/tests/fixtures"
+files = 7
+reason = "the 1.0.0 compatibility archive is frozen; nothing may depend on it, and its semantic-diff fixtures compare two archive copies rather than drive a pipeline"
+
+[[excluded]]
+scope = "crates/orna-application/tests/fixtures"
+files = 109
+reason = "source-effect and table-identity fixtures are driven through staged activations with hand-written arguments and row sets; they need the case row path (H6) before a case can describe them"
+
+[[excluded]]
+scope = "crates/orna-check/src/fixtures"
+files = 38
+reason = "REPL and semantic-payload fixtures are statement sequences whose expectations are in the checker's unit tests; lifting them needs the REPL case driver to carry per-input expectations"
+
+[[excluded]]
+scope = "crates/orna-check/tests/fixtures"
+files = 1076
+reason = "checker fixtures feed the semantic adapter, whose per-fixture expected diagnostics live in Rust tables (inline-semantic_graph hashes them); a case needs that expectation lifted first"
+
+[[excluded]]
+scope = "crates/orna-cli/tests/fixtures"
+files = 159
+reason = "CLI fixtures are project directories, VFS and media mounts and captured-standard projects driven by process-level tests; they need the project and mount harnesses, not the module observer"
+
+[[excluded]]
+scope = "crates/orna-conformance/src/fixtures"
+files = 6
+reason = "the conformance crate's own reference project and an evaluator fixture; the project tree belongs to the project fixture family"
+
+[[excluded]]
+scope = "crates/orna-conformance/tests/fixtures"
+files = 474
+reason = "the reference corpus (172 files, 169 loaded) and repl-admission (10, loaded) live here; the remainder are legacy 1.0.0 corpus copies, row-admission fixtures that need the table store, assertion-evidence projects that need project scaffolding, and the multi-module reference projects"
+
+[[excluded]]
+scope = "crates/orna-evaluator/src/fixtures"
+files = 42
+reason = "the evaluator's embedded fixtures are REPL input sequences named by a hash of their source; their expected results live in the test that generates them, so a case needs that expectation lifted"
+
+[[excluded]]
+scope = "crates/orna-evaluator/tests/fixtures"
+files = 2099
+reason = "the five expression directories (42 loaded) and the admitted_repl fixtures (4 loaded) are lifted; the rest are module or statement snippets whose entry function, arguments and expected value live in the Rust test that includes them (tests/evaluator.rs calls named functions with hand-written arguments), so each family needs its own extractor"
+
+[[excluded]]
+scope = "crates/orna-evolution/tests/fixtures"
+files = 20
+reason = "schema-evolution cases are JSON vectors over format-3 values, not programs"
+
+[[excluded]]
+scope = "crates/orna-live/tests/fixtures"
+files = 1
+reason = "one vendored reference copy; the same programs are loaded from the conformance copy, and a second case per program would only double the corpus"
+
+[[excluded]]
+scope = "crates/orna-lsp/src/analysis/fixtures"
+files = 47
+reason = "language-server analysis fixtures are editor snapshots with UTF-16 cursor positions; H1 loads the LSP fixtures once the language server runs on HIR"
+
+[[excluded]]
+scope = "crates/orna-lsp/src/examples"
+files = 1
+reason = "an editor example page, not a program the pipeline admits"
+
+[[excluded]]
+scope = "crates/orna-lsp/tests/fixtures"
+files = 66
+reason = "language-server fixtures are an editor library and a tree-sitter corpus; H1 loads them with the LSP on HIR"
+
+[[excluded]]
+scope = "crates/orna-project-repl/src/fixtures"
+files = 65
+reason = "project REPL fixtures are inline submission sequences whose expected results live in the REPL tests; a case needs those expectations lifted, and the project loader for the attached-database ones"
+
+[[excluded]]
+scope = "crates/orna-project/src/fixtures"
+files = 7
+reason = "attached-database project modules need the project loader to supply the primary and attached schemas together"
+
+[[excluded]]
+scope = "crates/orna-project/tests/fixtures"
+files = 72
+reason = "project fixtures are multi-module project trees with captured standard dependencies; a case needs every module's source, which the corpus loader does not read"
+
+[[excluded]]
+scope = "crates/orna-protocol/tests/fixtures"
+files = 3
+reason = "presentation-protocol fixtures are wire payloads with no Orna program to evaluate"
+
+[[excluded]]
+scope = "crates/orna-repository/tests/fixtures"
+files = 30
+reason = "repository fixtures are format-3 trees, media and ORP-1 vectors committed through the storage path; they need the store path (H6)"
+
+[[excluded]]
+scope = "crates/orna-runtime/tests/fixtures"
+files = 285
+reason = "runtime fixtures are table-store and publication cases with rows and committed identities; they need the case row path (H6)"
+
+[[excluded]]
+scope = "crates/orna-storage/tests/fixtures"
+files = 9
+reason = "publication fixtures are journal and store states, not programs"
+
+[[excluded]]
+scope = "crates/orna-syntax/tests/fixtures"
+files = 428
+reason = "parser fixtures are accept/reject sources for the syntax adapter, including a vendored reference copy and a probe grammar; a truncated snippet is not a module, so the module observer would report checker errors that say nothing about the fixture"
+
+[[excluded]]
+scope = "crates/orna-sys/tests/fixtures"
+files = 164
+reason = "sys fixtures drive host providers with declared surfaces and captured metadata; they need the host binding path the corpus does not drive"
+
+[[excluded]]
+scope = "crates/orna-traceability/tests/fixtures"
+files = 183
+reason = "a vendored reference copy used as citation evidence; the same programs are loaded from the conformance copy"
+
+[[excluded]]
+scope = "crates/orna-value/tests/fixtures"
+files = 5
+reason = "value contract fixtures are OVB-1 and format-3 encodings, not programs"
+
+[[excluded]]
+scope = "stdlib/std"
+files = 3
+reason = "the standard dependency bundle's 77 modules are loaded; the pinned tree also carries std/main.orna (outside the bundle) and an OrnaDB project-state directory (database.orna, format.orna), neither of which is a module the binary admits"

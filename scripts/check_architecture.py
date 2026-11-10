@@ -39,8 +39,9 @@ The rules, in the order ARCHITECTURE.md states them:
     layer table  a crate may depend only on a lower layer; a same-layer edge is
                  legal only when the source crate's `allowed` list names it
     archive      no crate may depend on a layer-15 archive crate
-    orphan       a crate with production in-degree 0 must be declared a tool or
-                 an archive, or be the shipped binary
+    orphan       a crate with production in-degree 0 must be declared with a
+                 non-production role (tool, harness, oracle or archive), or be
+                 the shipped binary
     tool         a crate outside the shipped closure must not depend on a
                  non-production crate
 
@@ -570,12 +571,15 @@ def check_layers(workspace: Workspace, table: LayerTable) -> tuple[list[Violatio
         if production_in[name] or name == table.shipped_binary:
             continue
         spec = table.crates.get(name)
-        if spec is not None and spec.role in ("tool", "archive"):
+        # A declared non-production role is the declaration the rule asks for: a
+        # test-support harness (orna-differential) has no production consumer by
+        # design, and R2 still refuses it in the shipped closure.
+        if spec is not None and spec.role != "production":
             continue
         violations.append(Violation(
             f"orphan:{name}",
             "ORPHAN",
-            f"{name}: production in-degree 0 and role is not tool or archive "
+            f"{name}: production in-degree 0 and no declared non-production role "
             f"(declare a role or give the crate a production dependent) "
             f"({display_path(workspace.members[name] / 'Cargo.toml', workspace.root)})",
         ))
