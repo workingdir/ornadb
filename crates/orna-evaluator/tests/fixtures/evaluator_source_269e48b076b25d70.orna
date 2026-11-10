@@ -1,1 +1,0 @@
-std.collection.partition([1], () => true)

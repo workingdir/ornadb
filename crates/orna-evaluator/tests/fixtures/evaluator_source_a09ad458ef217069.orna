@@ -1,1 +1,0 @@
-std.collection.chunk(rows, 2)
