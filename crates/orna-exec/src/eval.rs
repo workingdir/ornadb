@@ -307,7 +307,7 @@ impl<'p> Machine<'p> {
             Place::Local(slot) => {
                 let rhs = self.eval(body, frame, value)?;
                 let new = self.combine(op, rhs, || frame.get(*slot))?;
-                frame.set(*slot, new)?;
+                frame.assign(*slot, new)?;
                 Ok(Value::Unit)
             }
             Place::Field { base, field } => self.assign_field(body, frame, base, field, op, value),
@@ -363,7 +363,7 @@ impl<'p> Machine<'p> {
         let new = self.combine(op, rhs, || Ok(fields[position].1.clone()))?;
         let mut updated = fields.to_vec();
         updated[position].1 = new;
-        frame.set(*slot, Value::Record(updated.into()))?;
+        frame.assign(*slot, Value::Record(updated.into()))?;
         Ok(Value::Unit)
     }
 
@@ -396,7 +396,7 @@ impl<'p> Machine<'p> {
         let new = self.combine(op, rhs, || Ok(values[index].clone()))?;
         let mut updated = values.to_vec();
         updated[index] = new;
-        frame.set(*slot, Value::List(updated.into()))?;
+        frame.assign(*slot, Value::List(updated.into()))?;
         Ok(Value::Unit)
     }
 
@@ -598,14 +598,14 @@ impl<'p> Machine<'p> {
         Err(Stop::Error("ORNA-EVAL-NO-MATCH"))
     }
 
-    /// Builds a closure over the current values of the names its body
-    /// captures. The old pipeline captures the scope the same way.
+    /// Builds a closure over the variables its body captures. The closure shares
+    /// each variable's slot, so an assignment on either side is seen by the other.
     fn lambda(&self, frame: &Frame, lambda: BodyId) -> Result<Value, Stop> {
         let program = self.program;
         let captures = &program.bodies[lambda].captures;
         let mut captured = Vec::with_capacity(captures.len());
         for capture in captures.iter() {
-            captured.push(frame.get(capture.outer)?);
+            captured.push(frame.cell(capture.outer)?);
         }
         Ok(Value::Closure(Rc::new(Closure {
             body: lambda,
@@ -626,7 +626,7 @@ impl<'p> Machine<'p> {
     ) -> Result<Value, Stop> {
         match self.eval(body, frame, attempt) {
             Err(Stop::Error(code)) => {
-                frame.set(handler, Value::Error(code))?;
+                frame.bind(handler, Value::Error(code))?;
                 self.eval(body, frame, arm)
             }
             other => other,
@@ -666,7 +666,7 @@ impl<'p> Machine<'p> {
         match &body.pats[pat] {
             Pat::Wild => Ok(true),
             Pat::Bind { local } => {
-                frame.set(*local, value)?;
+                frame.bind(*local, value)?;
                 Ok(true)
             }
             Pat::Lit(lit) => Ok(self.literal(lit)? == value),
@@ -737,7 +737,7 @@ impl<'p> Machine<'p> {
         }
         if let Some(rest) = rest {
             let middle = Value::List(values[prefix.len()..suffix_start].into());
-            frame.set(rest, middle)?;
+            frame.bind(rest, middle)?;
         }
         Ok(true)
     }

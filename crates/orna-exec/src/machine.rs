@@ -8,7 +8,7 @@ use orna_hir::{Body, BodyId, DefId, DefKind, FnBody, Program};
 
 use crate::error::{ExecError, Stop};
 use crate::frame::Frame;
-use crate::value::Value;
+use crate::value::{Cell, Value};
 use crate::variants::{VariantIds, variant_ids};
 
 /// The resource limits one run is bounded by. Their defaults in the old
@@ -76,7 +76,7 @@ impl<'p> Machine<'p> {
         &mut self,
         body_id: BodyId,
         arguments: Vec<(usize, Value)>,
-        captured: &[Value],
+        captured: &[Cell],
     ) -> Result<Value, Stop> {
         if self.depth >= self.limits.max_depth {
             return Err(Stop::Error("ORNA-EVAL-LIMIT"));
@@ -88,10 +88,10 @@ impl<'p> Machine<'p> {
             let Some(&local) = body.params.get(index) else {
                 return Err(Stop::Error("ORNA-EVAL-ARGUMENT"));
             };
-            frame.set(local, value)?;
+            frame.bind(local, value)?;
         }
-        for (capture, value) in body.captures.iter().zip(captured) {
-            frame.set(capture.inner, value.clone())?;
+        for (capture, cell) in body.captures.iter().zip(captured) {
+            frame.share(capture.inner, cell.clone())?;
         }
         self.depth += 1;
         let result = self.eval(body, &mut frame, body.root);

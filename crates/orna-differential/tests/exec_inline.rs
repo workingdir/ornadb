@@ -88,3 +88,72 @@ fn a_run_whose_flag_is_clear_is_not_cancelled() {
 fn the_family_of_an_inline_expression_is_expression() {
     assert_eq!(expression_case("family", "1").family, Family::Expression);
 }
+
+fn module_case(id: &str, text: &str) -> Case {
+    Case::module(
+        id.to_owned(),
+        Family::Standard,
+        Source {
+            path: format!("inline/{id}.orna"),
+            logical_path: format!("inline/{id}.orna"),
+            text: text.to_owned(),
+        },
+    )
+}
+
+fn executor_outcome(case: &Case) -> Result<Vec<u8>, String> {
+    match observe_exec::run_case(case) {
+        ExecOutcome::Ran { outcome, .. } => outcome,
+        ExecOutcome::NotYet(reason) => panic!("{}: the executor did not run the case: {reason}", case.id),
+    }
+}
+
+fn old_outcome(case: &Case) -> Option<Result<Vec<u8>, String>> {
+    observe_old::observe(case)
+        .expect("the old pipeline observes the case")
+        .outcome
+}
+
+// D10 (docs/language/DECIDED.md): a closure captures the variable's slot, so the executor sees
+// reassignments made after capture. The old pipeline copied the value at closure creation or rejected
+// the assignment. These are the expected differences, recorded under bead ornadb-csenl.10.
+// The cases are modules: the old pipeline parses a block only inside a function body.
+
+#[test]
+fn d10_a_closure_reads_the_slot_reassigned_after_capture() {
+    let text = "fn main() { let seed = 1; let read = () => seed; seed = 9; read() }";
+    let executor = executor_outcome(&module_case("d10-read-after-reassignment", text));
+    let old = old_outcome(&module_case("d10-read-after-reassignment-old", text));
+    assert_eq!(
+        executor,
+        executor_outcome(&module_case(
+            "d10-read-after-reassignment-value",
+            "fn main() { let seed = 9; seed }"
+        )),
+        "D10: the closure reads the reassigned slot"
+    );
+    assert_eq!(
+        old,
+        old_outcome(&module_case(
+            "d10-read-after-reassignment-old-copy",
+            "fn main() { let seed = 1; seed }"
+        )),
+        "the old pipeline copied the captured value at creation"
+    );
+    assert_ne!(Some(executor), old, "the difference is real");
+}
+
+#[test]
+fn d10_a_closure_mutates_the_captured_slot() {
+    let text = "fn main() { let seed = 1; let mutate = () => { let bump = 1; seed = seed + bump; seed }; mutate() }";
+    assert_eq!(
+        executor_outcome(&module_case("d10-mutate-capture", text)),
+        executor_outcome(&module_case("d10-mutate-capture-value", "fn main() { let seed = 2; seed }")),
+        "D10: the closure assigns the shared slot"
+    );
+    assert_eq!(
+        old_outcome(&module_case("d10-mutate-capture-old", text)),
+        Some(Err("ORNA-EVAL-IMMUTABLE-CAPTURE".to_owned())),
+        "the old pipeline rejected assignment to a captured variable"
+    );
+}

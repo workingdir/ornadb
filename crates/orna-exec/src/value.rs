@@ -6,6 +6,7 @@
 //! their elements behind an `Rc`, so copying a value out of a slot never copies
 //! its contents.
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use num_bigint::BigInt;
@@ -47,13 +48,17 @@ pub enum Value {
     },
 }
 
-/// A lambda's body and the values captured when it was created.
+/// One variable: the slot a binding owns and every closure that captured it
+/// shares (`docs/language/reference/03-bindings-and-expressions.md`).
+pub type Cell = Rc<RefCell<Value>>;
+
+/// A lambda's body and the variables it captured when it was created.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Closure {
     /// The lambda's body.
     pub body: BodyId,
-    /// The captured values, in the order of the body's captures.
-    pub captured: Box<[Value]>,
+    /// The captured variables, in the order of the body's captures.
+    pub captured: Box<[Cell]>,
 }
 
 impl Value {
