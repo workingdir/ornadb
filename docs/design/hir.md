@@ -7,7 +7,7 @@ Input documents: `local://critique-fable-5-2.md` sections 4 and 5 (the
 critique), [`architecture.md`](architecture.md), [`sys-identity.md`](sys-identity.md),
 [`std-native.md`](std-native.md), [`native-declarations.md`](native-declarations.md).
 Language decisions this design depends on live in
-`docs/language/DECISIONS.md` (branch `docs/pivot-language-decisions`, written
+the file docs/language/DECISIONS.md (branch `docs/pivot-language-decisions`, written
 in parallel). They are cited here as D1 to D13 and stay OPEN until the owner
 answers; section 8 says which stage each one blocks.
 
