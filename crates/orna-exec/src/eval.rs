@@ -5,7 +5,8 @@ use std::rc::Rc;
 use num_traits::ToPrimitive;
 use orna_hir::{
     Arg, ArgValue, Arm, AssignOp, BinOp, Body, BodyId, Call, Callee, DefId, DefKind, ExprId,
-    ExprKind, FieldRef, FnBody, Lit, LocalId, LogicOp, Name, ParamDef, Pat, PatId, Place, Stmt,
+    ExprKind, FieldRef, FnBody, IntrinsicForm, Lit, LocalId, LogicOp, Name, ParamDef, Pat, PatId,
+    Place, Stmt,
 };
 
 use crate::binders;
@@ -163,6 +164,7 @@ impl<'p> Machine<'p> {
             Callee::Sys { .. } => Err(Stop::NotYet("sys call (H5)")),
             Callee::TableOp { .. } => Err(Stop::NotYet("table operation (H6)")),
             Callee::Relational { .. } => Err(Stop::NotYet("relation stage (H7)")),
+            Callee::Intrinsic(IntrinsicForm::Fail) => self.fail(body, frame, call),
             Callee::Intrinsic(_) => Err(Stop::NotYet("intrinsic form (H4)")),
             Callee::Pending { .. } => Err(Stop::NotYet("member call awaiting the type pass (H2)")),
             Callee::Ctor { def } => self.construct(body, frame, call, *def),
@@ -608,6 +610,26 @@ impl<'p> Machine<'p> {
                 self.eval(body, frame, arm)
             }
             other => other,
+        }
+    }
+
+    /// `fail(e)`: raises the error value `e` names, which a recovery handler
+    /// binds. Any other value is a type error, as in the old pipeline. The
+    /// argument is the only input; a defaulted or missing argument is an
+    /// argument error.
+    fn fail(&mut self, body: &'p Body, frame: &mut Frame, call: &Call) -> Result<Value, Stop> {
+        let [
+            Arg {
+                value: ArgValue::Expr(argument),
+                ..
+            },
+        ] = &call.args[..]
+        else {
+            return Err(Stop::Error("ORNA-EVAL-ARGUMENT"));
+        };
+        match self.eval(body, frame, *argument)? {
+            Value::Error(code) => Err(Stop::Error(code)),
+            _ => Err(Stop::Error("ORNA-EVAL-TYPE")),
         }
     }
 

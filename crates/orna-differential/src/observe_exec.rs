@@ -10,7 +10,10 @@
 //! source function. A step-budget exhaustion is not compared: the executor
 //! counts its own steps, and the step parity is a later stage's measurement.
 
-use orna_exec::{ExecError, ExecLimits, run_entry};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+
+use orna_exec::{ExecError, ExecLimits, run_entry, run_entry_cancellable};
 use orna_hir::Idx;
 use orna_value::CanonicalValue;
 
@@ -40,9 +43,19 @@ pub enum ExecOutcome {
     NotYet(String),
 }
 
-/// Runs one case's entry over its lowered HIR.
+/// Runs one case's entry over its lowered HIR, to its outcome.
 #[must_use]
 pub fn run_case(case: &Case) -> ExecOutcome {
+    run_with(case, None)
+}
+
+/// Runs one case as a cancelled run: the executor ends it when `cancel` is set,
+/// and the outcome is the old pipeline's cancellation code.
+pub fn run_case_cancellable(case: &Case, cancel: Arc<AtomicBool>) -> ExecOutcome {
+    run_with(case, Some(cancel))
+}
+
+fn run_with(case: &Case, cancel: Option<Arc<AtomicBool>>) -> ExecOutcome {
     if !case.evaluate {
         return ExecOutcome::NotYet("the case is not evaluated".to_owned());
     }
@@ -62,7 +75,11 @@ pub fn run_case(case: &Case) -> ExecOutcome {
     let Some(def) = entry_def(&lowered, case, entry) else {
         return ExecOutcome::NotYet(format!("the entry `{entry}` is not a function of the case"));
     };
-    match run_entry(&lowered.program, def, EXEC_LIMITS) {
+    let outcome = match cancel {
+        Some(flag) => run_entry_cancellable(&lowered.program, def, EXEC_LIMITS, flag),
+        None => run_entry(&lowered.program, def, EXEC_LIMITS),
+    };
+    match outcome {
         Ok(value) => ExecOutcome::Ran(match value.to_raw() {
             Ok(raw) => encode(raw),
             Err(code) => Err(code.to_owned()),
@@ -72,6 +89,7 @@ pub fn run_case(case: &Case) -> ExecOutcome {
         ),
         Err(ExecError::Code(code)) => ExecOutcome::Ran(Err(code.to_owned())),
         Err(ExecError::NotYet(reason)) => ExecOutcome::NotYet(reason.to_owned()),
+        Err(ExecError::Cancelled) => ExecOutcome::Ran(Err("ORNA-EVAL-CANCELLED".to_owned())),
     }
 }
 
