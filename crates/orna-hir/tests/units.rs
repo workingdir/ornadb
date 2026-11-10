@@ -169,3 +169,50 @@ fn a_unit_in_the_same_module_resolves_without_ambiguity() {
         ExprKind::Call(call) if matches!(call.callee, Callee::Ctor { .. })
     ));
 }
+
+/// The callee and the argument's expression of `run`'s root call, as text, so two programs can be compared.
+fn call_shape(program: &Program, run: DefId) -> (String, String) {
+    let ExprKind::Call(call) = &root_of(program, run).kind else {
+        panic!("run's root is a call");
+    };
+    let [arg] = &call.args[..] else {
+        panic!("the call has one argument");
+    };
+    let ArgValue::Expr(value) = &arg.value else {
+        panic!("the argument is written at the call");
+    };
+    let body = program.source_body(run).expect("run has a body");
+    (
+        format!("{:?}", call.callee),
+        format!("{:?}", program.bodies[body].exprs[*value].kind),
+    )
+}
+
+#[test]
+fn a_suffix_and_its_qualified_call_lower_to_the_same_hir() {
+    let suffix = lower_one(&format!("{LENGTH}pub fn run(): Int = 5.kilometre;\n"));
+    let qualified = lower_one(&format!(
+        "{LENGTH}pub fn run(): Int = Length.kilometre(5);\n"
+    ));
+    let suffix_run = defined(&suffix, "main", "run");
+    let qualified_run = defined(&qualified, "main", "run");
+    assert_eq!(
+        call_shape(&suffix, suffix_run),
+        call_shape(&qualified, qualified_run)
+    );
+}
+
+#[test]
+fn a_unit_family_names_a_suffix_before_the_builtin_postfix() {
+    const INTERVAL: &str =
+        "pub enum Interval {\n    hour,\n    day = 24 hour,\n    impl Unit {}\n}\n";
+    let program = lower_one(&format!("{INTERVAL}pub fn run(): Int = 2.day;\n"));
+    let run = defined(&program, "main", "run");
+    let ExprKind::Call(call) = &root_of(&program, run).kind else {
+        panic!("a family suffix is a call, not the builtin postfix");
+    };
+    assert!(matches!(
+        call.callee,
+        Callee::Ctor { def } if program.defs[def].name.as_str() == "day" && matches!(program.defs[def].kind, DefKind::Unit(_))
+    ));
+}
