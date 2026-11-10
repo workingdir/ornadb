@@ -66,6 +66,9 @@ struct Run {
     diagnostics: Vec<String>,
     outcome: Option<Result<Vec<u8>, String>>,
     writes: Vec<Write>,
+    /// Whether the evaluator ran. An admission rejection produces an outcome
+    /// without executing anything, and such a case has no step count.
+    evaluated: bool,
 }
 
 /// Observes a module case through admission and staged evaluation.
@@ -77,7 +80,7 @@ fn observe_module(case: &Case) -> Result<Observation, String> {
         ..case.limits
     };
     let run = run_module(case, source, catalogue, limits)?;
-    let steps = match (&run.outcome, case.evaluate) {
+    let steps = match (&run.outcome, run.evaluated) {
         (Some(outcome), true) if !is_other_limit(outcome) => {
             measure_steps(case, source, catalogue, outcome)?
         }
@@ -114,10 +117,12 @@ fn run_module(
         Ok(activation) => Ok(Run {
             outcome: Some(Ok(encode(activation.value())?)),
             writes: writes_of(&activation),
+            evaluated: true,
             ..Run::default()
         }),
         Err(error) => Ok(Run {
             outcome: Some(Err(application_code(&error))),
+            evaluated: true,
             ..Run::default()
         }),
     }
@@ -141,7 +146,7 @@ fn rejection(error: &ApplicationError, has_entry: bool) -> Run {
     Run {
         diagnostics: diagnosis,
         outcome,
-        writes: Vec::new(),
+        ..Run::default()
     }
 }
 
