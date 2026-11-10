@@ -1,9 +1,28 @@
 # The H2a typed-share ratchet (docs/design/hir.md section 6.3, stage H2).
 #
-# `typed` is the number of corpus cases whose owned top-level bodies the HIR
-# type pass finished and whose owned modules lower without a diagnostic.
-# `lowered` is the number of corpus cases the HIR lowers and the pass examines
-# (a REPL case is an incremental module and stage H8 lowers it).
+# Definition (changed in the PR that added this header; the old figures are kept
+# so the history is auditable):
+#
+# `lowered` is the number of corpus cases the OLD checker accepts and the HIR
+# lowers. A REPL case is an incremental module and stage H8 lowers it, so it is
+# not counted here.
+# `typed` is the number of those `lowered` cases whose owned top-level bodies the
+# HIR type pass finished and whose owned modules lower without a diagnostic.
+# `rejected` (not ratcheted, printed by the test) is the number of corpus cases
+# the old checker rejects. A program that must fail is diagnosed, and its
+# rejection is owned by the rule and code parity tests, not by the typed share,
+# so these cases are excluded from both `typed` and `lowered`.
+#
+# History:
+# - Under the old definition (every lowered case, invalid ones included): 52 of
+#   212 at the stage-H2 ratchet. At 3aa41cd44, after #9848 made HIR diagnose
+#   invalid programs the old checker rejects, that same definition measured 50 of
+#   212, and the two dropped invalid cases were `invalid/module-single-table-
+#   assertion.orna` and `invalid/module-zero-table-assertion.orna`. Neither is a
+#   typing regression: HIR now emits the primary code the corpus expects.
+# - New definition, measured on origin/main 3aa41cd44: 33 of 104 old-checker
+#   accepted cases typed; 108 old-checker rejected cases excluded; 14 cases not
+#   lowered. The ratchet is measured from this baseline and only grows.
 #
 # The typed count may only grow: update it in the commit that types more of the
 # corpus. A change to `lowered` is a corpus change or a lowering change, and the
@@ -17,5 +36,5 @@
 # and the checker's special cases (H3).
 
 [[typed-share]]
-typed = 52
-lowered = 212
+typed = 33
+lowered = 104
