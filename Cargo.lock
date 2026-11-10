@@ -1536,6 +1536,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "orna-differential"
+version = "1.0.0"
+dependencies = [
+ "orna-application",
+ "orna-check",
+ "orna-evaluator",
+ "orna-project-repl",
+ "orna-standard-sources",
+ "orna-syntax",
+ "orna-value",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "orna-evaluator"
 version = "1.0.0"
 dependencies = [

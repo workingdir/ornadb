@@ -6,6 +6,7 @@ members = [
     "crates/archive/orna-compat-v1",
     "crates/orna-intrinsics",
     "crates/orna-conformance",
+    "crates/orna-differential",
     "crates/orna-evolution",
     "crates/orna-format3",
     "crates/orna-evaluator",

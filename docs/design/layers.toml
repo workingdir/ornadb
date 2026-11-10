@@ -147,6 +147,11 @@ layer = 14
 allowed = ["orna-conformance"]
 
 [[crate]]
+name = "orna-differential"
+layer = 14
+role = "harness"
+
+[[crate]]
 name = "orna-lsp"
 layer = 14
 

@@ -165,6 +165,27 @@ jobs:
         if: ${{ !cancelled() }}
         run: python3 scripts/gate_evidence.py test -p orna-evaluator --target lib --target test:evaluator --target test:materialization_introspection --target test:evaluator_ovb2_boundary --timeout-minutes 30
 
+  # H0 of the HIR strangler (docs/design/hir.md section 6.2): the differential
+  # harness runs the whole repository corpus through the old pipeline twice and
+  # fails on a difference, on a flaky case, on a stale entry in
+  # tests/differential/expected-differences.toml and on a program that is neither
+  # loaded nor excluded. The corpus is small programs, so this job is a few
+  # minutes; the crate is test-support and never in the shipped binary.
+  differential-harness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.95.0
+
+      - name: Run the differential harness over the corpus
+        run: python3 scripts/gate_evidence.py test -p orna-differential --timeout-minutes 30
+
   # Gate E aggregate draft quota: the mount reads its budget from ORNA_DRAFT_QUOTA_BYTES,
   # which exists only with the test-seams feature. Its target is skipped by the crate-wide step above.
   aggregate-quota:

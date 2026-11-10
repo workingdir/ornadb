@@ -1,0 +1,17 @@
+# Differences between the old pipeline and a second pipeline that are accepted.
+#
+# One `[[difference]]` per accepted difference. A run fails on a difference with
+# no entry here and on an entry that no longer differs, so this list only
+# shrinks, in the manner of scripts/known-test-failures.toml.
+#
+# The H0 acceptance proof is the old pipeline against itself, so the file is
+# empty: a difference means nondeterminism, which is a bug in the harness, not
+# an accepted difference. Stage H1 adds the first entries.
+
+# [[difference]]
+# case = "reference/valid/affine-max.orna"
+# field = "outcome"
+# first = "value:00"
+# second = "value:01"
+# reason = "why the two pipelines may legitimately disagree"
+# bead = "ornadb-csenl.16"
