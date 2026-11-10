@@ -338,7 +338,7 @@ impl Program {
                     FnBody::Source(body) => {
                         self.validate_owned_body(body, from, "fn body", errors);
                     }
-                    FnBody::Native(_) => {}
+                    FnBody::Native(_) | FnBody::Signature => {}
                 }
             }
             DefKind::Table(table) => {
@@ -351,7 +351,10 @@ impl Program {
                     errors,
                 );
             }
-            DefKind::Type(ty) => self.validate_generics(&ty.params, errors),
+            DefKind::Type(ty) => {
+                self.validate_generics(&ty.params, errors);
+                self.validate_def_refs(&ty.members, "type member", errors);
+            }
             DefKind::Enum(enumeration) => {
                 self.validate_kinds(
                     &enumeration.variants,
@@ -856,6 +859,7 @@ impl Program {
                 self.validate_def_ref(*table, errors);
             }
             Callee::Relational { .. } | Callee::Intrinsic(_) => {}
+            Callee::Pending { base, .. } => self.validate_expr_ref(body_id, body, *base, errors),
             Callee::Value { callee } => self.validate_expr_ref(body_id, body, *callee, errors),
         }
         let mut previous = None;
@@ -973,6 +977,7 @@ mod tests {
             exports: BTreeMap::new(),
             imports: Vec::new(),
             diagnostics: Vec::new(),
+            name_uses: Vec::new(),
         });
         let def = program.defs.push(Def {
             module,
@@ -1022,6 +1027,7 @@ mod tests {
             exports: BTreeMap::new(),
             imports: Vec::new(),
             diagnostics: Vec::new(),
+            name_uses: Vec::new(),
         });
         program.modules[other]
             .exports
@@ -1128,6 +1134,7 @@ mod tests {
                     def: crate::DefId::new(0),
                     targs: Box::new([]),
                 },
+                callee_span: span(1),
                 args: Box::new([Arg {
                     slot: ParamIdx::new(0),
                     value: ArgValue::Expr(argument),

@@ -5,30 +5,32 @@
 //! `docs/design/hir.md`, is to resolve every name exactly once and to give the
 //! later layers a program to walk rather than a syntax tree and a spelling.
 //!
-//! Stage H0 supplies the data model and nothing else: the ids and tables
-//! (design section 2.2), the definition, body, pattern and call shapes
-//! (sections 2.4, 2.6, 2.7), one interned type and the effect vocabulary
-//! (sections 2.3, 2.5), the total [`lower`] entry point, and
-//! [`Program::validate`], the structural invariant check. Lowering has no
-//! passes yet, so it returns an empty program; the resolver, the inference
-//! pass and the executor arrive in H1 to H4 behind the same types.
+//! Stage H0 supplies the data model. Stage H1 adds lowering: the resolver for
+//! names, imports, locals, slots and patterns (design section 2.2), the one
+//! argument binder (section 2.7), `Callee` classification for every call
+//! (section 2.6), the per-module [`NameUse`] index, and the item and body
+//! lowering behind the same total [`lower`] entry point. There is still no
+//! type inference or effect inference: those arrive in H2 and H3.
 //!
-//! The crate depends on `orna-syntax` (input), `orna-value` (the diagnostic
-//! type), `num-bigint` (literal payloads) and `unicode-normalization`
-//! (identifier NFC). It must never depend on `orna-check`, `orna-evaluator`,
-//! `orna-intrinsics`, `orna-sys` or a storage crate; `scripts/check_architecture.py`
-//! enforces the layer table.
+//! The crate depends on `orna-syntax` (input), `orna-value` (the portable
+//! diagnostic the admission boundary converts to), `num-bigint` (literal
+//! payloads) and `unicode-normalization` (identifier NFC). It must never depend
+//! on `orna-check`, `orna-evaluator`, `orna-intrinsics`, `orna-sys` or a
+//! storage crate; `scripts/check_architecture.py` enforces the layer table.
 
 #![forbid(unsafe_code)]
 
 mod body;
 mod call;
 mod def;
+pub mod diag;
 mod effects;
 mod ids;
 mod lower;
+mod name_use;
 mod pat;
 mod program;
+mod resolve;
 mod ty;
 mod validate;
 
@@ -42,11 +44,13 @@ pub use def::{
     ImplDef, LetDef, NativeAbi, NativeDecl, NativeKey, ParamDef, ProtocolDef, TableDef, TypeDef,
     UnitDef, VariantDef, Visibility,
 };
+pub use diag::HirDiagnostic;
 pub use effects::{EffectKind, EffectRow, EffectSet, EffectVar};
 pub use ids::{
     BodyId, DefId, ExprId, Idx, IndexVec, LocalId, ModuleId, ModulePath, Name, PatId, SourceId,
 };
 pub use lower::{SourceUnit, lower};
+pub use name_use::{NameTarget, NameUse, UseContext};
 pub use pat::Pat;
 pub use program::{Import, ImportTarget, Module, ModuleOrigin, Program};
 pub use ty::{FnTy, ParamIdx, Ty, TyInterner, TyKind, TyVar};

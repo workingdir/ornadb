@@ -99,6 +99,11 @@ pub enum TyKind {
     Option(Ty),
     /// `List<T>`.
     List(Ty),
+    /// `Map<K, V>`: immutable and persistent, keys under the canonical total
+    /// order (decision D6).
+    Map(Ty, Ty),
+    /// `Set<T>`.
+    Set(Ty),
     /// `(T, U, ..)`.
     Tuple(Box<[Ty]>),
     /// A structural record, sorted by field name.

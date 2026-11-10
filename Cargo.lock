@@ -1542,6 +1542,7 @@ dependencies = [
  "orna-application",
  "orna-check",
  "orna-evaluator",
+ "orna-hir",
  "orna-project-repl",
  "orna-standard-sources",
  "orna-syntax",

@@ -97,7 +97,17 @@ fn excluded_programs(corpus: &Corpus) -> usize {
 #[test]
 fn the_old_pipeline_agrees_with_itself_on_every_case() {
     let corpus = Corpus::load().expect("the corpus loads and reconciles");
-    let expected = compare::load_expected_differences().expect("the ratchet file parses");
+    // The file also carries stage H1's call-classification and resolution
+    // differences, which old-against-old never observes; the H1 tests own
+    // those fields and this proof owns the observation fields.
+    let expected = compare::load_expected_differences()
+        .expect("the ratchet file parses")
+        .into_iter()
+        .filter(|entry| {
+            !entry.field.starts_with("call-classification")
+                && !entry.field.starts_with("resolution-")
+        })
+        .collect::<Vec<_>>();
     let started = Instant::now();
     let mut differences = Vec::new();
     let mut flaky = Vec::new();

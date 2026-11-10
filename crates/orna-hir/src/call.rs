@@ -14,6 +14,12 @@ use crate::{DefId, ExprId, ParamIdx, Ty};
 pub struct Call {
     /// What the call invokes.
     pub callee: Callee,
+    /// The written callee's span.
+    ///
+    /// The H1 classification proof keys the old evaluator's route trace by the
+    /// callee span (design section 6.3), so the span is kept beside the
+    /// classification instead of being recomputed from the call's extent.
+    pub callee_span: orna_syntax::SyntaxSpan,
     /// One entry per parameter, in parameter order.
     pub args: Box<[Arg]>,
     /// Whether argument 0 is the piped value.
@@ -61,6 +67,18 @@ pub enum Callee {
     /// A form that cannot be a function because it has a non-call evaluation
     /// rule.
     Intrinsic(IntrinsicForm),
+    /// A member call whose meaning depends on the receiver's type: a table
+    /// operation, a relation stage or an ordinary value member. The stage
+    /// text names the two settled cases `Pending::Container` (a relation
+    /// pipeline stage) and `Pending::Member` (a value's member); both have
+    /// this shape, and the type pass (stage H2) replaces the variant with
+    /// [`Callee::TableOp`], [`Callee::Relational`] or [`Callee::Value`].
+    Pending {
+        /// The receiver expression.
+        base: ExprId,
+        /// The member name, as written.
+        name: crate::Name,
+    },
     /// An enum variant, nominal or `Money<C>` constructor.
     Ctor {
         /// The constructed definition.
@@ -124,12 +142,16 @@ pub enum RelOp {
     Filter,
     /// `map`.
     Map,
+    /// `project`, the projection spelling of `map`.
+    Project,
     /// `sort_by`.
     SortBy,
     /// `bucket_by`.
     BucketBy,
     /// `distinct`.
     Distinct,
+    /// `unique`, the list spelling of `distinct`.
+    Unique,
     /// `pairs`.
     Pairs,
     /// `window`.
@@ -140,9 +162,43 @@ pub enum RelOp {
     Drop,
     /// `flat_map`.
     FlatMap,
+    /// `union`, a two-input relation constructor.
+    Union,
+    /// `zip`.
+    Zip,
+    /// `zip_exact`.
+    ZipExact,
+    /// `asof_join`.
+    AsOfJoin,
+    /// `count`, the row-count terminal.
+    Count,
+    /// `first`, the first-row terminal.
+    First,
+    /// `last`, the last-row terminal.
+    Last,
+    /// `one`, the exactly-one-row terminal.
+    One,
+    /// `every`, the all-rows terminal.
+    Every,
+    /// `exists`, the any-row terminal.
+    Exists,
+    /// `sum`, the integer-sum terminal.
+    Sum,
+    /// `min`, the minimum terminal.
+    Min,
+    /// `max`, the maximum terminal.
+    Max,
 }
 
 /// A form with a non-call evaluation rule.
+///
+/// The first five are the checker's non-native special cases
+/// (`orna-check/src/inference.rs:318-467` minus the natives). `OptionSome`,
+/// `Now`, `Uuid7` and `Error` are the root forms decision D12 moves to
+/// body-less `native fn` declarations in `core.orna`; until the parser has the
+/// `native fn` production (design section 4.2, stage H5) they classify here, so
+/// the old evaluator's root-intrinsic route maps to one `Callee` and the move
+/// changes no call site.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IntrinsicForm {
     /// `fail`, which is abrupt.
@@ -155,4 +211,12 @@ pub enum IntrinsicForm {
     Timeout,
     /// `merge_streams`.
     MergeStreams,
+    /// `Some`, the explicit option constructor.
+    OptionSome,
+    /// `now`, the clock reading.
+    Now,
+    /// `uuid7`, the time-ordered identifier.
+    Uuid7,
+    /// `error`, which constructs a failure value.
+    Error,
 }
