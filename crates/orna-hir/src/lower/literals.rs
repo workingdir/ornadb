@@ -45,14 +45,38 @@ pub(crate) fn lower_numeric_postfix(text: &str, kind: LiteralKind, name: &str) -
     if !matches!(kind, LiteralKind::Integer | LiteralKind::Decimal) {
         return None;
     }
-    match name {
-        "decimal" => parse_decimal(text),
-        "day" | "days" if matches!(kind, LiteralKind::Integer) => parse_int(text).map(Lit::Period),
-        "hour" | "hours" => duration_postfix(text, 3_600),
-        "minute" | "minutes" | "min" => duration_postfix(text, 60),
-        "second" | "seconds" | "s" => duration_postfix(text, 1),
-        _ => None,
+    match builtin_postfix(name)? {
+        PostfixUnit::Decimal => parse_decimal(text),
+        PostfixUnit::Days if matches!(kind, LiteralKind::Integer) => {
+            parse_int(text).map(Lit::Period)
+        }
+        PostfixUnit::Days => None,
+        PostfixUnit::Duration(seconds_per_unit) => duration_postfix(text, seconds_per_unit),
     }
+}
+
+/// The unit a built-in postfix name denotes and how its literal's value is read.
+#[derive(Clone, Copy)]
+enum PostfixUnit {
+    /// `12.34.decimal`: the literal is a decimal value.
+    Decimal,
+    /// `1.day`: a whole-day count, read as a period.
+    Days,
+    /// `3.hour`: an elapsed duration, the value times this many seconds.
+    Duration(u32),
+}
+
+/// The single table of built-in postfix names. Declared unit families replace it
+/// when stage D8 resolves postfixes against them; nothing else names these units.
+fn builtin_postfix(name: &str) -> Option<PostfixUnit> {
+    Some(match name {
+        "decimal" => PostfixUnit::Decimal,
+        "day" | "days" => PostfixUnit::Days,
+        "hour" | "hours" => PostfixUnit::Duration(3_600),
+        "minute" | "minutes" | "min" => PostfixUnit::Duration(60),
+        "second" | "seconds" | "s" => PostfixUnit::Duration(1),
+        _ => return None,
+    })
 }
 
 /// An elapsed-duration postfix: the literal's value times `seconds_per_unit`,
