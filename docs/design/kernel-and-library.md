@@ -12,7 +12,7 @@ Owner direction, quoted (2026-11-10):
 Input documents: [hir.md](hir.md), [native-declarations.md](native-declarations.md),
 [DECIDED.md](../language/DECIDED.md), [DECISIONS.md](../language/DECISIONS.md), the language reference
 ([README](../language/README.md)), the frozen 1.1.0 text under `reference/Orna-1.1.0/source`, and the units design on
-PR #9854 (file docs/design/units.md on branch docs/units-ordinary-declarations, head `86be7f979`).
+PR #9854 (file docs/design/units.md on branch docs/units-ordinary-declarations, head `9cd0fddfc`).
 
 Evidence base:
 
@@ -21,7 +21,7 @@ Evidence base:
   `orna-hir/src/`.
 * The pinned standard library is `stdlib/std` at `fdf63e87`. Counts of its contents are in Appendix A.
 * Two facts come from open PRs and are marked: #9850 (HIR typeck fixes, head `cc718ae26`) and #9854 (units, head
-  `86be7f979`).
+  `9cd0fddfc`; its section and rule numbers were read at `86be7f979`, and the later commit changed one line).
 * A claim marked `[probe]` comes from running a prebuilt `orna check` binary on a small module. The binary is
   `target/FixAppLive/debug/orna`, built on 2026-11-09 from a lane branch. It is not a build of main. Appendix B lists
   every probe with its output. Re-run a probe before you rely on it.
@@ -210,8 +210,10 @@ grammar (`reference/Orna-1.1.0/grammar/orna.ebnf:95-98`) and the 1.2 reference g
 variants only. Types, refined types and tables own `impl` blocks. Enums do not.
 
 Note on G7: the probe declared a protocol, implemented it in a nominal type and called the member on a value and on a
-bound type parameter. Both calls failed `[probe]`. Operators, `Display` and suffixes all need protocol member calls to
-resolve, so this is step zero of P1 and of P5.
+bound type parameter. Both calls failed `[probe]`. The source agrees. `infer_field` tries six name-based member probes
+(text, numeric, currency suffix, numeric postfix, unit suffix, refined `from`; `C:inference.rs:143-185`), then reads
+record fields, and otherwise reports `field access requires a record` (`:214`, `:220`). It never looks up an impl
+member. Operators, `Display` and suffixes all need protocol member calls to resolve, so this is step zero of P1 and P5.
 
 --------------------------------------------------------------------------
 
@@ -688,7 +690,7 @@ never shows library internals.
 | `a + b` on two nominal values | `E2001: operator + is not defined for Meters and Meters` |
 
 Once operators are protocol calls, the kernel alone can say the third form. It would say it for Money as well, and that
-is worse than the second form. The library knows the right words.
+is less specific than the second form. The library knows the right words.
 
 **Rules in every option.**
 
@@ -808,7 +810,8 @@ library type that moves or is renamed therefore changes identity and bytes. The 
 * **P9-B, a `wire` clause legal only in `core`.** For example `pub type Duration = Int wire 60005 { ... }`. PR #9854
   already proposes this shape for units as `repr NAME` on `dim` and `alias` declarations, "checked against the wire-form
   table and nothing else" (units.md section 5). Buys: the coupling is visible in source. Costs: new syntax; Money still
-  needs a Rust adapter because its shape differs. One clause should serve every legacy-tagged type, not only quantities.
+  needs a Rust adapter because its shape differs. A clause would have to serve every legacy-tagged type, not only
+  quantities.
 * **P9-C, no registry.** Library types use the generic encodings. Buys: simplest and most honest. Costs: a format change
   for Money, Duration, Range and Quantity: new descriptors, new fingerprints, new golden vectors, and a migration in
   `orna-evolution` for stored data.
@@ -1023,7 +1026,7 @@ This document does not decide it. Both keep tag 60007.
 3. **Only if the owner answers yes to Q1.** Build P4-B and move items 2 and 3 of the interface into Orna. Optionally
    switch the surface to S2.
 
-The surface (Q2) should be fixed before step 1 ships. D8 removed units from 1.x, so no program declares one yet. Any
+The surface (Q2) has to be fixed before step 1 ships. D8 removed units from 1.x, so no program declares one yet. Any
 surface is free today. It becomes a migration the day users start to declare units.
 
 ### 5.9 What a reader sees when opening `5.kilometre`
@@ -1740,17 +1743,17 @@ Conclusion: the kernel and library framing keeps PR #9854's unit-key algebra as 
 twelve changes around it. None overwrites units.md. Each names the section or rule, the change and the reason. The owner
 and the author of #9854 decide each one.
 
-Section and rule numbers are those of `units.md` at head `86be7f979` (file docs/design/units.md on branch
-docs/units-ordinary-declarations). Its status line says D8 is amended by owner direction of 2026-11-10 and that Q1 to Q6
-are open.
+Section and rule numbers are those of `units.md` at head `9cd0fddfc` (file docs/design/units.md on branch
+docs/units-ordinary-declarations). The only change from `86be7f979`, where this review began, is the colon bound in C3.
+Its status line says D8 is amended by owner direction of 2026-11-10 and that Q1 to Q6 are open.
 
 * **C1. Surface (section 2).** Add the enum-shaped surface S2 (section 5.5 here) as an alternative, and fix the surface
   before H2c ships. Reason: no program declares a unit yet, so any surface is free today and a migration later. With
   option A the text after `=` in an enum body is a new unit-expression production, so S2 gains naming and `case` only.
 * **C2. `alias_decl` (section 2).** Use the existing `type Name<..> = ..;` (U03) and drop the new `alias` declaration.
   Reason: a second spelling of a transparent alias breaks "one way to do a thing" (DECIDED principle 1).
-* **C3. Colon bound (section 8.3).** Write `Money<C impl Currency>`, not `Money<C: Currency>`. Reason: 1.1.0 removed the
-  colon bound (ORNA-GENERIC-006, `ORNA091-E-BOUND-COLON`).
+* **C3. Colon bound (section 8.3).** Done: the author changed `Money<C: Currency>` to `Money<C impl Currency>` in
+  `9cd0fddfc` after this review. Reason: 1.1.0 removed the colon bound (ORNA-GENERIC-006, `ORNA091-E-BOUND-COLON`).
 * **C4. Postfix lookup (section 5 item 3; ORNA-UNIT-008).** State the lookup as the P2 rule: value suffix, then type
   target. "Then as a currency, then as a calendar period" become library lines. Reason: the kernel keeps one rule, and
   `day` is a declaration returning `Period`, so Q1 is one line to change.
