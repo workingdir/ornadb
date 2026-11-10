@@ -289,3 +289,70 @@ fn a_bare_name_that_is_no_expected_variant_is_unresolved() {
         program.modules[test_module(&program)].diagnostics
     );
 }
+
+const LENGTH: &str =
+    "pub enum Length {\n    metre,\n    kilometre = 1000 metre,\n    impl Unit {}\n}\n";
+
+/// Checks `LENGTH` followed by `body`, returning the program and the checker's verdict.
+fn typed(body: &str) -> (Program, TypeCheckSummary) {
+    let mut program = program(&format!("{LENGTH}{body}"));
+    let summary = typeck(&mut program);
+    (program, summary)
+}
+
+/// The codes of every diagnostic the test module reports.
+fn module_codes(program: &Program) -> Vec<&str> {
+    program.modules[test_module(program)]
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.code)
+        .collect()
+}
+
+#[test]
+fn a_unit_literal_is_a_quantity_of_its_unit() {
+    let (program, summary) = typed("pub fn run() = 5.kilometre;\n");
+    assert!(test_accepted(&program, &summary), "{summary:?}");
+    assert_eq!(result(&program, "run"), "Quantity<Int, Length.kilometre>");
+}
+
+#[test]
+fn quantities_of_one_unit_add_in_that_unit() {
+    let (program, summary) = typed("pub fn run() = 5.kilometre + 2.kilometre;\n");
+    assert!(test_accepted(&program, &summary), "{summary:?}");
+    assert_eq!(result(&program, "run"), "Quantity<Int, Length.kilometre>");
+}
+
+#[test]
+fn addition_across_units_takes_the_finer_unit() {
+    let (program, summary) = typed("pub fn run() = 5.kilometre + 2.metre;\n");
+    assert!(test_accepted(&program, &summary), "{summary:?}");
+    assert_eq!(result(&program, "run"), "Quantity<Int, Length.metre>");
+}
+
+#[test]
+fn a_quantity_and_a_plain_number_are_a_dimension_error() {
+    let (program, summary) = typed("pub fn run() = 5.kilometre + 2;\n");
+    assert!(!test_accepted(&program, &summary), "{summary:?}");
+    assert!(module_codes(&program).contains(&crate::diag::UNIT_DIM));
+}
+
+#[test]
+fn the_quotient_of_one_unit_is_a_plain_number() {
+    let (program, summary) = typed("pub fn run() = 10.metre / 2.metre;\n");
+    assert!(test_accepted(&program, &summary), "{summary:?}");
+    assert_eq!(result(&program, "run"), "Int");
+}
+
+#[test]
+fn ordering_quantities_of_one_dimension_is_a_bool() {
+    let (program, summary) = typed("pub fn run() = 5.kilometre < 2.metre;\n");
+    assert!(test_accepted(&program, &summary), "{summary:?}");
+    assert_eq!(result(&program, "run"), "Bool");
+}
+
+#[test]
+fn a_product_of_quantities_is_accepted() {
+    let (program, summary) = typed("pub fn run() = 2.metre * 3.metre;\n");
+    assert!(test_accepted(&program, &summary), "{summary:?}");
+}

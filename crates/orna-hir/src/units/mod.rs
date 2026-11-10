@@ -11,6 +11,7 @@ use crate::{DefId, IndexVec};
 
 pub mod eval;
 pub mod key;
+pub mod print;
 
 pub use key::{Exponents, KeyError, MAX_EXPONENT, Rational, UnitKey};
 
@@ -38,6 +39,16 @@ impl UnitTable {
     #[must_use]
     pub fn unit_key(&self, unit: DefId) -> Option<UnitKeyId> {
         self.unit_keys.get(&unit).copied()
+    }
+
+    /// The smallest declared unit whose key is `key`: the canonical name that printing uses (units.md section 4,
+    /// rule 1). `None` when no declared unit has that key.
+    #[must_use]
+    pub fn declared_unit(&self, key: UnitKeyId) -> Option<DefId> {
+        self.unit_keys
+            .iter()
+            .find(|(_, unit_key)| **unit_key == key)
+            .map(|(unit, _)| *unit)
     }
 
     /// The dimension of a unit family: the axis of its base unit, or the common dimension of its variants.

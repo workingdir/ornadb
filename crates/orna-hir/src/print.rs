@@ -135,6 +135,11 @@ fn print_type_with(program: &Program, ty: Ty, generics: &[Name]) -> String {
             || format!("T{}", index.as_u32()),
             |name| name.as_str().to_owned(),
         ),
+        TyKind::Quantity(value, key) => crate::units::print::quantity_text(
+            program,
+            &print_type_with(program, *value, generics),
+            *key,
+        ),
         TyKind::Infer(var) => format!("?{}", var.as_u32()),
     }
 }

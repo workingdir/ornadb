@@ -277,6 +277,7 @@ impl InferCtxt {
                 ret: self.zonk(types, function.ret),
                 effects: function.effects,
             }),
+            TyKind::Quantity(number, key) => TyKind::Quantity(self.zonk(types, number), key),
         };
         types.intern(rebuilt)
     }
