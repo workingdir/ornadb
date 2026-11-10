@@ -187,7 +187,9 @@ impl<'a> BodyCheck<'a> {
         match kind {
             ExprKind::Block { stmts, tail } => self.check_block(body, &stmts, tail, None, span),
             ExprKind::If { cond, then, els } => self.check_if(body, cond, then, els, None, span),
-            ExprKind::Case { scrutinee, arms } => self.check_case(body, scrutinee, &arms, None, span),
+            ExprKind::Case { scrutinee, arms } => {
+                self.check_case(body, scrutinee, &arms, None, span)
+            }
             ExprKind::For {
                 pat,
                 iter,
@@ -256,7 +258,8 @@ impl<'a> BodyCheck<'a> {
             ExprKind::Continue => Ok(self.intern(TyKind::Never)),
             ExprKind::Assign { place, op, value } => {
                 let place_ty = self.place_ty(body, &place, span.clone())?;
-                let value_ty = self.infer_expr(body, value, matches!(op, AssignOp::Set).then_some(place_ty))?;
+                let value_ty =
+                    self.infer_expr(body, value, matches!(op, AssignOp::Set).then_some(place_ty))?;
                 match op {
                     AssignOp::Set => {
                         self.unify(place_ty, value_ty, span.clone());
@@ -359,7 +362,9 @@ impl<'a> BodyCheck<'a> {
                 None => result = Some(arm_ty),
             }
         }
-        let ty = result.ok_or_else(|| NotYetReason::Unsupported("a `case` with no arms has no H2a type".into()))?;
+        let ty = result.ok_or_else(|| {
+            NotYetReason::Unsupported("a `case` with no arms has no H2a type".into())
+        })?;
         Ok(match expected {
             Some(expected) => expected,
             None => self.resolved(ty),

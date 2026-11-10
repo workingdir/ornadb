@@ -38,10 +38,14 @@ pub(crate) fn run(program: &mut Program) {
             };
             match &call.callee {
                 Callee::Source { def, .. } => calls[owner].push(*def),
-                Callee::Value { callee } => match value_target(program, &body.exprs[*callee].kind) {
-                    ValueTarget::Source(def) => calls[owner].push(def),
-                    ValueTarget::Effects(effects) => direct[owner] = direct[owner].join(effects),
-                },
+                Callee::Value { callee } => {
+                    match value_target(program, &body.exprs[*callee].kind) {
+                        ValueTarget::Source(def) => calls[owner].push(def),
+                        ValueTarget::Effects(effects) => {
+                            direct[owner] = direct[owner].join(effects)
+                        }
+                    }
+                }
                 callee => direct[owner] = direct[owner].join(direct_effects(program, callee)),
             }
         }

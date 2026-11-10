@@ -59,7 +59,11 @@ pub(crate) fn lower_numeric_postfix(text: &str, kind: LiteralKind, name: &str) -
 /// as whole seconds and nanoseconds. A value finer than one nanosecond has no
 /// canonical payload and yields `None`.
 fn duration_postfix(text: &str, seconds_per_unit: u32) -> Option<Lit> {
-    let Lit::Decimal { coefficient, exponent } = parse_decimal(text)? else {
+    let Lit::Decimal {
+        coefficient,
+        exponent,
+    } = parse_decimal(text)?
+    else {
         return None;
     };
     let shift = small_exponent(&exponent)?.checked_add(9)?;
@@ -78,7 +82,11 @@ fn duration_postfix(text: &str, seconds_per_unit: u32) -> Option<Lit> {
         total /= divisor;
     }
     let nanos_per_second = BigInt::from(1_000_000_000u32);
-    let nanoseconds = match (&total % &nanos_per_second).magnitude().to_u64_digits().as_slice() {
+    let nanoseconds = match (&total % &nanos_per_second)
+        .magnitude()
+        .to_u64_digits()
+        .as_slice()
+    {
         [] => 0,
         [digit] => u32::try_from(*digit).ok()?,
         _ => return None,
@@ -96,7 +104,11 @@ fn small_exponent(exponent: &BigInt) -> Option<i64> {
         [digit] => i64::try_from(*digit).ok()?,
         _ => return None,
     };
-    Some(if exponent.sign() == Sign::Minus { -magnitude } else { magnitude })
+    Some(if exponent.sign() == Sign::Minus {
+        -magnitude
+    } else {
+        magnitude
+    })
 }
 
 /// An integer spelling, with `_` separators removed.

@@ -280,6 +280,14 @@ fn a_named_function_called_through_a_value_joins_its_effects() {
     let DefKind::Fn(function) = &program.defs[run].kind else {
         panic!("run is a function");
     };
-    assert!(!function.effects.is_opaque(), "a named callee resolves statically");
-    assert!(function.effects.kinds().any(|kind| kind == orna_hir::EffectKind::TableRead));
+    assert!(
+        !function.effects.is_opaque(),
+        "a named callee resolves statically"
+    );
+    assert!(
+        function
+            .effects
+            .kinds()
+            .any(|kind| kind == orna_hir::EffectKind::TableRead)
+    );
 }
