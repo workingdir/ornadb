@@ -53,7 +53,7 @@ impl<'a> BodyCheck<'a> {
     fn infer_shallow_atoms(
         &mut self,
         body: &mut Body,
-        _id: ExprId,
+        id: ExprId,
         kind: ExprKind,
         span: SyntaxSpan,
     ) -> Result<Ty, NotYetReason> {
@@ -61,8 +61,8 @@ impl<'a> BodyCheck<'a> {
             ExprKind::Lit(literal) => self.literal_ty(&literal, span),
             ExprKind::Local(local) => Ok(body.locals[local].ty),
             ExprKind::Def(def) => self.def_value_ty(def, span),
-            ExprKind::Unary { op, operand } => self.unary_ty(body, op, operand, span),
-            ExprKind::Binary { op, lhs, rhs } => self.binary_ty(body, op, lhs, rhs, span),
+            ExprKind::Unary { op, operand } => self.unary_ty(body, id, op, operand, span),
+            ExprKind::Binary { op, lhs, rhs } => self.binary_ty(body, id, op, lhs, rhs, span),
             ExprKind::Logic { op, lhs, rhs } => self.logic_ty(body, op, lhs, rhs, span),
             ExprKind::Range {
                 lo,

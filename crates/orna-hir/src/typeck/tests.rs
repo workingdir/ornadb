@@ -289,3 +289,59 @@ fn a_bare_name_that_is_no_expected_variant_is_unresolved() {
         program.modules[test_module(&program)].diagnostics
     );
 }
+
+const MONEY: &str = "use core.ops.*;\npub type Money {\n    cents: Int,\n    impl Add<Self, Self> {\n        fn add(self, right: Self): Self = right;\n    }\n}\n";
+
+fn module_has_code(program: &Program, code: &str) -> bool {
+    program.modules[test_module(program)]
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == code)
+}
+
+#[test]
+fn user_type_addition_selects_the_add_instance() {
+    let mut program = program(&format!(
+        "{MONEY}pub fn total(a: Money, b: Money): Money = a + b;\n"
+    ));
+    let summary = typeck(&mut program);
+    assert!(test_accepted(&program, &summary), "{summary:?}");
+    assert_eq!(result(&program, "total"), "Money");
+}
+
+#[test]
+fn missing_add_instance_names_the_type_operator_and_protocol() {
+    let mut program = program(
+        "pub type Money {\n    cents: Int,\n}\npub fn total(a: Money, b: Money): Money = a + b;\n",
+    );
+    let _ = typeck(&mut program);
+    let module = test_module(&program);
+    let message = program.modules[module]
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == crate::diag::INFER_CONFLICT)
+        .map(|diagnostic| diagnostic.message.to_string())
+        .unwrap_or_default();
+    assert!(message.contains("Money"), "{message}");
+    assert!(message.contains("`+`"), "{message}");
+    assert!(message.contains("`Add`"), "{message}");
+}
+
+#[test]
+fn two_applicable_add_instances_are_an_overlap_diagnostic() {
+    let mut program = program(
+        "use core.ops.*;\npub type Money {\n    cents: Int,\n    impl Add<Self, Self> {\n        fn add(self, right: Self): Self = self;\n    }\n    impl Add<Self, Self> {\n        fn add(self, right: Self): Self = right;\n    }\n}\npub fn total(a: Money, b: Money): Money = a + b;\n",
+    );
+    let _ = typeck(&mut program);
+    assert!(module_has_code(&program, crate::diag::GENERIC_OVERLAP));
+}
+
+#[test]
+fn negation_selects_the_neg_instance() {
+    let mut program = program(
+        "use core.ops.*;\npub type Money {\n    cents: Int,\n    impl Neg<Self> {\n        fn neg(self): Self = self;\n    }\n}\npub fn flip(a: Money): Money = -a;\n",
+    );
+    let summary = typeck(&mut program);
+    assert!(test_accepted(&program, &summary), "{summary:?}");
+    assert_eq!(result(&program, "flip"), "Money");
+}
