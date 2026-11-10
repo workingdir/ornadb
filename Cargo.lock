@@ -1595,7 +1595,10 @@ name = "orna-exec"
 version = "1.0.0"
 dependencies = [
  "num-bigint 0.4.8",
+ "num-integer",
+ "num-traits",
  "orna-hir",
+ "orna-syntax",
  "orna-value",
 ]
 
