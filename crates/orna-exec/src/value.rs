@@ -48,6 +48,12 @@ pub enum Value {
     },
 }
 
+impl From<i64> for Value {
+    fn from(value: i64) -> Self {
+        Self::Int(BigInt::from(value))
+    }
+}
+
 /// One variable: the slot a binding owns and every closure that captured it
 /// shares (`docs/language/reference/03-bindings-and-expressions.md`).
 pub type Cell = Rc<RefCell<Value>>;

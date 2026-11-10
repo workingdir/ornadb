@@ -463,6 +463,16 @@ impl<'a> BodyCheck<'a> {
                 }
                 Ok(bool_ty)
             }
+            RelOp::AllUnique => {
+                let key = self.infer.new_var(&mut self.program.tys, span.clone());
+                let callback = self.intern(TyKind::Fn(FnTy {
+                    params: Box::new([element]),
+                    ret: key,
+                    effects: crate::EffectRow::Hidden,
+                }));
+                self.check_slot(body, call, 1, Some(callback), span)?;
+                Ok(self.intern(TyKind::Bool))
+            }
             RelOp::SourceScan => Err(NotYetReason::Unsupported(
                 "a source scan without a table declaration is not on HIR".into(),
             )),

@@ -12,6 +12,23 @@ pub type Error {
     pub cause: Error?,
 }
 
+// core.Ordering: Result of `Order.compare` (kernel-and-library.md listing 5).
+pub enum Ordering {
+    less,
+    equal,
+    greater,
+}
+
+// core.Rounding: Decimal rounding modes (kernel-and-library.md candidate 8); replaces the name-based rounding words.
+pub enum Rounding {
+    half_even,
+    half_up,
+    toward_zero,
+    away_from_zero,
+    floor,
+    ceil,
+}
+
 // core.Some
 pub native fn Some<T>(value: T): T? effect none;
 

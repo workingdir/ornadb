@@ -318,7 +318,7 @@ impl Builder<'_> {
                         span.clone(),
                         DefKind::Unit(UnitDef),
                     );
-                    let kind = self.signature_only(module, signature);
+                    let kind = self.signature_only(module, signature, def);
                     self.pending[member_def.index()].kind = PendingKind::Built(kind);
                     lowered.push(member_def);
                 }
@@ -684,10 +684,28 @@ impl Builder<'_> {
         }
     }
 
-    /// A signature with no body, for a protocol member.
-    fn signature_only(&mut self, module: ModuleId, signature: &FunctionSignature) -> DefKind {
-        let names = generic_names(&signature.generics);
-        let generics = self.build_generics(module, &signature.generics);
+    /// A signature with no body, for a protocol member. A member that writes
+    /// `Self` gets an implicit generic at index 0 bounded by the protocol
+    /// (ORNA-GENERIC-002/003); a member that does not is lowered unchanged, so
+    /// its generic arity is the one its call sites already use.
+    fn signature_only(
+        &mut self,
+        module: ModuleId,
+        signature: &FunctionSignature,
+        protocol: DefId,
+    ) -> DefKind {
+        let mut names = generic_names(&signature.generics);
+        let mut generics = self.build_generics(module, &signature.generics);
+        if signature_mentions_self(signature) {
+            names.insert(0, crate::Name::new("Self"));
+            generics.insert(
+                0,
+                GenericParam {
+                    name: crate::Name::new("Self"),
+                    bounds: vec![protocol],
+                },
+            );
+        }
         let ret = self.build_result(module, &names, signature.result.as_ref());
         let params = signature
             .parameters
@@ -833,6 +851,35 @@ fn generic_names(generics: &[GenericParameter]) -> Vec<crate::Name> {
         .iter()
         .map(|generic| crate::Name::new(&generic.name))
         .collect()
+}
+
+/// Whether a signature writes `Self` in any parameter annotation or result.
+fn signature_mentions_self(signature: &FunctionSignature) -> bool {
+    signature
+        .parameters
+        .iter()
+        .filter_map(|parameter| parameter.annotation.as_ref())
+        .chain(signature.result.as_ref())
+        .any(type_mentions_self)
+}
+
+fn type_mentions_self(ty: &TypeExpr) -> bool {
+    match ty {
+        TypeExpr::Name {
+            path, arguments, ..
+        } => (path.len() == 1 && path[0] == "Self") || arguments.iter().any(type_mentions_self),
+        TypeExpr::Optional { inner, .. } | TypeExpr::List { inner, .. } => {
+            type_mentions_self(inner)
+        }
+        TypeExpr::Product { lhs, rhs, .. } => type_mentions_self(lhs) || type_mentions_self(rhs),
+        TypeExpr::Record { fields, .. } => {
+            fields.iter().any(|(_, field, _)| type_mentions_self(field))
+        }
+        TypeExpr::Tuple { elements, .. } => elements.iter().any(type_mentions_self),
+        TypeExpr::Function {
+            parameters, result, ..
+        } => parameters.iter().any(type_mentions_self) || type_mentions_self(result),
+    }
 }
 
 /// The effect kinds a native declaration's `effect` clause names (ORNA-NATIVE-009).
