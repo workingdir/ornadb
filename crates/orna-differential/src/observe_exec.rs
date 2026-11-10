@@ -71,7 +71,7 @@ pub fn run_case(case: &Case) -> ExecOutcome {
             "the step budget ends the run; step parity is not measured yet".to_owned(),
         ),
         Err(ExecError::Code(code)) => ExecOutcome::Ran(Err(code.to_owned())),
-        Err(ExecError::NotYet(reason)) => ExecOutcome::NotYet(format!("{reason} (H4)")),
+        Err(ExecError::NotYet(reason)) => ExecOutcome::NotYet(reason.to_owned()),
     }
 }
 

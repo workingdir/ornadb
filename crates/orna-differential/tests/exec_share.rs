@@ -21,10 +21,16 @@ fn executor_agreement_with_the_old_pipeline_only_grows() {
     let mut ran = 0usize;
     let mut agreed = 0usize;
     let mut mismatches = Vec::new();
-    let mut reasons: BTreeMap<String, usize> = BTreeMap::new();
+    let mut reasons: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for case in &corpus.cases {
         match observe_exec::run_case(case) {
-            ExecOutcome::NotYet(reason) => *reasons.entry(reason).or_insert(0) += 1,
+            ExecOutcome::NotYet(reason) => {
+                if reason.ends_with("(H4)") && std::env::var_os("EXEC_SHARE_IDS").is_some() {
+                    let old = observe_old::observe(case).map(|observation| observation.outcome);
+                    println!("OLD {} => {old:?}", case.id);
+                }
+                reasons.entry(reason).or_default().push(case.id.clone());
+            }
             ExecOutcome::Ran(outcome) => {
                 ran += 1;
                 let old = match observe_old::observe(case) {
@@ -46,8 +52,13 @@ fn executor_agreement_with_the_old_pipeline_only_grows() {
         "executor agreement: {agreed}/{ran} run cases agree with the old pipeline ({} cases in the corpus)",
         corpus.cases.len()
     );
-    for (reason, count) in &reasons {
-        println!("  {count:>5} {reason}");
+    for (reason, ids) in &reasons {
+        println!("  {:>5} {reason}", ids.len());
+        if std::env::var_os("EXEC_SHARE_IDS").is_some() {
+            for id in ids {
+                println!("          {id}");
+            }
+        }
     }
     assert!(
         mismatches.is_empty(),

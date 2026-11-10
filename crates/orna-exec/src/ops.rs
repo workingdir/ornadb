@@ -29,6 +29,9 @@ pub(crate) fn binary(
     rhs: Value,
     limits: &ExecLimits,
 ) -> Result<Value, Stop> {
+    if matches!(op, BinOp::Eq | BinOp::Ne) && (contains_closure(&lhs) || contains_closure(&rhs)) {
+        return Err(Stop::Error("ORNA-EVAL-UNSUPPORTED"));
+    }
     match (lhs, rhs) {
         (Value::Int(lhs), Value::Int(rhs)) => int_binary(op, &lhs, &rhs, limits),
         (Value::Bool(lhs), Value::Bool(rhs)) => match op {
@@ -42,6 +45,17 @@ pub(crate) fn binary(
             _ => Err(Stop::NotYet("operator on text")),
         },
         _ => Err(Stop::NotYet("operator on operands of different shapes")),
+    }
+}
+
+/// Whether `value` is or contains a closure. The old evaluator refuses to
+/// compare closures, however deeply they are nested.
+fn contains_closure(value: &Value) -> bool {
+    match value {
+        Value::Closure(_) => true,
+        Value::Tuple(items) | Value::List(items) => items.iter().any(contains_closure),
+        Value::Record(fields) => fields.iter().any(|(_, field)| contains_closure(field)),
+        _ => false,
     }
 }
 

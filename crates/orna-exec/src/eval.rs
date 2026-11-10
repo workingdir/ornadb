@@ -49,7 +49,7 @@ impl<'p> Machine<'p> {
                 Err(Stop::Return(value))
             }
             ExprKind::Break(None) => Err(Stop::Break),
-            ExprKind::Break(Some(_)) => Err(Stop::NotYet("break with a value")),
+            ExprKind::Break(Some(_)) => Err(Stop::NotYet("break with a value (H4)")),
             ExprKind::Continue => Err(Stop::Continue),
             ExprKind::Assign { place, op, value } => self.assign(body, frame, place, *op, *value),
             ExprKind::Tuple(items) => Ok(Value::Tuple(self.elements(body, frame, items)?)),
@@ -90,7 +90,7 @@ impl<'p> Machine<'p> {
             | Lit::Float(_)
             | Lit::None
             | Lit::Date(_)
-            | Lit::Instant { .. } => Err(Stop::NotYet("literal kind")),
+            | Lit::Instant { .. } => Err(Stop::NotYet("literal kind (H4)")),
         }
     }
 
@@ -117,7 +117,7 @@ impl<'p> Machine<'p> {
         let short_circuit = match op {
             LogicOp::And => false,
             LogicOp::Or => true,
-            LogicOp::Coalesce => return Err(Stop::NotYet("coalesce operator")),
+            LogicOp::Coalesce => return Err(Stop::NotYet("coalesce operator (H4)")),
         };
         match self.eval(body, frame, lhs)? {
             Value::Bool(value) if value == short_circuit => Ok(Value::Bool(value)),
@@ -134,26 +134,36 @@ impl<'p> Machine<'p> {
             Callee::Source { def, .. } => {
                 let program = self.program;
                 let DefKind::Fn(function) = &program.defs[*def].kind else {
-                    return Err(Stop::NotYet("call of a non-function definition"));
+                    return Err(Stop::NotYet("call of a non-function definition (H4)"));
                 };
                 let FnBody::Source(callee_body) = function.body else {
-                    return Err(Stop::NotYet("call of a function without a source body"));
+                    return Err(Stop::NotYet(
+                        "call of a function without a source body (H5)",
+                    ));
                 };
                 let arguments = self.arguments(body, frame, call, &function.params)?;
                 self.invoke(callee_body, arguments, &[])
             }
             Callee::Value { callee } => {
                 let Value::Closure(closure) = self.eval(body, frame, *callee)? else {
-                    return Err(Stop::NotYet("call of a non-closure value"));
+                    return Err(Stop::NotYet("call of a non-closure value (H4)"));
                 };
                 let arguments = self.arguments(body, frame, call, &[])?;
                 let callee_body = &self.program.bodies[closure.body];
-                if arguments.len() != callee_body.params.len() {
+                if arguments.len() != callee_body.params.len()
+                    || binders::binds_a_name_twice(callee_body)
+                {
                     return Err(Stop::Error("ORNA-EVAL-ARGUMENT"));
                 }
                 self.invoke(closure.body, arguments, &closure.captured)
             }
-            _ => Err(Stop::NotYet("call of this callee kind")),
+            Callee::Native { .. } => Err(Stop::NotYet("native call (H5)")),
+            Callee::Sys { .. } => Err(Stop::NotYet("sys call (H5)")),
+            Callee::TableOp { .. } => Err(Stop::NotYet("table operation (H6)")),
+            Callee::Relational { .. } => Err(Stop::NotYet("relation stage (H7)")),
+            Callee::Intrinsic(_) => Err(Stop::NotYet("intrinsic form (H4)")),
+            Callee::Pending { .. } => Err(Stop::NotYet("member call awaiting the type pass (H2)")),
+            Callee::Ctor { .. } => Err(Stop::NotYet("enum or money constructor (H4)")),
         }
     }
 
@@ -186,7 +196,7 @@ impl<'p> Machine<'p> {
             }
             ArgValue::Default => {
                 let Some(default) = params.get(slot).and_then(|param| param.default) else {
-                    return Err(Stop::NotYet("default argument without a default body"));
+                    return Err(Stop::NotYet("default argument without a default body (H4)"));
                 };
                 let value = self.invoke(default, Vec::new(), &[])?;
                 Ok((slot, value))
@@ -206,7 +216,7 @@ impl<'p> Machine<'p> {
                 Stmt::Let { pat, init } => {
                     let value = self.eval(body, frame, init)?;
                     if !self.matches(body, frame, pat, value)? {
-                        return Err(Stop::NotYet("let pattern that does not match"));
+                        return Err(Stop::Error("ORNA-EVAL-TYPE"));
                     }
                 }
                 Stmt::Assert(id) => match self.eval(body, frame, id)? {
@@ -231,7 +241,7 @@ impl<'p> Machine<'p> {
         els: Option<ExprId>,
     ) -> Result<Value, Stop> {
         let Some(els) = els else {
-            return Err(Stop::NotYet("if without else"));
+            return Err(Stop::NotYet("if without else (H4)"));
         };
         match self.eval(body, frame, cond)? {
             Value::Bool(true) => self.eval(body, frame, then),
@@ -309,10 +319,12 @@ impl<'p> Machine<'p> {
         value: ExprId,
     ) -> Result<Value, Stop> {
         let Place::Local(slot) = base else {
-            return Err(Stop::NotYet("assignment to a nested field"));
+            return Err(Stop::NotYet("assignment to a nested field (H4)"));
         };
         let FieldRef::Name(name) = field else {
-            return Err(Stop::NotYet("assignment to a field by index or definition"));
+            return Err(Stop::NotYet(
+                "assignment to a field by index or definition (H4)",
+            ));
         };
         let Value::Record(fields) = frame.get(*slot)? else {
             return Err(Stop::NotYet(
@@ -399,7 +411,9 @@ impl<'p> Machine<'p> {
         field: &FieldRef,
     ) -> Result<Value, Stop> {
         let Value::Record(fields) = self.eval(body, frame, base)? else {
-            return Err(Stop::NotYet("field access on a value that is not a record"));
+            return Err(Stop::NotYet(
+                "field access on a value the type pass rejects (H2)",
+            ));
         };
         let found = match field {
             FieldRef::Index(index) => fields.get(*index as usize).map(|(_, value)| value),
@@ -464,9 +478,6 @@ impl<'p> Machine<'p> {
     /// captures. The old pipeline captures the scope the same way.
     fn lambda(&self, frame: &Frame, lambda: BodyId) -> Result<Value, Stop> {
         let program = self.program;
-        if binders::binds_a_name_twice(&program.bodies[lambda]) {
-            return Err(Stop::NotYet("a parameter list binds one name twice"));
-        }
         let captures = &program.bodies[lambda].captures;
         let mut captured = Vec::with_capacity(captures.len());
         for capture in captures.iter() {
