@@ -134,7 +134,8 @@ impl DeclAst {
             Declaration::Let {
                 annotation, value, ..
             } => Self::Let(annotation.clone(), value.clone()),
-            Declaration::Use { .. } => Self::Dimension,
+            // `declare_item` rejects native declarations before this mapping runs.
+            Declaration::Use { .. } | Declaration::Native { .. } => Self::Dimension,
         }
     }
 }
@@ -267,6 +268,18 @@ impl<'a> Builder<'a> {
                 tail: tail.clone(),
                 span: item.span.clone(),
             });
+            return;
+        }
+        if let Declaration::Native { signature, .. } = &item.declaration {
+            self.diagnose(
+                module,
+                crate::diag::NATIVE_ADMISSION,
+                format!(
+                    "native declaration `{}` is admitted only in the engine-embedded core and sys modules",
+                    signature.name
+                ),
+                item.span.clone(),
+            );
             return;
         }
         let Some(name) = item_name(&item.declaration) else {
@@ -495,6 +508,7 @@ fn item_name(declaration: &Declaration) -> Option<&str> {
         | Declaration::Unit { name, .. }
         | Declaration::Type { name, .. } => Some(name),
         Declaration::Function { signature, .. } => Some(&signature.name),
+        Declaration::Native { signature, .. } => Some(&signature.name),
         Declaration::Assertion { .. } => Some("assert"),
         Declaration::Let { pattern, .. } => match pattern {
             Pattern::Name(name, _) => Some(name),
