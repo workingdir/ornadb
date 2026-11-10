@@ -180,7 +180,7 @@ impl Builder<'_> {
             DeclAst::Assertion(value) => {
                 let body = self.allocate_body(def);
                 self.pending[def.index()].kind =
-                    PendingKind::Built(DefKind::Assertion(AssertionDef { body }));
+                    PendingKind::Built(DefKind::Assertion(AssertionDef { body, owner: def }));
                 self.body_jobs.push(BodyJob::Expression {
                     def,
                     body,
@@ -285,7 +285,7 @@ impl Builder<'_> {
             "assert",
             Visibility::Private,
             span,
-            DefKind::Assertion(AssertionDef { body }),
+            DefKind::Assertion(AssertionDef { body, owner }),
         );
         self.body_jobs.push(BodyJob::Expression {
             def,
@@ -768,8 +768,7 @@ impl Builder<'_> {
         self_ty: Option<DefId>,
     ) {
         let module = self.pending[def.index()].module;
-        // An assertion body is owned by its table or type row, not by the assertion itself.
-        let mut state = BodyState::new(body_id, self_ty.unwrap_or(def), module);
+        let mut state = BodyState::new(body_id, def, module);
         state.push_scope(expr.span().start);
         if let Some(owner) = self_ty {
             // An assertion's owner row is written as `self` (design section

@@ -27,7 +27,7 @@ pub(super) fn check(program: &Program) -> Vec<Found> {
         }
         let body = &program.bodies[assertion.body];
         let module = def.module;
-        let owner = body.owner;
+        let owner = assertion.owner;
         let is_table = matches!(program.defs[owner].kind, DefKind::Table(_));
         if owner != id && !is_table {
             // Type-owned assertions need the type pass (A091-004, not on HIR yet).
