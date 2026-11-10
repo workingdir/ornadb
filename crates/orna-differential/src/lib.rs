@@ -34,8 +34,8 @@
 //! [`observe_old`](observe_old), and the comparator already takes two
 //! observations, so the only missing piece is a second driver. The recorded
 //! `calls` list is empty in H0 for the same reason: the evaluator's
-//! `route-trace` hook exists, but the classification it is compared against
-//! arrives with H1.
+//! `route-trace` hook lands in the scaffold PR that owns the evaluator, and the
+//! classification it is compared against arrives with H1.
 
 #![deny(missing_docs)]
 
