@@ -1066,7 +1066,7 @@ bead = "ornadb-csenl.15"
 [[environment]]
 category = "missing-import-names"
 count = 8
-reason = "stdlib names (for_each, mean, ref, open) used without the import that declares them. Each closes when the std declaration is imported by the case; the spec's root intrinsic environment conflict for for_each is open and is not decided here"
+reason = "stdlib names (for_each, mean, ref, open) used without the import that declares them. Each closes when the std declaration is imported by the case. Main decision: for_each is not a root intrinsic; it is a std.stream function that needs its import, which resolves the spec conflict (kernel-and-library.md still says open for for_each)"
 bead = "ornadb-csenl.16"
 
 [[environment]]
