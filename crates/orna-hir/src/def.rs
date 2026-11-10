@@ -221,6 +221,8 @@ pub struct EnumDef {
     pub variants: Vec<DefId>,
     /// Its nested implementations, in declaration order. Each is a [`DefKind::Impl`].
     pub members: Vec<DefId>,
+    /// The dimension a unit family declares; `None` for an ordinary enum.
+    pub dimension: Option<DimensionDef>,
 }
 
 /// One enum variant.
@@ -254,9 +256,27 @@ pub struct DimensionDef {
     pub unit: Option<DefId>,
 }
 
-/// A unit declaration.
+/// A unit: a variant of a unit family, or a top-level unit declaration.
 #[derive(Clone, Debug, Default)]
-pub struct UnitDef;
+pub struct UnitDef {
+    /// The family the unit is a variant of; `None` for a top-level unit declaration.
+    pub family: Option<DefId>,
+    /// The factors of a derived variant's expression, in written order. Empty for a base unit.
+    pub factors: Vec<UnitFactor>,
+}
+
+/// One factor of a derived unit expression: resolved, never evaluated.
+#[derive(Clone, Debug)]
+pub struct UnitFactor {
+    /// Whether the factor divides (written `/`) rather than multiplies.
+    pub divide: bool,
+    /// The rational coefficient exactly as written, such as `1000`.
+    pub coefficient: Option<Box<str>>,
+    /// The unit the factor names.
+    pub unit: DefId,
+    /// The exponent exactly as written after `^`.
+    pub exponent: Option<Box<str>>,
+}
 
 /// A module-level binding.
 #[derive(Clone, Debug)]

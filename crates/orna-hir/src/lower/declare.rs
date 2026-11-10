@@ -96,8 +96,13 @@ pub(crate) enum DeclAst {
     Table(Vec<Parameter>, Vec<TableMember>),
     /// A protocol.
     Protocol(Vec<GenericParameter>, Vec<ProtocolMember>),
-    /// An enum, with its variants and nested implementations.
-    Enum(Vec<GenericParameter>, Vec<EnumVariant>, Vec<Implementation>),
+    /// An enum, with its variants, nested implementations and whether it is a unit family.
+    Enum(
+        Vec<GenericParameter>,
+        Vec<EnumVariant>,
+        Vec<Implementation>,
+        bool,
+    ),
     /// A dimension.
     Dimension,
     /// A unit.
@@ -125,8 +130,14 @@ impl DeclAst {
                 generics,
                 variants,
                 implementations,
+                unit_family,
                 ..
-            } => Self::Enum(generics.clone(), variants.clone(), implementations.clone()),
+            } => Self::Enum(
+                generics.clone(),
+                variants.clone(),
+                implementations.clone(),
+                *unit_family,
+            ),
             Declaration::Dimension { .. } => Self::Dimension,
             Declaration::Unit {
                 dimension,
@@ -175,6 +186,8 @@ pub(crate) struct Builder<'a> {
     pub(crate) std_module: Option<ModuleId>,
     /// Bodies to lower once every signature is final.
     pub(crate) body_jobs: Vec<super::items::BodyJob>,
+    /// Unit-family variant expressions, resolved once every definition is built.
+    pub(crate) unit_jobs: Vec<super::units::UnitJob>,
 }
 
 impl<'a> Builder<'a> {
@@ -192,6 +205,7 @@ impl<'a> Builder<'a> {
             sys_module: ModuleId::new(0),
             std_module: None,
             body_jobs: Vec::new(),
+            unit_jobs: Vec::new(),
         };
         let mut registered = Vec::with_capacity(sources.len());
         for unit in sources {
