@@ -88,8 +88,10 @@ impl Builder<'_> {
         module: ModuleId,
         signature: &FunctionSignature,
     ) -> PendingFunction {
+        let names = generic_names(&signature.generics);
         let generics = self.build_generics(module, &signature.generics);
-        let (params, defaults) = self.build_parameters(def, module, &signature.parameters, None);
+        let (params, defaults) =
+            self.build_parameters(def, module, &signature.parameters, None, &names);
         for (body, expr) in defaults {
             self.body_jobs.push(BodyJob::Expression {
                 def,
@@ -98,7 +100,7 @@ impl Builder<'_> {
                 self_ty: None,
             });
         }
-        let ret = self.build_result(module, signature.result.as_ref());
+        let ret = self.build_result(module, &names, signature.result.as_ref());
         PendingFunction {
             generics,
             params,
@@ -301,9 +303,10 @@ impl Builder<'_> {
         &mut self,
         def: DefId,
         module: ModuleId,
-        _generics: &[GenericParameter],
+        generics: &[GenericParameter],
         members: &[ProtocolMember],
     ) {
+        let names = generic_names(generics);
         let mut lowered = Vec::new();
         for member in members {
             match member {
@@ -320,7 +323,7 @@ impl Builder<'_> {
                     lowered.push(member_def);
                 }
                 ProtocolMember::Static { name, ty, span } => {
-                    let ty = super::types::lower_type(self, module, &[], ty);
+                    let ty = super::types::lower_type(self, module, &names, ty);
                     lowered.push(self.declare_nested(
                         module,
                         name,
@@ -340,15 +343,16 @@ impl Builder<'_> {
         &mut self,
         def: DefId,
         module: ModuleId,
-        _generics: &[GenericParameter],
+        generics: &[GenericParameter],
         variants: &[EnumVariant],
     ) {
+        let names = generic_names(generics);
         let mut lowered = Vec::new();
         for variant in variants {
             let fields = variant
                 .fields
                 .iter()
-                .map(|field| self.build_payload_field(module, field))
+                .map(|field| self.build_payload_field(module, &names, field))
                 .collect::<Vec<_>>();
             lowered.push(self.declare_nested(
                 module,
@@ -363,8 +367,13 @@ impl Builder<'_> {
     }
 
     /// Builds one enum payload field.
-    fn build_payload_field(&mut self, module: ModuleId, field: &EnumPayloadField) -> DefId {
-        let ty = super::types::lower_type(self, module, &[], &field.ty);
+    fn build_payload_field(
+        &mut self,
+        module: ModuleId,
+        names: &[crate::Name],
+        field: &EnumPayloadField,
+    ) -> DefId {
+        let ty = super::types::lower_type(self, module, names, &field.ty);
         self.declare_nested(
             module,
             &field.name,
@@ -382,11 +391,12 @@ impl Builder<'_> {
         generics: &[GenericParameter],
         representation: &TypeRepresentation,
     ) {
+        let names = generic_names(generics);
         let params = self.build_generics(module, generics);
         let mut members = Vec::new();
         let type_members = match representation {
             TypeRepresentation::Alias { ty, refinements } => {
-                let _ = super::types::lower_type(self, module, &[], ty);
+                let _ = super::types::lower_type(self, module, &names, ty);
                 refinements.as_slice()
             }
             TypeRepresentation::Nominal { members } => members.as_slice(),
@@ -405,7 +415,7 @@ impl Builder<'_> {
                     } else {
                         Visibility::Private
                     };
-                    let ty = super::types::lower_type(self, module, &[], ty);
+                    let ty = super::types::lower_type(self, module, &names, ty);
                     members.push(self.declare_nested(
                         module,
                         name,
@@ -459,12 +469,14 @@ impl Builder<'_> {
                         DefKind::Unit(UnitDef),
                     );
                     let body_id = self.allocate_body(member_def);
+                    let names = generic_names(&signature.generics);
                     let generics = self.build_generics(module, &signature.generics);
                     let (params, defaults) = self.build_parameters(
                         member_def,
                         module,
                         &signature.parameters,
                         Some(receiver),
+                        &names,
                     );
                     for (default_body, expr) in defaults {
                         self.body_jobs.push(BodyJob::Expression {
@@ -474,7 +486,7 @@ impl Builder<'_> {
                             self_ty: None,
                         });
                     }
-                    let ret = self.build_result(module, signature.result.as_ref());
+                    let ret = self.build_result(module, &names, signature.result.as_ref());
                     let patterns = signature
                         .parameters
                         .iter()
@@ -618,6 +630,7 @@ impl Builder<'_> {
         module: ModuleId,
         parameters: &[Parameter],
         receiver: Option<crate::Ty>,
+        names: &[crate::Name],
     ) -> (Vec<ParamDef>, Vec<(BodyId, Expr)>) {
         let mut built = Vec::with_capacity(parameters.len());
         let mut defaults = Vec::new();
@@ -626,7 +639,7 @@ impl Builder<'_> {
             let is_receiver = index == 0 && name == "self";
             let (ty, written) = match (&parameter.annotation, receiver) {
                 (Some(annotation), _) => (
-                    super::types::lower_type(self, module, &[], annotation),
+                    super::types::lower_type(self, module, names, annotation),
                     true,
                 ),
                 (None, Some(receiver)) if is_receiver => (receiver, true),
@@ -649,17 +662,23 @@ impl Builder<'_> {
     }
 
     /// The declared result type.
-    fn build_result(&mut self, module: ModuleId, result: Option<&TypeExpr>) -> crate::Ty {
+    fn build_result(
+        &mut self,
+        module: ModuleId,
+        names: &[crate::Name],
+        result: Option<&TypeExpr>,
+    ) -> crate::Ty {
         match result {
-            Some(ty) => super::types::lower_type(self, module, &[], ty),
+            Some(ty) => super::types::lower_type(self, module, names, ty),
             None => self.program.tys.error(),
         }
     }
 
     /// A signature with no body, for a protocol member.
     fn signature_only(&mut self, module: ModuleId, signature: &FunctionSignature) -> DefKind {
+        let names = generic_names(&signature.generics);
         let generics = self.build_generics(module, &signature.generics);
-        let ret = self.build_result(module, signature.result.as_ref());
+        let ret = self.build_result(module, &names, signature.result.as_ref());
         let params = signature
             .parameters
             .iter()
@@ -667,7 +686,7 @@ impl Builder<'_> {
             .map(|(index, parameter)| {
                 let written = parameter.annotation.is_some();
                 let ty = match &parameter.annotation {
-                    Some(annotation) => super::types::lower_type(self, module, &[], annotation),
+                    Some(annotation) => super::types::lower_type(self, module, &names, annotation),
                     None => self.program.tys.error(),
                 };
                 ParamDef {
@@ -795,6 +814,15 @@ fn parameter_name(pattern: &Pattern, index: usize) -> String {
         Pattern::Name(name, _) => name.clone(),
         _ => format!("_arg{index}"),
     }
+}
+
+/// The declared generic names, in declaration order. A written type variable lowers to the parameter
+/// at its position in this list.
+fn generic_names(generics: &[GenericParameter]) -> Vec<crate::Name> {
+    generics
+        .iter()
+        .map(|generic| crate::Name::new(&generic.name))
+        .collect()
 }
 
 /// The effect kinds a native declaration's `effect` clause names (ORNA-NATIVE-009).
