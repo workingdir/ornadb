@@ -315,7 +315,9 @@ impl<'p> Machine<'p> {
             return Err(Stop::NotYet("assignment to a field by index or definition"));
         };
         let Value::Record(fields) = frame.get(*slot)? else {
-            return Err(Stop::NotYet("field assignment on a value that is not a record"));
+            return Err(Stop::NotYet(
+                "field assignment on a value that is not a record",
+            ));
         };
         let position = fields
             .iter()
@@ -343,7 +345,9 @@ impl<'p> Machine<'p> {
             return Err(Stop::NotYet("assignment to a nested index"));
         };
         let Value::List(values) = frame.get(*slot)? else {
-            return Err(Stop::NotYet("index assignment on a value that is not a list"));
+            return Err(Stop::NotYet(
+                "index assignment on a value that is not a list",
+            ));
         };
         let Value::Int(index) = self.eval(body, frame, index)? else {
             return Err(Stop::Error("ORNA-EVAL-TYPE"));
