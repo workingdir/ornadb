@@ -61,9 +61,9 @@ The four claims the rest of the document defends:
 4. **A strangler, not a rewrite.** The old pipeline keeps shipping. HIR is
    built beside it and a differential harness runs every fixture through both,
    comparing results, diagnostics and step counts. Stages port one feature at
-   a time. The first stage (H0, section 6) is already useful: resolution for
-   the language server and a test that pins the new call classification
-   against the old evaluator's routing.
+   a time. The first stage that delivers value (H1, section 6) is one resolver:
+   resolution for the language server and a test that pins the new call
+   classification against the old evaluator's routing.
 
 What this design deliberately does not decide: the language questions in
 `DECISIONS.md`. Where a decision changes a data structure, the structure is
@@ -451,7 +451,7 @@ same under both answers.
   to a body. This removes `lambda_numeric_parameter_usage`
   (`orna-check/src/inference.rs:1455`) either way.
 
-Stage H3 (section 6) builds the solver for the second option first, because it
+Stage H2 (section 6) builds the solver for the second option first, because it
 is a strict subset of the first. The first option adds generalisation on top.
 
 ### 2.4 Bodies, locals in slots, patterns
@@ -570,7 +570,7 @@ objection to an `effect` clause that exists "for natives alone"
 (`local://critique-fable-5-2.md` section 4.2 item 3).
 
 Two vocabularies today (section 1.5) become one: `EffectKind` is the single
-enumeration, and `orna_intrinsics::Effect` is deleted in stage H6. The
+enumeration, and `orna_intrinsics::Effect` is deleted in stage H5. The
 mapping, from the intrinsic classes: `Pure` and `PinnedData` to the empty set,
 `Clock` to `Clock`, `Entropy` to `Randomness`, `Host` to the specific
 `EffectKind` the declaration names (today decided per callee by
@@ -638,7 +638,7 @@ the local first.
 
 Which names are in `Intrinsic` versus `Native` is not an implementation
 detail: if D12 moves `Some`, `now`, `uuid7` and `error` into `core.orna`
-they are `Native`; if not they must be `Intrinsic`. Stage H2 (section 6) pins
+they are `Native`; if not they must be `Intrinsic`. Stage H1 (section 6) pins
 the current classification with a test against the old evaluator's routing
 before any behaviour changes.
 
@@ -712,3 +712,191 @@ args: [Expr(a), Expr(b)] }`. Link binds `(std.bits, bit_or)` to a Rust
 function once and records it under that `DefId`. Execution evaluates two
 arguments and calls a function pointer. There is no name in the executed
 program.
+
+--------------------------------------------------------------------------
+
+## 3. The pipeline and who consumes the HIR
+
+```mermaid
+flowchart LR
+    I["core.orna, sys.orna (embedded)"] --> L
+    D["pinned std, project modules, REPL input"] --> P["orna-syntax: AST"]
+    P --> L["orna-hir: lower + resolve"]
+    L --> T["orna-check: typeck, effects, rules"]
+    T --> PR[("Program")]
+    PR --> K["link: bind native declarations"]
+    K --> X["orna-exec"]
+    X --> H["Host"]
+    H --> ST["TableStore"]
+    H --> SY["sys providers"]
+    PR --> LS["orna-lsp: queries"]
+    PR --> MD["metadata: sys.Function, semantic catalogue"]
+    X --> EX["sys.explain: print the operator tree"]
+```
+
+### 3.1 The checker: HIR construction plus checks on HIR
+
+`orna-check` keeps its crate name and its public `analyze*` functions (they are
+called from `orna-application`, `orna-project-repl`, `orna-lsp` and the CLI).
+Internally it changes from "walk the AST and keep a `Scope`" to a sequence of
+passes over a `Program`:
+
+| Pass | Crate | Input | Output | Replaces |
+|---|---|---|---|---|
+| `lower` | `orna-hir` | AST | `Def`s, untyped `Body`s | header collection (`orna-check/src/units.rs:499`), and every later re-walk of syntax by admission |
+| `resolve` | `orna-hir` | defs, `use` | `Module.exports/imports`, `Local` slots, `Callee` for path callees, bound `Arg`s | the 26 sites R01..R26 of section 1.2 |
+| `typeck` | `orna-check` | resolved program | `Expr.ty`, `Local.ty`, `FnDef` signatures, settled calls | `infer*`, `Scope`, `Type` |
+| `effects` | `orna-check` | call graph | `FnDef.effects`, `Body.effects` | `EffectSummary` joins, `host_effect`, `stabilize_function_summaries` (`units.rs:349`) |
+| rules | `orna-check` | typed program | diagnostics | assertion scope, table admission, secrets, computed fields, currency, checkpoints, units |
+
+The new public entry point returns the program and the diagnostics together:
+
+```rust
+pub fn check(inputs: &[ModuleInput], env: &Environment) -> Checked;
+pub struct Checked { pub program: Program, pub diagnostics: Vec<Diagnostic> }
+```
+
+`Environment` carries what `Catalogue` carries today as string-keyed maps
+(`orna-check/src/catalogue.rs:9-30`): already-lowered packages (`core`, `sys`, a
+pinned `std`), attached databases and the object identity manifest. The legacy
+`analyze*` functions stay until stage H9 and are reimplemented, one at a time,
+as `check(..)` followed by a conversion to `Analysis`. Until each is
+reimplemented it runs the old code, so no caller changes in the intermediate
+stages.
+
+Rules are ported by family, each behind the differential harness (section 6.2).
+A rule that today asks "is this callee spelled `Table.insert`" asks "is this a
+`Callee::TableOp`"; a rule that asks "does this expression name a table" asks
+"is this `ExprKind::Def` of a `DefKind::Table`". The rule families, in the
+order they port, with their present size:
+
+| Family | Today | After |
+|---|---|---|
+| scalar typing and operators | `inference.rs` 3,294, `types.rs` | `typeck` operator tables over `Ty` |
+| calls, pipelines, collections | `calls.rs` 2,877, `intrinsics.rs` 1,255, `collection_calls.rs`, `collections.rs`, `flow.rs` 1,234 | one call rule per `Callee` variant |
+| tables and assertions | `assertions.rs` 979, `item_checks.rs` 1,600, `source_row.rs` | rules over `TableDef` and `Call.callee = TableOp` |
+| units and money | `units.rs` 1,498, parts of `inference.rs` | rules over `TyKind::Quantity` [D8] |
+| `sys` | `system_api.rs` 3,544, `system_calls.rs` 1,915 | none: `sys.orna` is lowered like any module (section 4) |
+| checkpoints, secrets | `checkpoint.rs` 3,574, `secrets.rs` 414, `semantic_payload.rs` 1,831 | ported last; they are type-directed and port with `typeck` |
+
+### 3.2 The executor consumes only HIR
+
+`orna-exec` replaces `orna-evaluator`. It receives a linked `Program` and
+builds an operator tree (section 7.2). It has no dependency on `orna-syntax`:
+it cannot match on a callee's spelling because it is never given one.
+
+```rust
+pub struct Activation<'a> {
+    pub program: &'a Program,
+    pub host: &'a mut dyn Host,
+    pub quotas: Quotas,
+    pub cancel: &'a CancellationToken,
+}
+impl Activation<'_> {
+    pub fn call(&mut self, entry: DefId, args: Vec<Value>) -> (Outcome, Usage);
+    pub fn eval(&mut self, body: BodyId, frame: Frame) -> (Outcome, Usage);
+}
+pub enum Outcome { Success(Value), Failure(Error), Cancelled }   // spec 06-expressions.md:428-436
+```
+
+There is no `ActivationMode` (`orna-evaluator/src/lib.rs:5008`), no
+`repl_bindings` flag (`:5036`) and no Cargo feature that changes what a call
+means (`system-host-bindings`, `:9864-9873`). What differs between `orna run`,
+the REPL, `serve`, the mount and a browser build is the `Host` value passed in
+(section 4.3). `Usage` reports steps, peak retained bytes and rows scanned for
+every activation, so quotas stay observable (ORNA-CLOSURE-004,
+`reference/Orna-1.1.0/source/01-scope.md:62`).
+
+### 3.3 The REPL is an incremental module
+
+Today a session is two sessions side by side (`AdmittedReplSession { semantic:
+ReplContext, runtime: ReplSession }`, `orna-project-repl/src/lib.rs:184-188`),
+and the runtime half re-parses every module and rebuilds alias maps
+(`admitted_runtime_sources`, `:603`). The target is one append-only program:
+
+```rust
+pub struct Session {
+    program: Program,       // core, sys, std, the project, and one Repl package
+    module: ModuleId,       // the session module
+    slots: Vec<Value>,      // session-level `let` bindings, `$_`, `$?`
+    revision: u64,
+}
+impl Session {
+    /// Lower, resolve and check one input against the current program.
+    /// Changes nothing.
+    pub fn stage(&self, source: &str) -> Result<Delta, Vec<Diagnostic>>;
+    /// Append the delta. Fails if the session moved on since `stage`.
+    pub fn commit(&mut self, delta: Delta) -> Result<(), Stale>;
+}
+```
+
+- An input that declares an item appends a `Def`. Redefining a name appends a
+  new `Def` and rebinds the name in the session module; closures created
+  earlier keep the `DefId` they captured.
+- An expression or statement becomes a `Body` whose free names resolve to
+  session slots. `$_` and `$?` are `ExprKind::Local` of reserved session slots,
+  not a flag that the evaluator checks (`orna-evaluator/src/lib.rs:6087`).
+- `stage` then `commit` keeps today's two-phase admission
+  (`ReplAdmission`, `ReplCommitError::{ForeignContext, StaleContext}`,
+  `orna-check/src/repl.rs:40-56`).
+- A generic function is just a `FnDef` with generics, so the pinned defect
+  `generics_fail_explicitly_in_the_bounded_runtime`
+  (`orna-project-repl/src/lib.rs:1564-1584`) becomes a passing test.
+- Value shape cannot depend on a mode because the executor has none. Today
+  statistics are wrapped in an option only `if self.mode.is_repl()`
+  (`orna-evaluator/src/lib.rs:10300-10310`; critique F12).
+
+This replaces `orna-check/src/repl.rs` (564 lines), `orna-evaluator/src/repl.rs`
+(1,766), the alias code in `orna-project-repl` and the ambiguity walk
+(`orna-evaluator/src/repl.rs:842`); site R18 of section 1.2 is among them.
+`orna-cli/src/repl.rs` and `repl_transaction.rs` keep the terminal and
+transaction UI; the write path in `repl_transaction.rs:525-560` is deleted
+because a REPL write is the one `TableOp` path of section 5.3.
+
+### 3.4 The language server is a set of HIR queries
+
+The server keeps one `Program` per workspace and rebuilds modules from the
+tolerant parse (`orna-syntax/src/editor.rs`). `Module` records, for each name
+occurrence, what it resolved to (`NameUse { span, res }`, a field `orna-hir`
+adds beside `exports/imports`):
+
+| Feature | Query | Today |
+|---|---|---|
+| go to definition | `use_at(module, offset)` then `Def.span` or `Local.span` | `Workspace::resolve` (`orna-lsp/src/workspace.rs:409`) |
+| references, rename | every `NameUse` with equal `Res` | `NameIndex` (`names.rs:162`) |
+| hover, inlay types | `Expr.ty` at the offset, printed by the diagnostics printer | `Hint` approximations (`names.rs:29-51`, string lists `:377-381`) |
+| signature help | `Call.callee` at the cursor, then `FnDef.params` | `expression_name` re-resolution (`analysis.rs:997`) |
+| completion | slots in scope at the offset, then module exports, then members by `Ty` | separate walks (`analysis.rs:1130`) |
+| semantic tokens | `NameUse.res` classified by `DefKind` | `resolved_token` (`semantic.rs:218`) |
+
+The editor and the engine then cannot disagree about what a name means,
+because they run the same resolver. `Expr` carries a `ty` and every node a span
+(`2.4`), so hover needs no inference of its own. `orna-lsp` loses `names.rs`
+(1,485 lines), the resolver half of `workspace.rs` (1,108) and the `Hint`
+machinery in `analysis.rs`; it keeps document sync, positions, formatting and
+protocol glue.
+
+### 3.5 `sys.explain` prints the real operator tree
+
+`sys.explain(query)` receives a relation value. After stage H7 that value is
+the operator tree the executor will pull from (section 5.4). Explain walks it
+and emits one `sys.Plan` node per operator: the table's object id, the stage
+kind, the callback's `DefId` and its `EffectSet`. `sys.explain(function)` prints
+the function's signature, effects and the tables its body reaches through
+`Callee::TableOp` and table-valued `ExprKind::Def`. There is no second model
+of the query, so explain cannot describe an execution that does not happen.
+Today `explain_query_plan` builds a description with no joins, predicate,
+projections or ordering and passes it to a planner nothing else uses
+(`orna-evaluator/src/explain_bindings.rs:127-155`); stream A deletes that
+planner (`orna-sys/src/introspection.rs`, 17,855 lines) independently, so H7
+only has to replace the 369-line binding.
+
+### 3.6 Other consumers
+
+| Consumer | Reads | Replaces |
+|---|---|---|
+| Admission (`ApplicationAuthority`) | a linked `Program`, cached per (source digest, environment) | `Functions`, `StandardLayer` (`orna-evaluator/src/lib.rs:857`), alias maps, `with_standard_sources` (`orna-application/src/lib.rs:294-406`) |
+| Assertion gate (`orna-cli/src/assertion_gate.rs`) | `AssertionDef` bodies and the tables they reach via `Callee::TableOp` / `ExprKind::Def` | `AssertionPlan.dependencies: BTreeSet<String>` (`orna-check/src/lib.rs:1260-1262`) and the harness handlers in `orna-conformance` |
+| `orna run` | `FnDef.effects` of the entry decides read-only versus read-write | `entry_references_tables()` / `requires_publication_metadata()` path selection (`orna-cli/src/main.rs:2028-2060`), and the substring test on source text (`orna-application/src/lib.rs:471-472`) |
+| `sys.Function`, semantic catalogue | `FnDef` signature, effects, `ObjectId` | `ModuleHeader` (`orna-check/src/types.rs:150-162`) |
+| Formatter | nothing: it works on syntax | nothing |
