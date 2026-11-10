@@ -29,6 +29,9 @@ import sys
 from pathlib import Path
 
 COUNTERS = ("steps", "calls")
+# Counters gated only where a baseline entry records them, so a suite that does not
+# count allocations (the evaluator's) keeps its exact entries.
+OPTIONAL_COUNTERS = ("allocations",)
 Benchmarks = dict[str, dict]
 
 
@@ -49,7 +52,7 @@ def load(path: Path, label: str) -> Benchmarks:
     for name, entry in benchmarks.items():
         if not isinstance(entry, dict):
             raise BaselineError(f"{label} {path}: benchmark {name!r} is not an object")
-        for counter in COUNTERS:
+        for counter in COUNTERS + tuple(c for c in OPTIONAL_COUNTERS if c in entry):
             value = entry.get(counter)
             if not isinstance(value, int) or isinstance(value, bool) or value < 0:
                 raise BaselineError(
@@ -71,8 +74,10 @@ def compare(baseline: Benchmarks, results: Benchmarks) -> list[str]:
         actual = results[name]
         if not expected.get("gated", True):
             continue
-        for counter in COUNTERS:
-            if expected[counter] != actual[counter]:
+        for counter in COUNTERS + tuple(c for c in OPTIONAL_COUNTERS if c in expected):
+            if counter not in actual:
+                problems.append(f"{name}.{counter}: missing from the benchmark run")
+            elif expected[counter] != actual[counter]:
                 problems.append(
                     f"{name}.{counter}: {actual[counter]} (baseline {expected[counter]})"
                 )

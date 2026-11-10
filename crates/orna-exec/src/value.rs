@@ -37,6 +37,12 @@ pub enum Value {
     Error(&'static str),
 }
 
+impl From<i64> for Value {
+    fn from(value: i64) -> Self {
+        Self::Int(BigInt::from(value))
+    }
+}
+
 /// A lambda's body and the values captured when it was created.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Closure {

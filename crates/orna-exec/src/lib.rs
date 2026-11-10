@@ -16,5 +16,5 @@ mod ops;
 mod value;
 
 pub use error::ExecError;
-pub use machine::{ExecLimits, run_entry};
+pub use machine::{ExecLimits, Measured, measure_entry, run_entry};
 pub use value::Value;

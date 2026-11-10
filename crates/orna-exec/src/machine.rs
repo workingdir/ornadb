@@ -20,11 +20,25 @@ pub struct ExecLimits {
     pub max_integer_digits: usize,
 }
 
+/// The outcome of one measured run: its value and the deterministic counters
+/// the benchmarks gate on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Measured {
+    /// The value the entry point returned.
+    pub value: Value,
+    /// Expression evaluations charged against [`ExecLimits::max_steps`].
+    pub steps: u64,
+    /// Calls executed, counting the entry point itself. Unlike the old
+    /// evaluator, nothing is memoised, so this counts every source-level call.
+    pub calls: u64,
+}
+
 /// The machine state of one run.
 pub(crate) struct Machine<'p> {
     pub(crate) program: &'p Program,
     pub(crate) limits: ExecLimits,
     steps: u64,
+    calls: u64,
     depth: usize,
 }
 
@@ -34,6 +48,7 @@ impl<'p> Machine<'p> {
             program,
             limits,
             steps: 0,
+            calls: 0,
             depth: 0,
         }
     }
@@ -58,6 +73,7 @@ impl<'p> Machine<'p> {
         if self.depth >= self.limits.max_depth {
             return Err(Stop::Error("ORNA-EVAL-LIMIT"));
         }
+        self.calls += 1;
         let program = self.program;
         let body: &'p Body = &program.bodies[body_id];
         let mut frame = Frame::new(body.locals.len());
@@ -90,14 +106,43 @@ pub fn run_entry(program: &Program, entry: DefId, limits: ExecLimits) -> Result<
     let DefKind::Fn(function) = &program.defs[entry].kind else {
         return Err(ExecError::NotYet("entry is not a function"));
     };
-    let FnBody::Source(body_id) = function.body else {
-        return Err(ExecError::NotYet("entry has no source body"));
-    };
     if !function.params.is_empty() {
         return Err(ExecError::NotYet("entry takes arguments"));
     }
+    measure_entry(program, entry, Vec::new(), limits).map(|measured| measured.value)
+}
+
+/// Runs the function `entry` with one argument per parameter, in declaration
+/// order, and reports its step and call counters.
+///
+/// # Errors
+///
+/// [`ExecError::Code`] when the program ends with a language error, and
+/// [`ExecError::NotYet`] when the entry is not a source function or it reaches
+/// a construct this stage does not run.
+pub fn measure_entry(
+    program: &Program,
+    entry: DefId,
+    arguments: Vec<Value>,
+    limits: ExecLimits,
+) -> Result<Measured, ExecError> {
+    let DefKind::Fn(function) = &program.defs[entry].kind else {
+        return Err(ExecError::NotYet("entry is not a function"));
+    };
+    let FnBody::Source(body_id) = function.body else {
+        return Err(ExecError::NotYet("entry has no source body"));
+    };
+    if function.params.len() != arguments.len() {
+        return Err(ExecError::Code("ORNA-EVAL-ARGUMENT"));
+    }
+    let arguments = arguments.into_iter().enumerate().collect();
     let mut machine = Machine::new(program, limits);
-    machine
-        .invoke(body_id, Vec::new(), &[])
-        .map_err(ExecError::from)
+    let value = machine
+        .invoke(body_id, arguments, &[])
+        .map_err(ExecError::from)?;
+    Ok(Measured {
+        value,
+        steps: machine.steps,
+        calls: machine.calls,
+    })
 }
