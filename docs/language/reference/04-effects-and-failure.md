@@ -15,8 +15,10 @@ its effect set, publishes it in the function's signature metadata and shows it
 in tools. The set takes no part in type compatibility: a function with effects
 and one without have the same function type.
 
-Only a body-less `native fn` states effects, in the engine's declaration
-metadata (chapter 1, "Native declarations"). Everything else derives them.
+Only a body-less `native fn` states effects, in its declaration's effect clause
+(chapter 1, "Native declarations"). For a native bound to a shared library that
+clause is the author's claim, which the engine cannot check
+(`docs/design/native-libraries.md`, section 5). Everything else derives them.
 
 ### Computing an effect set
 
@@ -251,5 +253,5 @@ Cancellation is a completion state of its own. It is not an `Error`.
 D2 (inferred effects, vocabulary, legality at the use site, no effect syntax),
 D4 (unchecked failures, typed `Error`, rollback at the activation boundary,
 cancellation as its own completion, `std.result` deleted), D10 (snapshot capture
-by concurrent bodies; chapter 3), D12 (native declarations carry their
-effects).
+by concurrent bodies; chapter 3), D12 (native declarations state their effects;
+amended 2026-11-10: any module may declare one).
