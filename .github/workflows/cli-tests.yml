@@ -218,3 +218,46 @@ jobs:
       - name: Test the migration kill matrix
         shell: bash
         run: python3 scripts/gate_evidence.py test -p orna-cli --target test:migration_kill_matrix --features crash-barriers --timeout-minutes 30
+
+  # HIR stage H0 (design sections 6.2 and 7.4): the route-trace hook is off in
+  # every shipped build, every branch of the evaluator's call cascade records
+  # its kind, and the three baseline benchmarks keep their deterministic step
+  # and call counters. Wall time is published in the job summary and is not
+  # gated, because shared runners are noisy.
+  hir-benchmarks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.95.0
+
+      - name: Prove the route-trace feature is off in the shipped build
+        run: |
+          set -euo pipefail
+          features="$(cargo tree --locked -p orna-cli -e features --prefix none)"
+          if printf '%s\n' "$features" | grep -q 'route-trace'; then
+            echo "the shipped orna-cli closure enables the route-trace feature" >&2
+            exit 1
+          fi
+          echo "route-trace is not enabled anywhere in the orna-cli closure"
+
+      - name: Prove a baseline counter regression fails the comparison
+        run: python3 -m unittest scripts.test_check_benchmark_baseline
+
+      - name: Test that every cascade branch records its route
+        run: cargo test --locked -p orna-evaluator --features route-trace --test route_trace_kinds
+
+      - name: Run the baseline benchmarks and compare their counters
+        run: |
+          set -euo pipefail
+          cargo run --locked --release -p orna-evaluator --bin orna_bench \
+            --features route-trace > "$RUNNER_TEMP/bench.json"
+          python3 scripts/check_benchmark_baseline.py \
+            --baseline crates/orna-evaluator/benchmarks/baseline.json \
+            --results "$RUNNER_TEMP/bench.json" \
+            --summary "$GITHUB_STEP_SUMMARY"
