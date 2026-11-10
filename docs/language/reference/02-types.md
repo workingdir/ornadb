@@ -110,10 +110,11 @@ directly as the nearest `Float`, so `let x: Float = 0.1;` works.
 
 ### Money, Duration, Instant
 
-`Money<C>` is exact decimal money. `C` is a nominal type that implements
-`Currency` (static `code` and `minor_digits`). `12.34.GBP` is `Money<GBP>`.
-Adding two different currencies is a type error; currency conversion is a
-named, data-backed operation. A `Float` never enters money arithmetic.
+`Money<C>` is exact decimal money and a library type. `C` is a nominal type that implements
+`Currency` (static `code` and `minor_digits`). `12.34.GBP` is `Money<GBP>`. Adding two
+different currencies, and multiplying two `Money<GBP>` values, are type errors; currency
+conversion is a named, data-backed operation. A `Float` never enters money arithmetic. The
+rate type `Rate<C, U>` is also a library type (chapter 5).
 
 ```orna
 pub type GBP {
@@ -124,8 +125,10 @@ pub type GBP {
 }
 ```
 
-`Duration` is elapsed time: `1.day`, `7.days`. `Instant` is a point on the
-UTC timeline.
+`Duration` is the nominal name of the time unit family (chapter 5) and is elapsed time:
+`1.day` and `7.days` are 24-hour elapsed durations, never calendar periods. An `Int` does
+not flow into a `Duration` annotation; write `Duration.second(n)` or `n.second`. `Instant`
+is a point on the UTC timeline.
 
 | Operation | Type |
 |---|---|
@@ -136,9 +139,10 @@ UTC timeline.
 | `Money<C> + Money<C>`, `Money<C> - Money<C>` | `Money<C>` |
 | `Money<C> * Decimal`, `Money<C> / Decimal` | `Money<C>` |
 
-Calendar-day operations on an `Instant` need an explicit `TimeZone`; a local
-day may have 23, 24 or 25 hours. A fixed elapsed window and a calendar period
-are different operations.
+Calendar arithmetic uses `Period`, never `Duration`: `1.months`, `1.years` and
+`Period.days(n)` (chapter 5). Calendar-day operations on an `Instant` need an explicit
+`TimeZone`; a local day may have 23, 24 or 25 hours. A fixed elapsed window and a
+calendar period are different operations.
 
 ## Options: `T?`
 
@@ -379,10 +383,11 @@ pub fn total(items: [Int]): Int = items | sum();     // full annotations require
   an error. 1.1 wrote the type as `Option<T>` and did not state that options do
   not nest.
 * Added `Map<K, V>`, `Set<T>`, `Bytes`; `List` gains `push` and `concat`.
-* `Quantity<N, U>`, user `dim` and `unit` and the checker's dimensional algebra
-  are removed. `Money<C>`, `Duration`, `Instant`, `Decimal` stay with their
-  literal postfixes.
-* `Money<GBP> / kWh` and other unit-product types no longer exist.
+* Unit families (chapter 5) replace the 1.1 user `dim` and `unit` declarations and the
+  checker's dimensional algebra. `Quantity<N, U>` is a type over a unit key.
+  `Money<C>`, `Duration`, `Instant` and `Decimal` stay with their literal postfixes.
+* `Money<GBP> / kWh` has no kernel type product. It is the library `Rate<GBP, kWh>`
+  (chapter 5); the kernel has no currency axis.
 * Inference is unification-based. `pub` functions require full annotations and
   private parameters left unresolved are errors; 1.1 made every annotation
   optional. Private
@@ -396,5 +401,5 @@ pub fn total(items: [Int]): Int = items | sum();     // full annotations require
 
 D1 (inference rules), D3 (flat options), D5 (no overloading, type arguments),
 D6 (`Map`, `Set`, `Bytes`), D7 (`Int` quota, no implicit numeric conversion),
-D8 (no units; `Duration`, `Instant`, `Decimal`, `Money<C>` stay), D4 (`std.result`
+D8 (units as enum families, amended 2026-11-10; `Duration`, `Instant`, `Decimal`, `Money<C>` stay), D4 (`std.result`
 deleted).
