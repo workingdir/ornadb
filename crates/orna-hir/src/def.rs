@@ -181,6 +181,9 @@ pub struct ParamDef {
     pub name: Name,
     /// Its type.
     pub ty: Ty,
+    /// Whether the declaration gives the parameter a type: a written annotation (even one that fails to resolve,
+    /// which is reported by lowering) or a method's receiver. `false` means the author omitted it (decision D1).
+    pub written: bool,
     /// The default expression, as its own body, when the declaration has one.
     pub default: Option<BodyId>,
     /// The binder pattern, when the declaration destructures the argument.
