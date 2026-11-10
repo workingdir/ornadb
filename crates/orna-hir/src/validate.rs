@@ -359,7 +359,7 @@ impl Program {
                 self.validate_kinds(
                     &enumeration.variants,
                     "enum variant",
-                    DefKind::is_variant,
+                    |kind| kind.is_variant() || kind.is_unit(),
                     errors,
                 );
                 self.validate_def_refs(&enumeration.members, "enum implementation", errors);
