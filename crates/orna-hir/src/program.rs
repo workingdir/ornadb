@@ -125,4 +125,19 @@ impl Program {
             .get(self.source_body(def)?)
             .map(|body| body.effects)
     }
+
+    /// Every diagnostic the program produced, in module order, each with the
+    /// module it belongs to: lowering and rule diagnostics, and the typing
+    /// diagnostics (ORNA-INFER-011 conflicts, ORNA-INFER-007 ambiguity,
+    /// ORNA-S020-ANNOTATION, generic overlap and unresolved names) with their
+    /// source spans. The "not yet on HIR" reasons are not diagnostics; they
+    /// stay on the typing summary.
+    pub fn diagnostics(&self) -> impl Iterator<Item = (ModuleId, &HirDiagnostic)> {
+        self.modules.iter_enumerated().flat_map(|(module, record)| {
+            record
+                .diagnostics
+                .iter()
+                .map(move |diagnostic| (module, diagnostic))
+        })
+    }
 }

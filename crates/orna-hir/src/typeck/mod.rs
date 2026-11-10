@@ -44,6 +44,8 @@ use crate::{
 };
 
 mod call;
+#[cfg(test)]
+mod diagnostics_tests;
 mod expr;
 mod operator;
 mod protocol;
@@ -646,11 +648,15 @@ impl<'a> BodyCheck<'a> {
         (bodies, self.diagnostics, self.conflicts)
     }
 
-    /// Reports one constraint conflict (ORNA-INFER-011).
+    /// Reports one constraint conflict (ORNA-INFER-011). The same conflict at
+    /// the same span, reached by two constraints, is reported once.
     fn conflict(&mut self, message: impl Into<Box<str>>, span: SyntaxSpan) {
+        let diagnostic = HirDiagnostic::new(INFER_CONFLICT, message.into(), span);
+        if self.diagnostics.contains(&diagnostic) {
+            return;
+        }
         self.conflicts += 1;
-        self.diagnostics
-            .push(HirDiagnostic::new(INFER_CONFLICT, message.into(), span));
+        self.diagnostics.push(diagnostic);
     }
 
     /// Unifies two types, reporting a conflict with both sides printed.
