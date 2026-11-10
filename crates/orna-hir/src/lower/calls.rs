@@ -17,7 +17,7 @@
 
 use orna_syntax::{Expr as AstExpr, SyntaxSpan, TypeExpr};
 
-use crate::{Callee, ExprId, ExprKind, FieldRef, Name, NameTarget};
+use crate::{Callee, DefId, ExprId, ExprKind, FieldRef, Name, NameTarget};
 
 use super::BodyState;
 use super::classify::{Classified, ParamInfo};
@@ -170,40 +170,7 @@ fn classify_path(
             classified_def(builder, state, def, span)
         }
         crate::resolve::PathKind::Member { base, .. } => {
-            if let Some(unit) = builder
-                .member_def(base, &last)
-                .filter(|def| builder.is_unit(*def))
-            {
-                super::record_body_use(
-                    &mut builder.program,
-                    module,
-                    state.id,
-                    last_span.clone(),
-                    last,
-                    crate::UseContext::Value,
-                    NameTarget::Def(unit),
-                );
-                return classified_def(builder, state, unit, span);
-            }
-            super::record_body_use(
-                &mut builder.program,
-                module,
-                state.id,
-                last_span,
-                last.clone(),
-                crate::UseContext::Value,
-                NameTarget::Def(base),
-            );
-            if builder.def_is_table(base) {
-                if let Some(op) = super::classify::table_op(last.as_str()) {
-                    return Some((Callee::TableOp { table: base, op }, None));
-                }
-                if let Some(op) = super::classify::rel_op(last.as_str()) {
-                    return Some((Callee::Relational { op }, None));
-                }
-            }
-            let base = lower_path_value(builder, state, &segments[..segments.len() - 1]);
-            Some((Callee::Pending { base, name: last }, None))
+            classify_member_path(builder, state, segments, base, last, last_span, span)
         }
         crate::resolve::PathKind::MissingMember { module: target, .. } => {
             super::record_body_use(
@@ -247,6 +214,53 @@ fn classify_path(
             None
         }
     }
+}
+
+/// Classifies a path whose prefix names a definition, then a member of it (`Note.insert`).
+fn classify_member_path(
+    builder: &mut Builder<'_>,
+    state: &mut BodyState,
+    segments: &[(&str, SyntaxSpan)],
+    base: DefId,
+    last: Name,
+    last_span: SyntaxSpan,
+    span: &SyntaxSpan,
+) -> ClassifiedCallee {
+    let module = state.module;
+    if let Some(unit) = builder
+        .member_def(base, &last)
+        .filter(|def| builder.is_unit(*def))
+    {
+        super::record_body_use(
+            &mut builder.program,
+            module,
+            state.id,
+            last_span.clone(),
+            last,
+            crate::UseContext::Value,
+            NameTarget::Def(unit),
+        );
+        return classified_def(builder, state, unit, span);
+    }
+    super::record_body_use(
+        &mut builder.program,
+        module,
+        state.id,
+        last_span,
+        last.clone(),
+        crate::UseContext::Value,
+        NameTarget::Def(base),
+    );
+    if builder.def_is_table(base) {
+        if let Some(op) = super::classify::table_op(last.as_str()) {
+            return Some((Callee::TableOp { table: base, op }, None));
+        }
+        if let Some(op) = super::classify::rel_op(last.as_str()) {
+            return Some((Callee::Relational { op }, None));
+        }
+    }
+    let base = lower_path_value(builder, state, &segments[..segments.len() - 1]);
+    Some((Callee::Pending { base, name: last }, None))
 }
 
 /// Reports a path whose root name does not resolve.
