@@ -36,6 +36,27 @@ pub enum EffectKind {
 }
 
 impl EffectKind {
+    /// The kind a native declaration's `effect` clause names by its class
+    /// spelling (ORNA-NATIVE-009). `None` for a spelling outside the vocabulary.
+    #[must_use]
+    pub fn from_class(class: &str) -> Option<Self> {
+        Some(match class {
+            "table_read" => Self::TableRead,
+            "table_write" => Self::TableWrite,
+            "network" => Self::Network,
+            "filesystem" => Self::Filesystem,
+            "process" => Self::Process,
+            "clock" => Self::Clock,
+            "randomness" => Self::Randomness,
+            "secret_access" => Self::SecretAccess,
+            "ui" => Self::Ui,
+            "git" => Self::Git,
+            "storage_admin" => Self::StorageAdmin,
+            "runtime_admin" => Self::RuntimeAdmin,
+            _ => return None,
+        })
+    }
+
     /// Every `sys.EffectKind` value, in declaration order.
     pub const ALL: [EffectKind; 12] = [
         EffectKind::TableRead,
