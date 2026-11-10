@@ -2115,7 +2115,7 @@ fn binary_checks_and_runs_an_import_from_the_pinned_standard_git_module() {
         module_commit
     );
     assert!(project.standard_runtime_modules().contains("std/math.orna"));
-    orna_semantic::Catalogue::authoritative_core()
+    orna_check::Catalogue::authoritative_core()
         .with_standard_sources(
             project.standard_profile().unwrap(),
             project.standard_sources().iter().cloned(),
@@ -2307,19 +2307,19 @@ fn binary_check_resolves_a_pinned_standard_collection_closure_through_the_produc
     let catalogue = project
         .production_catalogue()
         .expect("production catalogue from the pinned standard profile");
-    let analysis = orna_semantic::analyze_with_providers(
+    let analysis = orna_check::analyze_with_providers(
         project.modules(),
         &catalogue,
-        orna_semantic::SystemProviders::Production,
+        orna_check::SystemProviders::Production,
     );
     assert!(
         analysis.is_ok(),
         "analysis through production catalogue failed"
     );
-    let core_only = orna_semantic::analyze_with_providers(
+    let core_only = orna_check::analyze_with_providers(
         project.modules(),
-        &orna_semantic::Catalogue::authoritative_core(),
-        orna_semantic::SystemProviders::Production,
+        &orna_check::Catalogue::authoritative_core(),
+        orna_check::SystemProviders::Production,
     );
     assert!(
         !core_only.is_ok(),

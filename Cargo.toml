@@ -18,7 +18,7 @@ members = [
     "crates/orna-table",
     "crates/orna-serving",
     "crates/orna-security",
-    "crates/orna-semantic",
+    "crates/orna-check",
     "crates/orna-sys-macros",
     "crates/orna-standard-sources",
     "crates/orna-storage",

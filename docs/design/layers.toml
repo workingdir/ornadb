@@ -74,7 +74,7 @@ name = "orna-sys-macros"
 layer = 3
 
 [[crate]]
-name = "orna-semantic"
+name = "orna-check"
 layer = 4
 
 [[crate]]
@@ -171,7 +171,7 @@ role = "archive"
 # labels them. `--mode=report` prints these with their V number.
 [[known]]
 id = "V1"
-key = "layer:orna-semantic->orna-sys"
+key = "layer:orna-check->orna-sys"
 reason = "layer 4 -> 6: the only upward production edge; the catalogue moves to orna-sys-id at layer 3 (stage 06)"
 
 [[known]]
@@ -208,6 +208,11 @@ reason = "production in-degree 0 and not declared a tool; the LSP is its own bin
 id = "V10"
 key = "orphan:orna-traceability"
 reason = "production in-degree 0 and not declared a tool; moves under tools/ with no production dependent"
+
+[[known]]
+id = "V12"
+key = "layer:orna-sys-codegen->orna-sys-id"
+reason = "owner decision 2026-11-09 (S9): orna-sys-codegen validates semantic role attributes through VersionedId; the zero-dependency identity leaf is both a build and a runtime dependency of the generator"
 
 [[known]]
 id = "V11"

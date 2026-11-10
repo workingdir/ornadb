@@ -2150,7 +2150,7 @@ mod tests {
     fn fixture_profile() -> CompactOvbProfile {
         const SOURCE: &str = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../orna-semantic/tests/fixtures/contact-schema.orna"
+            "/../orna-check/tests/fixtures/contact-schema.orna"
         ));
         let header = SOURCE
             .lines()

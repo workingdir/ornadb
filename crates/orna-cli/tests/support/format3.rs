@@ -29,8 +29,8 @@ use orna_value::{
     ROV3_OVERFLOW_TAG, Raw, Snapshot, ValueFormat,
 };
 
+use orna_check::{ModuleInput, analyze};
 use orna_project::ObjectIdentityManifest;
-use orna_semantic::{ModuleInput, analyze};
 
 pub use orna_base::hex;
 

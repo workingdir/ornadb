@@ -12,10 +12,10 @@ use orna_application::{
     RemoteAnalysisGate, RemoteAnalysisPolicy, RemoteAnalysisProvenance,
     RemoteAnalysisProvenanceError, RemoteAnalysisRecordError, Reproducibility, RetainedArtifact,
 };
+use orna_check::Catalogue;
 use orna_evaluator::Limits;
 use orna_project::{LoadedProject, ProjectLoader};
 use orna_repository::Repository;
-use orna_semantic::Catalogue;
 use std::{fs, path::Path, process::Command};
 use tempfile::TempDir;
 

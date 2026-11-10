@@ -3,6 +3,7 @@ use orna_application::{
     ApplicationAuthority, ApplicationEffectFuture, ApplicationEffectRequest, ApplicationError,
     ApplicationLiveAdapter, AsyncApplicationEffectDispatcher,
 };
+use orna_check::Catalogue;
 use orna_evaluator::{Environment, Limits};
 use orna_live::{
     LiveAdminEffectDispatcher, LiveApplication, LiveApplicationWorkSupervisor, LiveEvalResponse,
@@ -14,7 +15,6 @@ use orna_runtime::{
     StreamAdministrationOutcome, StreamObservationRegistration, WriterLease,
 };
 use orna_runtime::{RuntimeIdentity, RuntimeState};
-use orna_semantic::Catalogue;
 use orna_sys_id::SysFailureCode;
 use orna_value::{CanonicalValue, OvbRaw};
 use std::{

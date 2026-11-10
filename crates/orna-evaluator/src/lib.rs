@@ -16,7 +16,7 @@ use std::{
 use num_bigint::{BigInt, Sign};
 use num_integer::Integer;
 use num_traits::{Signed, ToPrimitive, Zero};
-use orna_semantic::StandardDependencyProfile;
+use orna_check::StandardDependencyProfile;
 use orna_syntax::{
     AssignmentOperator, AssignmentTarget, ControlKind, Expr, LiteralKind, Parameter, Pattern,
     PatternField, ReplInput, Statement, StringSegment, parse_expression, parse_repl,
@@ -562,7 +562,7 @@ fn system_enum_constant(expression: &Expr, scope: &Scope) -> Option<(String, Str
     }
     segments.push("sys");
     segments.reverse();
-    orna_semantic::system_enum_constant(&segments)
+    orna_check::system_enum_constant(&segments)
 }
 
 /// Replaces every format-3 Blob reference in a raw REPL result with its

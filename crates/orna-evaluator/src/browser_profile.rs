@@ -8,7 +8,7 @@ use std::fmt;
 #[cfg(all(target_arch = "wasm32", feature = "browser-wasm"))]
 use std::ptr;
 
-use orna_semantic::{Catalogue, ModuleInput, SystemProviders, analyze_with_providers};
+use orna_check::{Catalogue, ModuleInput, SystemProviders, analyze_with_providers};
 use orna_syntax::{Declaration, parse_module_with_file};
 use orna_value::CanonicalValue;
 

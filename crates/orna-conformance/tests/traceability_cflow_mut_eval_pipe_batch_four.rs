@@ -3,9 +3,9 @@
 //! specified clause, an existing test, and the result of executing that test;
 //! each row below records only the particular observation made here.
 
+use orna_check::{DIAG_TYPE, ModuleInput, analyze};
 use orna_conformance::{SourceUnit, StageOutcome, TransactionalEvaluator};
 use orna_evaluator::{Environment, Limits, evaluate_expression};
-use orna_semantic::{DIAG_TYPE, ModuleInput, analyze};
 use orna_syntax::parse_module;
 use orna_value::{Diagnostic, Value};
 

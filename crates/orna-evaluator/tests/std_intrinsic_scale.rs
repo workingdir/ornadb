@@ -11,13 +11,13 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use num_bigint::BigInt;
+use orna_check::{Catalogue, ModuleInput};
 use orna_evaluator::{
     Environment, Functions, Limits, PureFunction, StandardLayer, StepBudget,
     evaluate_with_functions_and_budget, reference_standard_sources,
 };
 use orna_intrinsics::{Dispatch, catalogue};
 use orna_project_repl::AdmittedReplSession;
-use orna_semantic::{Catalogue, ModuleInput};
 use orna_syntax::{Declaration, parse_module_with_file};
 use orna_value::{CanonicalValue, Raw};
 

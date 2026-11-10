@@ -7,6 +7,11 @@
 //! activation context and is never published by this crate.
 
 use num_bigint::BigInt;
+use orna_check::{
+    Analysis, Catalogue, DIAG_AMBIGUOUS, DIAG_IMPORT, ModuleInput, Namespace,
+    StandardCatalogueError, StandardDependencyProfile, SystemProviders, TableSchema,
+    analyze_with_providers,
+};
 use orna_evaluator::{ActivationEffectReport, EffectGate};
 use orna_evaluator::{
     EffectHandler, Environment, EvaluationError, Functions, Limits, NominalDefinitions,
@@ -37,11 +42,6 @@ pub use orna_security::{
     CostAcknowledgement, RecordedRemoteAnalysis, RemoteAnalysisDecision, RemoteAnalysisPolicy,
     RemoteAnalysisRecordError, RemoteAnalysisRequest, Reproducibility, RetainedArtifact,
     RetainedArtifactError,
-};
-use orna_semantic::{
-    Analysis, Catalogue, DIAG_AMBIGUOUS, DIAG_IMPORT, ModuleInput, Namespace,
-    StandardCatalogueError, StandardDependencyProfile, SystemProviders, TableSchema,
-    analyze_with_providers,
 };
 use orna_syntax::{
     CaseArm, Declaration, Expr, FieldInitializer, Item, Pattern, Statement, StringSegment,
@@ -1432,7 +1432,7 @@ fn catalogue_column_rows(tables: &BTreeMap<String, TableSchema>) -> Vec<Canonica
     for (table, schema) in tables {
         for (position, column) in schema.declaration_order.iter().enumerate() {
             let ty = schema.fields.get(column);
-            let optional = matches!(ty, Some(orna_semantic::Type::Optional(_)));
+            let optional = matches!(ty, Some(orna_check::Type::Optional(_)));
             let key_position = schema
                 .admission
                 .as_ref()
@@ -2328,7 +2328,7 @@ impl SourceMutationEffectHandler {
     fn admission<'a>(
         &self,
         schema: &'a TableSchema,
-    ) -> Result<&'a orna_semantic::TableAdmission, EvaluationError> {
+    ) -> Result<&'a orna_check::TableAdmission, EvaluationError> {
         schema
             .admission
             .as_ref()
@@ -4407,7 +4407,7 @@ pub struct AdmittedApplication {
     limits: Limits,
     table_schemas: BTreeMap<String, AdmittedTableSchema>,
     #[cfg(test)]
-    module_header: orna_semantic::ModuleHeader,
+    module_header: orna_check::ModuleHeader,
 }
 
 impl AdmittedApplication {
@@ -5833,8 +5833,8 @@ mod tests {
     /// silently replacing the other.
     #[test]
     fn served_repl_table_schemas_reject_a_project_table_named_like_a_catalogue_table() {
+        use orna_check::StandardDependencyProfile;
         use orna_repository::Repository;
-        use orna_semantic::StandardDependencyProfile;
         use std::{fs, process::Command};
 
         let root = std::env::temp_dir().join(format!(

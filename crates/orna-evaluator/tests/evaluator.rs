@@ -10728,7 +10728,7 @@ fn admitted_eval_producer_stages_effectful_source_without_publishing() {
         staged
             .effects()
             .effects
-            .contains(&orna_semantic::EffectKind::Network)
+            .contains(&orna_check::EffectKind::Network)
     );
     assert!(staged.effects().may_fail);
     assert_eq!(

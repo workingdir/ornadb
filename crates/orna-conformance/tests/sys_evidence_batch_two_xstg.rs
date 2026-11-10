@@ -1,4 +1,4 @@
-use orna_semantic::{Catalogue, ModuleInput, analyze_with_catalogue};
+use orna_check::{Catalogue, ModuleInput, analyze_with_catalogue};
 use orna_sys::{
     AdmissionError, AdmissionRequest, Argument, ArgumentMap, ExecutionBoundary, FunctionDescriptor,
     FunctionId, FunctionIdentity, InvocationCompletion, InvocationContext, InvocationExecutor,
@@ -128,7 +128,7 @@ fn cases() -> Vec<Case> {
     ]
 }
 
-fn analyze(source: &str) -> orna_semantic::Analysis {
+fn analyze(source: &str) -> orna_check::Analysis {
     analyze_with_catalogue(
         &[ModuleInput::new("main.orna", source)],
         &Catalogue::authoritative_fixture(),

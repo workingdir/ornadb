@@ -7,9 +7,9 @@
 
 use std::collections::BTreeMap;
 
+use orna_check::{Analysis, SymbolKind};
 use orna_project::{LoadedProject, ObjectIdentityManifest, ProjectLoadError};
 use orna_repository::relation_admission::StagedRelation;
-use orna_semantic::{Analysis, SymbolKind};
 
 /// The relations one staged source admits, in deterministic module and table
 /// name order, with the source table name behind each relation.

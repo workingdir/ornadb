@@ -1,5 +1,5 @@
+use orna_check::{ModuleInput, analyze};
 use orna_conformance::{ConformanceAdapter, SemanticAdapter, SourceUnit, StageOutcome};
-use orna_semantic::{ModuleInput, analyze};
 
 const FIXTURE: &str = include_str!("fixtures/diagnostic-codes.orna");
 

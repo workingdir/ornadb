@@ -220,7 +220,7 @@ function! OrnaCaptureHover(data) abort
     let g:orna_hover_response = a:data['response']
 endfunction
 function! OrnaCaptureSemanticTokens(data) abort
-    let g:orna_semantic_response = a:data['response']
+    let g:orna_check_response = a:data['response']
 endfunction
 function! OrnaCaptureReferences(data) abort
     let g:orna_references_response = a:data['response']
@@ -334,11 +334,11 @@ call lsp#send_request('orna', {{
     \ 'on_notification': function('OrnaCaptureSemanticTokens'),
 \ }})
 let s:deadline = reltimefloat(reltime()) + 10.0
-while !exists('g:orna_semantic_response') && reltimefloat(reltime()) < s:deadline
+while !exists('g:orna_check_response') && reltimefloat(reltime()) < s:deadline
     sleep 10m
 endwhile
-call assert_true(exists('g:orna_semantic_response'), 'vim-lsp semantic token request timed out')
-let s:semantic = g:orna_semantic_response['result']
+call assert_true(exists('g:orna_check_response'), 'vim-lsp semantic token request timed out')
+let s:semantic = g:orna_check_response['result']
 
 execute 'edit ' . fnameescape($ORNA_TEST_DEPTH_FIXTURE)
 call assert_equal('orna', &filetype)

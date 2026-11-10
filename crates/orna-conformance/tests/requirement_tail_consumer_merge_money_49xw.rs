@@ -1,7 +1,7 @@
-use orna_semantic::{Catalogue, ModuleInput, Type, analyze_with_catalogue};
+use orna_check::{Catalogue, ModuleInput, Type, analyze_with_catalogue};
 use orna_stream::{CheckpointPositionMerge, Component, Position, merge_checkpoint_position};
 
-fn analyze(source: &str) -> orna_semantic::Analysis {
+fn analyze(source: &str) -> orna_check::Analysis {
     analyze_with_catalogue(
         &[ModuleInput::new("main.orna", source)],
         &Catalogue::authoritative_fixture(),

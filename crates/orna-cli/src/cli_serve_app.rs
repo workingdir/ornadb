@@ -25,10 +25,10 @@ use crate::media_range::{MediaMethod, MediaReply, media_reply, plan_media_respon
 use orna_application::{
     AdmittedApplication, ApplicationAuthority, ApplicationError, StagedActivation,
 };
+use orna_check::TableSchema;
 use orna_evaluator::Environment;
 use orna_project_repl::AdmittedReplSession;
 use orna_repository::{GitHashAlgorithm, KeyRange, NativeOid, RepositoryFormatContext};
-use orna_semantic::TableSchema;
 use orna_serving::media_preview::{
     MAX_PREVIEW_INPUT_BYTES, MAX_WAVE_INPUT_BYTES, PreviewError, WaveInspectionError,
     decode_image_preview, image_format_for, inspect_pcm_wave, is_wave_essence,
@@ -83,7 +83,7 @@ impl ServeApp {
     pub(super) fn admit(
         root: &str,
         project: &orna_project::LoadedProject,
-        catalogue: &orna_semantic::Catalogue,
+        catalogue: &orna_check::Catalogue,
     ) -> Result<Option<Self>, Diagnostic> {
         let Some(index) = project
             .identities()
@@ -1170,7 +1170,7 @@ mod serving_entry_tests {
     fn entry(console: Result<AdmittedReplSession, String>) -> ServingEntry {
         let app = ServeApp {
             authority: ApplicationAuthority::new(
-                orna_semantic::Catalogue::default(),
+                orna_check::Catalogue::default(),
                 Limits::default(),
             ),
             root: String::new(),
