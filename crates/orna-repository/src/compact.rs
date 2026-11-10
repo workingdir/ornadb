@@ -13,8 +13,14 @@ use std::{
 };
 
 use bytes::Bytes;
-use orna_syntax::{Expr, LiteralKind, parse_row};
-use orna_value::{CanonicalValue, OvbRaw, SchemaDescriptor, compare_primary_keys};
+pub use orna_format3::compact::COMPACT_MANIFEST_SHARD_LIMIT;
+use orna_format3::compact::{
+    COMPACT_PROFILE, ManifestHeader, SegmentRole, ShardEntry, canonical_key_extrema,
+    canonical_key_order, is_safe_atom, parse_manifest_header as parse_manifest_header_bytes,
+    parse_shard as parse_shard_bytes, validate_event_time_bounds,
+};
+use orna_syntax::parse_row;
+use orna_value::{CanonicalValue, OvbRaw, SchemaDescriptor};
 use parquet::{
     basic::{Compression, ConvertedType, Encoding, PageType, Type},
     column::{page::Page, reader::ColumnReader},
@@ -25,7 +31,7 @@ use uuid::{Uuid, Version};
 
 #[cfg(any(test, feature = "legacy-fixture-writer"))]
 use crate::PublicationJournalEntry;
-use crate::hex::{decode_text, hex_encode, is_hex};
+use crate::hex::{hex_encode, is_hex};
 use crate::wire::big::{put_string, put_u32, put_u64, take_fixed, take_string, take_u32, take_u64};
 use crate::{
     GitCommitRef, IndexGeneration, ManagedFileChange, ManagedPath, PrivateCommit,
@@ -33,7 +39,6 @@ use crate::{
 };
 
 /// Maximum number of entries in one canonical compact-manifest shard.
-pub const COMPACT_MANIFEST_SHARD_LIMIT: usize = 256;
 /// Maximum declared uncompressed size of one compact Parquet page.
 ///
 /// This is the compact profile's 16 MiB uncompressed row-group ceiling used
@@ -41,157 +46,8 @@ pub const COMPACT_MANIFEST_SHARD_LIMIT: usize = 256;
 /// the serialized page header before parquet-rs can allocate its decompressed
 /// buffer.
 pub const COMPACT_MAX_UNCOMPRESSED_PAGE_BYTES: usize = 16 * 1024 * 1024;
-const COMPACT_PROFILE: &str = "compact-storage-v1";
 const MAX_COMPACT_FILE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_COMPACT_ROW_GROUP_ROWS: i64 = 65_536;
-
-fn canonical_key_order(left: &[u8], right: &[u8]) -> Result<Ordering, RepositoryError> {
-    let left_value =
-        CanonicalValue::decode(left).map_err(|_| RepositoryError::InvalidCompactManifest)?;
-    let right_value =
-        CanonicalValue::decode(right).map_err(|_| RepositoryError::InvalidCompactManifest)?;
-    compare_primary_keys(&left_value, &right_value)
-        .map_err(|_| RepositoryError::InvalidCompactManifest)
-}
-
-fn canonical_key_extrema<'a, I>(mut keys: I) -> Result<(&'a [u8], &'a [u8]), RepositoryError>
-where
-    I: Iterator<Item = &'a [u8]>,
-{
-    let first = keys.next().ok_or(RepositoryError::InvalidCompactManifest)?;
-    keys.try_fold((first, first), |(min, max), key| {
-        let min = if canonical_key_order(key, min)? == Ordering::Less {
-            key
-        } else {
-            min
-        };
-        let max = if canonical_key_order(key, max)? == Ordering::Greater {
-            key
-        } else {
-            max
-        };
-        Ok::<_, RepositoryError>((min, max))
-    })
-}
-
-fn validate_event_time_bounds(
-    min_event_time: Option<&str>,
-    max_event_time: Option<&str>,
-) -> Result<(), RepositoryError> {
-    let (Some(min_event_time), Some(max_event_time)) = (min_event_time, max_event_time) else {
-        return if min_event_time.is_none() && max_event_time.is_none() {
-            Ok(())
-        } else {
-            Err(RepositoryError::InvalidCompactManifest)
-        };
-    };
-    let min = parse_canonical_utc_instant(min_event_time)?;
-    let max = parse_canonical_utc_instant(max_event_time)?;
-    if min > max {
-        return Err(RepositoryError::InvalidCompactManifest);
-    }
-    Ok(())
-}
-
-fn parse_canonical_utc_instant(value: &str) -> Result<(i64, u32), RepositoryError> {
-    let bytes = value.as_bytes();
-    if bytes.len() < 20
-        || !bytes.is_ascii()
-        || bytes.get(4) != Some(&b'-')
-        || bytes.get(7) != Some(&b'-')
-        || bytes.get(10) != Some(&b'T')
-        || bytes.get(13) != Some(&b':')
-        || bytes.get(16) != Some(&b':')
-    {
-        return Err(RepositoryError::InvalidCompactManifest);
-    }
-    let component = |start: usize, end: usize| {
-        bytes
-            .get(start..end)
-            .filter(|part| part.iter().all(u8::is_ascii_digit))
-            .and_then(|part| std::str::from_utf8(part).ok())
-            .and_then(|part| part.parse::<u32>().ok())
-    };
-    let (year, month, day, hour, minute, second) = (
-        component(0, 4),
-        component(5, 7),
-        component(8, 10),
-        component(11, 13),
-        component(14, 16),
-        component(17, 19),
-    );
-    let (Some(year), Some(month), Some(day), Some(hour), Some(minute), Some(second)) =
-        (year, month, day, hour, minute, second)
-    else {
-        return Err(RepositoryError::InvalidCompactManifest);
-    };
-    if !(1..=9999).contains(&year)
-        || !(1..=12).contains(&month)
-        || hour >= 24
-        || minute >= 60
-        || second >= 60
-    {
-        return Err(RepositoryError::InvalidCompactManifest);
-    }
-    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
-    let maximum_day = match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if leap => 29,
-        2 => 28,
-        _ => return Err(RepositoryError::InvalidCompactManifest),
-    };
-    if !(1..=maximum_day).contains(&day) {
-        return Err(RepositoryError::InvalidCompactManifest);
-    }
-
-    let mut at = 19;
-    let nanosecond = if bytes.get(at) == Some(&b'.') {
-        at += 1;
-        let start = at;
-        while bytes.get(at).is_some_and(u8::is_ascii_digit) {
-            at += 1;
-        }
-        let digits = at - start;
-        if !(1..=9).contains(&digits) {
-            return Err(RepositoryError::InvalidCompactManifest);
-        }
-        let fraction = component(start, at).ok_or(RepositoryError::InvalidCompactManifest)?;
-        fraction * 10_u32.pow((9 - digits) as u32)
-    } else {
-        0
-    };
-    if bytes.get(at..).is_none_or(|tail| tail != b"Z") {
-        return Err(RepositoryError::InvalidCompactManifest);
-    }
-
-    let year = i64::from(year);
-    let month = i64::from(month);
-    let day = i64::from(day);
-    let years_before = year - 1;
-    let days_before_year =
-        years_before * 365 + years_before / 4 - years_before / 100 + years_before / 400;
-    let days_before_epoch = 1969 * 365 + 1969 / 4 - 1969 / 100 + 1969 / 400;
-    let days_before_month = match month {
-        1 => 0,
-        2 => 31,
-        3 => 59,
-        4 => 90,
-        5 => 120,
-        6 => 151,
-        7 => 181,
-        8 => 212,
-        9 => 243,
-        10 => 273,
-        11 => 304,
-        12 => 334,
-        _ => unreachable!("month validated above"),
-    } + i64::from(month > 2 && leap);
-    let days = days_before_year + days_before_month + day - 1 - days_before_epoch;
-    let seconds =
-        days * 86_400 + i64::from(hour) * 3_600 + i64::from(minute) * 60 + i64::from(second);
-    Ok((seconds, nanosecond))
-}
 
 /// The compact role of one immutable segment.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -207,15 +63,6 @@ impl CompactSegmentRole {
             Self::Data => "data",
             Self::Replacement => "replacement",
             Self::Deletion => "deletion",
-        }
-    }
-
-    fn parse(value: &str) -> Result<Self, RepositoryError> {
-        match value {
-            "data" => Ok(Self::Data),
-            "replacement" => Ok(Self::Replacement),
-            "deletion" => Ok(Self::Deletion),
-            _ => Err(RepositoryError::InvalidCompactManifest),
         }
     }
 }
@@ -1211,13 +1058,17 @@ fn decode_projection_column(
             let ColumnReader::Int64ColumnReader(mut column) = reader else {
                 return Err(RepositoryError::InvalidCompactManifest);
             };
-            read_values!(column, i64, |value: &i64| Ok(OvbRaw::Int((*value).into())))
+            read_values!(column, i64, |value: &i64| Ok::<OvbRaw, RepositoryError>(
+                OvbRaw::Int((*value).into())
+            ))
         }
         PhysicalValueKind::Bool => {
             let ColumnReader::BoolColumnReader(mut column) = reader else {
                 return Err(RepositoryError::InvalidCompactManifest);
             };
-            read_values!(column, bool, |value: &bool| Ok(OvbRaw::Bool(*value)))
+            read_values!(column, bool, |value: &bool| Ok::<OvbRaw, RepositoryError>(
+                OvbRaw::Bool(*value)
+            ))
         }
         PhysicalValueKind::Str => {
             let ColumnReader::ByteArrayColumnReader(mut column) = reader else {
@@ -1252,7 +1103,7 @@ fn decode_projection_column(
                 column,
                 parquet::data_type::ByteArray,
                 |value: &parquet::data_type::ByteArray| {
-                    Ok(OvbRaw::Bytes(value.data().to_vec()))
+                    Ok::<OvbRaw, RepositoryError>(OvbRaw::Bytes(value.data().to_vec()))
                 }
             )
         }
@@ -4104,6 +3955,93 @@ fn path_key(path: &ManagedPath) -> Result<String, RepositoryError> {
         .ok_or(RepositoryError::InvalidCompactManifest)
 }
 
+fn decode_base64(value: &str) -> Result<Vec<u8>, RepositoryError> {
+    orna_base::base64_decode(value).map_err(|_| RepositoryError::InvalidCompactManifest)
+}
+
+impl From<orna_format3::compact::CompactError> for RepositoryError {
+    fn from(_: orna_format3::compact::CompactError) -> Self {
+        Self::InvalidCompactManifest
+    }
+}
+
+struct ParsedManifestHeader {
+    table: Uuid,
+    schema: [u8; 32],
+    next_generation: u64,
+    shards: Vec<ParsedShard>,
+}
+
+struct ParsedShard {
+    file: ManagedPath,
+    min_key: Vec<u8>,
+    max_key: Vec<u8>,
+    entries: usize,
+    hash: [u8; 32],
+}
+
+fn parse_manifest_header(bytes: &[u8]) -> Result<ParsedManifestHeader, RepositoryError> {
+    let parsed: ManifestHeader = parse_manifest_header_bytes(bytes)?;
+    let mut shards = Vec::with_capacity(parsed.shards.len());
+    for (number, shard) in parsed.shards.into_iter().enumerate() {
+        let number = u64::try_from(number).map_err(|_| RepositoryError::InvalidCompactManifest)?;
+        shards.push(ParsedShard {
+            file: shard_path(parsed.table, number)?,
+            min_key: shard.min_key,
+            max_key: shard.max_key,
+            entries: shard.entries,
+            hash: shard.hash,
+        });
+    }
+    Ok(ParsedManifestHeader {
+        table: parsed.table,
+        schema: parsed.schema,
+        next_generation: parsed.next_generation,
+        shards,
+    })
+}
+
+fn parse_shard(bytes: &[u8]) -> Result<Vec<CompactManifestEntry>, RepositoryError> {
+    parse_shard_bytes(bytes)?
+        .into_iter()
+        .map(CompactManifestEntry::from_parsed)
+        .collect()
+}
+
+impl CompactSegmentRole {
+    fn from_reader(role: SegmentRole) -> Self {
+        match role {
+            SegmentRole::Data => Self::Data,
+            SegmentRole::Replacement => Self::Replacement,
+            SegmentRole::Deletion => Self::Deletion,
+        }
+    }
+}
+
+impl CompactManifestEntry {
+    fn from_parsed(parsed: ShardEntry) -> Result<Self, RepositoryError> {
+        Ok(Self {
+            segment_id: parsed.segment_id,
+            role: CompactSegmentRole::from_reader(parsed.role),
+            generation: parsed.generation,
+            schema: parsed.schema,
+            encoder_version: parsed.encoder_version,
+            relative_path: ManagedPath::new(parsed.relative_path)?,
+            git_object_id: parsed.git_object_id,
+            sha256: parsed.sha256,
+            min_key: parsed.min_key,
+            max_key: parsed.max_key,
+            min_event_time: parsed.min_event_time,
+            max_event_time: parsed.max_event_time,
+            row_count: parsed.row_count,
+            compressed_bytes: parsed.compressed_bytes,
+            columns: parsed.columns,
+            row_group_index: parsed.row_group_index,
+            bloom: parsed.bloom,
+        })
+    }
+}
+
 fn canonical_manifest(
     manifest: &CompactManifest,
     shards: &[ShardDescriptor],
@@ -4176,307 +4114,6 @@ fn canonical_shard(entries: &[&CompactManifestEntry]) -> Result<Vec<u8>, Reposit
         .is_ok()
         .then_some(output.into_bytes())
         .ok_or(RepositoryError::InvalidCompactManifest)
-}
-
-struct ParsedManifestHeader {
-    table: Uuid,
-    schema: [u8; 32],
-    next_generation: u64,
-    shards: Vec<ParsedShard>,
-}
-
-struct ParsedShard {
-    file: ManagedPath,
-    min_key: Vec<u8>,
-    max_key: Vec<u8>,
-    entries: usize,
-    hash: [u8; 32],
-}
-
-fn parse_manifest_header(bytes: &[u8]) -> Result<ParsedManifestHeader, RepositoryError> {
-    let record = parse_record(bytes)?;
-    reject_unknown(
-        &record,
-        &["profile", "table", "schema", "next_generation", "shards"],
-    )?;
-    if string_field(&record, "profile")? != COMPACT_PROFILE {
-        return Err(RepositoryError::InvalidCompactManifest);
-    }
-    let table = Uuid::parse_str(string_field(&record, "table")?)
-        .map_err(|_| RepositoryError::InvalidCompactManifest)?;
-    let schema = parse_hex_32(string_field(&record, "schema")?)?;
-    let next_generation = integer_field(&record, "next_generation")?;
-    if next_generation == 0 {
-        return Err(RepositoryError::InvalidCompactManifest);
-    }
-    let mut shards = Vec::new();
-    let mut expected_number = 0_u64;
-    let mut expected_shard_paths = BTreeSet::new();
-    for shard in list_field(&record, "shards")? {
-        let shard = as_record(shard)?;
-        reject_unknown(
-            &shard,
-            &["number", "min_key", "max_key", "entries", "file", "hash"],
-        )?;
-        let number = integer_field(&shard, "number")?;
-        let declared_entries = usize::try_from(integer_field(&shard, "entries")?)
-            .map_err(|_| RepositoryError::InvalidCompactManifest)?;
-        if number != expected_number
-            || declared_entries == 0
-            || declared_entries > COMPACT_MANIFEST_SHARD_LIMIT
-        {
-            return Err(RepositoryError::InvalidCompactManifest);
-        }
-        expected_number = expected_number
-            .checked_add(1)
-            .ok_or(RepositoryError::InvalidCompactManifest)?;
-        let file = shard_path(table, number)?;
-        let expected_relative = file
-            .as_path()
-            .strip_prefix(compact_root(table)?.as_path())
-            .map_err(|_| RepositoryError::InvalidCompactManifest)?;
-        if string_field(&shard, "file")?
-            != expected_relative
-                .to_str()
-                .ok_or(RepositoryError::InvalidCompactManifest)?
-            || !expected_shard_paths.insert(path_key(&file)?)
-        {
-            return Err(RepositoryError::InvalidCompactManifest);
-        }
-        let hash = parse_hex_32(string_field(&shard, "hash")?)?;
-        let min_key = decode_hex(string_field(&shard, "min_key")?)?;
-        let max_key = decode_hex(string_field(&shard, "max_key")?)?;
-        shards.push(ParsedShard {
-            file,
-            min_key,
-            max_key,
-            entries: declared_entries,
-            hash,
-        });
-    }
-    Ok(ParsedManifestHeader {
-        table,
-        schema,
-        next_generation,
-        shards,
-    })
-}
-
-fn parse_shard(bytes: &[u8]) -> Result<Vec<CompactManifestEntry>, RepositoryError> {
-    let record = parse_record(bytes)?;
-    reject_unknown(&record, &["entries"])?;
-    let mut entries = Vec::new();
-    for value in list_field(&record, "entries")? {
-        let fields = as_record(value)?;
-        reject_unknown(
-            &fields,
-            &[
-                "segment_id",
-                "role",
-                "generation",
-                "schema_id",
-                "profile_version",
-                "encoder_version",
-                "relative_path",
-                "git_object_id",
-                "sha256",
-                "min_key",
-                "max_key",
-                "min_event_time",
-                "max_event_time",
-                "row_count",
-                "compressed_bytes",
-                "columns",
-                "row_group_index",
-                "bloom",
-            ],
-        )?;
-        if integer_field(&fields, "profile_version")? != 1 {
-            return Err(RepositoryError::InvalidCompactManifest);
-        }
-        let segment_id = Uuid::parse_str(string_field(&fields, "segment_id")?)
-            .map_err(|_| RepositoryError::InvalidCompactManifest)?;
-        let min_event_time = nullable_string_field(&fields, "min_event_time")?;
-        let max_event_time = nullable_string_field(&fields, "max_event_time")?;
-        let entry = CompactManifestEntry {
-            segment_id,
-            role: CompactSegmentRole::parse(string_field(&fields, "role")?)?,
-            generation: integer_field(&fields, "generation")?,
-            schema: parse_hex_32(string_field(&fields, "schema_id")?)?,
-            encoder_version: string_field(&fields, "encoder_version")?.to_owned(),
-            relative_path: ManagedPath::new(string_field(&fields, "relative_path")?)?,
-            git_object_id: string_field(&fields, "git_object_id")?.to_owned(),
-            sha256: parse_hex_32(string_field(&fields, "sha256")?)?,
-            min_key: decode_hex(string_field(&fields, "min_key")?)?,
-            max_key: decode_hex(string_field(&fields, "max_key")?)?,
-            min_event_time,
-            max_event_time,
-            row_count: integer_field(&fields, "row_count")?,
-            compressed_bytes: integer_field(&fields, "compressed_bytes")?,
-            columns: decode_base64(string_field(&fields, "columns")?)?,
-            row_group_index: boolean_field(&fields, "row_group_index")?,
-            bloom: boolean_field(&fields, "bloom")?,
-        };
-        entries.push(entry);
-    }
-    if entries.is_empty() || entries.len() > COMPACT_MANIFEST_SHARD_LIMIT {
-        return Err(RepositoryError::InvalidCompactManifest);
-    }
-    Ok(entries)
-}
-
-fn parse_record(bytes: &[u8]) -> Result<Vec<orna_syntax::RecordField>, RepositoryError> {
-    let text = std::str::from_utf8(bytes).map_err(|_| RepositoryError::InvalidCompactManifest)?;
-    let parsed = parse_row(text);
-    if !parsed.is_ok() {
-        return Err(RepositoryError::InvalidCompactManifest);
-    }
-    as_record(&parsed.value)
-}
-
-fn as_record(value: &Expr) -> Result<Vec<orna_syntax::RecordField>, RepositoryError> {
-    match value {
-        Expr::Record { fields, .. } => Ok(fields.clone()),
-        _ => Err(RepositoryError::InvalidCompactManifest),
-    }
-}
-
-fn reject_unknown(
-    fields: &[orna_syntax::RecordField],
-    names: &[&str],
-) -> Result<(), RepositoryError> {
-    let mut seen = BTreeSet::new();
-    if fields
-        .iter()
-        .any(|field| !names.contains(&field.name.as_str()) || !seen.insert(field.name.as_str()))
-    {
-        return Err(RepositoryError::InvalidCompactManifest);
-    }
-    Ok(())
-}
-
-fn field<'a>(
-    fields: &'a [orna_syntax::RecordField],
-    name: &str,
-) -> Result<&'a Expr, RepositoryError> {
-    let mut values = fields
-        .iter()
-        .filter(|field| field.name == name)
-        .map(|field| &field.value);
-    let Some(value) = values.next() else {
-        return Err(RepositoryError::InvalidCompactManifest);
-    };
-    if values.next().is_some() {
-        return Err(RepositoryError::InvalidCompactManifest);
-    }
-    Ok(value)
-}
-
-fn string_field<'a>(
-    fields: &'a [orna_syntax::RecordField],
-    name: &str,
-) -> Result<&'a str, RepositoryError> {
-    let Expr::Literal {
-        text,
-        kind: LiteralKind::String,
-        ..
-    } = field(fields, name)?
-    else {
-        return Err(RepositoryError::InvalidCompactManifest);
-    };
-    let value = text
-        .strip_prefix('"')
-        .and_then(|value| value.strip_suffix('"'))
-        .ok_or(RepositoryError::InvalidCompactManifest)?;
-    if value.contains('\\') {
-        return Err(RepositoryError::InvalidCompactManifest);
-    }
-    Ok(value)
-}
-
-fn integer_field(fields: &[orna_syntax::RecordField], name: &str) -> Result<u64, RepositoryError> {
-    let Expr::Literal {
-        text,
-        kind: LiteralKind::Integer,
-        ..
-    } = field(fields, name)?
-    else {
-        return Err(RepositoryError::InvalidCompactManifest);
-    };
-    text.parse()
-        .map_err(|_| RepositoryError::InvalidCompactManifest)
-}
-
-fn nullable_string_field(
-    fields: &[orna_syntax::RecordField],
-    name: &str,
-) -> Result<Option<String>, RepositoryError> {
-    match field(fields, name)? {
-        Expr::Literal {
-            text,
-            kind: LiteralKind::Null,
-            ..
-        } if text == "null" => Ok(None),
-        Expr::Literal {
-            text,
-            kind: LiteralKind::String,
-            ..
-        } => {
-            let value = text
-                .strip_prefix('"')
-                .and_then(|value| value.strip_suffix('"'))
-                .ok_or(RepositoryError::InvalidCompactManifest)?;
-            if value.is_empty() || value.contains('\\') || !value.bytes().all(is_safe_atom) {
-                return Err(RepositoryError::InvalidCompactManifest);
-            }
-            Ok(Some(value.to_owned()))
-        }
-        _ => Err(RepositoryError::InvalidCompactManifest),
-    }
-}
-
-fn boolean_field(fields: &[orna_syntax::RecordField], name: &str) -> Result<bool, RepositoryError> {
-    let Expr::Literal {
-        text,
-        kind: LiteralKind::Boolean,
-        ..
-    } = field(fields, name)?
-    else {
-        return Err(RepositoryError::InvalidCompactManifest);
-    };
-    match text.as_str() {
-        "true" => Ok(true),
-        "false" => Ok(false),
-        _ => Err(RepositoryError::InvalidCompactManifest),
-    }
-}
-
-fn list_field<'a>(
-    fields: &'a [orna_syntax::RecordField],
-    name: &str,
-) -> Result<&'a [Expr], RepositoryError> {
-    let Expr::List { elements, .. } = field(fields, name)? else {
-        return Err(RepositoryError::InvalidCompactManifest);
-    };
-    Ok(elements)
-}
-
-fn decode_hex(value: &str) -> Result<Vec<u8>, RepositoryError> {
-    decode_text(value).ok_or(RepositoryError::InvalidCompactManifest)
-}
-
-fn parse_hex_32(value: &str) -> Result<[u8; 32], RepositoryError> {
-    decode_hex(value)?
-        .try_into()
-        .map_err(|_| RepositoryError::InvalidCompactManifest)
-}
-
-fn decode_base64(value: &str) -> Result<Vec<u8>, RepositoryError> {
-    orna_value::base64_decode(value).map_err(|_| RepositoryError::InvalidCompactManifest)
-}
-
-fn is_safe_atom(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b':' | b'+')
 }
 
 fn is_selected_ref(value: &str) -> bool {
@@ -5272,11 +4909,11 @@ mod tests {
 
         assert!(matches!(
             canonical_key_order(&integer, &text),
-            Err(RepositoryError::InvalidCompactManifest)
+            Err(orna_format3::compact::CompactError::InvalidManifest)
         ));
         assert!(matches!(
             canonical_key_order(&text, &integer),
-            Err(RepositoryError::InvalidCompactManifest)
+            Err(orna_format3::compact::CompactError::InvalidManifest)
         ));
     }
 

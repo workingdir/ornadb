@@ -11,6 +11,7 @@
 //! respective layers. The retained format-1/2 commits stay readable under
 //! their original decoders (ORNA-ROW-013, ORNA-UPGRADE-001/002).
 
+pub mod compact;
 pub mod format2_ogb;
 pub mod format2_orr;
 pub mod format2_rov;
