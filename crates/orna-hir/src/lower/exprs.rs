@@ -671,13 +671,15 @@ fn lower_lambda(
             continue;
         }
         let slot = lambda.params[index];
+        let expected = lambda.locals[slot].ty;
         let init = push(
             builder,
             &mut lambda,
             ExprKind::Local(slot),
             parameter.pattern.span().clone(),
         );
-        let pat = pats::lower_pattern(builder, &mut lambda, &parameter.pattern);
+        let pat =
+            pats::lower_pattern_with(builder, &mut lambda, &parameter.pattern, Some(expected));
         prologue.push(Stmt::Let { pat, init });
     }
     let root = lower_expr(builder, &mut lambda, body);
@@ -722,12 +724,18 @@ fn lower_block(
         match statement {
             Statement::Let {
                 pattern,
-                annotation: _,
+                annotation,
                 value,
                 ..
             } => {
+                // The annotation is the initializer's expected type and the
+                // binding slots' written type; a pattern without one leaves
+                // the slots to the type pass (stage H2).
+                let expected = annotation.as_ref().map(|annotation| {
+                    super::types::lower_type(builder, state.module, &[], annotation)
+                });
                 let init = lower_expr(builder, state, value);
-                let pat = pats::lower_pattern(builder, state, pattern);
+                let pat = pats::lower_pattern_with(builder, state, pattern, expected);
                 lowered.push(Stmt::Let { pat, init });
             }
             Statement::Assert { value, .. } => {

@@ -278,6 +278,99 @@ pub fn compare_resolution(
     differences
 }
 
+/// Compares the printed type of every public signature the checker publishes.
+///
+/// The comparison is over the checker's keys: a function the checker does not
+/// export has no published signature to compare with (its result type is
+/// inferred from the body, and the old header records `Error`), so that is not
+/// a difference in this slice. A key the checker publishes and the HIR lacks,
+/// or whose printed type differs, is a difference with its reason recorded in
+/// the same expected-differences ratchet.
+#[must_use]
+pub fn compare_signatures(
+    case_id: &str,
+    old: &BTreeMap<String, String>,
+    new: &BTreeMap<String, String>,
+) -> Vec<Difference> {
+    let mut differences = Vec::new();
+    for (key, old_text) in old {
+        match new.get(key) {
+            Some(new_text) if new_text == old_text => {}
+            Some(new_text) => differences.push(difference(
+                case_id,
+                "public-signature",
+                format!("{key}={old_text}"),
+                format!("{key}={new_text}"),
+            )),
+            None => differences.push(difference(
+                case_id,
+                "public-signature",
+                format!("{key}={old_text}"),
+                format!("{key}=no HIR signature"),
+            )),
+        }
+    }
+    differences
+}
+
+/// The typed-share ratchet: the number of corpus cases typed on HIR.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TypedShare {
+    /// Corpus cases whose owned bodies are all typed.
+    pub typed: usize,
+    /// Corpus cases the HIR lowers and the pass examines.
+    pub lowered: usize,
+}
+
+/// Reads `tests/differential/typed-share.toml`.
+pub fn load_typed_share() -> Result<TypedShare, String> {
+    let path = differential_dir().join("typed-share.toml");
+    parse_typed_share(&read_file(&path)?)
+}
+
+/// Parses the typed-share ratchet text.
+pub fn parse_typed_share(source: &str) -> Result<TypedShare, String> {
+    let document = toml_lite::parse(source)?;
+    let table = document
+        .tables_named("typed-share")
+        .next()
+        .ok_or_else(|| "typed-share.toml: no `[[typed-share]]` table".to_owned())?;
+    let typed = usize::try_from(table.integer("typed")?)
+        .map_err(|_| "typed-share.toml: `typed` must be non-negative".to_owned())?;
+    let lowered = usize::try_from(table.integer("lowered")?)
+        .map_err(|_| "typed-share.toml: `lowered` must be non-negative".to_owned())?;
+    if typed > lowered {
+        return Err(format!(
+            "typed-share.toml: typed ({typed}) exceeds lowered ({lowered})"
+        ));
+    }
+    Ok(TypedShare { typed, lowered })
+}
+
+/// Applies the typed-share ratchet.
+///
+/// The typed count may only grow. The denominator may move when the corpus
+/// changes, but it must be the measured value: a new or removed case is a
+/// deliberate edit of this file, exactly as the exclusion account is.
+#[must_use]
+pub fn typed_share_ratchet(recorded: TypedShare, observed: TypedShare) -> Vec<String> {
+    let mut failures = Vec::new();
+    if observed.typed < recorded.typed {
+        failures.push(format!(
+            "typed share fell from {} to {} of {} lowered cases; the ratchet only grows",
+            recorded.typed, observed.typed, observed.lowered
+        ));
+    }
+    if observed.lowered != recorded.lowered {
+        failures.push(format!(
+            "the lowered corpus changed from {} to {} cases; record the measured denominator \
+             in typed-share.toml",
+            recorded.lowered, observed.lowered
+        ));
+    }
+    failures
+}
+
 /// Lowercase hex, the canonical rendering both ratchets and messages use.
 #[must_use]
 pub fn encode(bytes: &[u8]) -> String {
