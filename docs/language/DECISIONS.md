@@ -2329,3 +2329,529 @@ Reversibility. Low.
 * Under C: no assignment node.
 
 --------------------------------------------------------------------------
+
+## D11. Modules, packages, re-export and std replaceability
+
+Bead `ornadb-csenl.11`. Critique section 3.5 "Modules", F13, F14.
+
+Two questions: Q1 is there a re-export form; Q2 what does "`std` is
+replaceable" mean, and what is pinned.
+
+### Specification today
+
+* Imports (`03-source-modules.md:40-64`): `use a.b;`, `use a.b as x;`,
+  `use a.b.*;`, `use a.b.{X, y};`, `use x as _;` (prelude). The grammar has
+  no visibility on `use`: `use_declaration = "use" , namespace_path ,
+  use_tail , ";"` (`grammar/orna.ebnf:27`); `visibility` appears only on
+  other declarations. No clause defines re-export.
+* Yet `09-standard-library.md:9` says "`std.query` and `std.stream` may
+  re-export the intrinsic operators with identical identities and
+  behaviour", and `:136` says "`std.money` re-exports that protocol".
+* `sys` and `std` are the only reserved namespaces (ORNA-NS-005, `:32`);
+  `sys` "MUST be built into every conforming implementation and MUST NOT be
+  replaced or shadowed" (NS-006, `:34`); `std` "MUST remain optional and
+  replaceable, although its top-level name is reserved when present"
+  (NS-007, `:36`).
+* ORNA-LIB-001 (`09-standard-library.md:11`): library behaviour is
+  determined by captured dependency snapshots; ORNA-LIB-002 (`:13`): core
+  integrity, transactions and assertions work without `std`, and "An absent
+  optional module produces the ordinary import diagnostic; it cannot be
+  filled by an undocumented host library with the same spelling." LIB-003
+  (`:15`): portable operations have specified semantics "under the
+  reference-library profile".
+* ORNA-PACKAGE-001 (`08-relations.md:135`): version 1.0 MUST NOT require a
+  package registry, semantic-version solver or lockfile where exact Git
+  commit pins suffice; PACKAGE-003 (`:139`): `std` "remains an ordinary
+  optional attached Orna database/library except for mandatory core
+  language and `sys` functions". There is no package or version declaration
+  in source.
+* Chapter 9 specifies behaviour for `std.text`, `std.bits`, `std.stats`,
+  `std.money`, `std.time`, codecs and others (`:128-152`), including
+  operations a program cannot implement in Orna (D12).
+
+### Implementation today
+
+* No `pub use`. The pinned `std.query` instead declares 16 public
+  functions with marker bodies (`fail(error(code: "ORNA-EVAL-UNSUPPORTED",
+  message: "std.query.filter is the core relation intrinsic"))`,
+  `query.orna:251-288`) that the runtime binds to the root intrinsic of the
+  same name; the owner's native-declarations design counts 16 such
+  re-exports (`docs/design/native-declarations.md:94-99`).
+* The binding of a std declaration to a native is decided by names at
+  load time: `orna-application/src/lib.rs:330-356` looks up
+  `(module, leaf name)` in the intrinsic catalogue and requires
+  `intrinsic.pins.contains(CURRENT_STD_PIN)`.
+* `CURRENT_STD_PIN` is one hard-coded commit hash
+  (`orna-intrinsics/src/pin.rs:7`) and `PinRange::contains` is string
+  equality (`:38-40`), so a program whose captured std is any other commit
+  loses native bindings even though ORNA-LIB-001 says its captured std
+  decides its behaviour.
+* The runtime checks `sys` shadowing by scope lookup at run time
+  (`orna-evaluator/src/lib.rs:554`, `:9804`) though NS-006 forbids it
+  `[INFERENCE: the checker side was not confirmed, critique F44]`.
+
+### The problem
+
+Fact: the specification uses re-export in prose and has no syntax for it;
+the workaround costs 16 marker declarations. Fact: NS-007 and LIB-002 say
+`std` is replaceable while chapter 9 specifies its native behaviour and the
+engine binds natives to one hard-coded `std` commit; these cannot all hold
+(critique section 3.6). Fact: there is no package or version model beyond
+Git pins.
+
+### Options for Q1: re-export
+
+#### D11-A. Add `pub use`
+
+What it is. `pub use a.b.{X, y};` (and `pub use a.b as x;`) re-exports
+names with their original identity: the re-exported name resolves to the
+same `DefId`, equal for identity and effects. The reference defines
+visibility of re-exports and conflicts.
+
+Prior art. Rust `pub use`
+(https://doc.rust-lang.org/reference/items/use-declarations.html); OCaml
+`include` and module aliases (https://ocaml.org/manual/5.3/modules.html).
+
+For. Removes the 16 marker declarations; "identical identities"
+(`09-standard-library.md:9`) becomes a property of the language, not a
+runtime table; the HIR needs aliases anyway for imports.
+
+Against. A grammar and name-resolution change (visibility on `use`,
+cycle and glob re-export rules). Re-export of a native across a package
+boundary interacts with D12.
+
+Reversibility. High: adding it is additive.
+
+#### D11-B. No re-export
+
+What it is. State in the reference that the language has none and delete
+"may re-export" from chapter 9. A module needing a second path declares a
+forwarding function (an ordinary function, with its own identity).
+
+For. No change. The spec becomes consistent by deleting two sentences.
+
+Against. A forwarding function has a different identity from the original,
+so `std.query.filter` is not `filter`; "identical identities" is lost,
+which matters for the pinned-std historical story (ORNA-LIB-001) and for
+the effect and plan treatment of the core operators (the evaluator today
+needs the root-intrinsic identity to treat `std.query.filter` as a relation
+stage, `orna-evaluator/src/lib.rs:1116-1135`).
+
+Reversibility. High.
+
+### Options for Q2: what "std is replaceable" means
+
+#### D11-P. `std` is pinned and privileged
+
+What it is. `std` is part of the language distribution in all but file
+layout: it is a specific, engine-recognised snapshot (or a set of
+supported snapshots) whose natives the engine binds. "Replaceable" in
+NS-007 and "optional" in LIB-002 are rewritten to say: the program may omit
+it, and may pin a different supported snapshot, but may not provide a
+different library under the name `std`.
+
+Prior art. Rust's `std` over `core` and `alloc`
+(https://doc.rust-lang.org/core/index.html); Elm's kernel code is
+reserved to its own packages
+(https://guide.elm-lang.org/interop/limits.html describes the boundary; the
+claim about package restrictions is the critique's).
+
+For. Matches what is implemented; keeps natives in std (the
+native-declarations design as written).
+
+Against. Contradicts NS-007 as written; "replaceable" disappears from the
+language's promises; whoever pins std acquires an ABI (D12).
+
+Reversibility. Medium.
+
+#### D11-Q. `std` is ordinary, replaceable Orna on top of a built-in core
+
+What it is. `core` and `sys` are built in and versioned with the engine
+(D12-A). `std` contains only Orna source (no natives); any module may
+replace it. NS-007, LIB-002 and PACKAGE-003 are true as written. Chapter 9's
+native-backed operations move to `core`.
+
+Prior art. Rust `core`/`std` split; OCaml `external` declarations in the
+standard library bind to compiler primitives
+(https://ocaml.org/manual/5.3/intfc.html) while the library itself is
+ordinary OCaml.
+
+For. The specification is consistent; historical pins (LIB-001) become
+tractable because the native ABI is the engine's, not a std commit's.
+
+Against. Moves 113 natives (and the contract text for them) out of
+`std`; the specification of chapter 9 splits into "core" and "std" halves;
+users who pinned `std` for native behaviour see them in `core` instead.
+
+Reversibility. Medium.
+
+### Package and version declarations (applies to both)
+
+Currently a dependency is a Git commit and nothing in source names it
+(PACKAGE-001). The owner may keep that for 1.x or add a package or version
+declaration (a manifest, or a module header). This is only a decision for
+D11 if D12-C is considered, because natives in third-party packages need a
+package identity and an ABI version.
+
+### Migration cost
+
+| Option | Pinned std | Spec text | Engine |
+|---|---|---|---|
+| Q1-A | delete 16 marker declarations in `query.orna` | grammar, resolution | alias resolution in the HIR |
+| Q1-B | none | delete two sentences in chapter 9 | none |
+| Q2-P | none | reword NS-007, LIB-002, PACKAGE-003 | none; ABI by pin as today |
+| Q2-Q | natives leave `std`: 113 `native fn` become core declarations; `std` keeps only Orna | split chapter 9; NS-007 stays | native table moves to core |
+
+### What the HIR needs from the answer
+
+* Imports lower to alias `DefId`s that resolve to the target definition;
+  with A, an alias can itself be exported.
+* A `DefId` has a package identity (engine core, `sys`, or a dependency
+  pin); the HIR checks `sys` shadowing at resolution (removing the runtime
+  test).
+* Q2-Q: `std` modules contain no body-less declarations; Q2-P: they may.
+
+--------------------------------------------------------------------------
+
+## D12. Where host functions live
+
+Bead `ornadb-csenl.12`. Critique F13, F14, F15, F27, section 3.6, section
+4.2; the owner's design `docs/design/native-declarations.md`.
+
+### Specification today
+
+* `09-standard-library.md:3`: "The language supplies a small intrinsic
+  environment sufficient to evaluate source, query and update tables ...
+  The optional `std` namespace contains ordinary, explicitly imported
+  library code pinned to a Git snapshot." `:7`: the root environment has
+  `Some`, `null`, `error`, `fail`, `now`, `uuid7` and the relational and
+  stream operations; "Ordinary lexical declarations may shadow
+  unqualified helpers; `sys` itself cannot be shadowed."
+* `sys` is built in and not replaceable (ORNA-NS-006, `03-source-modules.md:34`);
+  it is "the implementation-provided model of the attached database and
+  its execution" (`15-system.md:5`). Its functions and relations are
+  specified in `api/sys.json` (82 functions, 78 relations) and
+  `34-system-reference.md`.
+* Chapter 9 normatively specifies `std.text`, `std.bits`, `std.stats`,
+  `std.money`, `std.time` and codec behaviour (`:128-152`), several of
+  which cannot be written in Orna (D11).
+* No clause defines how a function is declared as implemented by the host.
+
+### Implementation today
+
+Three surfaces answer "which functions does the runtime implement":
+
+| Surface | Declared in | Shadowable | Overloads | Bound by |
+|---|---|---|---|---|
+| Root intrinsics (`Some`, `now`, `uuid7`, `error`, `fail`, relation operators) | Rust, matched by callee spelling (`orna-evaluator/src/lib.rs:9675-9683`) | yes | by arity | name at each call |
+| `std` natives (113) | `.orna` with marker or self-call bodies plus the Rust catalogue `orna-intrinsics` (124 entries) | yes | no | catalogue lookup by `(module, leaf)` at admission (`orna-application/src/lib.rs:330-356`) |
+| `sys` | `api/sys.json` with Orna signatures as strings, parsed by a second signature parser (`orna-check/src/system_api.rs`); generated ids (`orna-sys-id`, `orna-sys-codegen`, `orna-sys-macros`, `orna-sys-model`, `orna-sys`) | no (checked at run time) | by arity and type | JSON read at run time, then per-function Rust |
+
+* `native-declarations.md:62-92` measures the std surface: 113 natives; 56
+  dispatched through a private `__leaf` and 57 through the public name; 83
+  top-level `fn __x` declarations in the pin, 68 with a `fail(error(..))`
+  marker body; 88 forwarders; 12 public functions that call themselves;
+  129 `native fn` declarations the migration would write.
+* A call is routed by `route_call` (`orna-evaluator/src/lib.rs:9884`), which
+  after resolving the callee tests `pins.contains(CURRENT_STD_PIN)`, a
+  constant (D11).
+* The owner's proposal: `pub native fn trim(value: Str): Str effect none;`
+  admitted only in the pinned standard dependency, bound by `(module path,
+  declared name)` at load, unbound is a load error, ABI versioned by the
+  pin (`native-declarations.md:34-56`, `:686-705`, `:1019-1043`). It leaves
+  `sys` as JSON and keeps `std` the only native carrier (Q5, `:1381-1385`).
+
+### The problem
+
+Fact: three mechanisms for one question, and the declaration in `std` can
+lie (a marker body next to a real native). Judgement (critique): serious
+languages give one answer, a privileged core versioned with the language
+distribution and ordinary code on top (OCaml `external`, Rust `core`
+intrinsics, Gleam `@external`, Lua's small C API), and the native
+declarations design should (a) not admit natives only in `std`, (b) use an
+engine-level ABI version and (c) not give `effect` to natives alone (D2),
+and `sys` should use the same form.
+
+### Options
+
+#### D12-A. Built-in `core` and `sys` versioned with the engine; `std` is pure Orna
+
+What it is. Two engine-shipped interface files, `core.orna` and `sys.orna`,
+contain only body-less declarations (`native fn ..`, or `fn ..;`). They
+parse and check through the ordinary front end; each declaration's
+`DefId` is the native or `sys` id. `api/sys.json` becomes generated output
+(the critique: invert the source of truth). The native ABI is a number on
+the engine, not a std commit. `std` is Orna only and replaceable (D11-Q).
+The 113 natives become `core` declarations (or move into Orna if the 14
+rows `native-declarations.md:1365-1371` marks as expressible are
+rewritten).
+
+Prior art.
+* OCaml `external` declarations bind to runtime primitives
+  (https://ocaml.org/manual/5.3/intfc.html).
+* Rust `core` intrinsics and `extern` blocks
+  (https://doc.rust-lang.org/std/intrinsics/index.html,
+  https://doc.rust-lang.org/reference/items/external-blocks.html).
+* Gleam `@external` (https://tour.gleam.run/advanced-features/externals/).
+* PostgreSQL `CREATE FUNCTION ... LANGUAGE internal AS 'symbol'`, checked
+  at creation against the backend symbol table
+  (https://www.postgresql.org/docs/current/xfunc-internal.html), and
+  `extend` mechanisms for extensions
+  (https://www.postgresql.org/docs/current/extend-extensions.html).
+* Lua keeps a small host API and library tables
+  (https://www.lua.org/manual/5.4/manual.html).
+
+For.
+* One declaration mechanism for core, `sys` and what are natives today;
+  `std` is truly replaceable; ORNA-LIB-001 gets an engine-side ABI to
+  version against.
+* Retires `orna-intrinsics` tables, `sys-id`, `sys-codegen` and
+  `sys-macros` (critique 4.3, F15, F27).
+
+Against.
+* The largest change: a second pin-bump story (users keep `std`, but
+  functions move to `core`), a spec split of chapter 9, and a new
+  load-time check for body-less declarations in `core`.
+* The owner's native-declarations work (7 stages, PR #9828) is partly
+  superseded: the declaration form stays, its admission rule (pinned std
+  only) and ABI rule change.
+* Whatever `core` exposes is permanently versioned with the engine; the
+  engine cannot drop a native without a language version.
+
+Risks. Scope; ordering against the HIR (the `DefId` of a declaration must
+exist before a native binds to it).
+
+Reversibility. Medium.
+
+Rests on.
+* The owner accepts that natives are part of the language distribution.
+* D11-Q, D2 (a single effect syntax for declarations).
+
+#### D12-B. `std` keeps natives; one declaration form; `sys` unchanged
+
+What it is. The owner's draft design as written: `pub native fn ..;` in
+the pinned standard dependency only, bound at load by `(module path,
+declared name)`, ABI versioned by the pin, `effect` clause mandatory on
+natives, unbound is a load error. `sys` stays in JSON. The 16 `std.query`
+re-exports need their own `native fn` (no `pub use`, D11-B) or `pub use`
+(D11-A).
+
+For. Smallest delta from the in-flight design; corrects the lying marker
+bodies; no change to the spec's "std" namespace.
+
+Against. Two mechanisms remain (Orna declarations for std, JSON for `sys`);
+`std` stays privileged, which contradicts NS-007 (D11-P resolves the
+contradiction by rewording); the `effect` clause exists for natives only
+(critique objection 3) unless D2 generalises it; the binding key is two
+strings (`native-declarations.md:707-710`).
+
+Risks. The design records its own open questions (language version
+coordinate for the extension: 1.2.0 or errata; vocabulary; user natives).
+
+Reversibility. Medium: moving natives from `std` to `core` later is a pin
+bump plus declaration moves.
+
+Rests on. D11-P and D2-B or D2-C (effects on natives only) or D2-A.
+
+#### D12-C. Natives may be declared in any pinned package
+
+What it is. As B, but the admission rule is "a package whose pin the
+engine trusts and whose declarations match an ABI the engine implements",
+so third-party packages can ship native operations. Needs package identity
+and an ABI manifest (D11).
+
+Prior art. PostgreSQL extensions
+(https://www.postgresql.org/docs/current/extend-extensions.html) and
+Erlang NIFs (https://www.erlang.org/doc/apps/erts/erl_nif.html); SQLite
+loadable extensions are the same idea (no page cited).
+
+For. Open ecosystem for host capabilities.
+
+Against. Reverses the owner's draft decision (Q5 "no"); native code from a
+package is arbitrary code in the engine, against the trust model in
+`26-security.md` `[INFERENCE: not read in full]`; every native needs an ABI
+version and a signature check.
+
+Weak for 1.x: nothing in the corpus needs it and the owner's draft
+deliberately excludes it.
+
+### Migration cost
+
+| Option | Pinned std | Engine | Spec text |
+|---|---|---|---|
+| A | 113 natives become `core` declarations; `std` loses its natives | `orna-intrinsics` tables, `sys` codegen and JSON-as-source retired | split chapter 9; define `core` and `sys` interface files |
+| B | `std` rewritten as in the draft (130 `native fn` and removed markers) | intrinsics keep identity and dispatch, lose signatures | amend 09 and 03 for `native` |
+| C | as B | plus package trust and ABI manifest | as B plus package model |
+
+### What the HIR needs from the answer
+
+* Every function in the HIR is `Source`, `Native` or `Sys` by declaration,
+  never by name; `Callee` is computed once (critique F01, F17).
+* A and C: natives and `sys` declared in interface modules that go through
+  the front end; `DefId` is the id.
+* B: natives are body-less declarations in std modules; `sys` is a separate
+  table behind a lookup that yields a `DefId`.
+* An ABI version carried by the engine (A), by a pin (B) or by a package
+  (C), checked once at load.
+
+--------------------------------------------------------------------------
+
+## D13. Specification hygiene
+
+Bead `ornadb-csenl.13`. Critique F04, F29, F30, section 3.1.
+
+### Specification today (facts)
+
+* `implementation/ORCHESTRATOR.md` (119 lines) is part of the specification
+  tree and fixes tooling policy: "Root orchestrator: exactly
+  `openai-codex/gpt-5.6-terra`" and worker model (`:25-27`), worker counts
+  (`:72`), "Missing required model support is a checkpointed blocker, not
+  permission to substitute another model" (`:30`).
+* `source/40-upgrade-contract.md` is headed "# 37. Compatibility, migration
+  and verification" (`:1`, the file is chapter 40), refers to "the supplied
+  earlier 1.1.0 authoring draft" (`:8`) and instructs "Keep current
+  parser/evaluator/embedded ownership/partial-clone code where" correct
+  (`:56`). `START-HERE.md:5` and `CHANGELOG.md:4` say the same of the
+  publication.
+* Vendor and product names in normative clauses: ORNA-CP-001
+  (`12-checkpoints.md:7`), ORNA-TURSO-001..006 (`20-embedded.md:8-13`),
+  ORNA-HOT-001 (`22-publication.md:7`) require "embedded Turso"; 16 lines in
+  `source/` mention it; `01-scope.md:5` says the specification "does not
+  prescribe a compiler implementation language, a user-interface toolkit or
+  a hosting profile".
+* Internal contradiction: ORNA-PUB-001 (`22-publication.md:11`, default
+  compact writer target 16 MiB) against ORNA-UPGRADE-003
+  (`40-upgrade-contract.md:17`, one canonical row store, no compact or
+  hybrid dual writing).
+* Fossils: about 33 of the 80 files in `examples/invalid/` are named
+  `legacy-*.orna`; 14 diagnostic codes in the `ORNA091-E-*` family
+  (`BOUND-COLON`, `CONVERSION-CHAIN`, `CURRENCY`, `CURRENCY-SYMBOL`,
+  `FIELD-CONSTRAINT`, `IMPL-FOR`, `MATCH`, `OPAQUE`, `POSTFIX-QUESTION`,
+  `RESULT`, `RETURN-ARROW`, `STATIC-FN`, `TRYFROM`, `VAR`) describe syntax
+  that did not ship; ten source chapters say "version 1.0" or "1.0";
+  `grammar/orna.ebnf:1` says "Orna 1.0.0 syntactic grammar".
+* Size: 947 distinct bold requirement ids and 840 occurrences of "MUST"
+  across `source/*.md`; chapter 34 (system reference) is 3,568 lines.
+
+### Implementation today
+
+* Crate descriptions and types use 1.0 names (`FailureStatus::{Failed,
+  Succeeded}` at `orna-stream/src/lib.rs:479` against the spec's `open`
+  and `recovered`; `Type::Text` against `Str`; critique F43). Not
+  re-verified here.
+
+### The problem
+
+Fact: one artefact is a language reference, a product requirements list and
+an agent work order. Judgement (critique): nobody can implement or review
+against it, it changes when the prompt changes, and the reader cannot
+tell live rules from history.
+
+### Options
+
+#### D13-A. Split into three documents
+
+What it is. (1) A language reference (the outline in
+[README.md](README.md)); (2) format specifications (canonical value
+encodings, row store, publication, protocol, VFS); (3) product
+requirements (CLI, REPL, serving, repository behaviour, embedded runtime,
+conformance gates). `ORCHESTRATOR.md` and the upgrade contract move out of
+the specification into the repository's process documents. Vendor names
+become contract statements (transaction, durability, single-owner). History
+goes to a migration appendix. The `ORNA-` id space is kept for requirements
+that survive.
+
+Prior art.
+* OCaml publishes the manual in separate parts
+  (https://ocaml.org/manual/5.3/index.html).
+* SQLite splits language documentation from the file format
+  (https://www.sqlite.org/fileformat2.html).
+* The Go specification is the language only (https://go.dev/ref/spec) with
+  modules in a separate reference (https://go.dev/ref/mod).
+
+For. Each document has one audience and can change at its own rate; a
+second implementation can claim conformance to the part it implements.
+
+Against. Large editing effort (critique estimate L); cross-references
+between the three need maintenance; the 1.1.0 text is published and
+pinned by artefact hash (`CHANGELOG.md:4`), so restructuring changes the
+publication identity.
+
+Reversibility. High: documents can be re-merged.
+
+#### D13-B. One document, cleaned
+
+What it is. Keep the single specification tree. Delete `ORCHESTRATOR.md`,
+retitle chapters, fix the PUB-001 contradiction, move fossils to an
+appendix, replace vendor names with contract text, and add the reference
+content as new chapters.
+
+For. Smallest structural change; keeps ids and cross-references.
+
+Against. The three audiences stay fused; the language reference chapters
+live beside 3,568 lines of system reference and product behaviour.
+
+Reversibility. High.
+
+#### D13-C. New language reference beside the frozen 1.1.0
+
+What it is. Leave `reference/Orna-1.1.0` as the frozen historical
+publication (hash-pinned). Write the reference as a new document under
+`docs/language/` (and a new version line, for example 1.2 or 2.0), which
+declares which 1.1.0 clauses it keeps, replaces or drops. The 1.1.0 text
+gets an erratum list instead of edits.
+
+For. No change to the pinned artefact; the new reference starts clean; the
+native-declarations design's version question (Q1, 1.2.0 or errata,
+`native-declarations.md:1350-1355`) is answered by the same mechanism.
+
+Against. Two normative documents for a period; conformance claims must say
+which one; "which clauses survive" is a large table to maintain.
+
+Reversibility. Medium.
+
+### Migration cost
+
+| Option | Source text | Fixtures and tests | Publication |
+|---|---|---|---|
+| A | restructure 42 chapters into three documents | `examples/invalid/legacy-*` move to the migration appendix; conformance corpus references change | new artefact identity |
+| B | edit in place | rename or move fossil fixtures | new artefact identity for the edited tree |
+| C | add a new tree | none initially | 1.1.0 identity unchanged |
+
+### What the HIR needs from the answer
+
+* Nothing structural. The HIR design needs one thing: the document that
+  states the typing, effect and evaluation rules must exist and be the
+  authority (README.md), so that the HIR's rules are the specification's
+  rules and not a transcription of the checker.
+
+--------------------------------------------------------------------------
+
+## Questions only the owner can answer
+
+These are decisions about intent, not options that more analysis can rank:
+
+1. D1: is terse unannotated declaration a product requirement, or only a
+   consequence of INFER-1?
+2. D2: which grain of effect do users need to read in a signature: twelve
+   kinds, three levels, or two?
+3. D3: is `null` a keyword for `None` kept in the language, and is a nested
+   option something programs may build?
+4. D4: is `std.result` something the language wants users to see? Should a
+   handler narrow on a nominal error type? Can cleanup code observe
+   cancellation?
+5. D5: which of "user-declared overloading" and "types as arguments" does
+   the language want, independent of today's platform needs?
+6. D6 and D7: do tables need fixed-width integers and a native map or set
+   for the domain's first programs, or is the corpus evidence (no
+   corpus of user programs yet) enough to defer?
+7. D8: are user-declared dimensions and units a 1.x promise, or is a closed
+   set (time, size, money) enough?
+8. D9: is the branch-and-merge workflow the default workflow, so that the
+   default key should be merge-safe?
+9. D10: why was `var` removed in 1.1, and does that reason forbid `let mut`?
+10. D11 and D12: is `std` a replaceable library or a privileged part of
+    the distribution, and may a third-party package ever ship native code?
+11. D13: is the 1.1.0 publication frozen (hash-pinned) or editable?
+
+--------------------------------------------------------------------------
