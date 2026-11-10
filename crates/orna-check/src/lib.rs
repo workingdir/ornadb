@@ -1107,7 +1107,7 @@ fn fixture_modules(catalogue: &mut Catalogue, rows: &FixtureRows) {
 /// declaration block of `05-types.md` "Dimensions and units". Only the units
 /// the fixtures name are public, so the private helpers never shadow the
 /// intrinsic temporal suffixes such as `90.min`.
-const FIXTURE_UNIT_SUPPORT: &str = "\
+pub const FIXTURE_UNIT_SUPPORT: &str = "\
 pub dim Length;
 pub dim Mass;
 pub dim Time;

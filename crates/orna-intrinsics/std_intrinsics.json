@@ -1,6 +1,6 @@
 {
   "schema": "orna.std_intrinsics.v1",
-  "source_digest": "acf9cfee9c9fdde7",
+  "source_digest": "723cfa30b243257a",
   "intrinsics": [
     {
       "id": "CoreSome",
@@ -64,14 +64,14 @@
       "leaf": null,
       "signature": {
         "type_params": [],
-        "params": [{ "name": "code", "type": "Str", "has_default": false, "pipeline": false }, { "name": "message", "type": "Str", "has_default": false, "pipeline": false }],
+        "params": [{ "name": "code", "type": "Str", "has_default": false, "pipeline": false }, { "name": "message", "type": "Str", "has_default": false, "pipeline": false }, { "name": "cause", "type": "Error?", "has_default": true, "pipeline": false }],
         "result": "Error",
-        "arities": []
+        "arities": [2, 3]
       },
       "effect": "Pure",
       "dispatch": { "kind": "Native" },
       "justification": "CoreIntrinsic",
-      "note": "constructs the core Error value from a code and message",
+      "note": "constructs the core Error value from a code, a message and an optional cause",
       "pins": { "since": "fdf63e87cc2ce52f240ba80328c61f31d38153a9", "until": null }
     },
     {
