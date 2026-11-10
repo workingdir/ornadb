@@ -306,3 +306,16 @@ jobs:
             --baseline crates/orna-evaluator/benchmarks/baseline.json \
             --results "$RUNNER_TEMP/bench.json" \
             --summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Run the executor benchmarks and compare their counters
+        run: |
+          set -euo pipefail
+          python3 scripts/gate_evidence.py run --record hir-exec-benchmarks --check benchmarks \
+            --title "the executor's share of the three HIR design benchmarks" \
+            --out "$RUNNER_TEMP/hir-exec-bench" --timeout-minutes 30 \
+            -- cargo run --locked --release -p orna-differential --bin hir_exec_bench
+          grep -o '{"pipeline":"exec".*}' "$RUNNER_TEMP/hir-exec-bench/hir-exec-benchmarks.log" > "$RUNNER_TEMP/exec.json"
+          python3 scripts/check_benchmark_baseline.py \
+            --baseline crates/orna-differential/benchmarks/exec.json \
+            --results "$RUNNER_TEMP/exec.json" \
+            --summary "$GITHUB_STEP_SUMMARY"

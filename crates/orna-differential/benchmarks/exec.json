@@ -1,14 +1,16 @@
 {
-  "note": "H4 baseline of the executor's share of the three benchmarks of the HIR design section 7.4, measured on orna-exec by crates/orna-differential/src/bin/hir_exec_bench.rs. steps is the executor's expression-evaluation count; calls counts every source-level call, because orna-exec does not memoise (B1 makes the design's 242,785 calls). B3 is not measured: orna-exec has no table scan yet, so it is listed under not_yet in the record. Wall time is recorded and not part of this baseline. Re-record only in a PR that explains why the counters changed.",
+  "note": "H4 baseline of the executor's share of the three benchmarks of the HIR design section 7.4, measured on orna-exec by crates/orna-differential/src/bin/hir_exec_bench.rs. steps is the executor's expression-evaluation count. calls counts every source-level call; orna-exec does not memoise, so B1 makes the design's 242,785 calls, while the old evaluator memoises B1 (397 steps, 48 calls), and the counters are not comparable across the two. allocations counts heap allocations made during the measured run (global counting allocator, bench bin only). The design's zero-allocation goal for B2 per iteration is NOT met: B2 allocates 3,000,004 times over 1,000,000 iterations (about 3 per iteration); this baseline records that number so the gate prevents further growth; it is not a claim of the goal. B3 is not measured: orna-exec has no table scan yet, so it is listed under not_yet in the record. Wall time is recorded and not part of this baseline. Re-record only in a PR that explains why a counter changed.",
   "benchmarks": {
     "b1_fib_25": {
       "steps": 2670631,
       "calls": 242785,
+      "allocations": 1335315,
       "gated": true
     },
     "b2_fold_1000000": {
       "steps": 8000008,
       "calls": 1,
+      "allocations": 3000004,
       "gated": true
     }
   }
