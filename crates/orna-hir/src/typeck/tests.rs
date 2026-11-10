@@ -177,3 +177,48 @@ fn a_printed_signature_uses_the_specification_spelling() {
         Some("add(Int, [Str?]) -> Int")
     );
 }
+
+#[test]
+fn a_protocol_member_called_on_an_instance_is_typed() {
+    let mut program = program(
+        "pub protocol P {\n    fn value(self): Int;\n}\npub type Box {\n    impl P {\n        fn value(self): Int = 1;\n    }\n}\npub fn f(b: Box): Int = b.value();\n",
+    );
+    let summary = typeck(&mut program);
+    assert!(test_accepted(&program, &summary), "{summary:?}");
+    assert_eq!(result(&program, "f"), "Int");
+}
+
+#[test]
+fn a_bounded_generic_call_resolves_through_the_protocol() {
+    let mut program = program(
+        "pub protocol P {\n    fn value(self): Int;\n}\npub fn read<T: P>(x: T): Int = x.value();\n",
+    );
+    let summary = typeck(&mut program);
+    assert!(test_accepted(&program, &summary), "{summary:?}");
+    assert_eq!(result(&program, "read"), "Int");
+}
+
+#[test]
+fn two_implementations_of_one_member_are_an_overlap_diagnostic() {
+    let mut program = program(
+        "pub protocol P {\n    fn value(self): Int;\n}\npub type Box {\n    impl P {\n        fn value(self): Int = 1;\n    }\n    impl P {\n        fn value(self): Int = 2;\n    }\n}\npub fn f(b: Box): Int = b.value();\n",
+    );
+    let _ = typeck(&mut program);
+    let module = test_module(&program);
+    assert!(
+        program.modules[module]
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == crate::diag::GENERIC_OVERLAP),
+        "expected ORNA-GENERIC-014"
+    );
+}
+
+#[test]
+fn a_member_call_without_an_implementation_is_not_typed() {
+    let mut program = program(
+        "pub protocol P {\n    fn value(self): Int;\n}\npub type Box {\n    x: Int,\n}\npub fn f(b: Box): Int = b.value();\n",
+    );
+    let summary = typeck(&mut program);
+    assert!(!test_accepted(&program, &summary), "{summary:?}");
+}
