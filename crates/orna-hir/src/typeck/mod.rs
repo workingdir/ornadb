@@ -39,8 +39,9 @@ use orna_syntax::SyntaxSpan;
 
 use crate::diag::{INFER_AMBIGUOUS, INFER_CONFLICT, PUBLIC_ANNOTATION};
 use crate::{
-    BinOp, Body, BodyId, DefId, DefKind, ExprId, ExprKind, FnBody, HirDiagnostic, LocalId, LogicOp,
-    ModuleId, Pat, PatId, Program, RelOp, Stmt, TableOp, Ty, TyKind, UnOp, Visibility,
+    BinOp, Body, BodyId, DefId, DefKind, ExprId, ExprKind, FnBody, GenericParam, HirDiagnostic,
+    LocalId, LogicOp, ModuleId, Name, Pat, PatId, Program, RelOp, Stmt, TableOp, Ty, TyKind, UnOp,
+    Visibility,
 };
 
 mod call;
@@ -201,6 +202,8 @@ enum Attempt {
         bodies: Vec<(BodyId, Body)>,
         /// The annotations this body determined that the source omitted.
         solved: Vec<Solved>,
+        /// The generic parameters the omitted annotations were generalised into.
+        generics: Vec<GenericParam>,
     },
     /// The body is inside the program and has a conflict.
     Failed {
@@ -239,9 +242,13 @@ impl TypeChecker<'_> {
                     continue;
                 }
                 match self.attempt(body) {
-                    Attempt::Typed { bodies, solved } => {
+                    Attempt::Typed {
+                        bodies,
+                        solved,
+                        generics,
+                    } => {
                         progressed = true;
-                        self.commit_typed(body, bodies, solved);
+                        self.commit_typed(body, bodies, solved, generics);
                     }
                     Attempt::Failed {
                         bodies,
@@ -403,22 +410,33 @@ impl TypeChecker<'_> {
             Ok(parts) => parts,
             Err(attempt) => return attempt,
         };
+        // A private function's omitted annotations may stay open after the
+        // body is checked; they become generic parameters (ORNA-INFER-003).
+        // A public function has already been rejected above when it omits one.
+        let base = match &self.program.defs[owner].kind {
+            DefKind::Fn(function) if self.program.defs[owner].vis != Visibility::Public => {
+                Some(function.generics.len())
+            }
+            _ => None,
+        };
         let mut check = BodyCheck::new(&mut *self.program, &self.variant_owner, owner);
         let root = check.check_root(body_id, expected);
         let root_ty = match root {
             Ok(root_ty) => root_ty,
             Err(reason) => return Attempt::NotYet(reason),
         };
+        let mut generics = Vec::new();
         let mut solved = Vec::new();
         if let Some(slot) = root_slot {
             solved.push(Solved {
                 def: owner,
                 slot,
-                ty: check.zonk(root_ty),
+                ty: check.generalize(root_ty, base, &mut generics),
             });
         }
         for index in omitted {
             let ty = check.local_ty(body_id, body_params[index]);
+            let ty = check.generalize(ty, base, &mut generics);
             solved.push(Solved {
                 def: owner,
                 slot: Slot::Param(index),
@@ -427,7 +445,11 @@ impl TypeChecker<'_> {
         }
         let (bodies, mut diagnostics, conflicts) = check.finish();
         if conflicts == 0 {
-            Attempt::Typed { bodies, solved }
+            Attempt::Typed {
+                bodies,
+                solved,
+                generics,
+            }
         } else {
             let detail = diagnostics
                 .iter()
@@ -444,12 +466,21 @@ impl TypeChecker<'_> {
         }
     }
 
-    fn commit_typed(&mut self, body: BodyId, bodies: Vec<(BodyId, Body)>, solved: Vec<Solved>) {
+    fn commit_typed(
+        &mut self,
+        body: BodyId,
+        bodies: Vec<(BodyId, Body)>,
+        solved: Vec<Solved>,
+        generics: Vec<GenericParam>,
+    ) {
         let owner = self.program.bodies[body].owner;
         let module = self.program.defs[owner].module;
         for (id, checked) in bodies {
             self.program.bodies[id] = checked;
             self.done.insert(id);
+        }
+        if let DefKind::Fn(function) = &mut self.program.defs[owner].kind {
+            function.generics.extend(generics);
         }
         for Solved { def, slot, ty } in solved {
             if let DefKind::Fn(function) = &mut self.program.defs[def].kind {
@@ -571,6 +602,26 @@ impl<'a> BodyCheck<'a> {
         infer.zonk(&mut self.program.tys, ty)
     }
 
+    /// Turns the variables an omitted annotation leaves open into generic
+    /// parameters of the owner, appended to `generics` (ORNA-INFER-003). With
+    /// no base (a public or non-function owner) this only zonks.
+    fn generalize(&mut self, ty: Ty, base: Option<usize>, generics: &mut Vec<GenericParam>) -> Ty {
+        let Some(base) = base else {
+            return self.zonk(ty);
+        };
+        let first = base + generics.len();
+        let (ty, added) = self.infer.generalize(
+            &mut self.program.tys,
+            ty,
+            u32::try_from(first).expect("generics fit u32"),
+        );
+        generics.extend((0..added).map(|offset| GenericParam {
+            name: Name::new(&format!("T{}", first + offset)),
+            bounds: Vec::new(),
+        }));
+        ty
+    }
+
     fn kind_of(&self, ty: Ty) -> Option<TyKind> {
         self.program.tys.kind(ty).cloned()
     }
@@ -687,6 +738,23 @@ impl<'a> BodyCheck<'a> {
     /// the same span, reached by two constraints, is reported once.
     fn conflict(&mut self, message: impl Into<Box<str>>, span: SyntaxSpan) {
         let diagnostic = HirDiagnostic::new(INFER_CONFLICT, message.into(), span);
+        if self.diagnostics.contains(&diagnostic) {
+            return;
+        }
+        self.conflicts += 1;
+        self.diagnostics.push(diagnostic);
+    }
+
+    /// Reports an operand whose type stays open at the point it is used
+    /// (ORNA-INFER-007), naming the operand as the annotation site.
+    fn ambiguous(&mut self, span: SyntaxSpan) {
+        let diagnostic = HirDiagnostic::new(
+            INFER_AMBIGUOUS,
+            Box::<str>::from(
+                "the type of this operand is not yet known; add an annotation to the value it reads",
+            ),
+            span,
+        );
         if self.diagnostics.contains(&diagnostic) {
             return;
         }
@@ -881,9 +949,11 @@ impl<'a> BodyCheck<'a> {
         ) {
             return Ok(result);
         }
-        let has_variable = matches!(self.kind_of(left_resolved), Some(TyKind::Infer(_)))
-            || matches!(self.kind_of(right_resolved), Some(TyKind::Infer(_)));
-        if has_variable {
+        let unsolved = [(lhs, left_resolved), (rhs, right_resolved)]
+            .into_iter()
+            .find(|&(_, ty)| matches!(self.kind_of(ty), Some(TyKind::Infer(_))));
+        if let Some((operand, _)) = unsolved {
+            let before = self.conflicts;
             self.unify(left, right, span.clone());
             let left_resolved = self.resolved(left);
             let right_resolved = self.resolved(right);
@@ -892,6 +962,12 @@ impl<'a> BodyCheck<'a> {
             {
                 return Ok(result);
             }
+            if self.conflicts == before {
+                // The operand's type is still open: it is underconstrained, so
+                // the smallest useful site is the operand itself (ORNA-INFER-007).
+                self.ambiguous(body.exprs[operand].span.clone());
+            }
+            return Ok(self.error());
         }
         if matches!(self.kind_of(left_resolved), Some(TyKind::Error))
             || matches!(self.kind_of(right_resolved), Some(TyKind::Error))
