@@ -5,6 +5,7 @@ use num_bigint::BigInt;
 use orna_hir::Ty;
 
 use super::order::compare_sort_keys;
+use super::stats_decimal::collection_items;
 use super::values::{exactly, list, list_of, truth};
 use crate::error::Stop;
 use crate::machine::Machine;
@@ -69,13 +70,4 @@ fn bounds(bins: &[Value]) -> Result<Vec<(Value, Value)>, Stop> {
         previous_upper = Some(upper);
     }
     Ok(bounds)
-}
-
-/// Refuses a collection of more elements than the limit allows, as the old evaluator's `items` check does.
-fn collection_items(machine: &Machine<'_>, count: usize) -> Result<(), Stop> {
-    if count > machine.limits.max_collection_items {
-        Err(Stop::Error("ORNA-EVAL-LIMIT"))
-    } else {
-        Ok(())
-    }
 }
