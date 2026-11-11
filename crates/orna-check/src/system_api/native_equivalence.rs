@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use orna_syntax::{
     Declaration, Expr, GenericParameter, LiteralKind, NativeEffectSet, Pattern, TypeExpr,
-    parse_interface,
+    TypeMember, TypeRepresentation, parse_interface,
 };
 
 const SYS_ORNA: &str = include_str!("../../../orna-hir/interface/sys.orna");
@@ -632,5 +632,64 @@ fn namespace_handles_match_json_grouped_handles() {
     assert_eq!(
         actual, expected,
         "the handles in the sys namespace modules must match the catalogue's grouped_handle fields"
+    );
+}
+
+/// The `sys.rt.*` relation handles against the `Relation` fields of `sys.RuntimeView`. The catalogue names each
+/// handle `sys.rt.<field>`; each `Relation` field of the record must carry the same element type. Both sides must
+/// name the same 19 fields.
+#[test]
+fn runtime_view_relation_fields_match_json_rt_handles() {
+    let catalogue: serde_json::Value =
+        serde_json::from_str(SYS_JSON).expect("the catalogue must be JSON");
+    let expected: BTreeMap<String, String> = catalogue["relations"]
+        .as_array()
+        .expect("catalogue `relations` must be an array")
+        .iter()
+        .filter_map(|relation| {
+            let handle = relation["grouped_handle"]
+                .as_str()
+                .expect("catalogue `grouped_handle` must be a string");
+            let name = relation["name"]
+                .as_str()
+                .expect("catalogue `name` must be a string");
+            handle
+                .strip_prefix("sys.rt.")
+                .map(|field| (field.to_owned(), format!("Relation<{name}>")))
+        })
+        .collect();
+    let parsed = parse_interface(SYS_ORNA);
+    // `Query` is both a generator builtin (bare in `Query<T>` signatures) and the declared `sys.Query` relation. The
+    // relation field must qualify it, so it is re-added to the declared set for this check only.
+    let mut declared = declared_names(&parsed.value.items);
+    declared.insert("Query".to_owned());
+    let members = parsed
+        .value
+        .items
+        .iter()
+        .find_map(|item| match &item.declaration {
+            Declaration::Type {
+                name,
+                representation: TypeRepresentation::Nominal { members },
+                ..
+            } if name == "RuntimeView" => Some(members),
+            _ => None,
+        })
+        .expect("sys.orna must declare the RuntimeView record");
+    let actual: BTreeMap<String, String> = members
+        .iter()
+        .filter_map(|member| match member {
+            TypeMember::Field { name, ty, .. } => {
+                let rendered = render_type(ty, &declared);
+                rendered
+                    .starts_with("Relation<")
+                    .then(|| (name.clone(), rendered))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        actual, expected,
+        "the Relation fields of sys.RuntimeView must match the catalogue's sys.rt.* handles"
     );
 }
