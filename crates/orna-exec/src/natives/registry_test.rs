@@ -19,6 +19,10 @@ const PORTED: &[(&str, &str)] = &[
         "core.text",
         include_str!("../../../orna-hir/interface/core/text.orna"),
     ),
+    (
+        "core.encoding.base64",
+        include_str!("../../../orna-hir/interface/core/encoding/base64.orna"),
+    ),
 ];
 
 /// The names of the `pub native fn` declarations one interface source states.

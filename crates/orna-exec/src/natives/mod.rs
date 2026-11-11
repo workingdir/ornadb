@@ -3,6 +3,7 @@
 //! Each family is one module, copied from the old evaluator's family of the same name. The old `Value` is private to
 //! the old evaluator, so these functions work on [`crate::value::Value`] and share no code with it.
 
+mod base64;
 mod bits;
 mod hash;
 #[cfg(test)]
@@ -25,6 +26,8 @@ pub(crate) type NativeFn = fn(&mut Machine<'_>, Vec<Value>) -> Result<Value, Sto
 pub(crate) fn lookup(key: &NativeKey) -> Option<NativeFn> {
     let module = key.module.to_string();
     Some(match (module.as_str(), key.name.as_str()) {
+        ("core.encoding.base64", "encode") => base64::encode,
+        ("core.encoding.base64", "decode") => base64::decode,
         ("core.bits", "bit_or") => bits::bit_or,
         ("core.bits", "bit_and") => bits::bit_and,
         ("core.bits", "bit_xor") => bits::bit_xor,
