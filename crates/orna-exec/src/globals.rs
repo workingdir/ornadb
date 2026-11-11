@@ -33,6 +33,12 @@ impl Globals {
     pub fn get(&self, def: DefId) -> Option<&Value> {
         self.values.get(&def)
     }
+
+    /// Binds the `let` `def` to `value`, replacing any cached value. A session binds the hidden `$_` global to each
+    /// line's result this way; a later run reads the bound value without evaluating an initializer.
+    pub fn insert(&mut self, def: DefId, value: Value) {
+        self.values.insert(def, value);
+    }
 }
 
 impl Machine<'_> {

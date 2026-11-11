@@ -154,3 +154,22 @@ fn evaluating_a_function_as_a_global_is_refused() {
     );
     assert_eq!(result, Err(ExecError::NotYet("global is not a let")));
 }
+
+#[test]
+fn bound_value_is_read_without_evaluating_the_initializer() {
+    let program = lower_source(SOURCE);
+    let label = fn_named(&program, "label");
+    let code = let_named(&program, "code");
+
+    let mut globals = Globals::new();
+    globals.insert(code, text("USD"));
+    let (result, _) = measure_entry_in(
+        &program,
+        label,
+        Vec::new(),
+        LIMITS,
+        Box::new(MemoryStore::new()),
+        &mut globals,
+    );
+    assert_eq!(result.map(|measured| measured.value), Ok(text("USD")));
+}
