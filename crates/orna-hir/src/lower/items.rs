@@ -238,9 +238,17 @@ impl Builder<'_> {
                 span,
             );
         }
+        let (offset, affine) = match &definition {
+            orna_syntax::UnitDefinition::Derived { offset, affine, .. } => {
+                (super::units::literal_offset(offset.as_ref()), *affine)
+            }
+            orna_syntax::UnitDefinition::Base => (None, false),
+        };
         self.pending[def.index()].kind = PendingKind::Built(DefKind::Unit(UnitDef {
             family: None,
             factors: Vec::new(),
+            offset,
+            affine,
         }));
         if let orna_syntax::UnitDefinition::Derived { value, offset, .. } = definition {
             // A derived unit's expression is not part of the value model, but its

@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use orna_differential::case::{Case, CaseKind, Corpus};
 use orna_differential::{compare, observe_checker, observe_new};
-use orna_hir::ModuleOrigin;
+use orna_hir::{Idx, ModuleOrigin};
 
 /// Cases whose diagnostic code sets differ, measured when this test landed.
 /// The count may only go down.
@@ -34,10 +34,12 @@ fn hir_codes(case: &Case) -> Option<BTreeSet<String>> {
     let mut lowered = observe_new::lower_case(case).ok()?;
     orna_hir::typeck(&mut lowered.program);
     let program = &lowered.program;
+    let owned = &lowered.owned;
     Some(
         program
             .diagnostics()
             .filter(|(module, _)| program.modules[*module].origin == ModuleOrigin::Project)
+            .filter(|(module, _)| owned.get(module.index()).copied().unwrap_or(false))
             .map(|(_, diagnostic)| diagnostic.code.to_owned())
             .collect(),
     )
