@@ -428,23 +428,53 @@ pub enum ChangeTargetKind {
     row,
 }
 
+/// Snapshot/runtime-pinned reference to one canonical system-relation row.
+///
+/// Kind: opaque-generic
+///
+/// Invariants:
+/// - preserves the row natural key and resolution context
+/// - does not grant authority
+/// - live references are runtime-generation-bound
 pub type RowRef<T> {}
 
+/// Explicit existential envelope for a value crossing a reflective system boundary.
+///
+/// Kind: opaque
+///
+/// Invariants:
+/// - is not a dynamic Any fallback
+/// - retains the exact originating static type
+/// - cannot be implicitly unboxed or converted
 pub type Value {
     type: TypeRef,
     redacted: Bool,
     canonical_digest: Digest?,
 }
 
+/// One named typed reflective-call argument.
+///
+/// Kind: record
 pub type Argument {
     pub name: Str,
     pub value: Value,
 }
 
+/// Immutable ordered collection of uniquely named reflective-call arguments.
+///
+/// Kind: record
+///
+/// Invariants:
+/// - names are unique
+/// - canonical order is Unicode scalar-value order by name
+/// - record literals are boxed only under an ArgumentMap expected type
 pub type ArgumentMap {
     pub entries: [Argument],
 }
 
+/// Safe type, protocol and codec metadata for a value without private-field disclosure.
+///
+/// Kind: record-generic
 pub type ValueMetadata<T> {
     pub static_type: TypeRef,
     pub nominal_type: TypeRef?,
@@ -453,6 +483,14 @@ pub type ValueMetadata<T> {
     pub redacted: Bool,
 }
 
+/// Operational handle for one accepted invocation in one runtime generation.
+///
+/// Kind: opaque-generic
+///
+/// Invariants:
+/// - resumable is false in 1.0
+/// - usable only by sys.await and sys.cancel
+/// - descriptive decoding never revives operational authority
 pub type InvocationHandle<T> {
     invocation: InvocationRef,
     runtime: RuntimeId,
@@ -460,6 +498,15 @@ pub type InvocationHandle<T> {
     resumable: Bool,
 }
 
+/// Complete terminal result returned by sys.await.
+///
+/// Kind: record-generic
+///
+/// Invariants:
+/// - status is terminal
+/// - succeeded has value and no failure
+/// - failed has failure and no value
+/// - cancelled/orphaned have no value and may carry a diagnostic
 pub type InvocationResult<T> {
     pub invocation: InvocationRef,
     pub status: InvocationStatus,
@@ -470,6 +517,9 @@ pub type InvocationResult<T> {
     pub duration: Duration?,
 }
 
+/// Snapshot-pinned reference to a resolved expression in a definition.
+///
+/// Kind: opaque
 pub type ExpressionRef {
     owner: ObjectRef,
     definition: DefinitionRef,
@@ -477,6 +527,13 @@ pub type ExpressionRef {
     semantic_hash: Digest,
 }
 
+/// Half-open canonical UTF-8 source range with one-based human coordinates.
+///
+/// Kind: record
+///
+/// Invariants:
+/// - 0 <= start_byte <= end_byte
+/// - line and column values are one-based
 pub type SourceSpan {
     pub file: FileRef,
     pub start_byte: Int,
@@ -487,18 +544,31 @@ pub type SourceSpan {
     pub end_column: Int,
 }
 
+/// Mapping from a generated span to an authored span and optional original name.
+///
+/// Kind: record
 pub type SourceMapEntry {
     pub generated: SourceSpan,
     pub original: SourceSpan?,
     pub original_name: Str?,
 }
 
+/// One source label attached to a structured diagnostic.
+///
+/// Kind: record
 pub type DiagnosticLabel {
     pub span: SourceSpan,
     pub message: Str,
     pub primary: Bool,
 }
 
+/// Exact retained source plus source maps and explicit unavailability state.
+///
+/// Kind: record
+///
+/// Invariants:
+/// - text and unavailable_reason are not both absent
+/// - text hashes to exact_hash after canonical decoding
 pub type SourceDocument {
     pub file: FileRef,
     pub snapshot: SnapshotRef,
@@ -510,6 +580,9 @@ pub type SourceDocument {
     pub unavailable_reason: Str?,
 }
 
+/// Source or semantic blame attribution for one exact target range.
+///
+/// Kind: record
 pub type Attribution {
     pub file: FileRef,
     pub span: SourceSpan,
@@ -521,11 +594,17 @@ pub type Attribution {
     pub semantic: Bool,
 }
 
+/// Git-compatible authored identity without signing or authorization semantics.
+///
+/// Kind: record
 pub type PersonIdentity {
     pub name: Str,
     pub email: Str?,
 }
 
+/// Structured summary of one semantic object at its pinned revision.
+///
+/// Kind: record
 pub type ObjectDescription {
     pub object: ObjectRef,
     pub revision: RevisionRef,
@@ -537,6 +616,9 @@ pub type ObjectDescription {
     pub metadata: Value,
 }
 
+/// Structured causal explanation of a diagnostic.
+///
+/// Kind: record
 pub type Explanation {
     pub diagnostic: Diagnostic,
     pub summary: Str,
@@ -546,11 +628,22 @@ pub type Explanation {
     pub plan: PlanRef?,
 }
 
+/// Provider-specific replay position with portable equality and canonical encoding.
+///
+/// Kind: opaque
+///
+/// Invariants:
+/// - payload is not generically orderable
+/// - equality includes format and canonical payload
+/// - provider APIs own construction and comparison beyond equality
 pub type CheckpointPosition {
     format: Str,
     digest: Digest,
 }
 
+/// Compatibility tuple embedded in builds and artifacts.
+///
+/// Kind: record
 pub type CompatibilityInfo {
     pub language_version: Str,
     pub sys_version: Str,
@@ -561,6 +654,9 @@ pub type CompatibilityInfo {
     pub supported_profiles: [Str],
 }
 
+/// Exact language, sys, storage, presentation and implementation coordinates for the current runtime.
+///
+/// Kind: record
 pub type RuntimeInfo {
     pub language_version: Str,
     pub sys_version: Str,
@@ -580,6 +676,12 @@ pub type RuntimeInfo {
     pub timezone_database_version: Str?,
 }
 
+/// Result of sealing durable pending rows without a logical data change.
+///
+/// Kind: record
+///
+/// Invariants:
+/// - semantic_changes is zero
 pub type FlushResult {
     pub tables: [TableRef],
     pub rows: Int,
@@ -589,6 +691,13 @@ pub type FlushResult {
     pub semantic_changes: Int,
 }
 
+/// Physical maintenance result for the one indexed profile; segment-named fields refer to observed
+/// bounded storage pages.
+///
+/// Kind: record
+///
+/// Invariants:
+/// - semantic_changes is zero
 pub type CompactionResult {
     pub tables: [TableRef],
     pub input_segments: [SegmentRef],
@@ -600,6 +709,13 @@ pub type CompactionResult {
     pub semantic_changes: Int,
 }
 
+/// Structured integrity-verification outcome.
+///
+/// Kind: record
+///
+/// Invariants:
+/// - invalid has at least one error/fatal diagnostic
+/// - valid has no error/fatal diagnostic
 pub type VerificationReport {
     pub scope: VerifyScope,
     pub status: VerificationStatus,
@@ -609,12 +725,18 @@ pub type VerificationReport {
     pub diagnostics: Relation<Diagnostic>,
 }
 
+/// Immutable activation-local cancellation observation.
+///
+/// Kind: record
 pub type CancellationView {
     pub requested: Bool,
     pub reason: Str?,
     pub requested_at: Instant?,
 }
 
+/// Session-local presentation selection for one type.
+///
+/// Kind: record
 pub type PresentationOverride {
     pub type: TypeRef,
     pub renderer: Str?,
@@ -622,6 +744,9 @@ pub type PresentationOverride {
     pub formatter: FunctionRef?,
 }
 
+/// REPL watch expression and its most recent safe observation.
+///
+/// Kind: record
 pub type Watch {
     pub expression: ExpressionRef,
     pub label: Str?,
@@ -630,6 +755,9 @@ pub type Watch {
     pub updated: Instant?,
 }
 
+/// Current attached database/worktree descriptor exposed by sys.database.
+///
+/// Kind: record
 pub type DatabaseView {
     pub id: DatabaseId,
     pub name: Str,
@@ -644,6 +772,9 @@ pub type DatabaseView {
     pub storage_manifest_version: Str,
 }
 
+/// Immutable context of the current activation exposed by sys.current.
+///
+/// Kind: record
 pub type CurrentContext {
     pub snapshot: SnapshotRef,
     pub transaction: TransactionRef?,
@@ -659,6 +790,9 @@ pub type CurrentContext {
     pub present_context: PresentContext,
 }
 
+/// Current live runtime owner and live relation handles exposed by sys.rt.
+///
+/// Kind: record
 pub type RuntimeView {
     pub id: RuntimeId,
     pub mode: RuntimeMode,
@@ -687,6 +821,9 @@ pub type RuntimeView {
     pub checkpoint_updates: Relation<CheckpointUpdate>,
 }
 
+/// Interactive session presentation and watch state exposed by sys.repl.
+///
+/// Kind: record
 pub type ReplView {
     pub session: SessionRef,
     pub renderer: Str,
@@ -698,11 +835,23 @@ pub type ReplView {
     pub watched_expressions: Relation<Watch>,
 }
 
+/// Availability: always while a database is attached
 pub native static database: DatabaseView effect none;
+/// Availability: every activation
 pub native static current: CurrentContext effect none;
+/// Availability: every command/runtime owner
 pub native static rt: RuntimeView effect none formerly "sys.runtime" diagnostic "ORNA100-E-SYS-RUNTIME";
+/// Availability: REPL only; otherwise sys.context.repl_unavailable
 pub native static repl: ReplView effect none;
 
+/// Discriminated identity of one changed semantic object, source file or table row.
+///
+/// Kind: record
+///
+/// Invariants:
+/// - object: only object is present; file: only file is present; row: only table and row_key are present
+/// - row_key retains a non-secret key type and canonical value
+/// - equality includes kind and all populated identity fields
 pub type ChangeTarget {
     pub kind: ChangeTargetKind,
     pub object: ObjectId?,
@@ -711,6 +860,13 @@ pub type ChangeTarget {
     pub row_key: Value?,
 }
 
+/// A three-way merge conflict between incomparable or divergent checkpoint positions.
+///
+/// Kind: record
+///
+/// Invariants:
+/// - reason is divergent_position, incompatible_format, or delete_update
+/// - opaque positions are never numerically ordered
 pub type CheckpointConflict {
     pub consumer_identity: ConsumerIdentity,
     pub source_identity: Str,
@@ -723,6 +879,13 @@ pub type CheckpointConflict {
     pub reason: Str,
 }
 
+/// A three-way merge conflict at one stable table identity and primary key.
+///
+/// Kind: record
+///
+/// Invariants:
+/// - absence means no row, not a row with null fields
+/// - reason is update_update, delete_update, key_collision, or assertion_failure
 pub type RowConflict {
     pub table: TableRef,
     pub key: Value,
@@ -732,6 +895,14 @@ pub type RowConflict {
     pub reason: Str,
 }
 
+/// Read-only preview bound to the exact target and local worktree state.
+///
+/// Kind: record
+///
+/// Invariants:
+/// - token is a domain-separated digest of all plan inputs in canonical order
+/// - the plan performs no mutation
+/// - force is not permission to accept a stale token
 pub type CheckoutPlan {
     pub token: Digest,
     pub target: SnapshotRef,
@@ -746,8 +917,25 @@ pub type CheckoutPlan {
     pub conflicts: [Diagnostic],
 }
 
+/// Nonserialisable owner/runtime-bound incremental Blob capture.
+///
+/// Kind: opaque
+///
+/// Invariants:
+/// - states are open, finished, aborted
+/// - a handle is not a stored Blob or a portable reference
+/// - declared total and per-call limits are enforced before mutation
+/// - finish protects and returns immutable content; no user row or branch is implicitly created
 pub type BlobWriter {}
 
+/// Non-authorising, state-bound review of the exact staged Git candidate.
+///
+/// Kind: record
+///
+/// Invariants:
+/// - all fields and the exact format coordinate enter the review token
+/// - supplying the record does not grant administrative authority
+/// - an altered or stale review fails before ref visibility
 pub type CommitReview {
     pub token: Digest,
     pub head: GitOid?,
@@ -759,6 +947,7 @@ pub type CommitReview {
     pub pending_generation: Int,
 }
 
+/// Database/worktree attachments visible at a snapshot.
 pub type Database key id availability "catalogue" {
     pub reference: DatabaseRef,
     pub id: DatabaseId,
@@ -774,6 +963,7 @@ pub type Database key id availability "catalogue" {
     pub storage_manifest_version: Str,
 }
 
+/// Resolved namespace tree.
 pub type Namespace key object availability "catalogue" {
     pub reference: NamespaceRef,
     pub object: ObjectRef,
@@ -783,6 +973,7 @@ pub type Namespace key object availability "catalogue" {
     pub docs: Str?,
 }
 
+/// Resolved source module.
 pub type Module key object availability "catalogue" {
     pub reference: ModuleRef,
     pub object: ObjectRef,
@@ -793,6 +984,7 @@ pub type Module key object availability "catalogue" {
     pub diagnostics: Relation<Diagnostic>,
 }
 
+/// Resolved import edge.
 pub type Import key module, position availability "catalogue" {
     pub reference: ImportRef,
     pub module: ModuleRef,
@@ -804,6 +996,7 @@ pub type Import key module, position availability "catalogue" {
     pub span: SourceSpan,
 }
 
+/// Repository file/source unit metadata.
 pub type File key id availability "catalogue" {
     pub reference: FileRef,
     pub id: FileId,
@@ -818,6 +1011,7 @@ pub type File key id availability "catalogue" {
     pub generated: Bool,
 }
 
+/// Stable semantic object identity at a snapshot.
 pub type Object key id, snapshot availability "catalogue" {
     pub reference: ObjectRef,
     pub id: ObjectId,
@@ -829,6 +1023,7 @@ pub type Object key id, snapshot availability "catalogue" {
     pub snapshot: SnapshotRef,
 }
 
+/// Immutable semantic revision of a stable object.
 pub type Revision key id availability "catalogue" {
     pub reference: RevisionRef,
     pub id: RevisionId,
@@ -840,6 +1035,7 @@ pub type Revision key id availability "catalogue" {
     pub definition: DefinitionRef?,
 }
 
+/// Source definition and span of an object revision.
 pub type Definition key id availability "catalogue" {
     pub reference: DefinitionRef,
     pub id: DefinitionId,
@@ -850,6 +1046,7 @@ pub type Definition key id availability "catalogue" {
     pub docs: Str?,
 }
 
+/// Resolved static type declaration or constructed type metadata.
 pub type Type key object availability "catalogue" {
     pub reference: TypeRef,
     pub object: ObjectRef,
@@ -862,6 +1059,7 @@ pub type Type key object availability "catalogue" {
     pub assertions: Relation<Assertion>,
 }
 
+/// Generic parameter and protocol bounds.
 pub type TypeParameter key owner, position availability "catalogue" {
     pub reference: TypeParameterRef,
     pub owner: ObjectRef,
@@ -871,6 +1069,7 @@ pub type TypeParameter key owner, position availability "catalogue" {
     pub inferred: Bool,
 }
 
+/// Nominal type field metadata.
 pub type Field key object availability "catalogue" {
     pub reference: FieldRef,
     pub object: ObjectRef,
@@ -882,6 +1081,7 @@ pub type Field key object availability "catalogue" {
     pub docs: Str?,
 }
 
+/// Enum/sum variant metadata.
 pub type Variant key object availability "catalogue" {
     pub reference: VariantRef,
     pub object: ObjectRef,
@@ -892,6 +1092,7 @@ pub type Variant key object availability "catalogue" {
     pub docs: Str?,
 }
 
+/// Protocol declaration metadata.
 pub type Protocol key object availability "catalogue" {
     pub reference: ProtocolRef,
     pub object: ObjectRef,
@@ -900,6 +1101,7 @@ pub type Protocol key object availability "catalogue" {
     pub docs: Str?,
 }
 
+/// Required protocol function or static property.
 pub type ProtocolMember key object availability "catalogue" {
     pub reference: ProtocolMemberRef,
     pub object: ObjectRef,
@@ -910,6 +1112,7 @@ pub type ProtocolMember key object availability "catalogue" {
     pub position: Int,
 }
 
+/// Nested protocol implementation owned by its target type.
 pub type Implementation key object availability "catalogue" {
     pub reference: ImplementationRef,
     pub object: ObjectRef,
@@ -920,6 +1123,7 @@ pub type Implementation key object availability "catalogue" {
     pub members: Relation<Function>,
 }
 
+/// Resolved function signature, effects and dependency surface.
 pub type Function key object availability "catalogue" {
     pub reference: FunctionRef,
     pub object: ObjectRef,
@@ -935,6 +1139,7 @@ pub type Function key object availability "catalogue" {
     pub docs: Str?,
 }
 
+/// Function parameter metadata.
 pub type Parameter key function, position availability "catalogue" {
     pub reference: ParameterRef,
     pub function: FunctionRef,
@@ -946,6 +1151,7 @@ pub type Parameter key function, position availability "catalogue" {
     pub explicit_type: Bool,
 }
 
+/// Conservative static effect metadata.
 pub type Effect key function, kind, target availability "catalogue" {
     pub reference: EffectRef,
     pub function: FunctionRef,
@@ -954,6 +1160,7 @@ pub type Effect key function, kind, target availability "catalogue" {
     pub conditional: Bool,
 }
 
+/// Persistent relation declaration and storage projection.
 pub type Table key object availability "catalogue" {
     pub reference: TableRef,
     pub object: ObjectRef,
@@ -967,6 +1174,7 @@ pub type Table key object availability "catalogue" {
     pub row_count_exact: Bool,
 }
 
+/// Table column metadata.
 pub type Column key object availability "catalogue" {
     pub reference: ColumnRef,
     pub object: ObjectRef,
@@ -981,6 +1189,7 @@ pub type Column key object availability "catalogue" {
     pub docs: Str?,
 }
 
+/// Primary-key definition and path/storage codec.
 pub type Key key object availability "catalogue" {
     pub reference: KeyRef,
     pub object: ObjectRef,
@@ -991,6 +1200,7 @@ pub type Key key object availability "catalogue" {
     pub path_codec: Str,
 }
 
+/// Always-enforced executable, refined, table or cross-table proposition.
 pub type Assertion key object availability "catalogue" {
     pub reference: AssertionRef,
     pub object: ObjectRef,
@@ -1005,6 +1215,7 @@ pub type Assertion key object availability "catalogue" {
     pub deterministic: Bool,
 }
 
+/// Stored table-reference edge.
 pub type Reference key from_column availability "catalogue" {
     pub reference: ReferenceRef,
     pub from_table: TableRef,
@@ -1016,6 +1227,7 @@ pub type Reference key from_column availability "catalogue" {
     pub on_rekey: ReferenceAction,
 }
 
+/// Function-derived page entry metadata.
 pub type Page key function availability "catalogue" {
     pub reference: PageRef,
     pub function: FunctionRef,
@@ -1024,6 +1236,7 @@ pub type Page key function availability "catalogue" {
     pub definition: DefinitionRef,
 }
 
+/// Reduced physical dimension declaration.
 pub type Dimension key object availability "catalogue" {
     pub reference: DimensionRef,
     pub object: ObjectRef,
@@ -1031,6 +1244,7 @@ pub type Dimension key object availability "catalogue" {
     pub definition: DefinitionRef,
 }
 
+/// Unit scale/offset and dimension.
 pub type Unit key object availability "catalogue" {
     pub reference: UnitRef,
     pub object: ObjectRef,
@@ -1041,6 +1255,7 @@ pub type Unit key object availability "catalogue" {
     pub definition: DefinitionRef,
 }
 
+/// Nominal type implementing Currency.
 pub type Currency key type availability "catalogue" {
     pub reference: CurrencyRef,
     pub type: TypeRef,
@@ -1049,6 +1264,7 @@ pub type Currency key type availability "catalogue" {
     pub definition: DefinitionRef,
 }
 
+/// Declared secret dependency without plaintext.
 pub type SecretRequirement key object availability "catalogue" {
     pub reference: SecretRequirementRef,
     pub object: ObjectRef,
@@ -1058,6 +1274,7 @@ pub type SecretRequirement key object availability "catalogue" {
     pub definition: DefinitionRef,
 }
 
+/// Extension component interface and coarse trust declaration.
 pub type Extension key object availability "catalogue" {
     pub reference: ExtensionRef,
     pub object: ObjectRef,
@@ -1069,6 +1286,7 @@ pub type Extension key object availability "catalogue" {
     pub trust: ExtensionTrust,
 }
 
+/// Typed semantic dependency edge.
 pub type Dependency key from, to, kind, span availability "catalogue" {
     pub reference: DependencyRef,
     pub from: ObjectRef,
@@ -1080,6 +1298,7 @@ pub type Dependency key from, to, kind, span availability "catalogue" {
     pub conditional: Bool,
 }
 
+/// Structured diagnostic independent of renderer.
 pub type Diagnostic key id availability "durable-observation" {
     pub reference: DiagnosticRef,
     pub id: Str,
@@ -1097,6 +1316,7 @@ pub type Diagnostic key id availability "durable-observation" {
     pub trace: TraceRef?,
 }
 
+/// Committed, logical-CWD or synthetic database snapshot.
 pub type Snapshot key id availability "catalogue" {
     pub reference: SnapshotRef,
     pub id: SnapshotId,
@@ -1110,6 +1330,7 @@ pub type Snapshot key id availability "catalogue" {
     pub missing_objects: Relation<GitObject>,
 }
 
+/// Object revision membership in a snapshot.
 pub type SnapshotObject key snapshot, object availability "catalogue" {
     pub reference: SnapshotObjectRef,
     pub snapshot: SnapshotRef,
@@ -1118,6 +1339,12 @@ pub type SnapshotObject key snapshot, object availability "catalogue" {
     pub reachable: Bool,
 }
 
+/// Semantic/source/row change entry.
+///
+/// Invariants:
+/// - object/file/table/key projections agree exactly with target discriminator
+/// - snapshot identifies the compared result generation
+/// - one consolidated change per snapshot, area and typed target
 pub type Change key snapshot, area, target availability "catalogue" {
     pub reference: ChangeRef,
     pub snapshot: SnapshotRef,
@@ -1134,6 +1361,7 @@ pub type Change key snapshot, area, target availability "catalogue" {
     pub new_name: Str?,
 }
 
+/// Snapshot-to-snapshot semantic diff entry.
 pub type DiffEntry key from, to, change.area, change.target availability "derived" {
     pub reference: DiffEntryRef,
     pub from: SnapshotRef,
@@ -1143,6 +1371,7 @@ pub type DiffEntry key from, to, change.area, change.target availability "derive
     pub details: Value?,
 }
 
+/// One retained version of a repository file at a snapshot.
 pub type FileVersion key file, snapshot availability "derived" {
     pub reference: FileVersionRef,
     pub file: FileRef,
@@ -1157,6 +1386,7 @@ pub type FileVersion key file, snapshot availability "derived" {
     pub generated: Bool,
 }
 
+/// Underlying real Git repository metadata.
 pub type GitRepository key database availability "catalogue" {
     pub reference: GitRepositoryRef,
     pub database: DatabaseRef,
@@ -1167,6 +1397,7 @@ pub type GitRepository key database availability "catalogue" {
     pub partial_clone: Bool,
 }
 
+/// Git commit and corresponding Orna snapshot.
 pub type Commit key oid availability "catalogue" {
     pub reference: CommitRef,
     pub oid: GitOid,
@@ -1180,6 +1411,7 @@ pub type Commit key oid availability "catalogue" {
     pub tree: GitObjectRef,
 }
 
+/// Git tree entry.
 pub type TreeEntry key tree, path availability "catalogue" {
     pub reference: TreeEntryRef,
     pub tree: GitObjectRef,
@@ -1189,6 +1421,7 @@ pub type TreeEntry key tree, path availability "catalogue" {
     pub kind: GitObjectKind,
 }
 
+/// Git ref, including hidden Orna refs.
 pub type Ref key name availability "catalogue" {
     pub reference: RefRef,
     pub name: Str,
@@ -1198,6 +1431,7 @@ pub type Ref key name availability "catalogue" {
     pub remote: RemoteRef?,
 }
 
+/// Local/remote branch projection.
 pub type Branch key name availability "catalogue" {
     pub reference: BranchRef,
     pub name: Str,
@@ -1208,6 +1442,7 @@ pub type Branch key name availability "catalogue" {
     pub behind: Int?,
 }
 
+/// Git tag projection.
 pub type Tag key name availability "catalogue" {
     pub reference: TagRef,
     pub name: Str,
@@ -1217,6 +1452,7 @@ pub type Tag key name availability "catalogue" {
     pub tagger: PersonIdentity?,
 }
 
+/// Git remote without plaintext credentials.
 pub type Remote key name availability "catalogue" {
     pub reference: RemoteRef,
     pub name: Str,
@@ -1226,6 +1462,7 @@ pub type Remote key name availability "catalogue" {
     pub last_error: Diagnostic?,
 }
 
+/// Git stash projection.
 pub type Stash key index availability "catalogue" {
     pub reference: StashRef,
     pub index: Int,
@@ -1234,6 +1471,7 @@ pub type Stash key index availability "catalogue" {
     pub created: Instant?,
 }
 
+/// Git object availability and type.
 pub type GitObject key oid availability "catalogue" {
     pub reference: GitObjectRef,
     pub oid: GitOid,
@@ -1243,6 +1481,7 @@ pub type GitObject key oid availability "catalogue" {
     pub promisor_remote: RemoteRef?,
 }
 
+/// Physical Git worktree status, distinct from logical CWD state.
 pub type WorktreeEntry key path availability "local-durable" {
     pub reference: WorktreeEntryRef,
     pub path: Path,
@@ -1252,6 +1491,7 @@ pub type WorktreeEntry key path availability "local-durable" {
     pub untracked: Bool,
 }
 
+/// Query execution observation.
 pub type Query key id availability "durable-observation" {
     pub reference: QueryRef,
     pub id: QueryId,
@@ -1269,6 +1509,7 @@ pub type Query key id availability "durable-observation" {
     pub failure: Diagnostic?,
 }
 
+/// Structured explain plan.
 pub type Plan key id availability "derived" {
     pub reference: PlanRef,
     pub id: Str,
@@ -1279,6 +1520,7 @@ pub type Plan key id availability "derived" {
     pub warnings: [Diagnostic],
 }
 
+/// One structured plan operation.
 pub type PlanNode key plan, position availability "derived" {
     pub reference: PlanNodeRef,
     pub plan: PlanRef,
@@ -1295,6 +1537,12 @@ pub type PlanNode key plan, position availability "derived" {
     pub details: Value,
 }
 
+/// Function activation/invocation observation.
+///
+/// Invariants:
+/// - exactly one launch owner: parent invocation or owner_session, except a top-level command run
+/// - ordinary function calls do not detach ownership
+/// - terminal state is published only after all children terminate and resources are released
 pub type Invocation key id availability "durable-observation" {
     pub reference: InvocationRef,
     pub id: InvocationId,
@@ -1314,6 +1562,7 @@ pub type Invocation key id availability "durable-observation" {
     pub idempotency_key_hash: Digest?,
 }
 
+/// Redaction-safe invocation argument metadata.
 pub type InvocationArgument key invocation, position availability "durable-observation" {
     pub reference: InvocationArgumentRef,
     pub invocation: InvocationRef,
@@ -1325,6 +1574,7 @@ pub type InvocationArgument key invocation, position availability "durable-obser
     pub redacted: Bool,
 }
 
+/// Top-level durable program-run observation.
 pub type Run key id availability "durable-observation" {
     pub reference: RunRef,
     pub id: RunId,
@@ -1343,6 +1593,7 @@ pub type Run key id availability "durable-observation" {
     pub failure: Diagnostic?,
 }
 
+/// Orna transaction observation and atomic write/checkpoint set.
 pub type Transaction key id availability "local-durable" {
     pub reference: TransactionRef,
     pub id: TransactionId,
@@ -1357,6 +1608,7 @@ pub type Transaction key id availability "local-durable" {
     pub rolled_back: Bool,
 }
 
+/// Bounded structured trace.
 pub type Trace key id availability "durable-observation" {
     pub reference: TraceRef,
     pub id: TraceId,
@@ -1368,6 +1620,7 @@ pub type Trace key id availability "durable-observation" {
     pub detail_available: Bool,
 }
 
+/// Nested trace span.
 pub type Span key id availability "durable-observation" {
     pub reference: SpanRef,
     pub id: SpanId,
@@ -1382,6 +1635,7 @@ pub type Span key id availability "durable-observation" {
     pub events: Relation<TraceEvent>,
 }
 
+/// Trace event with redaction-safe attributes.
 pub type TraceEvent key span, sequence availability "durable-observation" {
     pub reference: TraceEventRef,
     pub span: SpanRef,
@@ -1392,6 +1646,7 @@ pub type TraceEvent key span, sequence availability "durable-observation" {
     pub diagnostic: Diagnostic?,
 }
 
+/// Finite/unbounded stream execution observation.
 pub type Stream key run, source_identity, partition availability "durable-observation" {
     pub reference: StreamRef,
     pub run: RunRef,
@@ -1412,6 +1667,7 @@ pub type Stream key run, source_identity, partition availability "durable-observ
     pub live: Bool,
 }
 
+/// Durable resumable consumer progress.
 pub type Checkpoint key consumer_identity, source_identity, partition availability "local-durable" {
     pub reference: CheckpointRef,
     pub consumer: FunctionRef,
@@ -1427,6 +1683,7 @@ pub type Checkpoint key consumer_identity, source_identity, partition availabili
     pub last_transaction: TransactionRef,
 }
 
+/// Atomic checkpoint compare-and-set update.
 pub type CheckpointUpdate key transaction, checkpoint availability "local-durable" {
     pub reference: CheckpointUpdateRef,
     pub transaction: TransactionRef,
@@ -1437,6 +1694,15 @@ pub type CheckpointUpdate key transaction, checkpoint availability "local-durabl
     pub committed: Bool,
 }
 
+/// One durable blocked or preserved delivery; repeated attempts update this record.
+///
+/// Invariants:
+/// - attempt_count starts at one after the first failure and is monotonic
+/// - version changes on every committed state transition
+/// - position digest accelerates lookup but does not substitute for canonical position equality
+/// - retry failure updates this record without creating a successor record
+/// - only one retry or replay may hold this delivery lease
+/// - payload is redacted unless the explicit privileged payload-access boundary permits disclosure
 pub type Failure key consumer_identity, source_identity, partition, position_format, position availability "local-durable" {
     pub reference: FailureRef,
     pub consumer: FunctionRef,
@@ -1464,6 +1730,7 @@ pub type Failure key consumer_identity, source_identity, partition, position_for
     pub checkpoint_version_before: CheckpointVersion,
 }
 
+/// Interactive/page session.
 pub type Session key id availability "live" {
     pub reference: SessionRef,
     pub id: SessionId,
@@ -1475,6 +1742,7 @@ pub type Session key id availability "live" {
     pub renderer: Str?,
 }
 
+/// Attached CLI/REPL/server/renderer client.
 pub type Client key id availability "live" {
     pub reference: ClientRef,
     pub id: ClientId,
@@ -1486,6 +1754,7 @@ pub type Client key id availability "live" {
     pub redacted: Bool,
 }
 
+/// Local owner/consumer coordination lease.
 pub type Lease key name availability "local-durable" {
     pub reference: LeaseRef,
     pub name: Str,
@@ -1496,6 +1765,7 @@ pub type Lease key name availability "local-durable" {
     pub generation: Int,
 }
 
+/// Optional network listener owned by the current runtime.
 pub type Listener key id availability "live" {
     pub reference: ListenerRef,
     pub id: Str,
@@ -1507,6 +1777,7 @@ pub type Listener key id availability "live" {
     pub authenticated: Bool,
 }
 
+/// Observed single indexed row-store root, generation and availability; not a placement policy.
 pub type Storage key object availability "local-durable" {
     pub reference: StorageRef,
     pub object: ObjectRef,
@@ -1527,6 +1798,8 @@ pub type Storage key object availability "local-durable" {
     pub schema_digest: Digest,
 }
 
+/// Compatibility-named bounded immutable row/index-page observation; no separate compact storage
+/// writer.
 pub type Segment key id availability "catalogue" {
     pub reference: SegmentRef,
     pub id: SegmentId,
@@ -1544,6 +1817,7 @@ pub type Segment key id availability "catalogue" {
     pub generation: Int,
 }
 
+/// Segment statistics used for safe planning/pruning.
 pub type Statistic key segment, column, kind availability "catalogue" {
     pub reference: StatisticRef,
     pub segment: SegmentRef,
@@ -1554,6 +1828,7 @@ pub type Statistic key segment, column, kind availability "catalogue" {
     pub valid: Bool,
 }
 
+/// Logical/physical index metadata.
 pub type Index key object availability "catalogue" {
     pub reference: IndexRef,
     pub object: ObjectRef,
@@ -1565,6 +1840,7 @@ pub type Index key object availability "catalogue" {
     pub valid: Bool,
 }
 
+/// Cached/materialized function/query result.
 pub type Materialization key object, snapshot availability "local-durable" {
     pub reference: MaterializationRef,
     pub object: ObjectRef,
@@ -1576,6 +1852,7 @@ pub type Materialization key object, snapshot availability "local-durable" {
     pub valid: Bool,
 }
 
+/// Automatic-key allocator state.
 pub type Allocator key table availability "local-durable" {
     pub reference: AllocatorRef,
     pub table: TableRef,
@@ -1585,6 +1862,7 @@ pub type Allocator key table availability "local-durable" {
     pub updated: Instant,
 }
 
+/// Lazy-object hydration progress.
 pub type Hydration key object availability "live" {
     pub reference: HydrationRef,
     pub object: GitObjectRef,
@@ -1596,6 +1874,7 @@ pub type Hydration key object availability "live" {
     pub failure: Diagnostic?,
 }
 
+/// Atomic compact-segment rewrite.
 pub type Compaction key id availability "local-durable" {
     pub reference: CompactionRef,
     pub id: Str,
@@ -1609,6 +1888,7 @@ pub type Compaction key id availability "local-durable" {
     pub failure: Diagnostic?,
 }
 
+/// Verification/prune/flush/maintenance operation.
 pub type MaintenanceJob key id availability "local-durable" {
     pub reference: MaintenanceJobRef,
     pub id: Str,
@@ -1621,6 +1901,7 @@ pub type MaintenanceJob key id availability "local-durable" {
     pub failure: Diagnostic?,
 }
 
+/// Local runtime/storage file projection.
 pub type StorageFile key path availability "local-durable" {
     pub reference: StorageFileRef,
     pub path: Path,
@@ -1632,6 +1913,7 @@ pub type StorageFile key path availability "local-durable" {
     pub redacted: Bool,
 }
 
+/// Secret availability metadata without plaintext.
 pub type Secret key name availability "local-durable" {
     pub reference: SecretRef,
     pub name: Str,
@@ -1643,6 +1925,7 @@ pub type Secret key name availability "local-durable" {
     pub last_error: Diagnostic?,
 }
 
+/// Effective configuration with explicit redaction.
 pub type Setting key name, scope availability "local-durable" {
     pub reference: SettingRef,
     pub name: Str,
@@ -1653,6 +1936,7 @@ pub type Setting key name, scope availability "local-durable" {
     pub effective_at: SnapshotRef?,
 }
 
+/// Reproducible build observation.
 pub type Build key id availability "durable-observation" {
     pub reference: BuildRef,
     pub id: BuildId,
@@ -1667,6 +1951,7 @@ pub type Build key id availability "durable-observation" {
     pub diagnostics: Relation<Diagnostic>,
 }
 
+/// Test execution observation.
 pub type Test key build, name availability "durable-observation" {
     pub reference: TestRef,
     pub build: BuildRef,
@@ -1836,124 +2121,220 @@ pub type BuildRef = RowRef<Build>;
 pub type TestRef = RowRef<Test>;
 
 // sys.meta
+/// Return safe static/nominal/codec/protocol metadata for a value.
 pub native fn meta<T>(value: T): ValueMetadata<T> effect table_read;
 
 // sys.object
+/// Look up a stable object at a snapshot.
 pub native fn object(id: ObjectId, at: SnapshotRef = current.snapshot): ObjectRef effect table_read;
 
 // sys.resolve
+/// Resolve a semantic name with ordinary visibility/import rules.
 pub native fn resolve(name: Str, kind: ObjectKind? = null, at: SnapshotRef = current.snapshot, from: ModuleRef? = null): ObjectRef effect table_read;
 
 // sys.resolve_function
+/// Resolve a function reference.
 pub native fn resolve_function(name: Str, at: SnapshotRef = current.snapshot, from: ModuleRef? = null): FunctionRef effect table_read;
 
 // sys.describe
+/// Return structured object description.
 pub native fn describe(object: ObjectRef): ObjectDescription effect table_read;
 
 // sys.source(ObjectRef)
+/// Return retained exact source/source maps for an object subject to redaction.
 pub native fn source_object_ref(object: ObjectRef): SourceDocument effect table_read spelling "sys.source(ObjectRef)";
 
 // sys.source(FileRef)
+/// Return retained exact source/source maps for a file subject to redaction.
 pub native fn source_file_ref(file: FileRef): SourceDocument effect table_read spelling "sys.source(FileRef)";
 
 // sys.history(ObjectRef)
+/// Return stable semantic-object revision history.
 pub native fn history_object_ref(object: ObjectRef): Relation<Revision> effect table_read spelling "sys.history(ObjectRef)";
 
 // sys.history(FileRef)
+/// Return retained versions of one repository file.
 pub native fn history_file_ref(file: FileRef): Relation<FileVersion> effect table_read spelling "sys.history(FileRef)";
 
 // sys.blame(FileRef)
+/// Return source attribution.
 pub native fn blame_file_ref(target: FileRef): Relation<Attribution> effect table_read spelling "sys.blame(FileRef)";
 
 // sys.blame(RowRef)
+/// Return semantic row/field attribution.
 pub native fn blame_row_ref<T>(target: RowRef<T>): Relation<Attribution> effect table_read spelling "sys.blame(RowRef)";
 
 // sys.dependencies
+/// Traverse outgoing dependency edges.
 pub native fn dependencies(object: ObjectRef, transitive: Bool = false, kinds: [DependencyKind]? = null): Relation<Dependency> effect table_read;
 
 // sys.dependents
+/// Traverse incoming dependency edges.
 pub native fn dependents(object: ObjectRef, transitive: Bool = false, kinds: [DependencyKind]? = null): Relation<Dependency> effect table_read;
 
 // sys.snapshot(SnapshotRef)
+/// Return an already resolved snapshot reference.
 pub native fn snapshot_snapshot_ref(reference: SnapshotRef = database.cwd): SnapshotRef effect table_read spelling "sys.snapshot(SnapshotRef)";
 
 // sys.snapshot(CommitRef)
+/// Resolve a commit snapshot.
 pub native fn snapshot_commit_ref(reference: CommitRef): SnapshotRef effect table_read spelling "sys.snapshot(CommitRef)";
 
 // sys.snapshot(BranchRef)
+/// Resolve the branch target observed by the reference.
 pub native fn snapshot_branch_ref(reference: BranchRef): SnapshotRef effect table_read spelling "sys.snapshot(BranchRef)";
 
 // sys.snapshot(TagRef)
+/// Resolve the peeled tag target.
 pub native fn snapshot_tag_ref(reference: TagRef): SnapshotRef effect table_read spelling "sys.snapshot(TagRef)";
 
 // sys.snapshot(GitOid)
+/// Resolve an exact Git object identifier.
 pub native fn snapshot_git_oid(reference: GitOid): SnapshotRef effect table_read spelling "sys.snapshot(GitOid)";
 
 // sys.snapshot(Str)
+/// Resolve a Git revision expression in the attached repository.
 pub native fn snapshot_str(reference: Str): SnapshotRef effect table_read spelling "sys.snapshot(Str)";
 
 // sys.diff
+/// Compute semantic/source/row diff.
 pub native fn diff(from: SnapshotRef, to: SnapshotRef, scope: DiffScope = DiffScope.all): Relation<DiffEntry> effect table_read;
 
 // sys.changes
+/// Report changes represented by/relative to a state.
 pub native fn changes(snapshot: SnapshotRef = database.cwd, area: ChangeArea? = null): Relation<Change> effect table_read;
 
 // sys.explain(Query)
+/// Return structured query plan.
 pub native fn explain_query<T>(query: Query<T>): Plan effect table_read spelling "sys.explain(Query)";
 
 // sys.explain(FunctionRef)
+/// Return structured function/effect plan.
 pub native fn explain_function_ref(function: FunctionRef): Plan effect table_read spelling "sys.explain(FunctionRef)";
 
 // sys.explain(Diagnostic)
+/// Return structured causal explanation.
 pub native fn explain_diagnostic(diagnostic: Diagnostic): Explanation effect table_read spelling "sys.explain(Diagnostic)";
 
 // sys.checkpoint
+/// Read a checkpoint snapshot.
 pub native fn checkpoint(consumer_identity: ConsumerIdentity, source_identity: Str, partition: Str? = null): Checkpoint? effect table_read;
 
 // sys.render_diagnostic
+/// Render without altering structured diagnostic.
 pub native fn render_diagnostic(diagnostic: Diagnostic, context: PresentContext = current.present_context): PresentTree effect table_read;
 
 // sys.rt.info
+/// Return exact language/sys/storage/protocol compatibility coordinates.
 pub native fn rt_info(): RuntimeInfo effect table_read spelling "sys.rt.info"
     formerly "sys.runtime_info" diagnostic "ORNA100-E-SYS-RUNTIME";
 
 // sys.invoke(Value)
+/// Reflectively invoke and return an explicitly erased value envelope.
+///
+/// Snapshot rule: An omitted at selects the FunctionRef pin; an explicit different database or snapshot
+/// fails sys.invoke.snapshot_mismatch. Historical snapshots permit read-only table access.
 pub native fn invoke_value(function: FunctionRef, arguments: ArgumentMap, at: SnapshotRef? = null, transaction: InvokeTransaction = InvokeTransaction.inherit, idempotency_key: Str? = null): Value effect runtime_admin spelling "sys.invoke(Value)";
 
 // sys.invoke<T>
+/// Reflectively invoke after validating the declared result against an explicit type witness.
+///
+/// Snapshot rule: An omitted at selects the FunctionRef pin; an explicit different database or snapshot
+/// fails sys.invoke.snapshot_mismatch. Historical snapshots permit read-only table access.
 pub native fn invoke_t<T>(function: FunctionRef, arguments: ArgumentMap, as: T, at: SnapshotRef? = null, transaction: InvokeTransaction = InvokeTransaction.inherit, idempotency_key: Str? = null): T effect runtime_admin spelling "sys.invoke<T>";
 
 // sys.start(Value)
+/// Start an awaitable invocation with an explicitly erased result.
+///
+/// Ownership: Current operation owns the child, except a direct REPL sys.start expression/binding is
+/// session-owned. Inherit transaction mode is rejected; separate/read_only are permitted.
+///
+/// Snapshot rule: An omitted at selects the FunctionRef pin; an explicit different database or snapshot
+/// fails sys.invoke.snapshot_mismatch. Historical snapshots permit read-only table access.
 pub native fn start_value(function: FunctionRef, arguments: ArgumentMap, at: SnapshotRef? = null, transaction: InvokeTransaction = InvokeTransaction.separate, idempotency_key: Str? = null): InvocationHandle<Value> effect runtime_admin spelling "sys.start(Value)";
 
 // sys.start<T>
+/// Start an awaitable invocation after validating an explicit result type witness.
+///
+/// Ownership: Current operation owns the child, except a direct REPL sys.start expression/binding is
+/// session-owned. Inherit transaction mode is rejected; separate/read_only are permitted.
+///
+/// Snapshot rule: An omitted at selects the FunctionRef pin; an explicit different database or snapshot
+/// fails sys.invoke.snapshot_mismatch. Historical snapshots permit read-only table access.
 pub native fn start_t<T>(function: FunctionRef, arguments: ArgumentMap, as: T, at: SnapshotRef? = null, transaction: InvokeTransaction = InvokeTransaction.separate, idempotency_key: Str? = null): InvocationHandle<T> effect runtime_admin spelling "sys.start<T>";
 
 // sys.await
+/// Wait for a terminal result; timeout does not cancel.
 pub native fn await<T>(invocation: InvocationHandle<T>, timeout: Duration? = null): InvocationResult<T> effect runtime_admin;
 
 // sys.cancel
+/// Idempotently request invocation cancellation.
 pub native fn cancel<T>(invocation: InvocationHandle<T>, reason: Str? = null): Bool effect runtime_admin;
 
 // sys.admin.commit
+/// Commit the validated staged state, preserving unstaged CWD changes and unpublished tail.
+///
+/// Contract: administrative-state-transitions
 pub native fn admin_commit(message: Str, author: PersonIdentity? = null): CommitRef effect storage_admin spelling "sys.admin.commit";
 
 // sys.admin.checkout(SnapshotRef)
+/// Validate and select an already resolved snapshot.
+///
+/// Contract: administrative-state-transitions
+///
+/// Preconditions: Carry nonconflicting staged, unstaged and pending database changes. Refuse overwrite
+/// by default. force requires a matching plan token and explicit host consent; invalid target
+/// assertions are never bypassed.
 pub native fn admin_checkout_snapshot_ref(target: SnapshotRef, force: Bool = false, expected_plan: Digest? = null): SnapshotRef effect storage_admin spelling "sys.admin.checkout(SnapshotRef)";
 
 // sys.admin.checkout(CommitRef)
+/// Validate and select a commit snapshot.
+///
+/// Contract: administrative-state-transitions
+///
+/// Preconditions: Carry nonconflicting staged, unstaged and pending database changes. Refuse overwrite
+/// by default. force requires a matching plan token and explicit host consent; invalid target
+/// assertions are never bypassed.
 pub native fn admin_checkout_commit_ref(target: CommitRef, force: Bool = false, expected_plan: Digest? = null): SnapshotRef effect storage_admin spelling "sys.admin.checkout(CommitRef)";
 
 // sys.admin.checkout(BranchRef)
+/// Validate and select a branch target.
+///
+/// Contract: administrative-state-transitions
+///
+/// Preconditions: Carry nonconflicting staged, unstaged and pending database changes. Refuse overwrite
+/// by default. force requires a matching plan token and explicit host consent; invalid target
+/// assertions are never bypassed.
 pub native fn admin_checkout_branch_ref(target: BranchRef, force: Bool = false, expected_plan: Digest? = null): SnapshotRef effect storage_admin spelling "sys.admin.checkout(BranchRef)";
 
 // sys.admin.checkout(TagRef)
+/// Validate and select a peeled tag target.
+///
+/// Contract: administrative-state-transitions
+///
+/// Preconditions: Carry nonconflicting staged, unstaged and pending database changes. Refuse overwrite
+/// by default. force requires a matching plan token and explicit host consent; invalid target
+/// assertions are never bypassed.
 pub native fn admin_checkout_tag_ref(target: TagRef, force: Bool = false, expected_plan: Digest? = null): SnapshotRef effect storage_admin spelling "sys.admin.checkout(TagRef)";
 
 // sys.admin.checkout(GitOid)
+/// Validate and select an exact Git object.
+///
+/// Contract: administrative-state-transitions
+///
+/// Preconditions: Carry nonconflicting staged, unstaged and pending database changes. Refuse overwrite
+/// by default. force requires a matching plan token and explicit host consent; invalid target
+/// assertions are never bypassed.
 pub native fn admin_checkout_git_oid(target: GitOid, force: Bool = false, expected_plan: Digest? = null): SnapshotRef effect storage_admin spelling "sys.admin.checkout(GitOid)";
 
 // sys.admin.checkout(Str)
+/// Resolve, validate and select a Git revision expression.
+///
+/// Contract: administrative-state-transitions
+///
+/// Preconditions: Carry nonconflicting staged, unstaged and pending database changes. Refuse overwrite
+/// by default. force requires a matching plan token and explicit host consent; invalid target
+/// assertions are never bypassed.
 pub native fn admin_checkout_str(target: Str, force: Bool = false, expected_plan: Digest? = null): SnapshotRef effect storage_admin spelling "sys.admin.checkout(Str)";
 
 // sys.admin.set_storage_preference (removed in 1.1.0)
@@ -1979,129 +2360,297 @@ pub enum StorageRewriteTarget removed "1.1.0" {
 pub native type StorageRewriteResult removed "1.1.0";
 
 // sys.admin.create_branch(SnapshotRef)
+/// Create a branch at the supplied committed snapshot or current HEAD; do not switch or commit pending
+/// changes.
+///
+/// Contract: administrative-state-transitions
+///
+/// Preconditions: Target must resolve to a commit; name must be a valid non-existing Git branch. An
+/// unborn HEAD or uncommitted CWD target fails without mutation.
 pub native fn admin_create_branch_snapshot_ref(name: Str, at: SnapshotRef? = null): BranchRef effect storage_admin spelling "sys.admin.create_branch(SnapshotRef)";
 
 // sys.admin.create_branch(CommitRef)
+/// Create a Git branch at a commit.
+///
+/// Contract: administrative-state-transitions
+///
+/// Preconditions: Target must resolve to a commit; name must be a valid non-existing Git branch. An
+/// unborn HEAD or uncommitted CWD target fails without mutation.
 pub native fn admin_create_branch_commit_ref(name: Str, at: CommitRef): BranchRef effect storage_admin spelling "sys.admin.create_branch(CommitRef)";
 
 // sys.admin.create_branch(BranchRef)
+/// Create a Git branch at another branch target.
+///
+/// Contract: administrative-state-transitions
+///
+/// Preconditions: Target must resolve to a commit; name must be a valid non-existing Git branch. An
+/// unborn HEAD or uncommitted CWD target fails without mutation.
 pub native fn admin_create_branch_branch_ref(name: Str, at: BranchRef): BranchRef effect storage_admin spelling "sys.admin.create_branch(BranchRef)";
 
 // sys.admin.create_branch(TagRef)
+/// Create a Git branch at a peeled tag target.
+///
+/// Contract: administrative-state-transitions
+///
+/// Preconditions: Target must resolve to a commit; name must be a valid non-existing Git branch. An
+/// unborn HEAD or uncommitted CWD target fails without mutation.
 pub native fn admin_create_branch_tag_ref(name: Str, at: TagRef): BranchRef effect storage_admin spelling "sys.admin.create_branch(TagRef)";
 
 // sys.admin.create_branch(GitOid)
+/// Create a Git branch at an exact Git object.
+///
+/// Contract: administrative-state-transitions
+///
+/// Preconditions: Target must resolve to a commit; name must be a valid non-existing Git branch. An
+/// unborn HEAD or uncommitted CWD target fails without mutation.
 pub native fn admin_create_branch_git_oid(name: Str, at: GitOid): BranchRef effect storage_admin spelling "sys.admin.create_branch(GitOid)";
 
 // sys.admin.create_branch(Str)
+/// Resolve a Git revision expression and create a branch there.
+///
+/// Contract: administrative-state-transitions
+///
+/// Preconditions: Target must resolve to a commit; name must be a valid non-existing Git branch. An
+/// unborn HEAD or uncommitted CWD target fails without mutation.
 pub native fn admin_create_branch_str(name: Str, at: Str): BranchRef effect storage_admin spelling "sys.admin.create_branch(Str)";
 
 // sys.admin.flush
+/// Durably seal pending rows without changing logical contents.
+///
+/// Contract: administrative-state-transitions
 pub native fn admin_flush(table: TableRef? = null): FlushResult effect storage_admin spelling "sys.admin.flush";
 
 // sys.admin.compact
+/// Maintain/repack the current indexed profile without logical mutation or selecting a row mode.
+///
+/// Contract: administrative-state-transitions
 pub native fn admin_compact(table: TableRef? = null): CompactionResult effect storage_admin spelling "sys.admin.compact";
 
 // sys.admin.verify
+/// Verify repository, metadata, storage and checkpoint invariants.
+///
+/// Contract: administrative-state-transitions
 pub native fn admin_verify(scope: VerifyScope = VerifyScope.database): VerificationReport effect storage_admin spelling "sys.admin.verify";
 
 // sys.admin.cancel_run
+/// Cancel a durable program run.
+///
+/// Contract: administrative-state-transitions
 pub native fn admin_cancel_run(run: RunRef, reason: Str? = null): Bool effect storage_admin spelling "sys.admin.cancel_run";
 
 // sys.admin.pause_stream
+/// Pause at an item/batch transaction boundary.
+///
+/// Contract: administrative-state-transitions
 pub native fn admin_pause_stream(stream: StreamRef, reason: Str? = null): Bool effect storage_admin spelling "sys.admin.pause_stream";
 
 // sys.admin.resume_stream
+/// Resume a paused stream.
+///
+/// Contract: administrative-state-transitions
 pub native fn admin_resume_stream(stream: StreamRef): Bool effect storage_admin spelling "sys.admin.resume_stream";
 
 // sys.admin.reset_checkpoint
+/// Compare-and-set checkpoint reset.
+///
+/// Contract: administrative-state-transitions
 pub native fn admin_reset_checkpoint(checkpoint: CheckpointRef, expected_version: CheckpointVersion, expected_position: CheckpointPosition, to: CheckpointPosition, reason: Str): Checkpoint effect storage_admin spelling "sys.admin.reset_checkpoint";
 
 // sys.admin.retry_failure
+/// Lease and retry the same blocked delivery; keep identity stable across failed attempts.
+///
+/// Contract: administrative-state-transitions
+///
+/// Preconditions: Atomically compare stable delivery identity, expected_version and expected_status. A
+/// stale observation fails before work or checkpoint movement.
 pub native fn admin_retry_failure(failure: FailureRef, expected_version: FailureVersion, expected_status: FailureStatus = FailureStatus.open): InvocationHandle<Value> effect storage_admin spelling "sys.admin.retry_failure";
 
 // sys.admin.skip_failure
+/// Atomically skip a supported failed position and move progress.
+///
+/// Contract: administrative-state-transitions
+///
+/// Preconditions: Atomically compare stable delivery identity, expected_version and expected_status. A
+/// stale observation fails before work or checkpoint movement.
 pub native fn admin_skip_failure(failure: FailureRef, expected_version: FailureVersion, expected_status: FailureStatus, reason: Str): Checkpoint effect storage_admin spelling "sys.admin.skip_failure";
 
 // sys.admin.replay_failure
+/// Reprocess a preserved skipped delivery without rewinding the live checkpoint.
+///
+/// Contract: administrative-state-transitions
+///
+/// Preconditions: Atomically compare stable delivery identity, expected_version and expected_status. A
+/// stale observation fails before work or checkpoint movement.
 pub native fn admin_replay_failure(failure: FailureRef, expected_version: FailureVersion, expected_status: FailureStatus = FailureStatus.skipped): InvocationHandle<Value> effect storage_admin spelling "sys.admin.replay_failure";
 
 // sys.admin.resolve_failure
+/// Resolve a preserved failure without marking its processing as successful.
+///
+/// Contract: administrative-state-transitions
+///
+/// Preconditions: Atomically compare stable delivery identity, expected_version and expected_status. A
+/// stale observation fails before work or checkpoint movement.
 pub native fn admin_resolve_failure(failure: FailureRef, expected_version: FailureVersion, expected_status: FailureStatus, reason: Str): Failure effect storage_admin spelling "sys.admin.resolve_failure";
 
 // sys.consumer_identity
+/// Derive durable consumer identity from database identity, stable function ObjectId and canonical
+/// typed arguments. Reject secret plaintext and unsupported argument values.
 pub native fn consumer_identity(function: FunctionRef, arguments: ArgumentMap): ConsumerIdentity effect table_read;
 
 // sys.admin.plan_checkout(SnapshotRef)
+/// Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached
+/// snapshot is selected.
+///
+/// Contract: administrative-state-transitions
 pub native fn admin_plan_checkout_snapshot_ref(target: SnapshotRef): CheckoutPlan effect table_read spelling "sys.admin.plan_checkout(SnapshotRef)";
 
 // sys.admin.plan_checkout(CommitRef)
+/// Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached
+/// snapshot is selected.
+///
+/// Contract: administrative-state-transitions
 pub native fn admin_plan_checkout_commit_ref(target: CommitRef): CheckoutPlan effect table_read spelling "sys.admin.plan_checkout(CommitRef)";
 
 // sys.admin.plan_checkout(BranchRef)
+/// Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached
+/// snapshot is selected.
+///
+/// Contract: administrative-state-transitions
 pub native fn admin_plan_checkout_branch_ref(target: BranchRef): CheckoutPlan effect table_read spelling "sys.admin.plan_checkout(BranchRef)";
 
 // sys.admin.plan_checkout(TagRef)
+/// Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached
+/// snapshot is selected.
+///
+/// Contract: administrative-state-transitions
 pub native fn admin_plan_checkout_tag_ref(target: TagRef): CheckoutPlan effect table_read spelling "sys.admin.plan_checkout(TagRef)";
 
 // sys.admin.plan_checkout(GitOid)
+/// Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached
+/// snapshot is selected.
+///
+/// Contract: administrative-state-transitions
 pub native fn admin_plan_checkout_git_oid(target: GitOid): CheckoutPlan effect table_read spelling "sys.admin.plan_checkout(GitOid)";
 
 // sys.admin.plan_checkout(Str)
+/// Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached
+/// snapshot is selected.
+///
+/// Contract: administrative-state-transitions
 pub native fn admin_plan_checkout_str(target: Str): CheckoutPlan effect table_read spelling "sys.admin.plan_checkout(Str)";
 
 // sys.blob.length
+/// Return the exact byte count without hydrating payloads.
+///
+/// Contract: blob-value-and-storage
 pub native fn blob_length(value: Blob): Int effect table_read since "1.1.0" spelling "sys.blob.length";
 
 // sys.blob.digest
+/// Return the raw-content SHA-256 commitment, independent of layout; not a full-verification claim.
+///
+/// Contract: blob-value-and-storage
 pub native fn blob_digest(value: Blob): Digest effect table_read since "1.1.0" spelling "sys.blob.digest";
 
 // sys.blob.read
+/// Return bounded raw-byte slice with octet-stream/null annotation; no media decoding.
+///
+/// Contract: blob-value-and-storage
 pub native fn blob_read(value: Blob, offset: Int, length: Int): Blob effect table_read since "1.1.0" spelling "sys.blob.read";
 
 // sys.blob.verify
+/// Incrementally verify the complete content and its native dependency structure.
+///
+/// Contract: blob-value-and-storage
 pub native fn blob_verify(value: Blob): Unit effect table_read since "1.1.0" spelling "sys.blob.verify";
 
 // sys.blob.from_bytes
+/// Construct at most 8 MiB of bytes from integers in 0..255. The fallback annotation is
+/// application/octet-stream with no suffix; explicit annotate changes metadata only.
+///
+/// Contract: blob-value-and-storage
 pub native fn blob_from_bytes(values: [Int]): Blob effect table_read since "1.1.0" spelling "sys.blob.from_bytes";
 
 // sys.blob.to_bytes
+/// Explicit bounded materialisation of at most 8 MiB.
+///
+/// Contract: blob-value-and-storage
 pub native fn blob_to_bytes(value: Blob): [Int] effect table_read since "1.1.0" spelling "sys.blob.to_bytes";
 
 // sys.blob.begin
+/// Begin an owned capture with a checked total bound.
+///
+/// Contract: blob-value-and-storage
 pub native fn blob_begin(expected_length: Int? = null, max_bytes: Int): BlobWriter effect runtime_admin since "1.1.0" spelling "sys.blob.begin";
 
 // sys.blob.append
+/// Append at most 8 MiB in order; enforce the total bound before acceptance.
+///
+/// Contract: blob-value-and-storage
 pub native fn blob_append(writer: BlobWriter, part: Blob): Unit effect runtime_admin since "1.1.0" spelling "sys.blob.append";
 
 // sys.blob.finish
+/// Seal, verify and protect the captured value without implicitly inserting a row. The fallback
+/// annotation is application/octet-stream with no suffix; explicit annotate changes metadata only.
+///
+/// Contract: blob-value-and-storage
 pub native fn blob_finish(writer: BlobWriter): Blob effect runtime_admin since "1.1.0" spelling "sys.blob.finish";
 
 // sys.blob.abort
+/// Abort unfinished capture; never delete a returned value.
+///
+/// Contract: blob-value-and-storage
 pub native fn blob_abort(writer: BlobWriter): Unit effect runtime_admin since "1.1.0" spelling "sys.blob.abort";
 
 // sys.blob.capture_file
+/// Capture an authorised regular file using the shared Blob writer and protection boundary. The
+/// fallback annotation is application/octet-stream with no suffix; explicit annotate changes metadata
+/// only.
+///
+/// Contract: blob-value-and-storage
 pub native fn blob_capture_file(root: Str, path: Str, max_bytes: Int): Blob effect runtime_admin since "1.1.0" spelling "sys.blob.capture_file";
 
 // sys.blob.resource
+/// Read a safe package-relative resource in the caller module's admitted source snapshot. The fallback
+/// annotation is application/octet-stream with no suffix; explicit annotate changes metadata only.
+///
+/// Contract: blob-value-and-storage
 pub native fn blob_resource(path: Str): Blob effect table_read since "1.1.0" spelling "sys.blob.resource";
 
 // sys.admin.review_commit
+/// Validate and bind the exact staged candidate without changing index, branch or user data.
+///
+/// Contract: administrative-state-transitions
 pub native fn admin_review_commit(): CommitReview effect table_read since "1.1.0" spelling "sys.admin.review_commit";
 
 // sys.admin.commit_reviewed
+/// Revalidate a reviewed candidate at protected publication and commit exactly that candidate.
+///
+/// Contract: administrative-state-transitions
 pub native fn admin_commit_reviewed(review: CommitReview, message: Str, author: PersonIdentity? = null): CommitRef effect storage_admin since "1.1.0" spelling "sys.admin.commit_reviewed";
 
 // sys.blob.media_type
+/// Read canonical declared MIME without payload hydration.
+///
+/// Contract: annotated-blob-format-3
 pub native fn blob_media_type(value: Blob): Str effect table_read since "1.1.0" spelling "sys.blob.media_type";
 
 // sys.blob.suffix
+/// Read the canonical optional suffix hint without payload hydration.
+///
+/// Contract: annotated-blob-format-3
 pub native fn blob_suffix(value: Blob): Str? effect table_read since "1.1.0" spelling "sys.blob.suffix";
 
 // sys.blob.annotate
+/// Return the same immutable bytes with MIME-1-validated canonical annotations.
+///
+/// Contract: annotated-blob-format-3
 pub native fn blob_annotate(value: Blob, media_type: Str, suffix: Str? = null): Blob effect table_read since "1.1.0" spelling "sys.blob.annotate";
 
 // sys.blob.same_content
+/// Exact content-only equality under admitted-witness/collision rules; may stream bytes and fail
+/// unavailable.
+///
+/// Contract: annotated-blob-format-3
 pub native fn blob_same_content(left: Blob, right: Blob): Bool effect table_read since "1.1.0" spelling "sys.blob.same_content";
 
 // The 67 portable failure codes of sys-1.1.0, in catalogue order (sys-as-native section 3.4, decision F1). Each
