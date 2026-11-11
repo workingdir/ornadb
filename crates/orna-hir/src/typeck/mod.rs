@@ -309,13 +309,15 @@ impl TypeChecker<'_> {
         matches!(self.program.tys.kind(ty), Some(TyKind::Error))
     }
 
-    /// Attempts one top-level body.
-    fn attempt(&mut self, body_id: BodyId) -> Attempt {
+    /// The expected type, root slot and omitted parameters of a top-level body, or the attempt that ends it.
+    fn expectation(
+        &self,
+        body_id: BodyId,
+        owner_kind: &DefKind,
+    ) -> Result<(Option<Ty>, Option<Slot>, Vec<usize>), Attempt> {
         let owner = self.program.bodies[body_id].owner;
-        let owner_kind = self.program.defs[owner].kind.clone();
         let public = self.program.defs[owner].vis == Visibility::Public;
-        let body_params = self.program.bodies[body_id].params.clone();
-        let (expected, root_slot, omitted) = match &owner_kind {
+        match owner_kind {
             DefKind::Fn(function) => {
                 let is_main = matches!(function.body, FnBody::Source(id) if id == body_id);
                 if is_main {
@@ -341,22 +343,19 @@ impl TypeChecker<'_> {
                                 )
                             })
                             .collect::<Vec<_>>();
-                        return Attempt::Failed {
+                        return Err(Attempt::Failed {
                             bodies: Vec::new(),
                             conflicts: diagnostics.len(),
                             diagnostics,
                             detail: "a public function omits a parameter annotation".into(),
-                        };
+                        });
                     }
-                    if omitted
-                        .iter()
-                        .any(|&index| function.params[index].default.is_some())
-                    {
-                        return Attempt::NotYet(NotYetReason::UnannotatedParameter(owner));
+                    if omitted.iter().any(|&index| function.params[index].default.is_some()) {
+                        return Err(Attempt::NotYet(NotYetReason::UnannotatedParameter(owner)));
                     }
                     let infer = self.is_error(function.ret);
                     let expected = if infer { None } else { Some(function.ret) };
-                    (expected, infer.then_some(Slot::Ret), omitted)
+                    Ok((expected, infer.then_some(Slot::Ret), omitted))
                 } else if let Some(index) = function
                     .params
                     .iter()
@@ -364,36 +363,40 @@ impl TypeChecker<'_> {
                 {
                     let is_omitted = !function.params[index].written;
                     if is_omitted && public {
-                        return Attempt::NotYet(NotYetReason::UnannotatedParameter(owner));
+                        return Err(Attempt::NotYet(NotYetReason::UnannotatedParameter(owner)));
                     }
                     let expected = if is_omitted {
                         None
                     } else {
                         Some(function.params[index].ty)
                     };
-                    (
-                        expected,
-                        is_omitted.then_some(Slot::Param(index)),
-                        Vec::new(),
-                    )
+                    Ok((expected, is_omitted.then_some(Slot::Param(index)), Vec::new()))
                 } else {
-                    return Attempt::NotYet(NotYetReason::Unsupported(
+                    Err(Attempt::NotYet(NotYetReason::Unsupported(
                         "this body is not a function body or default".into(),
-                    ));
+                    )))
                 }
             }
             DefKind::Let(binding) => {
                 let declared = binding.declared.filter(|ty| !self.is_error(*ty));
-                (declared, None, Vec::new())
+                Ok((declared, None, Vec::new()))
             }
-            DefKind::Assertion(_) => (None, None, Vec::new()),
-            _ => {
-                return Attempt::NotYet(NotYetReason::Unsupported(
-                    "this definition's body is outside the H2a subset".into(),
-                ));
-            }
-        };
+            DefKind::Assertion(_) => Ok((None, None, Vec::new())),
+            _ => Err(Attempt::NotYet(NotYetReason::Unsupported(
+                "this definition's body is outside the H2a subset".into(),
+            ))),
+        }
+    }
 
+    /// Attempts one top-level body.
+    fn attempt(&mut self, body_id: BodyId) -> Attempt {
+        let owner = self.program.bodies[body_id].owner;
+        let owner_kind = self.program.defs[owner].kind.clone();
+        let body_params = self.program.bodies[body_id].params.clone();
+        let (expected, root_slot, omitted) = match self.expectation(body_id, &owner_kind) {
+            Ok(parts) => parts,
+            Err(attempt) => return attempt,
+        };
         let mut check = BodyCheck::new(&mut *self.program, &self.variant_owner, owner);
         let root = check.check_root(body_id, expected);
         let root_ty = match root {
