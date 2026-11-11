@@ -1,7 +1,8 @@
-//! Contract tests every [`TableStore`] implementation must pass, exported as
-//! [`run_contract`] behind the `test-support` feature. The in-memory store runs
-//! them in this crate; the SQLite and Git stores join by calling [`run_contract`]
-//! with their own constructor.
+//! Contract tests every [`TableStore`] implementation must pass. The read-side
+//! cases ([`run_read_contract`]) take a [`SeedableStore`] and run against any
+//! store that can be seeded with rows; the write-side cases ([`run_write_contract`])
+//! take a constructor and stay memory-only until a writable committed store exists.
+//! The in-memory store runs both in this crate.
 
 use std::ops::Bound;
 

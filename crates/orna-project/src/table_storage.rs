@@ -19,7 +19,10 @@ use std::fmt;
 
 use num_bigint::BigInt;
 use orna_check::{ModuleHeader, SymbolKind, TableSchema, Type};
-use orna_repository::{GitCommitRef, KeyRange, PrivateCommit, Repository, RepositoryFormatContext};
+use orna_repository::{
+    AdmittedRow, GitCommitRef, KeyRange, NativeGraphContext, PrivateCommit, Repository, RepositoryFormatContext,
+    RepositoryReadScope,
+};
 use orna_runtime::TableObjectId;
 use orna_value::{
     BlobMetadata, ContextValue, ROV3_BLOB_TAG, Raw, Value, ValueFormat,
@@ -176,57 +179,31 @@ fn read_tables(
             .copied()
             .ok_or(TableStorageError)?;
         let resolved_schema = resolve(object_id).map_err(|_| TableStorageError)?;
-        let binding = resolved_schema.binding();
-        let row_map = format_context
-            .load_row_map(object_id.bytes())
-            .map_err(|_| TableStorageError)?;
-        let graph = format_context
-            .open_native_graph(&row_map)
-            .map_err(|_| TableStorageError)?;
-        let read_scope = graph.open_read_scope().map_err(|_| TableStorageError)?;
-        let (field_names, storage_order) = stored_field_names(binding.descriptor().raw())?;
-        let admission = table_schema.admission.as_ref().ok_or(TableStorageError)?;
-        let text_primary_key = has_text_primary_key(table_schema);
+        let opened = open_table(format_context, object_id, resolved_schema, table_schema)?;
         let mut committed = BTreeMap::<Vec<u8>, Vec<u8>>::new();
         let mut lower = None;
         loop {
             let range = KeyRange::new(lower.clone(), None, 64).map_err(|_| TableStorageError)?;
-            let page = graph
-                .range_rows(&range, &read_scope)
+            let page = opened
+                .graph
+                .range_rows(&range, &opened.read_scope)
                 .map_err(|_| TableStorageError)?;
             if page.is_empty() {
                 break;
             }
             let next_lower = page.last().map(|row| row.key().clone());
             for row in page.into_iter().skip(usize::from(lower.is_some())) {
-                let canonical_key = row.key().canonical_bytes().map_err(|_| TableStorageError)?;
-                let key_value = Value::decode(&canonical_key).map_err(|_| TableStorageError)?;
-                let key_bytes = key_value.encode().map_err(|_| TableStorageError)?;
-                // Reject a key whose shape does not match the primary key declaration.
-                key_values(admission.keys.len(), key_value.raw())?;
-                let runtime_key = runtime_key_from_evaluator(&key_bytes, text_primary_key)?;
+                let runtime_key = runtime_key_of_row(&row, opened.key_count, opened.text_primary_key)?;
                 // The row slot is checked before the stored tuple is decoded, so the row
                 // past the per-table row limit is never decoded or retained.
                 budget.check_row_slot(committed.len())?;
                 // The committed descriptor validates the whole stored tuple,
                 // Blob references included, so the tuple is kept as stored.
-                let decoded = graph
-                    .decode_admitted_row_fields(&row, binding, &read_scope)
-                    .map_err(|_| TableStorageError)?;
-                if decoded.fields().len() != storage_order.len()
-                    || decoded
-                        .fields()
-                        .iter()
-                        .zip(&storage_order)
-                        .any(|(field, name)| field_names.get(field.field_id()) != Some(name))
-                {
-                    return Err(TableStorageError.into());
-                }
-                let value = decoded.canonical_fields();
+                let value = stored_tuple_of_row(&opened, &row)?;
                 // The byte bound needs the stored tuple's size, so it is admitted once
                 // decoded and before the row is retained.
                 budget.admit_row_bytes(committed.len(), runtime_key.len() + value.len())?;
-                if committed.insert(runtime_key, value.to_vec()).is_some() {
+                if committed.insert(runtime_key, value).is_some() {
                     return Err(TableStorageError.into());
                 }
             }
@@ -238,12 +215,85 @@ fn read_tables(
         result.insert(
             table_name.clone(),
             CommittedTable {
-                storage_order,
+                storage_order: opened.storage_order,
                 rows: committed.into_iter().collect(),
             },
         );
     }
     Ok(result)
+}
+
+/// One committed table opened for reading: its native graph and read scope, and
+/// the descriptor facts a row decode needs.
+pub(crate) struct OpenedTable {
+    pub(crate) resolved: ResolvedTableSchema,
+    pub(crate) graph: NativeGraphContext,
+    pub(crate) read_scope: RepositoryReadScope,
+    pub(crate) field_names: BTreeMap<[u8; 16], String>,
+    pub(crate) storage_order: Vec<String>,
+    pub(crate) key_count: usize,
+    pub(crate) text_primary_key: bool,
+}
+
+/// Opens one table of a committed format context for reading.
+pub(crate) fn open_table(
+    format_context: &RepositoryFormatContext,
+    object_id: TableObjectId,
+    resolved: ResolvedTableSchema,
+    table_schema: &TableSchema,
+) -> Result<OpenedTable, TableStorageError> {
+    let row_map = format_context
+        .load_row_map(object_id.bytes())
+        .map_err(|_| TableStorageError)?;
+    let graph = format_context
+        .open_native_graph(&row_map)
+        .map_err(|_| TableStorageError)?;
+    let read_scope = graph.open_read_scope().map_err(|_| TableStorageError)?;
+    let (field_names, storage_order) = stored_field_names(resolved.binding().descriptor().raw())?;
+    let admission = table_schema.admission.as_ref().ok_or(TableStorageError)?;
+    Ok(OpenedTable {
+        key_count: admission.keys.len(),
+        text_primary_key: has_text_primary_key(table_schema),
+        resolved,
+        graph,
+        read_scope,
+        field_names,
+        storage_order,
+    })
+}
+
+/// The runtime key of one admitted row, after its key shape is checked against
+/// the primary-key declaration.
+pub(crate) fn runtime_key_of_row(
+    row: &AdmittedRow,
+    key_count: usize,
+    text_primary_key: bool,
+) -> Result<Vec<u8>, TableStorageError> {
+    let canonical_key = row.key().canonical_bytes().map_err(|_| TableStorageError)?;
+    let key_value = Value::decode(&canonical_key).map_err(|_| TableStorageError)?;
+    let key_bytes = key_value.encode().map_err(|_| TableStorageError)?;
+    // Reject a key whose shape does not match the primary key declaration.
+    key_values(key_count, key_value.raw())?;
+    runtime_key_from_evaluator(&key_bytes, text_primary_key)
+}
+
+/// The stored tuple of one admitted row, as the committed descriptor canonicalises
+/// it, after its fields are checked against the table's storage order.
+pub(crate) fn stored_tuple_of_row(opened: &OpenedTable, row: &AdmittedRow) -> Result<Vec<u8>, TableStorageError> {
+    let decoded = opened
+        .graph
+        .decode_admitted_row_fields(row, opened.resolved.binding(), &opened.read_scope)
+        .map_err(|_| TableStorageError)?;
+    if decoded.fields().len() != opened.storage_order.len()
+        || decoded
+            .fields()
+            .iter()
+            .zip(&opened.storage_order)
+            .any(|(field, name)| opened.field_names.get(field.field_id()) != Some(name))
+    {
+        return Err(TableStorageError);
+    }
+    Ok(decoded.canonical_fields().to_vec())
 }
 
 /// Converts one table's runtime rows into evaluator records, ordered by evaluator key.

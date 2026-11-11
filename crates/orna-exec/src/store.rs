@@ -86,6 +86,18 @@ pub enum StoreError {
     UnknownCursor(CursorId),
     /// An `Expect` requirement did not hold for the key.
     Expectation(&'static str),
+    /// The table is not one the store holds.
+    UnknownTable(TableId),
+    /// The store's rows do not come in canonical key order, so a range scan
+    /// cannot be answered from them.
+    UnsupportedOrder,
+    /// A reverse scan would buffer more rows than its quota allows.
+    Quota {
+        /// The rows seen when the quota refused the next one.
+        rows_seen: usize,
+    },
+    /// The backing storage could not be read.
+    Backend(&'static str),
 }
 
 /// The table store. Its methods take `&mut self` even for reads, because a
