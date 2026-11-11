@@ -60,7 +60,7 @@ pub(crate) fn binary(
 
 /// Whether `value` is or contains a closure. The old evaluator refuses to
 /// compare closures, however deeply they are nested.
-fn contains_closure(value: &Value) -> bool {
+pub(crate) fn contains_closure(value: &Value) -> bool {
     match value {
         Value::Closure(_) => true,
         Value::Tuple(items) | Value::List(items) => items.iter().any(contains_closure),
