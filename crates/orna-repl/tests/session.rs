@@ -30,6 +30,16 @@ fn function_defined_then_called() {
     assert_eq!(run(&mut session, "double(21)"), Some(Value::from(42_i64)));
 }
 
+// Expected difference from `generics_fail_explicitly_in_the_bounded_runtime` in orna-project-repl: the HIR
+// session accepts a generic function at the prompt and instantiates it per call instead of rejecting it.
+#[test]
+fn generic_function_is_accepted_and_instantiated_per_call() {
+    let mut session = Session::new();
+    assert_eq!(code(&mut session, "fn identity<T>(value: T): T = value;"), "ok");
+    assert_eq!(run(&mut session, "identity(1)"), Some(Value::from(1_i64)));
+    assert_eq!(run(&mut session, "identity(\"text\")"), Some(Value::Text("text".into())));
+}
+
 #[test]
 fn redefinition_shadows_earlier_function() {
     let mut session = Session::new();
