@@ -217,6 +217,9 @@ enum Attempt {
     NotYet(NotYetReason),
 }
 
+/// The expected type, the slot to solve, and the omitted parameters of one top-level body.
+type Expectation = (Option<Ty>, Option<Slot>, Vec<usize>);
+
 struct TypeChecker<'a> {
     program: &'a mut Program,
     variant_owner: BTreeMap<DefId, DefId>,
@@ -310,11 +313,7 @@ impl TypeChecker<'_> {
     }
 
     /// The expected type, root slot and omitted parameters of a top-level body, or the attempt that ends it.
-    fn expectation(
-        &self,
-        body_id: BodyId,
-        owner_kind: &DefKind,
-    ) -> Result<(Option<Ty>, Option<Slot>, Vec<usize>), Attempt> {
+    fn expectation(&self, body_id: BodyId, owner_kind: &DefKind) -> Result<Expectation, Attempt> {
         let owner = self.program.bodies[body_id].owner;
         let public = self.program.defs[owner].vis == Visibility::Public;
         match owner_kind {
@@ -350,7 +349,10 @@ impl TypeChecker<'_> {
                             detail: "a public function omits a parameter annotation".into(),
                         });
                     }
-                    if omitted.iter().any(|&index| function.params[index].default.is_some()) {
+                    if omitted
+                        .iter()
+                        .any(|&index| function.params[index].default.is_some())
+                    {
                         return Err(Attempt::NotYet(NotYetReason::UnannotatedParameter(owner)));
                     }
                     let infer = self.is_error(function.ret);
@@ -370,7 +372,11 @@ impl TypeChecker<'_> {
                     } else {
                         Some(function.params[index].ty)
                     };
-                    Ok((expected, is_omitted.then_some(Slot::Param(index)), Vec::new()))
+                    Ok((
+                        expected,
+                        is_omitted.then_some(Slot::Param(index)),
+                        Vec::new(),
+                    ))
                 } else {
                     Err(Attempt::NotYet(NotYetReason::Unsupported(
                         "this body is not a function body or default".into(),
