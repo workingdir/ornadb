@@ -1,5 +1,6 @@
 //! The `core.collection` natives that group or join rows by keys: `group_by` and `asof_join`.
 
+use orna_hir::Ty;
 use std::cmp::Ordering;
 
 use crate::error::Stop;
@@ -14,6 +15,7 @@ use crate::value::Value;
 /// key. Groups keep their first-seen row order, and the groups themselves are sorted by key.
 pub(in crate::natives) fn group_by(
     machine: &mut Machine<'_>,
+    _targs: &[Ty],
     arguments: Vec<Value>,
 ) -> Result<Value, Stop> {
     let [rows, key] = exactly(arguments)?;
@@ -59,6 +61,7 @@ pub(in crate::natives) fn group_by(
 /// An empty left list returns at once, without evaluating the right side.
 pub(in crate::natives) fn asof_join(
     machine: &mut Machine<'_>,
+    _targs: &[Ty],
     arguments: Vec<Value>,
 ) -> Result<Value, Stop> {
     let [left, right, time, by] = exactly(arguments)?;

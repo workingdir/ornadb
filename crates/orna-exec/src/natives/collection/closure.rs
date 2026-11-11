@@ -2,6 +2,7 @@
 //! ranks. Each closure call charges what the closure's body charges; the natives charge the steps the old evaluator
 //! charged on top of that.
 
+use orna_hir::Ty;
 use std::cmp::Ordering;
 
 use num_bigint::BigInt;
@@ -15,6 +16,7 @@ use crate::value::Value;
 /// `map<T, U>(rows: [T], transform: fn(T): U): [U]`. No step of its own.
 pub(in crate::natives) fn map(
     machine: &mut Machine<'_>,
+    _targs: &[Ty],
     arguments: Vec<Value>,
 ) -> Result<Value, Stop> {
     let [rows, transform] = exactly(arguments)?;
@@ -29,6 +31,7 @@ pub(in crate::natives) fn map(
 /// `flat_map<T, U>(rows: [T], transform: fn(T): [U]): [U]`. Each transform result must be a list. No step of its own.
 pub(in crate::natives) fn flat_map(
     machine: &mut Machine<'_>,
+    _targs: &[Ty],
     arguments: Vec<Value>,
 ) -> Result<Value, Stop> {
     let [rows, transform] = exactly(arguments)?;
@@ -44,6 +47,7 @@ pub(in crate::natives) fn flat_map(
 /// `filter<T>(rows: [T], predicate: fn(T): Bool): [T]`. One step per row; a row is kept only on an explicit true.
 pub(in crate::natives) fn filter(
     machine: &mut Machine<'_>,
+    _targs: &[Ty],
     arguments: Vec<Value>,
 ) -> Result<Value, Stop> {
     let [rows, predicate] = exactly(arguments)?;
@@ -61,6 +65,7 @@ pub(in crate::natives) fn filter(
 /// `every<T>(rows: [T], predicate: fn(T): Bool): Bool`. One step per row examined; stops at the first false.
 pub(in crate::natives) fn every(
     machine: &mut Machine<'_>,
+    _targs: &[Ty],
     arguments: Vec<Value>,
 ) -> Result<Value, Stop> {
     let [rows, predicate] = exactly(arguments)?;
@@ -77,6 +82,7 @@ pub(in crate::natives) fn every(
 /// `exists<T>(rows: [T], predicate: fn(T): Bool): Bool`. One step per row examined; stops at the first true.
 pub(in crate::natives) fn exists(
     machine: &mut Machine<'_>,
+    _targs: &[Ty],
     arguments: Vec<Value>,
 ) -> Result<Value, Stop> {
     let [rows, predicate] = exactly(arguments)?;
@@ -94,6 +100,7 @@ pub(in crate::natives) fn exists(
 /// and more than one is a multiple error, reported after every row has been examined.
 pub(in crate::natives) fn one(
     machine: &mut Machine<'_>,
+    _targs: &[Ty],
     arguments: Vec<Value>,
 ) -> Result<Value, Stop> {
     let [rows, predicate] = exactly(arguments)?;
@@ -120,6 +127,7 @@ pub(in crate::natives) fn one(
 /// any reordering, and each key must be a lawful sort key. The sort is stable.
 pub(in crate::natives) fn sort_by(
     machine: &mut Machine<'_>,
+    _targs: &[Ty],
     arguments: Vec<Value>,
 ) -> Result<Value, Stop> {
     let [rows, key] = exactly(arguments)?;
@@ -141,6 +149,7 @@ pub(in crate::natives) fn sort_by(
 /// compared.
 pub(in crate::natives) fn rank(
     machine: &mut Machine<'_>,
+    _targs: &[Ty],
     arguments: Vec<Value>,
 ) -> Result<Value, Stop> {
     let [rows, key] = exactly(arguments)?;

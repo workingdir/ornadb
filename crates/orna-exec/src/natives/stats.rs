@@ -4,6 +4,7 @@
 //! The old evaluator's stats extremes return `null` for an empty list, where the collection extremes return `none`;
 //! the stats range of an empty list is `null` too.
 
+use orna_hir::Ty;
 use std::cmp::Ordering;
 
 use crate::error::Stop;
@@ -18,6 +19,7 @@ use orna_hir::BinOp;
 /// `min<T>(rows: [T]): T?`. `null` for no rows; otherwise the option of the smallest row. One step per row.
 pub(in crate::natives) fn min(
     machine: &mut Machine<'_>,
+    _targs: &[Ty],
     arguments: Vec<Value>,
 ) -> Result<Value, Stop> {
     let [rows] = exactly(arguments)?;
@@ -28,6 +30,7 @@ pub(in crate::natives) fn min(
 /// `max<T>(rows: [T]): T?`. `null` for no rows; otherwise the option of the largest row. One step per row.
 pub(in crate::natives) fn max(
     machine: &mut Machine<'_>,
+    _targs: &[Ty],
     arguments: Vec<Value>,
 ) -> Result<Value, Stop> {
     let [rows] = exactly(arguments)?;
@@ -39,6 +42,7 @@ pub(in crate::natives) fn max(
 /// step per row. Only integer rows subtract here; other row kinds are a type error.
 pub(in crate::natives) fn range(
     machine: &mut Machine<'_>,
+    _targs: &[Ty],
     arguments: Vec<Value>,
 ) -> Result<Value, Stop> {
     let [rows] = exactly(arguments)?;
@@ -55,6 +59,7 @@ pub(in crate::natives) fn range(
 /// empty list has no mode.
 pub(in crate::natives) fn mode(
     machine: &mut Machine<'_>,
+    _targs: &[Ty],
     arguments: Vec<Value>,
 ) -> Result<Value, Stop> {
     let [rows] = exactly(arguments)?;

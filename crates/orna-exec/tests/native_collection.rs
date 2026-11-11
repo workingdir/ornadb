@@ -12,6 +12,7 @@ const LIMITS: ExecLimits = ExecLimits {
     max_steps: 100_000,
     max_depth: 64,
     max_string_bytes: 1 << 20,
+    max_collection_items: 2_048,
     max_integer_digits: 1_024,
 };
 

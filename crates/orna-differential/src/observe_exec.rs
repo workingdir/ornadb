@@ -25,6 +25,7 @@ use crate::observe_new::{self, LoweredProgram};
 const EXEC_LIMITS: ExecLimits = ExecLimits {
     max_steps: 2048 * 200 + 10_000,
     max_depth: 64,
+    max_collection_items: 2048,
     max_string_bytes: 16_384,
     max_integer_digits: 1024,
 };

@@ -1,6 +1,7 @@
 //! The `core.collection` natives over whole lists that take no closure: counting, union, sums, the ends, slices,
 //! distinct elements and extremes. Each function charges the steps the old evaluator charged.
 
+use orna_hir::Ty;
 use std::cmp::Ordering;
 use std::collections::HashSet;
 
@@ -17,6 +18,7 @@ use crate::value::Value;
 /// `count<T>(rows: [T]): Int`. One step.
 pub(in crate::natives) fn count(
     machine: &mut Machine<'_>,
+    _targs: &[Ty],
     arguments: Vec<Value>,
 ) -> Result<Value, Stop> {
     let [rows] = exactly(arguments)?;
@@ -28,6 +30,7 @@ pub(in crate::natives) fn count(
 /// `union<T>(left: [T], right: [T]): [T]`, and `__list_concat`. One step per element of both lists.
 pub(in crate::natives) fn union_rows(
     machine: &mut Machine<'_>,
+    _targs: &[Ty],
     arguments: Vec<Value>,
 ) -> Result<Value, Stop> {
     let [left, right] = exactly(arguments)?;
@@ -41,6 +44,7 @@ pub(in crate::natives) fn union_rows(
 /// element is unsupported, as the old evaluator reports it.
 pub(in crate::natives) fn sum(
     machine: &mut Machine<'_>,
+    _targs: &[Ty],
     arguments: Vec<Value>,
 ) -> Result<Value, Stop> {
     let [rows] = exactly(arguments)?;
@@ -59,6 +63,7 @@ pub(in crate::natives) fn sum(
 /// `first<T>(rows: [T]): T?`. No step.
 pub(in crate::natives) fn first(
     _machine: &mut Machine<'_>,
+    _targs: &[Ty],
     arguments: Vec<Value>,
 ) -> Result<Value, Stop> {
     let [rows] = exactly(arguments)?;
@@ -69,6 +74,7 @@ pub(in crate::natives) fn first(
 /// `last<T>(rows: [T]): T?`. No step.
 pub(in crate::natives) fn last(
     _machine: &mut Machine<'_>,
+    _targs: &[Ty],
     arguments: Vec<Value>,
 ) -> Result<Value, Stop> {
     let [rows] = exactly(arguments)?;
@@ -79,6 +85,7 @@ pub(in crate::natives) fn last(
 /// `min<T>(rows: [T]): T?`, and `__minimum`.
 pub(in crate::natives) fn min_value(
     machine: &mut Machine<'_>,
+    _targs: &[Ty],
     arguments: Vec<Value>,
 ) -> Result<Value, Stop> {
     let [rows] = exactly(arguments)?;
@@ -89,6 +96,7 @@ pub(in crate::natives) fn min_value(
 /// `max<T>(rows: [T]): T?`, and `__maximum`.
 pub(in crate::natives) fn max_value(
     machine: &mut Machine<'_>,
+    _targs: &[Ty],
     arguments: Vec<Value>,
 ) -> Result<Value, Stop> {
     let [rows] = exactly(arguments)?;
@@ -100,6 +108,7 @@ pub(in crate::natives) fn max_value(
 /// One step per row taken.
 pub(in crate::natives) fn take_rows(
     machine: &mut Machine<'_>,
+    _targs: &[Ty],
     arguments: Vec<Value>,
 ) -> Result<Value, Stop> {
     let [rows, count] = exactly(arguments)?;
@@ -118,6 +127,7 @@ pub(in crate::natives) fn take_rows(
 /// One step per row kept.
 pub(in crate::natives) fn drop_rows(
     machine: &mut Machine<'_>,
+    _targs: &[Ty],
     arguments: Vec<Value>,
 ) -> Result<Value, Stop> {
     let [rows, count] = exactly(arguments)?;
@@ -147,6 +157,7 @@ fn prefix_length(count: &BigInt, length: usize) -> Result<usize, Stop> {
 /// encodings are, and the first of equal rows is kept, in source order.
 pub(in crate::natives) fn distinct(
     machine: &mut Machine<'_>,
+    _targs: &[Ty],
     arguments: Vec<Value>,
 ) -> Result<Value, Stop> {
     let [rows] = exactly(arguments)?;

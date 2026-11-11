@@ -88,6 +88,16 @@ pub enum TyKind {
     Period,
     /// `Digest`.
     Digest,
+    /// `Path`: an identifier of a location in the project or host.
+    Path,
+    /// `TimeZone`: a named or fixed time-zone value.
+    TimeZone,
+    /// `Locale`: a language and region tag.
+    Locale,
+    /// `PresentContext`: the presentation settings a `sys` renderer takes.
+    PresentContext,
+    /// `PresentTree`: a rendered presentation tree.
+    PresentTree,
     /// The unit type of an expression with no value.
     Unit,
     /// `Quantity<N, U>`: a numeric value of type `N` (`Int`, `Decimal` or `Float`) in the unit key `U` (units.md 3.4).
