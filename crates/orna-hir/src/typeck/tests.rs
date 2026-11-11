@@ -6,7 +6,7 @@ use crate::{
 };
 use orna_syntax::parse_module_with_file;
 
-fn program(source: &str) -> Program {
+pub(super) fn program(source: &str) -> Program {
     let tree = parse_module_with_file(source, "test.orna").value;
     lower(&[SourceUnit {
         source: SourceId::new(0),
@@ -15,7 +15,7 @@ fn program(source: &str) -> Program {
     }])
 }
 
-fn definition(program: &Program, name: &str) -> DefId {
+pub(super) fn definition(program: &Program, name: &str) -> DefId {
     program
         .defs
         .iter_enumerated()
@@ -26,7 +26,7 @@ fn definition(program: &Program, name: &str) -> DefId {
 
 /// The module the test source lowered to. Lowering registers the engine-embedded
 /// `core` and `sys` modules first, so the index is not zero.
-fn test_module(program: &Program) -> ModuleId {
+pub(super) fn test_module(program: &Program) -> ModuleId {
     program
         .modules
         .iter_enumerated()
@@ -38,7 +38,7 @@ fn test_module(program: &Program) -> ModuleId {
 /// Whether every body of the test module types. The embedded `core` and `sys`
 /// bodies belong to the interface, not to the program under test, so one
 /// program's verdict ignores them.
-fn test_accepted(program: &Program, summary: &TypeCheckSummary) -> bool {
+pub(super) fn test_accepted(program: &Program, summary: &TypeCheckSummary) -> bool {
     let module = test_module(program);
     summary
         .outcomes
@@ -57,7 +57,7 @@ fn test_not_yet(program: &Program, summary: &TypeCheckSummary) -> usize {
         .count()
 }
 
-fn result(program: &Program, name: &str) -> String {
+pub(super) fn result(program: &Program, name: &str) -> String {
     let definition = definition(program, name);
     match &program.defs[definition].kind {
         DefKind::Fn(function) => print_type(program, function.ret),

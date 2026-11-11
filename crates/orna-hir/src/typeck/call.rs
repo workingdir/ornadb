@@ -233,7 +233,7 @@ impl<'a> BodyCheck<'a> {
     }
 
     /// Replaces a generic parameter with a written type argument.
-    fn substitute(&mut self, ty: Ty, targs: &[Ty]) -> Ty {
+    pub(super) fn substitute(&mut self, ty: Ty, targs: &[Ty]) -> Ty {
         let Some(kind) = self.kind_of(ty) else {
             return ty;
         };
@@ -573,10 +573,10 @@ impl<'a> BodyCheck<'a> {
         if super::quantity::is_unit(self.program, def) {
             return self.unit_ctor_ty(body, def, call, span);
         }
-        let result = self.ctor_result_ty(def)?;
+        let result = self.ctor_result_ty(def, span.clone())?;
         let fields = self.ctor_fields(def)?;
         for (index, field) in fields.iter().enumerate() {
-            let field_ty = self.field_definition_ty(*field)?;
+            let field_ty = self.field_in(result, *field)?;
             if call.args.get(index).is_some() {
                 self.check_slot(body, call, index, Some(field_ty), span.clone())?;
             }
@@ -599,10 +599,13 @@ impl<'a> BodyCheck<'a> {
         expected: Option<Ty>,
         span: SyntaxSpan,
     ) -> Result<Ty, NotYetReason> {
-        let result = self.ctor_result_ty(def)?;
+        let result = self.ctor_result_ty(def, span.clone())?;
         let declared = self.ctor_fields(def)?;
+        if let Some(expected) = expected {
+            self.unify(result, expected, span.clone());
+        }
         for (field, value) in fields {
-            let field_ty = self.field_definition_ty(*field)?;
+            let field_ty = self.field_in(result, *field)?;
             self.infer_expr(body, *value, Some(field_ty))?;
         }
         let required = self.table_required_fields(def).unwrap_or_else(|| {
@@ -625,15 +628,17 @@ impl<'a> BodyCheck<'a> {
                 );
             }
         }
-        if let Some(expected) = expected {
-            self.unify(result, expected, span);
-        }
         Ok(result)
     }
 
     /// The result type of a constructor: the enclosing enum for a variant, the
-    /// declared nominal otherwise.
-    pub(super) fn ctor_result_ty(&mut self, def: DefId) -> Result<Ty, NotYetReason> {
+    /// declared nominal otherwise. A generic nominal's result carries one fresh
+    /// variable per declared parameter, for the caller to solve.
+    pub(super) fn ctor_result_ty(
+        &mut self,
+        def: DefId,
+        span: SyntaxSpan,
+    ) -> Result<Ty, NotYetReason> {
         match self
             .program
             .defs
@@ -648,7 +653,11 @@ impl<'a> BodyCheck<'a> {
                 })?;
                 Ok(self.intern(TyKind::Adt(owner, Box::new([]))))
             }
-            Some(DefKind::Type(_) | DefKind::Enum(_) | DefKind::Table(_)) => {
+            Some(DefKind::Type(_)) => {
+                let args = self.fresh_nominal_args(def, &span);
+                Ok(self.intern(TyKind::Adt(def, args)))
+            }
+            Some(DefKind::Enum(_) | DefKind::Table(_)) => {
                 Ok(self.intern(TyKind::Adt(def, Box::new([]))))
             }
             Some(DefKind::Unit(_)) => Ok(self.intern(TyKind::Unit)),
@@ -732,7 +741,7 @@ impl<'a> BodyCheck<'a> {
         let base_ty = self.infer_expr(body, base, None)?;
         let resolved = self.resolved(base_ty);
         match field {
-            FieldRef::Def(def) => self.field_definition_ty(*def),
+            FieldRef::Def(def) => self.field_in(resolved, *def),
             FieldRef::Index(index) => match self.kind_of(resolved) {
                 Some(TyKind::Record(fields)) => fields
                     .get(*index as usize)
@@ -759,7 +768,7 @@ impl<'a> BodyCheck<'a> {
                             .into(),
                         ));
                     };
-                    let field_ty = self.field_definition_ty(field_def)?;
+                    let field_ty = self.field_in(resolved, field_def)?;
                     body.exprs[id].kind = ExprKind::Field {
                         base,
                         field: FieldRef::Def(field_def),
@@ -837,7 +846,7 @@ impl<'a> BodyCheck<'a> {
                 let base_ty = self.place_ty(body, base, span.clone())?;
                 let resolved = self.resolved(base_ty);
                 match field {
-                    FieldRef::Def(def) => self.field_definition_ty(*def),
+                    FieldRef::Def(def) => self.field_in(base_ty, *def),
                     FieldRef::Index(index) => match self.kind_of(resolved) {
                         Some(TyKind::Record(fields)) => fields
                             .get(*index as usize)
@@ -858,7 +867,7 @@ impl<'a> BodyCheck<'a> {
                                     "assignment to an undeclared field is not on HIR".into(),
                                 ));
                             };
-                            self.field_definition_ty(field)
+                            self.field_in(resolved, field)
                         }
                         Some(TyKind::Record(fields)) => fields
                             .iter()
@@ -894,7 +903,7 @@ impl<'a> BodyCheck<'a> {
     pub(super) fn def_value_ty(
         &mut self,
         def: DefId,
-        _span: SyntaxSpan,
+        span: SyntaxSpan,
     ) -> Result<Ty, NotYetReason> {
         match self
             .program
@@ -933,17 +942,19 @@ impl<'a> BodyCheck<'a> {
                 let row = self.intern(TyKind::Adt(def, Box::new([])));
                 Ok(self.intern(TyKind::Relation(row)))
             }
-            Some(DefKind::Enum(_) | DefKind::Type(_)) => {
-                Ok(self.intern(TyKind::Adt(def, Box::new([]))))
+            Some(DefKind::Enum(_)) => Ok(self.intern(TyKind::Adt(def, Box::new([])))),
+            Some(DefKind::Type(_)) => {
+                let args = self.fresh_nominal_args(def, &span);
+                Ok(self.intern(TyKind::Adt(def, args)))
             }
             Some(DefKind::Variant(variant)) => {
-                let result = self.ctor_result_ty(def)?;
+                let result = self.ctor_result_ty(def, span.clone())?;
                 if variant.fields.is_empty() {
                     return Ok(result);
                 }
                 let mut params = Vec::with_capacity(variant.fields.len());
                 for field in &variant.fields {
-                    params.push(self.field_definition_ty(*field)?);
+                    params.push(self.field_in(result, *field)?);
                 }
                 Ok(self.intern(TyKind::Fn(FnTy {
                     params: params.into_boxed_slice(),
@@ -988,7 +999,7 @@ impl<'a> BodyCheck<'a> {
         let resolved = self.resolved(expected);
         let (declared, required) = match self.kind_of(resolved) {
             Some(TyKind::Adt(def, _)) => (
-                self.nominal_fields(def).ok_or_else(|| {
+                self.nominal_fields_of(resolved).ok_or_else(|| {
                     NotYetReason::Unsupported(
                         "a record literal for this nominal type is not on HIR".into(),
                     )

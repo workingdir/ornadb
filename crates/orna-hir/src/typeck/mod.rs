@@ -51,6 +51,9 @@ mod case_tests;
 mod diagnostics_tests;
 mod expr;
 mod family;
+#[cfg(test)]
+mod generics_tests;
+mod nominal;
 mod operator;
 mod protocol;
 mod quantity;
@@ -1070,8 +1073,8 @@ impl<'a> BodyCheck<'a> {
                         }
                         Ok(())
                     }
-                    Some(TyKind::Adt(def, _)) => {
-                        let declared = self.nominal_fields(def).ok_or_else(|| {
+                    Some(TyKind::Adt(..)) => {
+                        let declared = self.nominal_fields_of(resolved).ok_or_else(|| {
                             NotYetReason::Unsupported(
                                 "a record pattern against this nominal type is not on HIR".into(),
                             )
@@ -1097,10 +1100,10 @@ impl<'a> BodyCheck<'a> {
                 }
             }
             Pat::Ctor { def, fields } => {
-                let result = self.ctor_result_ty(def)?;
+                let result = self.ctor_result_ty(def, span.clone())?;
                 self.unify(ty, result, span.clone());
                 for (field, pattern) in &fields {
-                    let field_ty = self.field_definition_ty(*field)?;
+                    let field_ty = self.field_in(result, *field)?;
                     self.bind_pattern(body, *pattern, field_ty, span.clone())?;
                 }
                 Ok(())

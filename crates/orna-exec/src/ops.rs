@@ -37,6 +37,12 @@ pub(crate) fn binary(
     if matches!(op, BinOp::Eq | BinOp::Ne) && (contains_closure(&lhs) || contains_closure(&rhs)) {
         return Err(Stop::Error("ORNA-EVAL-UNSUPPORTED"));
     }
+    if matches!(op, BinOp::Eq | BinOp::Ne)
+        && (matches!(lhs, Value::Null) || matches!(rhs, Value::Null))
+    {
+        let equal = matches!((&lhs, &rhs), (Value::Null, Value::Null));
+        return Ok(Value::Bool(equal == matches!(op, BinOp::Eq)));
+    }
     if time::is_temporal(&lhs) || time::is_temporal(&rhs) {
         return time::binary(op, lhs, rhs, limits);
     }
