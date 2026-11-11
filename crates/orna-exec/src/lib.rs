@@ -17,10 +17,20 @@ mod link;
 mod machine;
 mod natives;
 mod ops;
+mod raw_value;
+mod relation;
+mod store;
+mod table;
 mod time;
 mod value;
 mod variants;
 
 pub use error::ExecError;
-pub use machine::{ExecLimits, Measured, Run, measure_entry, run_entry, run_entry_cancellable};
+pub use machine::{
+    ExecLimits, Measured, Run, measure_entry, measure_entry_with_store, run_entry,
+    run_entry_cancellable,
+};
+pub use store::{
+    CursorId, Direction, Expect, KeyBounds, MemoryStore, RowRef, StoreError, TableId, TableStore,
+};
 pub use value::Value;

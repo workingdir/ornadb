@@ -490,6 +490,9 @@ pub(crate) fn lower_name(
         let ty = state.locals[local].ty;
         return push_typed(builder, state, ExprKind::Local(local), span.clone(), ty);
     }
+    if let Some(sibling) = super::row::lower_sibling_field(builder, state, &name, &span) {
+        return sibling;
+    }
     let module = state.module;
     let target = builder.resolve_bare(module, &name);
     super::record_value_use(

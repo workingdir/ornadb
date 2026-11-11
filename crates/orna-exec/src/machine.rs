@@ -11,6 +11,8 @@ use crate::error::{ExecError, Stop};
 use crate::frame::Frame;
 use crate::link;
 use crate::natives::NativeFn;
+use crate::store::{MemoryStore, TableStore};
+use crate::table::store_invariant;
 use crate::value::{Cell, Value};
 use crate::variants::{VariantIds, variant_ids};
 
@@ -41,6 +43,8 @@ pub struct Measured {
     /// Calls executed, counting the entry point itself. Unlike the old
     /// evaluator, nothing is memoised, so this counts every source-level call.
     pub calls: u64,
+    /// Rows the table store handed to a scan during the run. A `take` that stops early leaves the rest unread.
+    pub rows_read: u64,
 }
 
 /// The machine state of one run.
@@ -54,23 +58,36 @@ pub(crate) struct Machine<'p> {
     cancel: Option<Arc<AtomicBool>>,
     /// The engine natives this program's declarations bind to, built on the first native call.
     pub(crate) natives: OnceCell<HashMap<DefId, NativeFn>>,
+    /// The table store. Each entry-point activation opens one store activation, committed or rolled back.
+    pub(crate) store: Box<dyn TableStore>,
     steps: u64,
     calls: u64,
     depth: usize,
 }
 
 impl<'p> Machine<'p> {
-    fn new(program: &'p Program, limits: ExecLimits, cancel: Option<Arc<AtomicBool>>) -> Self {
+    fn new(
+        program: &'p Program,
+        limits: ExecLimits,
+        cancel: Option<Arc<AtomicBool>>,
+        store: Box<dyn TableStore>,
+    ) -> Self {
         Self {
             program,
             limits,
             variants: OnceCell::new(),
             cancel,
             natives: OnceCell::new(),
+            store,
             steps: 0,
             calls: 0,
             depth: 0,
         }
+    }
+
+    /// Gives the store back once the run is over, with the activation's writes applied or rolled back.
+    pub(crate) fn into_store(self) -> Box<dyn TableStore> {
+        self.store
     }
 
     /// The ids of the source enum variant `variant`. The map is built on first
@@ -102,8 +119,8 @@ impl<'p> Machine<'p> {
     /// Runs one body with its argument slots and capture slots already bound.
     /// A `return` ends the call with its value.
     ///
-    /// A failing activation drops its frame. The pure core holds no other
-    /// state, so a failure has nothing to roll back at the activation boundary.
+    /// A failing activation drops its frame. The store is rolled back by [`Machine::run_activation`] at the
+    /// entry boundary, which owns the store activation.
     pub(crate) fn invoke(
         &mut self,
         body_id: BodyId,
@@ -132,6 +149,36 @@ impl<'p> Machine<'p> {
         match result {
             Ok(value) | Err(Stop::Return(value)) => Ok(value),
             Err(stop) => Err(stop),
+        }
+    }
+
+    /// Runs the activation of `body_id` inside one store activation. The writes commit when it returns a value
+    /// and roll back when it stops with any error, so a failed entry leaves the store unchanged.
+    ///
+    /// # Errors
+    ///
+    /// The activation's own stop, or [`Stop::NotYet`] when the store breaks its activation contract.
+    pub(crate) fn run_activation(
+        &mut self,
+        body_id: BodyId,
+        arguments: Vec<(usize, Value)>,
+    ) -> Result<Value, Stop> {
+        self.store
+            .begin()
+            .map_err(|error| store_invariant(&error))?;
+        match self.invoke(body_id, arguments, &[]) {
+            Ok(value) => {
+                self.store
+                    .commit()
+                    .map_err(|error| store_invariant(&error))?;
+                Ok(value)
+            }
+            Err(stop) => {
+                self.store
+                    .rollback()
+                    .map_err(|error| store_invariant(&error))?;
+                Err(stop)
+            }
         }
     }
 }
@@ -179,7 +226,7 @@ fn run(
     limits: ExecLimits,
     cancel: Option<Arc<AtomicBool>>,
 ) -> Run {
-    let mut machine = Machine::new(program, limits, cancel);
+    let mut machine = Machine::new(program, limits, cancel, Box::new(MemoryStore::new()));
     let result = start(&mut machine, program, entry);
     Run {
         result,
@@ -199,12 +246,12 @@ fn start(machine: &mut Machine<'_>, program: &Program, entry: DefId) -> Result<V
         return Err(ExecError::NotYet("entry has no source body"));
     };
     machine
-        .invoke(body_id, Vec::new(), &[])
+        .run_activation(body_id, Vec::new())
         .map_err(ExecError::from)
 }
 
 /// Runs the function `entry` with one argument per parameter, in declaration
-/// order, and reports its step and call counters.
+/// order, and reports its step, call and row-read counters.
 ///
 /// # Errors
 ///
@@ -217,6 +264,36 @@ pub fn measure_entry(
     arguments: Vec<Value>,
     limits: ExecLimits,
 ) -> Result<Measured, ExecError> {
+    measure_entry_with_store(
+        program,
+        entry,
+        arguments,
+        limits,
+        Box::new(MemoryStore::new()),
+    )
+    .0
+}
+
+/// As [`measure_entry`], but the run reads and writes `store`. The store comes back with the run's writes
+/// applied, or rolled back when the run fails, so a later run sees the rows an earlier run committed.
+pub fn measure_entry_with_store(
+    program: &Program,
+    entry: DefId,
+    arguments: Vec<Value>,
+    limits: ExecLimits,
+    store: Box<dyn TableStore>,
+) -> (Result<Measured, ExecError>, Box<dyn TableStore>) {
+    let mut machine = Machine::new(program, limits, None, store);
+    let result = measure(&mut machine, program, entry, arguments);
+    (result, machine.into_store())
+}
+
+fn measure(
+    machine: &mut Machine<'_>,
+    program: &Program,
+    entry: DefId,
+    arguments: Vec<Value>,
+) -> Result<Measured, ExecError> {
     link::check_abi(program).map_err(ExecError::NotYet)?;
     let DefKind::Fn(function) = &program.defs[entry].kind else {
         return Err(ExecError::NotYet("entry is not a function"));
@@ -228,13 +305,14 @@ pub fn measure_entry(
         return Err(ExecError::Code("ORNA-EVAL-ARGUMENT"));
     }
     let arguments = arguments.into_iter().enumerate().collect();
-    let mut machine = Machine::new(program, limits, None);
+    let rows_before = machine.store.rows_read();
     let value = machine
-        .invoke(body_id, arguments, &[])
+        .run_activation(body_id, arguments)
         .map_err(ExecError::from)?;
     Ok(Measured {
         value,
         steps: machine.steps,
         calls: machine.calls,
+        rows_read: machine.store.rows_read() - rows_before,
     })
 }

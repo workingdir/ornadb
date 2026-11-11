@@ -229,7 +229,7 @@ pub enum ValidationError {
         slot: crate::ParamIdx,
     },
 }
-
+mod field;
 mod generics;
 
 impl Program {
@@ -410,7 +410,7 @@ impl Program {
             DefKind::Assertion(assertion) => {
                 self.validate_owned_body(assertion.body, from, "assertion body", errors);
             }
-            DefKind::Field(field) => self.validate_ty(field.ty, "field.ty", errors),
+            DefKind::Field(field) => self.validate_field(field, from, errors),
         }
     }
 

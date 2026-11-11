@@ -31,6 +31,7 @@ mod imports;
 mod items;
 mod literals;
 mod pats;
+mod row;
 mod types;
 mod units;
 
@@ -125,6 +126,8 @@ pub(crate) struct BodyState {
     pub(crate) scopes: Vec<ScopeFrame>,
     /// The body's root expression, once it has one.
     pub(crate) root: Option<ExprId>,
+    /// The row a field initializer body reads by bare sibling field name.
+    pub(crate) row: Option<row::RowScope>,
 }
 
 impl BodyState {
@@ -143,6 +146,7 @@ impl BodyState {
             lowering_concurrent_argument: false,
             scopes: Vec::new(),
             root: None,
+            row: None,
         }
     }
 

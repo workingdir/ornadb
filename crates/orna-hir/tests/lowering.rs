@@ -237,6 +237,69 @@ fn a_table_operation_is_classified_once() {
 }
 
 #[test]
+fn a_relation_stage_on_a_table_path_keeps_the_table_as_its_receiver() {
+    let program = lower_one("table Note(id: Int) { }\npub fn run() = Note.take(0);\n");
+    let note = defined(&program, "main", "Note");
+    let run = defined(&program, "main", "run");
+    let body = program.source_body(run).expect("run has a body");
+    let root = &program.bodies[body].exprs[program.bodies[body].root];
+    let ExprKind::Call(call) = &root.kind else {
+        panic!("run's root is a call");
+    };
+    let Callee::Pending { base, name } = &call.callee else {
+        panic!("a relation stage is pending until typeck settles it");
+    };
+    assert_eq!(name.as_str(), "take");
+    assert!(matches!(program.bodies[body].exprs[*base].kind, ExprKind::Def(def) if def == note));
+}
+
+/// The field definition at `index` of the table named `table`.
+fn table_field(program: &Program, table: &str, index: usize) -> orna_hir::DefId {
+    let DefKind::Table(table_def) = &program.defs[defined(program, "main", table)].kind else {
+        panic!("`{table}` is a table");
+    };
+    table_def.fields[index]
+}
+
+/// The initializer of a table field definition, if it has one.
+fn initializer_of(program: &Program, field: orna_hir::DefId) -> Option<orna_hir::FieldInitializer> {
+    let DefKind::Field(field) = &program.defs[field].kind else {
+        panic!("a table member is a field");
+    };
+    field.initializer
+}
+
+#[test]
+fn a_default_table_field_owns_an_initializer_body() {
+    let program = lower_one("pub table Note(id: Int) {\n    label: Str = \"draft\",\n}\n");
+    let field = table_field(&program, "Note", 1);
+    let initializer = initializer_of(&program, field).expect("a default field has an initializer");
+    assert!(matches!(
+        initializer,
+        orna_hir::FieldInitializer::Default(_)
+    ));
+    assert_eq!(program.bodies[initializer.body()].owner, field);
+}
+
+#[test]
+fn a_computed_table_field_owns_an_initializer_body() {
+    let program = lower_one("pub table Note(id: Int) {\n    label: Str => \"draft\",\n}\n");
+    let field = table_field(&program, "Note", 1);
+    let initializer = initializer_of(&program, field).expect("a computed field has an initializer");
+    assert!(matches!(
+        initializer,
+        orna_hir::FieldInitializer::Computed(_)
+    ));
+    assert_eq!(program.bodies[initializer.body()].owner, field);
+}
+
+#[test]
+fn a_plain_table_field_has_no_initializer() {
+    let program = lower_one("pub table Note(id: Int) {\n    label: Str,\n}\n");
+    assert!(initializer_of(&program, table_field(&program, "Note", 1)).is_none());
+}
+
+#[test]
 fn a_local_call_is_a_first_class_value() {
     let program = lower_one(
         "fn twice(f: fn(Int): Int, v: Int): Int = f(v);\nfn run(): Int = twice(x => x + 1, 41);\n",
