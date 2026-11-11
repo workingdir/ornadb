@@ -15,6 +15,8 @@ mod registry_test;
 mod registry_tests;
 mod stats;
 mod text;
+mod time;
+mod time_format;
 mod unicode_16_case_properties;
 mod unicode_case;
 mod values;
@@ -91,6 +93,12 @@ pub(crate) fn lookup(key: &NativeKey) -> Option<NativeFn> {
         ("core.text", "normalise") => text::normalise,
         ("core.text", "lower") => text::lower,
         ("core.text", "upper") => text::upper,
+        ("core.time", "offset_at") => time::offset_at,
+        ("core.time", "resolve_local") => time::resolve_local,
+        ("core.time", "duration_compact_format") => time_format::duration_compact_format,
+        ("core.time", "duration_clock_format") => time_format::duration_clock_format,
+        ("core.time", "duration_words_format") => time_format::duration_words_format,
+        ("core.time", "duration_iso_format") => time_format::duration_iso_format,
         _ => return None,
     })
 }
