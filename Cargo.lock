@@ -1465,6 +1465,8 @@ dependencies = [
  "orna-check",
  "orna-conformance",
  "orna-evaluator",
+ "orna-exec",
+ "orna-hir",
  "orna-live",
  "orna-project",
  "orna-project-repl",
