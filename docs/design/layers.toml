@@ -70,6 +70,10 @@ name = "orna-link"
 layer = 4
 
 [[crate]]
+name = "orna-native-loader"
+layer = 2
+
+[[crate]]
 name = "orna-sys-id"
 layer = 3
 
@@ -229,6 +233,11 @@ reason = "production in-degree 0 and not declared a tool; the LSP is its own bin
 id = "V10"
 key = "orphan:orna-traceability"
 reason = "production in-degree 0 and not declared a tool; moves under tools/ with no production dependent"
+
+[[known]]
+id = "V13"
+key = "orphan:orna-native-loader"
+reason = "production in-degree 0 until the evaluator's library-native call path consumes the loader (native-libraries.md section 10 step 2d-f); the loader is called by no analysis tool or language server by design"
 
 [[known]]
 id = "V12"

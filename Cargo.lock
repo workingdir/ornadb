@@ -1681,6 +1681,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "orna-native-loader"
+version = "1.0.0"
+dependencies = [
+ "libc",
+ "libloading",
+ "sha2 0.10.9",
+ "tempfile",
+]
+
+[[package]]
 name = "orna-project"
 version = "1.0.0"
 dependencies = [
