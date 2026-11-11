@@ -8,7 +8,7 @@
 //! again on each stage. Redefinition, shadowing and `$_` follow the old REPL's rules; `tests/session.rs` pins them.
 //!
 //! [`run_lines`] drives a session from a reader, one submission per non-empty line; the `orna-repl-session`
-//! binary is its stdin front end.
+//! example is its stdin front end.
 
 #![forbid(unsafe_code)]
 
