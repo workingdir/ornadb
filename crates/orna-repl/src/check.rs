@@ -1,13 +1,12 @@
 //! Lowers and typechecks a composed module, then evaluates its entry on the executor.
 
 use orna_exec::{ExecError, ExecLimits, Globals, MemoryStore, Value, measure_entry_in};
-use orna_hir::{
-    DefId, DefKind, ModulePath, Name, Program, SourceId, SourceUnit, lower, print_type, typeck,
-};
+use orna_hir::{DefId, DefKind, ModulePath, Name, Program, lower, print_type, typeck};
 use orna_syntax::parse_session_module_with_file;
 
 use crate::compose::ENTRY;
 use crate::error::ReplError;
+use crate::standard;
 
 /// The module path the session's source lowers under.
 const MODULE: &str = "repl";
@@ -37,11 +36,10 @@ pub(crate) fn lower_checked(source: &str) -> Result<Program, ReplError> {
             "the composed session source does not parse",
         ));
     }
-    let mut program = lower(&[SourceUnit {
-        source: SourceId::new(0),
-        tree: &parsed.value,
-        path: ModulePath::new([Name::new(MODULE)]),
-    }]);
+    let mut program = lower(&standard::units_with(
+        &parsed.value,
+        ModulePath::new([Name::new(MODULE)]),
+    ));
     typeck(&mut program);
     if let Err(errors) = program.validate() {
         return Err(ReplError::new(
@@ -85,12 +83,14 @@ pub(crate) fn evaluate(
     }
     let mut globals = Globals::new();
     for (name, value) in seeds {
-        let def = module_def(&program, name, |kind| matches!(kind, DefKind::Let(_))).ok_or_else(|| {
-            ReplError::new(
-                "ORNA-REPL-INTERNAL",
-                format!("the session global {name} is not a module let"),
-            )
-        })?;
+        let def = module_def(&program, name, |kind| matches!(kind, DefKind::Let(_))).ok_or_else(
+            || {
+                ReplError::new(
+                    "ORNA-REPL-INTERNAL",
+                    format!("the session global {name} is not a module let"),
+                )
+            },
+        )?;
         globals.insert(def, value.clone());
     }
     let (result, _store) = measure_entry_in(

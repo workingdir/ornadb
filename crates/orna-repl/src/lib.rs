@@ -13,6 +13,7 @@ mod check;
 mod compose;
 mod error;
 mod session;
+mod standard;
 
 pub use error::ReplError;
 pub use session::{Session, Staged};

@@ -47,6 +47,8 @@ struct Scope {
 /// The session: every definition and binding a commit has applied, and the previous result, `$_`.
 #[derive(Debug, Default)]
 pub struct Session {
+    /// The `use` declarations the prompt accepted, in order: every input's module starts with them.
+    imports: Vec<String>,
     definitions: Vec<Definition>,
     bindings: Vec<Binding>,
     last: Option<Typed>,
@@ -66,7 +68,8 @@ pub struct Staged {
 enum Change {
     Define(Definition),
     Bind(Binding),
-    /// An expression: it becomes `$_`.
+    /// A `use` declaration: it joins the session's imports.
+    Import(String),
     Evaluate(Typed),
     /// An expression statement: its value is discarded and `$_` is kept.
     Discard,
@@ -128,6 +131,7 @@ impl Session {
                 self.bindings.push(binding);
             }
             Change::Evaluate(typed) => self.last = Some(typed),
+            Change::Import(text) => self.imports.push(text),
             Change::Discard => {}
         }
         self.revision += 1;
@@ -214,7 +218,10 @@ impl Session {
                 }
                 let text = compose::declaration_text(input, item)?;
                 let source = compose::module(
-                    self.definitions_except(&signature.name)
+                    self.imports
+                        .iter()
+                        .map(String::as_str)
+                        .chain(self.definitions_except(&signature.name))
                         .chain([text.as_str()]),
                     None,
                 );
@@ -229,11 +236,43 @@ impl Session {
                     result: None,
                 })
             }
+            Declaration::Use { .. } => self.stage_import(input, item),
             _ => Err(ReplError::new(
                 "ORNA-EVAL-UNSUPPORTED",
                 "this declaration is not accepted at the prompt yet",
             )),
         }
+    }
+
+    /// Stages a `use` declaration: it is checked against the session as it stands, then joins the imports. A
+    /// declaration the session already accepts is a no-op.
+    fn stage_import(&self, input: &str, item: &Item) -> Result<Staged, ReplError> {
+        let text = compose::declaration_text(input, item)?;
+        if self.imports.contains(&text) {
+            return Ok(Staged {
+                base_revision: self.revision,
+                effectful: false,
+                change: Change::Discard,
+                result: None,
+            });
+        }
+        let scope = self.scope(&[], &[], "")?;
+        let source = compose::module(
+            self.imports
+                .iter()
+                .map(String::as_str)
+                .chain([text.as_str()])
+                .chain(self.definitions_except(""))
+                .chain(scope.globals.iter().map(String::as_str)),
+            None,
+        );
+        check::lower_checked(&source)?;
+        Ok(Staged {
+            base_revision: self.revision,
+            effectful: false,
+            change: Change::Import(text),
+            result: None,
+        })
     }
 
     /// The staged result of one evaluation: an effectful one carries no change and no value.
@@ -267,9 +306,11 @@ impl Session {
 
     /// Whether an input's identifiers name an existing binding, global or parameter.
     fn reads_binding(&self, identifiers: &[String]) -> bool {
-        identifiers
-            .iter()
-            .any(|identifier| self.bindings.iter().any(|binding| binding.name == *identifier))
+        identifiers.iter().any(|identifier| {
+            self.bindings
+                .iter()
+                .any(|binding| binding.name == *identifier)
+        })
     }
 
     /// The scope of one input. `shadowed` is the name a `let` input binds: its earlier global is hidden, and it is
@@ -322,10 +363,14 @@ impl Session {
             .map(|definition| definition.text.as_str())
     }
 
-    /// The module source for one input: the definitions it keeps, its module-level `let`s, then its entry.
+    /// The module source for one input: the session's imports, the definitions it keeps, its module-level `let`s, then
+    /// its entry.
     fn module_source(&self, scope: &Scope, shadowed: &str, entry: Option<&str>) -> String {
         compose::module(
-            self.definitions_except(shadowed)
+            self.imports
+                .iter()
+                .map(String::as_str)
+                .chain(self.definitions_except(shadowed))
                 .chain(scope.globals.iter().map(String::as_str)),
             entry,
         )

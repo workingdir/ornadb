@@ -1741,6 +1741,7 @@ version = "1.0.0"
 dependencies = [
  "orna-exec",
  "orna-hir",
+ "orna-standard-sources",
  "orna-syntax",
 ]
 
