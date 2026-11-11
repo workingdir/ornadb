@@ -1439,6 +1439,7 @@ version = "1.0.0"
 dependencies = [
  "num-bigint 0.4.8",
  "num-traits",
+ "orna-hir",
  "orna-intrinsics",
  "orna-syntax",
  "orna-sys",

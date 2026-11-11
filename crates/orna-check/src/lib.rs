@@ -33,7 +33,10 @@ pub use effects::EffectKind;
 pub use system_api::system_enum_constant;
 mod source_row;
 
-pub use located::{DiagnosticOrigin, LocatedAnalysis, analyze_with_catalogue_located};
+pub use located::{
+    DiagnosticOrigin, LocatedAnalysis, analyze_with_catalogue_located,
+    analyze_with_providers_located,
+};
 
 pub use source_row::{
     LoweredRowUnit, lower_data_expression, lower_row_unit, lower_row_unit_with_key_spelling,
@@ -86,6 +89,7 @@ mod secrets;
 pub(crate) use secrets::*;
 mod analysis_support;
 pub use analysis_support::*;
+pub mod hir_check;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModuleInput {
