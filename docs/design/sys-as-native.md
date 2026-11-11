@@ -598,6 +598,7 @@ whichever its layer allows.
 | evaluator bindings and `sys_provider_linkage.rs` | the lowered declarations, then the key enum | SN3, SN5 |
 | `object_identity.rs`, `explain_bindings.rs` | their own code, pinned by a test over the declarations | SN3 |
 | conformance, CLI and `orna-sys` tests that call `system_api_json()` | the lowered model | SN3 |
+| `orna-sys-codegen`, `orna-sys/build.rs` | API halves deleted; host halves stay to SN7 | SN4 |
 | `gen_interface.py`, `gen_core_interface.py` | deleted: the files are hand-written | SN1 |
 | `sys-api-export`, `std-api-export`, the JSON steps of `sys-artifact-ci` | deleted | SN4 |
 
@@ -1046,8 +1047,10 @@ SN5 --> SN7 host operations (optional)
   linkage read the lowered declarations. The 11 `role` pairs move to a Rust table keyed by declaration path. The
   `#[ornasys]` blocks no longer feed anything.
 * `orna-traceability`, the evaluator bindings, the linkage test and the conformance, CLI and `orna-sys` tests that call
-  `system_api_json()` read the lowered declarations. The two hand copies (the `object_identity.rs` ordinals and the
-  `explain_bindings.rs` fields) stay code and gain a test over the declared order and fields.
+  `system_api_json()` read the lowered declarations. The hand copies that are wire data or row shape (the
+  `object_identity.rs` ordinals, the `orna-value` status words and the `explain_bindings.rs` fields) stay code and gain
+  a test over the declared order and fields, so that a reordered declaration fails a test and never changes stored
+  bytes.
 * The host registry that `build_host.rs` writes becomes a generated Rust table (section 2.6).
 * Proof, for each PR: the reader's own tests pass without an edit beyond the flip, and the equality test prints
   nothing. `system_registry_parity`, `system_provider_abi` and `system_binding_stubs` pass over the new input.
