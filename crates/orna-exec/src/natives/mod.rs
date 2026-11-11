@@ -18,7 +18,15 @@ mod registry_test;
 mod registry_tests;
 mod schema;
 mod stats;
+mod stats_decimal;
+mod stats_histogram;
 mod stats_mean;
+mod stats_median;
+mod stats_percentile;
+mod stats_round;
+mod stats_series;
+mod stats_stddev;
+mod stats_variance;
 mod text;
 mod time;
 mod time_format;
@@ -91,11 +99,19 @@ pub(crate) fn lookup(key: &NativeKey) -> Option<NativeFn> {
         ("core.collection", "group_by") => collection::keyed::group_by,
         ("core.collection", "asof_join") => collection::keyed::asof_join,
         ("core.stats", "sum") => collection::basic::sum,
+        ("core.stats", "median") => stats_median::median,
+        ("core.stats", "percentile") => stats_percentile::percentile,
+        ("core.stats", "rate") => stats_series::rate,
+        ("core.stats", "derivative") => stats_series::derivative,
+        ("core.stats", "integrate") => stats_series::integrate,
+        ("core.stats", "variance") => stats_variance::variance,
+        ("core.stats", "standard_deviation") => stats_stddev::standard_deviation,
         ("core.stats", "min") => stats::min,
         ("core.stats", "max") => stats::max,
         ("core.stats", "range") => stats::range,
         ("core.stats", "mode") => stats::mode,
         ("core.stats", "mean") => stats_mean::mean,
+        ("core.stats", "histogram") => stats_histogram::histogram,
         ("core.text", "trim") => text::trim,
         ("core.text", "split") => text::split,
         ("core.text", "join") => text::join,
