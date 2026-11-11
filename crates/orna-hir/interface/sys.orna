@@ -1842,22 +1842,22 @@ pub native fn resolve_function(name: Str, at: SnapshotRef = current.snapshot, fr
 pub native fn describe(object: ObjectRef): ObjectDescription effect table_read;
 
 // sys.source(ObjectRef)
-pub native fn source_object_ref(object: ObjectRef): SourceDocument effect table_read;
+pub native fn source_object_ref(object: ObjectRef): SourceDocument effect table_read spelling "sys.source(ObjectRef)";
 
 // sys.source(FileRef)
-pub native fn source_file_ref(file: FileRef): SourceDocument effect table_read;
+pub native fn source_file_ref(file: FileRef): SourceDocument effect table_read spelling "sys.source(FileRef)";
 
 // sys.history(ObjectRef)
-pub native fn history_object_ref(object: ObjectRef): Relation<Revision> effect table_read;
+pub native fn history_object_ref(object: ObjectRef): Relation<Revision> effect table_read spelling "sys.history(ObjectRef)";
 
 // sys.history(FileRef)
-pub native fn history_file_ref(file: FileRef): Relation<FileVersion> effect table_read;
+pub native fn history_file_ref(file: FileRef): Relation<FileVersion> effect table_read spelling "sys.history(FileRef)";
 
 // sys.blame(FileRef)
-pub native fn blame_file_ref(target: FileRef): Relation<Attribution> effect table_read;
+pub native fn blame_file_ref(target: FileRef): Relation<Attribution> effect table_read spelling "sys.blame(FileRef)";
 
 // sys.blame(RowRef)
-pub native fn blame_row_ref<T>(target: RowRef<T>): Relation<Attribution> effect table_read;
+pub native fn blame_row_ref<T>(target: RowRef<T>): Relation<Attribution> effect table_read spelling "sys.blame(RowRef)";
 
 // sys.dependencies
 pub native fn dependencies(object: ObjectRef, transitive: Bool = false, kinds: [DependencyKind]? = null): Relation<Dependency> effect table_read;
@@ -1866,22 +1866,22 @@ pub native fn dependencies(object: ObjectRef, transitive: Bool = false, kinds: [
 pub native fn dependents(object: ObjectRef, transitive: Bool = false, kinds: [DependencyKind]? = null): Relation<Dependency> effect table_read;
 
 // sys.snapshot(SnapshotRef)
-pub native fn snapshot_snapshot_ref(reference: SnapshotRef = database.cwd): SnapshotRef effect table_read;
+pub native fn snapshot_snapshot_ref(reference: SnapshotRef = database.cwd): SnapshotRef effect table_read spelling "sys.snapshot(SnapshotRef)";
 
 // sys.snapshot(CommitRef)
-pub native fn snapshot_commit_ref(reference: CommitRef): SnapshotRef effect table_read;
+pub native fn snapshot_commit_ref(reference: CommitRef): SnapshotRef effect table_read spelling "sys.snapshot(CommitRef)";
 
 // sys.snapshot(BranchRef)
-pub native fn snapshot_branch_ref(reference: BranchRef): SnapshotRef effect table_read;
+pub native fn snapshot_branch_ref(reference: BranchRef): SnapshotRef effect table_read spelling "sys.snapshot(BranchRef)";
 
 // sys.snapshot(TagRef)
-pub native fn snapshot_tag_ref(reference: TagRef): SnapshotRef effect table_read;
+pub native fn snapshot_tag_ref(reference: TagRef): SnapshotRef effect table_read spelling "sys.snapshot(TagRef)";
 
 // sys.snapshot(GitOid)
-pub native fn snapshot_git_oid(reference: GitOid): SnapshotRef effect table_read;
+pub native fn snapshot_git_oid(reference: GitOid): SnapshotRef effect table_read spelling "sys.snapshot(GitOid)";
 
 // sys.snapshot(Str)
-pub native fn snapshot_str(reference: Str): SnapshotRef effect table_read;
+pub native fn snapshot_str(reference: Str): SnapshotRef effect table_read spelling "sys.snapshot(Str)";
 
 // sys.diff
 pub native fn diff(from: SnapshotRef, to: SnapshotRef, scope: DiffScope = DiffScope.all): Relation<DiffEntry> effect table_read;
@@ -1890,13 +1890,13 @@ pub native fn diff(from: SnapshotRef, to: SnapshotRef, scope: DiffScope = DiffSc
 pub native fn changes(snapshot: SnapshotRef = database.cwd, area: ChangeArea? = null): Relation<Change> effect table_read;
 
 // sys.explain(Query)
-pub native fn explain_query<T>(query: Query<T>): Plan effect table_read;
+pub native fn explain_query<T>(query: Query<T>): Plan effect table_read spelling "sys.explain(Query)";
 
 // sys.explain(FunctionRef)
-pub native fn explain_function_ref(function: FunctionRef): Plan effect table_read;
+pub native fn explain_function_ref(function: FunctionRef): Plan effect table_read spelling "sys.explain(FunctionRef)";
 
 // sys.explain(Diagnostic)
-pub native fn explain_diagnostic(diagnostic: Diagnostic): Explanation effect table_read;
+pub native fn explain_diagnostic(diagnostic: Diagnostic): Explanation effect table_read spelling "sys.explain(Diagnostic)";
 
 // sys.checkpoint
 pub native fn checkpoint(consumer_identity: ConsumerIdentity, source_identity: Str, partition: Str? = null): Checkpoint? effect table_read;
@@ -1905,19 +1905,19 @@ pub native fn checkpoint(consumer_identity: ConsumerIdentity, source_identity: S
 pub native fn render_diagnostic(diagnostic: Diagnostic, context: PresentContext = current.present_context): PresentTree effect table_read;
 
 // sys.rt.info
-pub native fn rt_info(): RuntimeInfo effect table_read;
+pub native fn rt_info(): RuntimeInfo effect table_read spelling "sys.rt.info";
 
 // sys.invoke(Value)
-pub native fn invoke_value(function: FunctionRef, arguments: ArgumentMap, at: SnapshotRef? = null, transaction: InvokeTransaction = InvokeTransaction.inherit, idempotency_key: Str? = null): Value effect runtime_admin;
+pub native fn invoke_value(function: FunctionRef, arguments: ArgumentMap, at: SnapshotRef? = null, transaction: InvokeTransaction = InvokeTransaction.inherit, idempotency_key: Str? = null): Value effect runtime_admin spelling "sys.invoke(Value)";
 
 // sys.invoke<T>
-pub native fn invoke_t<T>(function: FunctionRef, arguments: ArgumentMap, as: T, at: SnapshotRef? = null, transaction: InvokeTransaction = InvokeTransaction.inherit, idempotency_key: Str? = null): T effect runtime_admin;
+pub native fn invoke_t<T>(function: FunctionRef, arguments: ArgumentMap, as: T, at: SnapshotRef? = null, transaction: InvokeTransaction = InvokeTransaction.inherit, idempotency_key: Str? = null): T effect runtime_admin spelling "sys.invoke<T>";
 
 // sys.start(Value)
-pub native fn start_value(function: FunctionRef, arguments: ArgumentMap, at: SnapshotRef? = null, transaction: InvokeTransaction = InvokeTransaction.separate, idempotency_key: Str? = null): InvocationHandle<Value> effect runtime_admin;
+pub native fn start_value(function: FunctionRef, arguments: ArgumentMap, at: SnapshotRef? = null, transaction: InvokeTransaction = InvokeTransaction.separate, idempotency_key: Str? = null): InvocationHandle<Value> effect runtime_admin spelling "sys.start(Value)";
 
 // sys.start<T>
-pub native fn start_t<T>(function: FunctionRef, arguments: ArgumentMap, as: T, at: SnapshotRef? = null, transaction: InvokeTransaction = InvokeTransaction.separate, idempotency_key: Str? = null): InvocationHandle<T> effect runtime_admin;
+pub native fn start_t<T>(function: FunctionRef, arguments: ArgumentMap, as: T, at: SnapshotRef? = null, transaction: InvokeTransaction = InvokeTransaction.separate, idempotency_key: Str? = null): InvocationHandle<T> effect runtime_admin spelling "sys.start<T>";
 
 // sys.await
 pub native fn await<T>(invocation: InvocationHandle<T>, timeout: Duration? = null): InvocationResult<T> effect runtime_admin;
@@ -1926,148 +1926,148 @@ pub native fn await<T>(invocation: InvocationHandle<T>, timeout: Duration? = nul
 pub native fn cancel<T>(invocation: InvocationHandle<T>, reason: Str? = null): Bool effect runtime_admin;
 
 // sys.admin.commit
-pub native fn admin_commit(message: Str, author: PersonIdentity? = null): CommitRef effect storage_admin;
+pub native fn admin_commit(message: Str, author: PersonIdentity? = null): CommitRef effect storage_admin spelling "sys.admin.commit";
 
 // sys.admin.checkout(SnapshotRef)
-pub native fn admin_checkout_snapshot_ref(target: SnapshotRef, force: Bool = false, expected_plan: Digest? = null): SnapshotRef effect storage_admin;
+pub native fn admin_checkout_snapshot_ref(target: SnapshotRef, force: Bool = false, expected_plan: Digest? = null): SnapshotRef effect storage_admin spelling "sys.admin.checkout(SnapshotRef)";
 
 // sys.admin.checkout(CommitRef)
-pub native fn admin_checkout_commit_ref(target: CommitRef, force: Bool = false, expected_plan: Digest? = null): SnapshotRef effect storage_admin;
+pub native fn admin_checkout_commit_ref(target: CommitRef, force: Bool = false, expected_plan: Digest? = null): SnapshotRef effect storage_admin spelling "sys.admin.checkout(CommitRef)";
 
 // sys.admin.checkout(BranchRef)
-pub native fn admin_checkout_branch_ref(target: BranchRef, force: Bool = false, expected_plan: Digest? = null): SnapshotRef effect storage_admin;
+pub native fn admin_checkout_branch_ref(target: BranchRef, force: Bool = false, expected_plan: Digest? = null): SnapshotRef effect storage_admin spelling "sys.admin.checkout(BranchRef)";
 
 // sys.admin.checkout(TagRef)
-pub native fn admin_checkout_tag_ref(target: TagRef, force: Bool = false, expected_plan: Digest? = null): SnapshotRef effect storage_admin;
+pub native fn admin_checkout_tag_ref(target: TagRef, force: Bool = false, expected_plan: Digest? = null): SnapshotRef effect storage_admin spelling "sys.admin.checkout(TagRef)";
 
 // sys.admin.checkout(GitOid)
-pub native fn admin_checkout_git_oid(target: GitOid, force: Bool = false, expected_plan: Digest? = null): SnapshotRef effect storage_admin;
+pub native fn admin_checkout_git_oid(target: GitOid, force: Bool = false, expected_plan: Digest? = null): SnapshotRef effect storage_admin spelling "sys.admin.checkout(GitOid)";
 
 // sys.admin.checkout(Str)
-pub native fn admin_checkout_str(target: Str, force: Bool = false, expected_plan: Digest? = null): SnapshotRef effect storage_admin;
+pub native fn admin_checkout_str(target: Str, force: Bool = false, expected_plan: Digest? = null): SnapshotRef effect storage_admin spelling "sys.admin.checkout(Str)";
 
 // sys.admin.create_branch(SnapshotRef)
-pub native fn admin_create_branch_snapshot_ref(name: Str, at: SnapshotRef? = null): BranchRef effect storage_admin;
+pub native fn admin_create_branch_snapshot_ref(name: Str, at: SnapshotRef? = null): BranchRef effect storage_admin spelling "sys.admin.create_branch(SnapshotRef)";
 
 // sys.admin.create_branch(CommitRef)
-pub native fn admin_create_branch_commit_ref(name: Str, at: CommitRef): BranchRef effect storage_admin;
+pub native fn admin_create_branch_commit_ref(name: Str, at: CommitRef): BranchRef effect storage_admin spelling "sys.admin.create_branch(CommitRef)";
 
 // sys.admin.create_branch(BranchRef)
-pub native fn admin_create_branch_branch_ref(name: Str, at: BranchRef): BranchRef effect storage_admin;
+pub native fn admin_create_branch_branch_ref(name: Str, at: BranchRef): BranchRef effect storage_admin spelling "sys.admin.create_branch(BranchRef)";
 
 // sys.admin.create_branch(TagRef)
-pub native fn admin_create_branch_tag_ref(name: Str, at: TagRef): BranchRef effect storage_admin;
+pub native fn admin_create_branch_tag_ref(name: Str, at: TagRef): BranchRef effect storage_admin spelling "sys.admin.create_branch(TagRef)";
 
 // sys.admin.create_branch(GitOid)
-pub native fn admin_create_branch_git_oid(name: Str, at: GitOid): BranchRef effect storage_admin;
+pub native fn admin_create_branch_git_oid(name: Str, at: GitOid): BranchRef effect storage_admin spelling "sys.admin.create_branch(GitOid)";
 
 // sys.admin.create_branch(Str)
-pub native fn admin_create_branch_str(name: Str, at: Str): BranchRef effect storage_admin;
+pub native fn admin_create_branch_str(name: Str, at: Str): BranchRef effect storage_admin spelling "sys.admin.create_branch(Str)";
 
 // sys.admin.flush
-pub native fn admin_flush(table: TableRef? = null): FlushResult effect storage_admin;
+pub native fn admin_flush(table: TableRef? = null): FlushResult effect storage_admin spelling "sys.admin.flush";
 
 // sys.admin.compact
-pub native fn admin_compact(table: TableRef? = null): CompactionResult effect storage_admin;
+pub native fn admin_compact(table: TableRef? = null): CompactionResult effect storage_admin spelling "sys.admin.compact";
 
 // sys.admin.verify
-pub native fn admin_verify(scope: VerifyScope = VerifyScope.database): VerificationReport effect storage_admin;
+pub native fn admin_verify(scope: VerifyScope = VerifyScope.database): VerificationReport effect storage_admin spelling "sys.admin.verify";
 
 // sys.admin.cancel_run
-pub native fn admin_cancel_run(run: RunRef, reason: Str? = null): Bool effect storage_admin;
+pub native fn admin_cancel_run(run: RunRef, reason: Str? = null): Bool effect storage_admin spelling "sys.admin.cancel_run";
 
 // sys.admin.pause_stream
-pub native fn admin_pause_stream(stream: StreamRef, reason: Str? = null): Bool effect storage_admin;
+pub native fn admin_pause_stream(stream: StreamRef, reason: Str? = null): Bool effect storage_admin spelling "sys.admin.pause_stream";
 
 // sys.admin.resume_stream
-pub native fn admin_resume_stream(stream: StreamRef): Bool effect storage_admin;
+pub native fn admin_resume_stream(stream: StreamRef): Bool effect storage_admin spelling "sys.admin.resume_stream";
 
 // sys.admin.reset_checkpoint
-pub native fn admin_reset_checkpoint(checkpoint: CheckpointRef, expected_version: CheckpointVersion, expected_position: CheckpointPosition, to: CheckpointPosition, reason: Str): Checkpoint effect storage_admin;
+pub native fn admin_reset_checkpoint(checkpoint: CheckpointRef, expected_version: CheckpointVersion, expected_position: CheckpointPosition, to: CheckpointPosition, reason: Str): Checkpoint effect storage_admin spelling "sys.admin.reset_checkpoint";
 
 // sys.admin.retry_failure
-pub native fn admin_retry_failure(failure: FailureRef, expected_version: FailureVersion, expected_status: FailureStatus = FailureStatus.open): InvocationHandle<Value> effect storage_admin;
+pub native fn admin_retry_failure(failure: FailureRef, expected_version: FailureVersion, expected_status: FailureStatus = FailureStatus.open): InvocationHandle<Value> effect storage_admin spelling "sys.admin.retry_failure";
 
 // sys.admin.skip_failure
-pub native fn admin_skip_failure(failure: FailureRef, expected_version: FailureVersion, expected_status: FailureStatus, reason: Str): Checkpoint effect storage_admin;
+pub native fn admin_skip_failure(failure: FailureRef, expected_version: FailureVersion, expected_status: FailureStatus, reason: Str): Checkpoint effect storage_admin spelling "sys.admin.skip_failure";
 
 // sys.admin.replay_failure
-pub native fn admin_replay_failure(failure: FailureRef, expected_version: FailureVersion, expected_status: FailureStatus = FailureStatus.skipped): InvocationHandle<Value> effect storage_admin;
+pub native fn admin_replay_failure(failure: FailureRef, expected_version: FailureVersion, expected_status: FailureStatus = FailureStatus.skipped): InvocationHandle<Value> effect storage_admin spelling "sys.admin.replay_failure";
 
 // sys.admin.resolve_failure
-pub native fn admin_resolve_failure(failure: FailureRef, expected_version: FailureVersion, expected_status: FailureStatus, reason: Str): Failure effect storage_admin;
+pub native fn admin_resolve_failure(failure: FailureRef, expected_version: FailureVersion, expected_status: FailureStatus, reason: Str): Failure effect storage_admin spelling "sys.admin.resolve_failure";
 
 // sys.consumer_identity
 pub native fn consumer_identity(function: FunctionRef, arguments: ArgumentMap): ConsumerIdentity effect table_read;
 
 // sys.admin.plan_checkout(SnapshotRef)
-pub native fn admin_plan_checkout_snapshot_ref(target: SnapshotRef): CheckoutPlan effect table_read;
+pub native fn admin_plan_checkout_snapshot_ref(target: SnapshotRef): CheckoutPlan effect table_read spelling "sys.admin.plan_checkout(SnapshotRef)";
 
 // sys.admin.plan_checkout(CommitRef)
-pub native fn admin_plan_checkout_commit_ref(target: CommitRef): CheckoutPlan effect table_read;
+pub native fn admin_plan_checkout_commit_ref(target: CommitRef): CheckoutPlan effect table_read spelling "sys.admin.plan_checkout(CommitRef)";
 
 // sys.admin.plan_checkout(BranchRef)
-pub native fn admin_plan_checkout_branch_ref(target: BranchRef): CheckoutPlan effect table_read;
+pub native fn admin_plan_checkout_branch_ref(target: BranchRef): CheckoutPlan effect table_read spelling "sys.admin.plan_checkout(BranchRef)";
 
 // sys.admin.plan_checkout(TagRef)
-pub native fn admin_plan_checkout_tag_ref(target: TagRef): CheckoutPlan effect table_read;
+pub native fn admin_plan_checkout_tag_ref(target: TagRef): CheckoutPlan effect table_read spelling "sys.admin.plan_checkout(TagRef)";
 
 // sys.admin.plan_checkout(GitOid)
-pub native fn admin_plan_checkout_git_oid(target: GitOid): CheckoutPlan effect table_read;
+pub native fn admin_plan_checkout_git_oid(target: GitOid): CheckoutPlan effect table_read spelling "sys.admin.plan_checkout(GitOid)";
 
 // sys.admin.plan_checkout(Str)
-pub native fn admin_plan_checkout_str(target: Str): CheckoutPlan effect table_read;
+pub native fn admin_plan_checkout_str(target: Str): CheckoutPlan effect table_read spelling "sys.admin.plan_checkout(Str)";
 
 // sys.blob.length
-pub native fn blob_length(value: Blob): Int effect table_read;
+pub native fn blob_length(value: Blob): Int effect table_read spelling "sys.blob.length";
 
 // sys.blob.digest
-pub native fn blob_digest(value: Blob): Digest effect table_read;
+pub native fn blob_digest(value: Blob): Digest effect table_read spelling "sys.blob.digest";
 
 // sys.blob.read
-pub native fn blob_read(value: Blob, offset: Int, length: Int): Blob effect table_read;
+pub native fn blob_read(value: Blob, offset: Int, length: Int): Blob effect table_read spelling "sys.blob.read";
 
 // sys.blob.verify
-pub native fn blob_verify(value: Blob): Unit effect table_read;
+pub native fn blob_verify(value: Blob): Unit effect table_read spelling "sys.blob.verify";
 
 // sys.blob.from_bytes
-pub native fn blob_from_bytes(values: [Int]): Blob effect table_read;
+pub native fn blob_from_bytes(values: [Int]): Blob effect table_read spelling "sys.blob.from_bytes";
 
 // sys.blob.to_bytes
-pub native fn blob_to_bytes(value: Blob): [Int] effect table_read;
+pub native fn blob_to_bytes(value: Blob): [Int] effect table_read spelling "sys.blob.to_bytes";
 
 // sys.blob.begin
-pub native fn blob_begin(expected_length: Int? = null, max_bytes: Int): BlobWriter effect runtime_admin;
+pub native fn blob_begin(expected_length: Int? = null, max_bytes: Int): BlobWriter effect runtime_admin spelling "sys.blob.begin";
 
 // sys.blob.append
-pub native fn blob_append(writer: BlobWriter, part: Blob): Unit effect runtime_admin;
+pub native fn blob_append(writer: BlobWriter, part: Blob): Unit effect runtime_admin spelling "sys.blob.append";
 
 // sys.blob.finish
-pub native fn blob_finish(writer: BlobWriter): Blob effect runtime_admin;
+pub native fn blob_finish(writer: BlobWriter): Blob effect runtime_admin spelling "sys.blob.finish";
 
 // sys.blob.abort
-pub native fn blob_abort(writer: BlobWriter): Unit effect runtime_admin;
+pub native fn blob_abort(writer: BlobWriter): Unit effect runtime_admin spelling "sys.blob.abort";
 
 // sys.blob.capture_file
-pub native fn blob_capture_file(root: Str, path: Str, max_bytes: Int): Blob effect runtime_admin;
+pub native fn blob_capture_file(root: Str, path: Str, max_bytes: Int): Blob effect runtime_admin spelling "sys.blob.capture_file";
 
 // sys.blob.resource
-pub native fn blob_resource(path: Str): Blob effect table_read;
+pub native fn blob_resource(path: Str): Blob effect table_read spelling "sys.blob.resource";
 
 // sys.admin.review_commit
-pub native fn admin_review_commit(): CommitReview effect table_read;
+pub native fn admin_review_commit(): CommitReview effect table_read spelling "sys.admin.review_commit";
 
 // sys.admin.commit_reviewed
-pub native fn admin_commit_reviewed(review: CommitReview, message: Str, author: PersonIdentity? = null): CommitRef effect storage_admin;
+pub native fn admin_commit_reviewed(review: CommitReview, message: Str, author: PersonIdentity? = null): CommitRef effect storage_admin spelling "sys.admin.commit_reviewed";
 
 // sys.blob.media_type
-pub native fn blob_media_type(value: Blob): Str effect table_read;
+pub native fn blob_media_type(value: Blob): Str effect table_read spelling "sys.blob.media_type";
 
 // sys.blob.suffix
-pub native fn blob_suffix(value: Blob): Str? effect table_read;
+pub native fn blob_suffix(value: Blob): Str? effect table_read spelling "sys.blob.suffix";
 
 // sys.blob.annotate
-pub native fn blob_annotate(value: Blob, media_type: Str, suffix: Str? = null): Blob effect table_read;
+pub native fn blob_annotate(value: Blob, media_type: Str, suffix: Str? = null): Blob effect table_read spelling "sys.blob.annotate";
 
 // sys.blob.same_content
-pub native fn blob_same_content(left: Blob, right: Blob): Bool effect table_read;
+pub native fn blob_same_content(left: Blob, right: Blob): Bool effect table_read spelling "sys.blob.same_content";

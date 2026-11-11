@@ -3542,3 +3542,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod native_equivalence;
