@@ -1,11 +1,13 @@
 //! The `core.encoding.orna` natives: `encode<T>` writes a value as canonical Orna text. Each call charges one step, as
 //! the other codec natives do.
 
+mod decode;
 mod encode;
 #[cfg(test)]
 mod tests;
 
 use orna_hir::Ty;
+use orna_syntax::parse_expression;
 
 use crate::error::Stop;
 use crate::machine::Machine;
@@ -30,4 +32,30 @@ pub(super) fn encode(
         return Err(Stop::Error("ORNA-EVAL-LIMIT"));
     }
     Ok(Value::Text(out))
+}
+
+/// `decode<T>(input: Str): T`. The text must be exactly one canonical expression of type `T`; anything else is a value
+/// error. Each call charges one step.
+pub(super) fn decode(
+    machine: &mut Machine<'_>,
+    targs: &[Ty],
+    arguments: Vec<Value>,
+) -> Result<Value, Stop> {
+    machine.tick(1)?;
+    let ty = targs
+        .first()
+        .copied()
+        .ok_or(Stop::Error("ORNA-EVAL-TYPE"))?;
+    let [input] = <[Value; 1]>::try_from(arguments).map_err(|_| Stop::Error("ORNA-EVAL-TYPE"))?;
+    let Value::Text(text) = input else {
+        return Err(Stop::Error("ORNA-EVAL-TYPE"));
+    };
+    if text.len() > machine.limits.max_string_bytes {
+        return Err(Stop::Error("ORNA-EVAL-LIMIT"));
+    }
+    let parsed = parse_expression(&text);
+    if !parsed.is_ok() {
+        return Err(Stop::Error("ORNA-EVAL-VALUE"));
+    }
+    decode::decode(machine, &parsed.value, ty, None, 0)
 }
