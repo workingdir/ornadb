@@ -20,14 +20,14 @@ use crate::{
 
 /// The numeric type of a quantity's value.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Num {
+pub(super) enum Num {
     Int,
     Decimal,
     Float,
 }
 
 impl Num {
-    fn of(kind: &TyKind) -> Option<Self> {
+    pub(super) fn of(kind: &TyKind) -> Option<Self> {
         match kind {
             TyKind::Int => Some(Self::Int),
             TyKind::Decimal => Some(Self::Decimal),
@@ -59,13 +59,13 @@ impl Num {
 }
 
 /// A rejected quantity operation: its diagnostic code and message.
-struct Fail {
+pub(super) struct Fail {
     code: &'static str,
     message: String,
 }
 
 impl Fail {
-    fn new(code: &'static str, message: impl Into<String>) -> Self {
+    pub(super) fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
@@ -74,7 +74,7 @@ impl Fail {
 }
 
 /// Maps a unit-key arithmetic failure to the evaluator's limit diagnostic.
-fn budget(_: KeyError) -> Fail {
+pub(super) fn budget(_: KeyError) -> Fail {
     Fail::new(
         UNIT_LIMIT,
         "the unit key arithmetic leaves the evaluator's budget",
@@ -92,7 +92,7 @@ struct Operand {
 /// Converts a value of type `num` by `factor`, keeping it exact. An integer factor keeps `Int` and `Decimal`; a finite
 /// decimal factor turns an `Int` into a `Decimal`; any other factor has no exact decimal form. A `Float` stays a
 /// `Float` (ORNA-UNIT-016).
-fn scaled(num: Num, factor: &Rational) -> Result<Num, Fail> {
+pub(super) fn scaled(num: Num, factor: &Rational) -> Result<Num, Fail> {
     if num == Num::Float || factor.is_integer() {
         return Ok(num);
     }
@@ -324,7 +324,7 @@ impl<'a> BodyCheck<'a> {
 
     /// Folds a value of type `num` in unit `key`: a quantity when the key has dimension (ORNA-UNIT-011 to 013), otherwise
     /// the plain numeric type its scale leaves (ORNA-UNIT-014).
-    fn fold(&mut self, num: Num, key: UnitKeyId) -> Result<Ty, Fail> {
+    pub(super) fn fold(&mut self, num: Num, key: UnitKeyId) -> Result<Ty, Fail> {
         let unit = self.program.units.key(key).clone();
         if !unit.is_dimensionless() {
             let value = self.intern(num.kind());
@@ -368,7 +368,7 @@ impl<'a> BodyCheck<'a> {
     }
 
     /// Records a rejected quantity operation as a constraint conflict and yields the error type.
-    fn report(&mut self, fail: Fail, span: SyntaxSpan) -> Ty {
+    pub(super) fn report(&mut self, fail: Fail, span: SyntaxSpan) -> Ty {
         self.conflicts += 1;
         self.diagnostics
             .push(HirDiagnostic::new(fail.code, fail.message, span));

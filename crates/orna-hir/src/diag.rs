@@ -29,6 +29,8 @@ pub const UNSUPPORTED: &str = "ORNA-S022-UNSUPPORTED";
 pub const UNIT_UNRESOLVED: &str = "ORNA-UNIT-UNRESOLVED";
 /// A unit family whose variants do not share the family's dimension (units.md ORNA-UNIT-010).
 pub const UNIT_DIM: &str = "ORNA-UNIT-DIM";
+/// A bare number, or a quantity outside its family, given a unit-family type (units.md ORNA-UNIT-020).
+pub const UNIT_ANNOT: &str = "ORNA-UNIT-020";
 /// A unit whose definition depends on itself (units.md ORNA-UNIT-009).
 pub const UNIT_CYCLE: &str = "ORNA-UNIT-CYCLE";
 /// A unit key whose exponent or rational leaves the evaluator's budget (units.md ORNA-UNIT-019).
