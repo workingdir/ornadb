@@ -1905,7 +1905,8 @@ pub native fn checkpoint(consumer_identity: ConsumerIdentity, source_identity: S
 pub native fn render_diagnostic(diagnostic: Diagnostic, context: PresentContext = current.present_context): PresentTree effect table_read;
 
 // sys.rt.info
-pub native fn rt_info(): RuntimeInfo effect table_read spelling "sys.rt.info";
+pub native fn rt_info(): RuntimeInfo effect table_read spelling "sys.rt.info"
+    formerly "sys.runtime_info" diagnostic "ORNA100-E-SYS-RUNTIME";
 
 // sys.invoke(Value)
 pub native fn invoke_value(function: FunctionRef, arguments: ArgumentMap, at: SnapshotRef? = null, transaction: InvokeTransaction = InvokeTransaction.inherit, idempotency_key: Str? = null): Value effect runtime_admin spelling "sys.invoke(Value)";
@@ -1945,6 +1946,28 @@ pub native fn admin_checkout_git_oid(target: GitOid, force: Bool = false, expect
 
 // sys.admin.checkout(Str)
 pub native fn admin_checkout_str(target: Str, force: Bool = false, expected_plan: Digest? = null): SnapshotRef effect storage_admin spelling "sys.admin.checkout(Str)";
+
+// sys.admin.set_storage_preference (removed in 1.1.0)
+pub native fn set_storage_preference(table: TableRef, preference: StoragePreference): Storage effect storage_admin spelling "sys.admin.set_storage_preference" removed "1.1.0" reason "No new-format row placement mode; migrate source explicitly.";
+
+// sys.admin.rewrite_storage (removed in 1.1.0)
+pub native fn rewrite_storage(table: TableRef, to: StorageRewriteTarget): StorageRewriteResult effect storage_admin spelling "sys.admin.rewrite_storage" removed "1.1.0" reason "No new-format row placement mode; migrate source explicitly.";
+
+// sys.StoragePreference (removed in 1.1.0)
+pub enum StoragePreference removed "1.1.0" {
+    automatic,
+    editable,
+    compact,
+}
+
+// sys.StorageRewriteTarget (removed in 1.1.0)
+pub enum StorageRewriteTarget removed "1.1.0" {
+    editable,
+    compact,
+}
+
+// sys.StorageRewriteResult (removed in 1.1.0)
+pub native type StorageRewriteResult removed "1.1.0";
 
 // sys.admin.create_branch(SnapshotRef)
 pub native fn admin_create_branch_snapshot_ref(name: Str, at: SnapshotRef? = null): BranchRef effect storage_admin spelling "sys.admin.create_branch(SnapshotRef)";

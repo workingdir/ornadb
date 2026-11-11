@@ -160,9 +160,10 @@ fn catalogue_class(effects: Option<&NativeEffectSet>) -> String {
         .join("|")
 }
 
-/// Native callables from `sys.orna`, keyed by label: the `spelling` clause, or `sys.<name>` without one.
-/// Each value is the rendered signature followed by the catalogue class.
-fn native_entries() -> BTreeMap<String, String> {
+/// Native callables from `sys.orna`, keyed by label. With `retired` false these are the active callables; with
+/// `retired` true they are the ones carrying a `removed` clause. Each value is the rendered signature followed by
+/// the catalogue class.
+fn native_entries(retired: bool) -> BTreeMap<String, String> {
     let parsed = parse_interface(SYS_ORNA);
     assert!(
         parsed.diagnostics.is_empty(),
@@ -173,10 +174,10 @@ fn native_entries() -> BTreeMap<String, String> {
     let mut natives = BTreeMap::new();
     for item in &parsed.value.items {
         if let Declaration::Native { signature, effects } = &item.declaration {
-            let label = item.clauses.spelling.as_ref().map_or_else(
-                || format!("sys.{}", signature.name),
-                |spelling| spelling.text.clone(),
-            );
+            if item.clauses.removed.is_some() != retired {
+                continue;
+            }
+            let label = native_label(item, &signature.name);
             let entry = format!(
                 "{} class {}",
                 render_native(&label, signature, &declared),
@@ -218,22 +219,192 @@ fn catalogue_entries() -> BTreeMap<String, String> {
 
 #[test]
 fn native_callable_signatures_match_json_catalogue() {
-    let catalogue = catalogue_entries();
-    let natives = native_entries();
+    assert_same_entries(
+        "callable(s) differ between sys.orna and the JSON catalogue",
+        &catalogue_entries(),
+        &native_entries(false),
+    );
+}
+
+const RETIRED_JSON: &str =
+    include_str!("../../../orna-conformance/tests/fixtures/reference/api/retired.json");
+
+/// The label of a `pub native fn`: its `spelling` clause, or `sys.<name>` without one.
+fn native_label(item: &orna_syntax::Item, name: &str) -> String {
+    item.clauses
+        .spelling
+        .as_ref()
+        .map_or_else(|| format!("sys.{name}"), |spelling| spelling.text.clone())
+}
+
+/// Fails with every key whose two renderings differ; `what` completes the message's count.
+fn assert_same_entries(
+    what: &str,
+    expected: &BTreeMap<String, String>,
+    actual: &BTreeMap<String, String>,
+) {
+    let labels: BTreeSet<&String> = expected.keys().chain(actual.keys()).collect();
     let mut differences = Vec::new();
-    let labels: BTreeSet<&String> = catalogue.keys().chain(natives.keys()).collect();
     for label in labels {
-        let json_side = catalogue.get(label);
-        let native_side = natives.get(label);
-        if json_side != native_side {
+        let expected_side = expected.get(label);
+        let actual_side = actual.get(label);
+        if expected_side != actual_side {
             differences.push(format!(
-                "{label}:\n  json   = {json_side:?}\n  native = {native_side:?}"
+                "{label}:\n  expected = {expected_side:?}\n  actual   = {actual_side:?}"
             ));
         }
     }
     assert!(
         differences.is_empty(),
-        "{} callable(s) differ between sys.orna and the JSON catalogue:\n{}",
+        "{} {what}:\n{}",
+        differences.len(),
+        differences.join("\n")
+    );
+}
+
+/// Names of the declared types that carry a `removed` clause, qualified as the catalogue spells them.
+fn removed_declared_types() -> BTreeSet<String> {
+    parse_interface(SYS_ORNA)
+        .value
+        .items
+        .iter()
+        .filter(|item| item.clauses.removed.is_some())
+        .filter_map(|item| match &item.declaration {
+            Declaration::Enum { name, .. }
+            | Declaration::Type { name, .. }
+            | Declaration::NativeType { name, .. } => Some(format!("sys.{name}")),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The `removed` reason of each removed native callable, keyed by label.
+fn removed_reasons() -> BTreeMap<String, Option<String>> {
+    parse_interface(SYS_ORNA)
+        .value
+        .items
+        .iter()
+        .filter_map(|item| {
+            let removed = item.clauses.removed.as_ref()?;
+            let Declaration::Native { signature, .. } = &item.declaration else {
+                return None;
+            };
+            let reason = removed.reason.as_ref().map(|reason| reason.text.clone());
+            Some((native_label(item, &signature.name), reason))
+        })
+        .collect()
+}
+
+/// Removed callables and types against the frozen `retired.json`: the signature and class of each removed callable,
+/// the set of removed types, and each removed callable's reason against `removed_names`.
+#[test]
+fn removed_callables_match_retired_json() {
+    let retired: serde_json::Value =
+        serde_json::from_str(RETIRED_JSON).expect("retired.json must be JSON");
+    let expected: BTreeMap<String, String> = retired["functions"]
+        .as_array()
+        .expect("retired `functions` must be an array")
+        .iter()
+        .map(|function| {
+            let label = function["name"]
+                .as_str()
+                .expect("retired `name` must be a string");
+            let signature = function["signature"]
+                .as_str()
+                .expect("retired `signature` must be a string");
+            let class = function["effect"]
+                .as_str()
+                .expect("retired `effect` must be a string");
+            (label.to_owned(), format!("{signature} class {class}"))
+        })
+        .collect();
+    assert_same_entries(
+        "retired callable(s) differ between sys.orna and retired.json",
+        &expected,
+        &native_entries(true),
+    );
+
+    let mut expected_types: BTreeSet<String> = retired["enums"]
+        .as_object()
+        .expect("retired `enums` must be an object")
+        .keys()
+        .cloned()
+        .collect();
+    expected_types.extend(
+        retired["value_types"]
+            .as_array()
+            .expect("retired `value_types` must be an array")
+            .iter()
+            .map(|name| {
+                name.as_str()
+                    .expect("retired value type must be a string")
+                    .to_owned()
+            }),
+    );
+    assert_eq!(
+        removed_declared_types(),
+        expected_types,
+        "the removed types in sys.orna must be exactly the retired.json types"
+    );
+
+    let catalogue: serde_json::Value =
+        serde_json::from_str(SYS_JSON).expect("the catalogue must be JSON");
+    let removed_names = catalogue["removed_names"]
+        .as_object()
+        .expect("catalogue `removed_names` must be an object");
+    for (label, reason) in removed_reasons() {
+        let recorded = removed_names
+            .get(&label)
+            .and_then(|entry| entry["reason"].as_str())
+            .map(str::to_owned);
+        assert_eq!(
+            reason, recorded,
+            "the removal reason of `{label}` must match removed_names"
+        );
+    }
+}
+
+/// `formerly` clauses against `removed_names`: each names a retired name whose replacement is this callable and
+/// whose diagnostic is the clause's. The reverse direction (a `removed_names` replacement with no `formerly`
+/// clause) is not asserted yet: `sys.runtime` -> `sys.rt` waits for the singleton declarations.
+#[test]
+fn formerly_clauses_agree_with_removed_names() {
+    let catalogue: serde_json::Value =
+        serde_json::from_str(SYS_JSON).expect("the catalogue must be JSON");
+    let removed_names = catalogue["removed_names"]
+        .as_object()
+        .expect("catalogue `removed_names` must be an object");
+    let mut differences = Vec::new();
+    for item in &parse_interface(SYS_ORNA).value.items {
+        let Some(clause) = &item.clauses.formerly else {
+            continue;
+        };
+        let Declaration::Native { signature, .. } = &item.declaration else {
+            differences.push(format!(
+                "`formerly {}` is not on a native callable",
+                clause.name.text
+            ));
+            continue;
+        };
+        let label = native_label(item, &signature.name);
+        let entry = removed_names.get(&clause.name.text);
+        let replacement = entry.and_then(|entry| entry["replacement"].as_str());
+        let diagnostic = entry.and_then(|entry| entry["diagnostic"].as_str());
+        let declared = clause
+            .diagnostic
+            .as_ref()
+            .map(|diagnostic| diagnostic.text.as_str());
+        if replacement != Some(label.as_str()) || diagnostic != declared {
+            differences.push(format!(
+                "{label}: formerly `{}` declares diagnostic {declared:?}; removed_names has replacement \
+                 {replacement:?} and diagnostic {diagnostic:?}",
+                clause.name.text
+            ));
+        }
+    }
+    assert!(
+        differences.is_empty(),
+        "{} formerly clause(s) disagree with removed_names:\n{}",
         differences.len(),
         differences.join("\n")
     );
