@@ -1,13 +1,14 @@
 //! The `core.encoding.ovb` engine natives over lowered source: `encode` yields the canonical OVB-1 bytes of its
-//! argument, `decode` reads them back, and the refusals match the old evaluator's codec: `ORNA-EVAL-VALUE` for bytes
-//! that are not one canonical value and `ORNA-EVAL-LIMIT` past the collection and string limits.
+//! argument, `decode` reads them back at the declared type, and the refusals match the old evaluator's codec:
+//! `ORNA-EVAL-VALUE` for bytes that are not one canonical value of the declared type and `ORNA-EVAL-LIMIT` past the
+//! collection and string limits.
 
 use std::rc::Rc;
 
 use orna_exec::{ExecError, ExecLimits, Value, run_entry};
 use orna_hir::{DefId, DefKind, ModulePath, Name, Program, SourceId, SourceUnit, lower};
 use orna_syntax::parse_module_with_file;
-use orna_value::{CanonicalValue, Raw};
+use orna_value::{CanonicalValue, Raw, base64_encode};
 
 const LIMITS: ExecLimits = ExecLimits {
     max_steps: 100_000,
@@ -18,6 +19,9 @@ const LIMITS: ExecLimits = ExecLimits {
 };
 
 const HEAD: &str = "use core.encoding.ovb;\nuse core.encoding.base64;\n";
+
+/// A nominal record with one defaulted field, decoded at `Pair`.
+const PAIR: &str = "pub type Pair {\n    pub a: Int,\n    pub b: Int = 5,\n}\n";
 
 fn lower_one(source: &str) -> Program {
     let parsed = parse_module_with_file(source, "test.orna");
@@ -97,6 +101,23 @@ fn canonical(raw: Raw) -> Vec<u8> {
         .expect("test value encodes")
 }
 
+/// The Orna expression that decodes the canonical bytes of the map `entries` as a `Pair`.
+fn decode_pair(entries: Vec<(&str, Raw)>) -> String {
+    let map = Raw::Map(
+        entries
+            .into_iter()
+            .map(|(key, value)| (Raw::Text(key.to_owned()), value))
+            .collect(),
+    );
+    let encoded = base64_encode(&canonical(map));
+    format!("ovb.decode<Pair>(base64.decode(\"{encoded}\"))")
+}
+
+/// A program defining the `Pair` type and `run` as `expression`.
+fn pair_program(expression: &str) -> String {
+    format!("{HEAD}{PAIR}pub fn run(): Pair = {expression};\n")
+}
+
 #[test]
 fn encode_yields_the_canonical_ovb_bytes_of_its_argument() {
     assert_eq!(
@@ -133,6 +154,42 @@ fn decode_refuses_bytes_that_are_not_one_canonical_value() {
     );
     assert_eq!(
         run("Int", "ovb.decode<Int>(base64.decode(\"\"))"),
+        Err(ExecError::Code("ORNA-EVAL-VALUE"))
+    );
+}
+
+#[test]
+fn decode_refuses_a_value_whose_shape_is_not_the_declared_type() {
+    assert_eq!(
+        run("Int", "ovb.decode<Int>(ovb.encode<Str>(\"a\"))"),
+        Err(ExecError::Code("ORNA-EVAL-VALUE"))
+    );
+}
+
+#[test]
+fn decode_fills_an_omitted_defaulted_field_at_its_declared_default() {
+    let expression = decode_pair(vec![("a", Raw::Int(1.into()))]);
+    let expected = Value::Record(Rc::from([
+        (Name::new("a"), Value::Int(1.into())),
+        (Name::new("b"), Value::Int(5.into())),
+    ]));
+    assert_eq!(run_with(&pair_program(&expression), LIMITS), Ok(expected));
+}
+
+#[test]
+fn decode_refuses_a_record_missing_a_field_without_a_default() {
+    let expression = decode_pair(vec![("b", Raw::Int(2.into()))]);
+    assert_eq!(
+        run_with(&pair_program(&expression), LIMITS),
+        Err(ExecError::Code("ORNA-EVAL-VALUE"))
+    );
+}
+
+#[test]
+fn decode_refuses_a_record_with_an_undeclared_field() {
+    let expression = decode_pair(vec![("a", Raw::Int(1.into())), ("z", Raw::Int(2.into()))]);
+    assert_eq!(
+        run_with(&pair_program(&expression), LIMITS),
         Err(ExecError::Code("ORNA-EVAL-VALUE"))
     );
 }

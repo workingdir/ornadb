@@ -26,6 +26,7 @@ mod relation;
 mod store;
 mod table;
 mod time;
+mod typed_raw;
 mod unit_variant;
 mod value;
 mod variants;
