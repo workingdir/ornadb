@@ -26,6 +26,9 @@ from gen_interface import check_type_tokens, split_top_level  # noqa: E402
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 EXPORT = ROOT / "crates/orna-intrinsics/std_intrinsics.json"
 INTERFACE = ROOT / "crates/orna-hir/interface"
+# Hand-written Orna under the interface directory (not generated). The generator must never emit these; the README in
+# that directory lists which files are generated and which are hand-written.
+HAND_WRITTEN = ("core/range.orna",)
 
 # Root environment rows (hir.md 2.6: `Some`, `now`, `uuid7`, `error` are core natives).
 # `fail` stays an `IntrinsicForm` (abrupt evaluation rule), so it is not a native.
@@ -283,6 +286,9 @@ def render():
         if module not in INCLUDED_MODULES and module != "core":
             gaps["excluded_modules"].append(f"{module} ({len(rows)} rows)")
 
+    for path in HAND_WRITTEN:
+        if path in files:
+            fail(f"{path} is hand-written and must not be generated; remove it from the generator")
     for path, text in files.items():
         if not text.isascii():
             fail(f"{path} is not plain ASCII")

@@ -1,0 +1,31 @@
+// Hand-written Orna source, not generated. See README.md in this directory.
+//
+// core.range: the `Range` behind `a..b` and `a..=b` (kernel-and-library.md listing 5; P1, P9, P10).
+// `Order` is the core.ops protocol; `Ordering` is the root core enum.
+use core.{Ordering};
+use core.ops.{Order};
+
+// `a..b` is Range { lower: a, upper: b, inclusive: false }; `a..=b` sets `inclusive`.
+pub type Range<T impl Order> {
+    pub lower: T?,
+    pub upper: T?,
+    pub inclusive: Bool,
+}
+
+// `contains` is the listing's `impl Contains<T>` written as a free function: a generic type's `impl` cannot yet name
+// the type's parameter (HIR gap, see bead), so `x in r` is not wired to this function yet.
+pub fn contains<T impl Order>(range: Range<T>, value: T): Bool =
+    above(range.lower, value) && below(range.upper, range.inclusive, value);
+
+// An absent bound compares equal to `value` itself, so `value >= lower` holds.
+fn above<T impl Order>(lower: T?, value: T): Bool = value.compare(lower ?? value) != Ordering.less;
+
+// An absent bound admits every value; a present bound admits `value < upper`, or `value == upper` when inclusive.
+fn below<T impl Order>(upper: T?, inclusive: Bool, value: T): Bool = case upper {
+    null: true,
+    _: case value.compare(upper ?? value) {
+        Ordering.less: true,
+        Ordering.equal: inclusive,
+        Ordering.greater: false,
+    },
+};
