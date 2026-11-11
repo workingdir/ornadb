@@ -3,6 +3,7 @@
 
 use std::rc::Rc;
 
+use orna_hir::Ty;
 use sha2::{Digest, Sha256};
 
 use crate::error::Stop;
@@ -12,7 +13,11 @@ use crate::value::Value;
 const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 
 /// `sha256(Blob): Digest`. The input is bounded by the string limit.
-pub(super) fn sha256(machine: &mut Machine<'_>, arguments: Vec<Value>) -> Result<Value, Stop> {
+pub(super) fn sha256(
+    machine: &mut Machine<'_>,
+    _targs: &[Ty],
+    arguments: Vec<Value>,
+) -> Result<Value, Stop> {
     machine.tick(1)?;
     let input = blob(one(arguments)?)?;
     if input.len() > machine.limits.max_string_bytes {
@@ -22,7 +27,11 @@ pub(super) fn sha256(machine: &mut Machine<'_>, arguments: Vec<Value>) -> Result
 }
 
 /// `sha256_text(Str): Digest`, over the UTF-8 bytes of the text.
-pub(super) fn sha256_text(machine: &mut Machine<'_>, arguments: Vec<Value>) -> Result<Value, Stop> {
+pub(super) fn sha256_text(
+    machine: &mut Machine<'_>,
+    _targs: &[Ty],
+    arguments: Vec<Value>,
+) -> Result<Value, Stop> {
     machine.tick(1)?;
     let input = text(one(arguments)?)?;
     Ok(digest(input.as_bytes()))
@@ -32,6 +41,7 @@ pub(super) fn sha256_text(machine: &mut Machine<'_>, arguments: Vec<Value>) -> R
 /// ASCII without NUL, and the payload is bounded by the string limit.
 pub(super) fn domain_sha256(
     machine: &mut Machine<'_>,
+    _targs: &[Ty],
     arguments: Vec<Value>,
 ) -> Result<Value, Stop> {
     machine.tick(1)?;
@@ -54,7 +64,11 @@ pub(super) fn domain_sha256(
 }
 
 /// `to_hex(Digest): Str`: the 32 bytes as 64 lowercase hexadecimal digits.
-pub(super) fn to_hex(machine: &mut Machine<'_>, arguments: Vec<Value>) -> Result<Value, Stop> {
+pub(super) fn to_hex(
+    machine: &mut Machine<'_>,
+    _targs: &[Ty],
+    arguments: Vec<Value>,
+) -> Result<Value, Stop> {
     machine.tick(1)?;
     let digest = blob(one(arguments)?)?;
     if digest.len() != 32 {
@@ -72,7 +86,11 @@ pub(super) fn to_hex(machine: &mut Machine<'_>, arguments: Vec<Value>) -> Result
 }
 
 /// `from_hex(Str): Digest?`: `Some` of the digest when the text is exactly 64 lowercase hexadecimal digits.
-pub(super) fn from_hex(machine: &mut Machine<'_>, arguments: Vec<Value>) -> Result<Value, Stop> {
+pub(super) fn from_hex(
+    machine: &mut Machine<'_>,
+    _targs: &[Ty],
+    arguments: Vec<Value>,
+) -> Result<Value, Stop> {
     machine.tick(1)?;
     let encoded = text(one(arguments)?)?;
     let valid = encoded.len() == 64
