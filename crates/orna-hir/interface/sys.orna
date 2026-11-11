@@ -2042,55 +2042,55 @@ pub native fn admin_plan_checkout_git_oid(target: GitOid): CheckoutPlan effect t
 pub native fn admin_plan_checkout_str(target: Str): CheckoutPlan effect table_read spelling "sys.admin.plan_checkout(Str)";
 
 // sys.blob.length
-pub native fn blob_length(value: Blob): Int effect table_read spelling "sys.blob.length";
+pub native fn blob_length(value: Blob): Int effect table_read since "1.1.0" spelling "sys.blob.length";
 
 // sys.blob.digest
-pub native fn blob_digest(value: Blob): Digest effect table_read spelling "sys.blob.digest";
+pub native fn blob_digest(value: Blob): Digest effect table_read since "1.1.0" spelling "sys.blob.digest";
 
 // sys.blob.read
-pub native fn blob_read(value: Blob, offset: Int, length: Int): Blob effect table_read spelling "sys.blob.read";
+pub native fn blob_read(value: Blob, offset: Int, length: Int): Blob effect table_read since "1.1.0" spelling "sys.blob.read";
 
 // sys.blob.verify
-pub native fn blob_verify(value: Blob): Unit effect table_read spelling "sys.blob.verify";
+pub native fn blob_verify(value: Blob): Unit effect table_read since "1.1.0" spelling "sys.blob.verify";
 
 // sys.blob.from_bytes
-pub native fn blob_from_bytes(values: [Int]): Blob effect table_read spelling "sys.blob.from_bytes";
+pub native fn blob_from_bytes(values: [Int]): Blob effect table_read since "1.1.0" spelling "sys.blob.from_bytes";
 
 // sys.blob.to_bytes
-pub native fn blob_to_bytes(value: Blob): [Int] effect table_read spelling "sys.blob.to_bytes";
+pub native fn blob_to_bytes(value: Blob): [Int] effect table_read since "1.1.0" spelling "sys.blob.to_bytes";
 
 // sys.blob.begin
-pub native fn blob_begin(expected_length: Int? = null, max_bytes: Int): BlobWriter effect runtime_admin spelling "sys.blob.begin";
+pub native fn blob_begin(expected_length: Int? = null, max_bytes: Int): BlobWriter effect runtime_admin since "1.1.0" spelling "sys.blob.begin";
 
 // sys.blob.append
-pub native fn blob_append(writer: BlobWriter, part: Blob): Unit effect runtime_admin spelling "sys.blob.append";
+pub native fn blob_append(writer: BlobWriter, part: Blob): Unit effect runtime_admin since "1.1.0" spelling "sys.blob.append";
 
 // sys.blob.finish
-pub native fn blob_finish(writer: BlobWriter): Blob effect runtime_admin spelling "sys.blob.finish";
+pub native fn blob_finish(writer: BlobWriter): Blob effect runtime_admin since "1.1.0" spelling "sys.blob.finish";
 
 // sys.blob.abort
-pub native fn blob_abort(writer: BlobWriter): Unit effect runtime_admin spelling "sys.blob.abort";
+pub native fn blob_abort(writer: BlobWriter): Unit effect runtime_admin since "1.1.0" spelling "sys.blob.abort";
 
 // sys.blob.capture_file
-pub native fn blob_capture_file(root: Str, path: Str, max_bytes: Int): Blob effect runtime_admin spelling "sys.blob.capture_file";
+pub native fn blob_capture_file(root: Str, path: Str, max_bytes: Int): Blob effect runtime_admin since "1.1.0" spelling "sys.blob.capture_file";
 
 // sys.blob.resource
-pub native fn blob_resource(path: Str): Blob effect table_read spelling "sys.blob.resource";
+pub native fn blob_resource(path: Str): Blob effect table_read since "1.1.0" spelling "sys.blob.resource";
 
 // sys.admin.review_commit
-pub native fn admin_review_commit(): CommitReview effect table_read spelling "sys.admin.review_commit";
+pub native fn admin_review_commit(): CommitReview effect table_read since "1.1.0" spelling "sys.admin.review_commit";
 
 // sys.admin.commit_reviewed
-pub native fn admin_commit_reviewed(review: CommitReview, message: Str, author: PersonIdentity? = null): CommitRef effect storage_admin spelling "sys.admin.commit_reviewed";
+pub native fn admin_commit_reviewed(review: CommitReview, message: Str, author: PersonIdentity? = null): CommitRef effect storage_admin since "1.1.0" spelling "sys.admin.commit_reviewed";
 
 // sys.blob.media_type
-pub native fn blob_media_type(value: Blob): Str effect table_read spelling "sys.blob.media_type";
+pub native fn blob_media_type(value: Blob): Str effect table_read since "1.1.0" spelling "sys.blob.media_type";
 
 // sys.blob.suffix
-pub native fn blob_suffix(value: Blob): Str? effect table_read spelling "sys.blob.suffix";
+pub native fn blob_suffix(value: Blob): Str? effect table_read since "1.1.0" spelling "sys.blob.suffix";
 
 // sys.blob.annotate
-pub native fn blob_annotate(value: Blob, media_type: Str, suffix: Str? = null): Blob effect table_read spelling "sys.blob.annotate";
+pub native fn blob_annotate(value: Blob, media_type: Str, suffix: Str? = null): Blob effect table_read since "1.1.0" spelling "sys.blob.annotate";
 
 // sys.blob.same_content
-pub native fn blob_same_content(left: Blob, right: Blob): Bool effect table_read spelling "sys.blob.same_content";
+pub native fn blob_same_content(left: Blob, right: Blob): Bool effect table_read since "1.1.0" spelling "sys.blob.same_content";

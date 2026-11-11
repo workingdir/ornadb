@@ -409,3 +409,36 @@ fn formerly_clauses_agree_with_removed_names() {
         differences.join("\n")
     );
 }
+
+/// The `since` version of each native callable that carries one, against the catalogue's `since` field. Both sides
+/// must name the same callables with the same version.
+#[test]
+fn since_clauses_match_json_catalogue() {
+    let catalogue: serde_json::Value =
+        serde_json::from_str(SYS_JSON).expect("the catalogue must be JSON");
+    let expected: BTreeMap<String, String> = catalogue["functions"]
+        .as_array()
+        .expect("catalogue `functions` must be an array")
+        .iter()
+        .filter_map(|function| {
+            let since = function["since"].as_str()?;
+            let label = function["name"]
+                .as_str()
+                .expect("catalogue `name` must be a string");
+            Some((label.to_owned(), since.to_owned()))
+        })
+        .collect();
+    let mut actual = BTreeMap::new();
+    for item in &parse_interface(SYS_ORNA).value.items {
+        let (Some(since), Declaration::Native { signature, .. }) =
+            (&item.clauses.since, &item.declaration)
+        else {
+            continue;
+        };
+        actual.insert(native_label(item, &signature.name), since.text.clone());
+    }
+    assert_eq!(
+        actual, expected,
+        "the `since` clauses in sys.orna must match the catalogue's `since` fields"
+    );
+}
