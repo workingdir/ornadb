@@ -488,6 +488,186 @@ fn singletons_match_json_catalogue() {
     );
 }
 
+/// Joins prose parts with single spaces after normalising whitespace, so line wrapping never changes a comparison.
+fn flatten(parts: &[String]) -> String {
+    parts
+        .join(" ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// A non-empty string field of a catalogue entry.
+fn json_text<'a>(value: &'a serde_json::Value, field: &str) -> Option<&'a str> {
+    value[field].as_str().filter(|text| !text.is_empty())
+}
+
+/// The string items of a catalogue list field, empty when the field is absent.
+fn json_list<'a>(value: &'a serde_json::Value, field: &str) -> Vec<&'a str> {
+    value.get(field).map_or_else(Vec::new, |list| {
+        list.as_array()
+            .expect("catalogue list fields must be arrays")
+            .iter()
+            .map(|item| item.as_str().expect("catalogue list items must be strings"))
+            .collect()
+    })
+}
+
+/// The prose parts of one entry in the order `sys.orna` writes them: the purpose, each labelled field, then each
+/// list as its label followed by one `- item` part per item.
+fn prose_parts(
+    purpose: Option<&str>,
+    labelled: &[(&str, Option<&str>)],
+    lists: &[(&str, Vec<&str>)],
+) -> Vec<String> {
+    let mut parts: Vec<String> = purpose.map(str::to_owned).into_iter().collect();
+    for (label, text) in labelled {
+        if let Some(text) = text {
+            parts.push(format!("{label}: {text}"));
+        }
+    }
+    for (label, items) in lists {
+        if !items.is_empty() {
+            parts.push(format!("{label}:"));
+            parts.extend(items.iter().map(|item| format!("- {item}")));
+        }
+    }
+    parts
+}
+
+/// Records an entry's flattened prose under `key`. Entries with no prose at all are not recorded, so a declaration
+/// that carries prose the JSON lacks shows up as an unexpected key.
+fn insert_prose(prose: &mut BTreeMap<String, String>, key: String, parts: &[String]) {
+    let text = flatten(parts);
+    if !text.is_empty() {
+        prose.insert(key, text);
+    }
+}
+
+/// The flattened prose of every catalogue entry, keyed by kind and name: `fn:` callables, `static:` singletons,
+/// `relation:` row types and `value:` value types.
+fn json_prose(catalogue: &serde_json::Value) -> BTreeMap<String, String> {
+    let mut prose = BTreeMap::new();
+    for function in catalogue["functions"]
+        .as_array()
+        .expect("catalogue `functions` must be an array")
+    {
+        let name = function["name"]
+            .as_str()
+            .expect("catalogue function `name` must be a string");
+        let parts = prose_parts(
+            json_text(function, "purpose"),
+            &[
+                ("Contract", json_text(function, "contract")),
+                ("Preconditions", json_text(function, "preconditions")),
+                ("Ownership", json_text(function, "ownership")),
+                ("Snapshot rule", json_text(function, "snapshot_rule")),
+            ],
+            &[],
+        );
+        insert_prose(&mut prose, format!("fn:{name}"), &parts);
+    }
+    for singleton in catalogue["singletons"]
+        .as_array()
+        .expect("catalogue `singletons` must be an array")
+    {
+        let name = singleton["name"]
+            .as_str()
+            .expect("catalogue singleton `name` must be a string");
+        let parts = prose_parts(
+            None,
+            &[("Availability", json_text(singleton, "availability"))],
+            &[],
+        );
+        insert_prose(&mut prose, format!("static:{name}"), &parts);
+    }
+    for relation in catalogue["relations"]
+        .as_array()
+        .expect("catalogue `relations` must be an array")
+    {
+        let name = relation["name"]
+            .as_str()
+            .expect("catalogue relation `name` must be a string");
+        let parts = prose_parts(
+            json_text(relation, "purpose"),
+            &[],
+            &[("Invariants", json_list(relation, "invariants"))],
+        );
+        insert_prose(&mut prose, format!("relation:{name}"), &parts);
+    }
+    for value in catalogue["value_types"]
+        .as_array()
+        .expect("catalogue `value_types` must be an array")
+    {
+        let name = value["name"]
+            .as_str()
+            .expect("catalogue value type `name` must be a string");
+        let parts = prose_parts(
+            json_text(value, "purpose"),
+            &[("Kind", json_text(value, "kind"))],
+            &[("Invariants", json_list(value, "invariants"))],
+        );
+        insert_prose(&mut prose, format!("value:{name}"), &parts);
+    }
+    prose
+}
+
+/// The flattened `///` prose of each declaration in `sys.orna`, keyed the way `json_prose` keys the catalogue. A type
+/// is a relation when the catalogue names it as one, otherwise a value type.
+fn declared_prose(
+    items: &[orna_syntax::Item],
+    catalogue: &serde_json::Value,
+) -> BTreeMap<String, String> {
+    let relations: BTreeSet<&str> = catalogue["relations"]
+        .as_array()
+        .expect("catalogue `relations` must be an array")
+        .iter()
+        .filter_map(|relation| relation["name"].as_str())
+        .collect();
+    let mut prose = BTreeMap::new();
+    for item in items.iter().filter(|item| !item.docs.is_empty()) {
+        let key = match &item.declaration {
+            Declaration::Native { signature, .. } => {
+                format!("fn:{}", native_label(item, &signature.name))
+            }
+            Declaration::NativeStatic { name, .. } => {
+                format!("static:{}", native_label(item, name))
+            }
+            Declaration::Type { name, generics, .. } => {
+                let qualified = format!("sys.{name}");
+                if relations.contains(qualified.as_str()) {
+                    format!("relation:{qualified}")
+                } else {
+                    format!("value:{qualified}{}", render_generics(generics))
+                }
+            }
+            _ => format!("undocumented:{}", item.docs.join(" ")),
+        };
+        insert_prose(&mut prose, key, &item.docs);
+    }
+    prose
+}
+
+/// The `///` prose on each declaration against the JSON prose fields: purpose, contract, preconditions, ownership,
+/// snapshot rule, invariants, kind and availability. Both sides must name the same entries with the same prose, so a
+/// doc comment that drifts from the catalogue, or a catalogue prose field no declaration carries, fails here.
+#[test]
+fn prose_matches_json_catalogue() {
+    let catalogue: serde_json::Value =
+        serde_json::from_str(SYS_JSON).expect("the catalogue must be JSON");
+    let parsed = parse_interface(SYS_ORNA);
+    assert!(
+        parsed.diagnostics.is_empty(),
+        "sys.orna must parse without diagnostics: {:?}",
+        parsed.diagnostics
+    );
+    assert_same_entries(
+        "prose differs between sys.orna doc comments and the JSON catalogue",
+        &json_prose(&catalogue),
+        &declared_prose(&parsed.value.items, &catalogue),
+    );
+}
+
 /// The `since` version of each native callable that carries one, against the catalogue's `since` field. Both sides
 /// must name the same callables with the same version.
 #[test]
