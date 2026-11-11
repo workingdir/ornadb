@@ -270,8 +270,6 @@ pub enum Lit {
         /// The nanoseconds within the second.
         nanoseconds: u32,
     },
-    /// A period of whole days, from `N.day` or `N.days`.
-    Period(BigInt),
     /// An elapsed duration as whole seconds and a nanoseconds component, from
     /// a built-in duration postfix such as `3.hour` or `1.5.second`.
     Duration {

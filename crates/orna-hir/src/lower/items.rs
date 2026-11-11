@@ -18,8 +18,8 @@ use orna_syntax::{
 
 use crate::{
     AssertionDef, BodyId, DefId, DefKind, DimensionDef, EnumDef, FieldDef, FieldInitializer,
-    GenericParam, Idx, ImplDef, LetDef, ModuleId, ParamDef, ProtocolDef, Stmt, TableDef, TypeDef,
-    UnitDef, VariantDef, Visibility,
+    GenericParam, Idx, ImplDef, LetDef, ModuleId, ParamDef, ProtocolDef, Stmt, TableDef, Ty,
+    TypeDef, UnitDef, VariantDef, Visibility,
 };
 
 use super::declare::{Builder, DeclAst, PendingFunction, PendingKind};
@@ -181,27 +181,7 @@ impl Builder<'_> {
                     PendingKind::Built(DefKind::Dimension(DimensionDef { unit: None }));
             }
             DeclAst::Unit(dimension, definition) => {
-                let ty = super::types::lower_type(self, module, &[], &dimension);
-                let _ = ty;
-                self.pending[def.index()].kind =
-                    PendingKind::Built(DefKind::Unit(UnitDef::default()));
-                if let orna_syntax::UnitDefinition::Derived { value, offset, .. } = definition {
-                    // A derived unit's expression is not part of the value
-                    // model, but its names are still written in the module:
-                    // lower it so the editor index sees them.
-                    let expressions = std::iter::once(value.clone())
-                        .chain(offset.clone())
-                        .collect::<Vec<_>>();
-                    for expr in expressions {
-                        let body = self.allocate_body(def);
-                        self.body_jobs.push(BodyJob::Expression {
-                            def,
-                            body,
-                            expr: Box::new(expr),
-                            self_ty: None,
-                        });
-                    }
-                }
+                self.build_unit(def, module, dimension, definition)
             }
             DeclAst::Type(generics, representation) => {
                 self.build_type(def, module, &generics, &representation);
@@ -227,6 +207,59 @@ impl Builder<'_> {
                     def,
                     body,
                     expr: Box::new(value),
+                    self_ty: None,
+                });
+            }
+        }
+    }
+
+    /// Builds a unit: lowers its dimension, rejects the affine clauses and lowers
+    /// the names a derived unit's value writes.
+    fn build_unit(
+        &mut self,
+        def: DefId,
+        module: ModuleId,
+        dimension: TypeExpr,
+        definition: orna_syntax::UnitDefinition,
+    ) {
+        let _ = super::types::lower_type(self, module, &[], &dimension);
+        let affine_clause = match &definition {
+            orna_syntax::UnitDefinition::Derived { offset, affine, .. } => {
+                offset.is_some() || *affine
+            }
+            orna_syntax::UnitDefinition::Base => false,
+        };
+        if affine_clause {
+            let span = self.pending[def.index()].span.clone();
+            self.diagnose(
+                module,
+                crate::diag::UNSUPPORTED,
+                "affine units are library types (units.md 8.5): `offset` and `affine` are not kernel clauses",
+                span,
+            );
+        }
+        let (offset, affine) = match &definition {
+            orna_syntax::UnitDefinition::Derived { offset, affine, .. } => {
+                (super::units::literal_offset(offset.as_ref()), *affine)
+            }
+            orna_syntax::UnitDefinition::Base => (None, false),
+        };
+        self.pending[def.index()].kind = PendingKind::Built(DefKind::Unit(UnitDef {
+            family: None,
+            factors: Vec::new(),
+            offset,
+            affine,
+        }));
+        if let orna_syntax::UnitDefinition::Derived { value, offset, .. } = definition {
+            // A derived unit's expression is not part of the value model, but its
+            // names are still written in the module: lower it so the editor index
+            // sees them.
+            for expr in std::iter::once(value).chain(offset) {
+                let body = self.allocate_body(def);
+                self.body_jobs.push(BodyJob::Expression {
+                    def,
+                    body,
+                    expr: Box::new(expr),
                     self_ty: None,
                 });
             }
@@ -320,19 +353,31 @@ impl Builder<'_> {
             }),
         );
         if let Some(initializer) = initializer {
-            let (kind, value) = self.plan_initializer(field, initializer);
-            self.pending[field.index()].kind = PendingKind::Built(DefKind::Field(FieldDef {
-                ty,
-                initializer: Some(kind),
-            }));
-            self.body_jobs.push(BodyJob::Expression {
-                def: field,
-                body: kind.body(),
-                expr: Box::new(value),
-                self_ty: Some(table),
-            });
+            self.attach_initializer(field, ty, Some(table), initializer);
         }
         field
+    }
+
+    /// Attaches an initializer body to a field that already exists. The field owns the body. An `owner`
+    /// names the row a table field's body reads as `self`; a nominal default has none and is closed.
+    fn attach_initializer(
+        &mut self,
+        field: DefId,
+        ty: Ty,
+        owner: Option<DefId>,
+        initializer: &SyntaxFieldInitializer,
+    ) {
+        let (kind, value) = self.plan_initializer(field, initializer);
+        self.pending[field.index()].kind = PendingKind::Built(DefKind::Field(FieldDef {
+            ty,
+            initializer: Some(kind),
+        }));
+        self.body_jobs.push(BodyJob::Expression {
+            def: field,
+            body: kind.body(),
+            expr: Box::new(value),
+            self_ty: owner,
+        });
     }
 
     /// Allocates the body an initializer lowers into. The field owns it, as an assertion owns its body.
@@ -532,8 +577,8 @@ impl Builder<'_> {
                     name,
                     ty,
                     visibility,
+                    initializer,
                     span,
-                    ..
                 } => {
                     let vis = if *visibility {
                         Visibility::Public
@@ -541,7 +586,7 @@ impl Builder<'_> {
                         Visibility::Private
                     };
                     let ty = super::types::lower_type(self, module, &names, ty);
-                    members.push(self.declare_nested(
+                    let field = self.declare_nested(
                         module,
                         name,
                         vis,
@@ -550,7 +595,12 @@ impl Builder<'_> {
                             ty,
                             initializer: None,
                         }),
-                    ));
+                    );
+                    if let Some(value) = initializer {
+                        let default = SyntaxFieldInitializer::Default(value.clone());
+                        self.attach_initializer(field, ty, None, &default);
+                    }
+                    members.push(field);
                 }
                 TypeMember::Assertion { value, span } => {
                     members.push(self.build_assertion(module, def, value, span.clone()));

@@ -299,6 +299,33 @@ fn a_plain_table_field_has_no_initializer() {
     assert!(initializer_of(&program, table_field(&program, "Note", 1)).is_none());
 }
 
+/// The field definition at `index` among the members of the nominal type named `ty`.
+fn type_field(program: &Program, ty: &str, index: usize) -> orna_hir::DefId {
+    let DefKind::Type(type_def) = &program.defs[defined(program, "main", ty)].kind else {
+        panic!("`{ty}` is a nominal type");
+    };
+    type_def.members[index]
+}
+
+#[test]
+fn a_nominal_field_default_owns_an_initializer_body() {
+    let program = lower_one("pub type Box {\n    pub b: Int = 5,\n}\n");
+    let field = type_field(&program, "Box", 0);
+    let initializer =
+        initializer_of(&program, field).expect("a defaulted nominal field has an initializer");
+    assert!(matches!(
+        initializer,
+        orna_hir::FieldInitializer::Default(_)
+    ));
+    assert_eq!(program.bodies[initializer.body()].owner, field);
+}
+
+#[test]
+fn a_plain_nominal_field_has_no_initializer() {
+    let program = lower_one("pub type Box {\n    b: Int,\n}\n");
+    assert!(initializer_of(&program, type_field(&program, "Box", 0)).is_none());
+}
+
 #[test]
 fn a_local_call_is_a_first_class_value() {
     let program = lower_one(

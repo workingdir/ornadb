@@ -301,6 +301,12 @@ pub struct UnitDef {
     pub family: Option<DefId>,
     /// The factors of a derived variant's expression, in written order. Empty for a base unit.
     pub factors: Vec<UnitFactor>,
+    /// The offset written after `offset` in a top-level unit declaration, exactly as written, such as `273.15`.
+    /// `None` when the unit has no offset.
+    pub offset: Option<Box<str>>,
+    /// Whether the declaration is `affine`: its points are offset from zero, so point arithmetic differs from
+    /// vector arithmetic (units.md section 6).
+    pub affine: bool,
 }
 
 /// One factor of a derived unit expression: resolved, never evaluated.
@@ -338,8 +344,8 @@ pub struct AssertionDef {
 pub struct FieldDef {
     /// The declared type.
     pub ty: Ty,
-    /// How a table field gets its value when a row omits it. Only table fields
-    /// carry one; other fields are always written by the caller.
+    /// How the field gets its value when a row or record omits it. A table field's default reads its row
+    /// as `self`; a nominal default is a closed expression. Other fields are always written by the caller.
     pub initializer: Option<FieldInitializer>,
 }
 

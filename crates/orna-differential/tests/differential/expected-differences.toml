@@ -967,30 +967,6 @@ reason = "the checker gives an empty braced lambda body `{}` the empty record ty
 bead = "ornadb-csenl.18"
 
 [[difference]]
-case = "valid/computed-field.orna"
-field = "effects"
-first = "examples.valid.computed-field::names=TableRead+MayFail"
-second = "examples.valid.computed-field::names=pure"
-reason = "the checker publishes the table read of `Contact | map(Contact.full_name)` through its computed-field member, which the H1 classification does not produce as a relation call; the HIR effect pass sees no table-touching callee in the body. Closing it needs the computed-field member resolved on HIR (H3 rule families)"
-bead = "ornadb-csenl.18"
-
-[[difference]]
-case = "valid/computed-and-defaulted-fields.orna"
-field = "effects"
-first = "examples.valid.computed-and-defaulted-fields::names=TableRead+MayFail"
-second = "examples.valid.computed-and-defaulted-fields::names=pure"
-reason = "same cause as computed-field.orna: the computed field read through the table source is not a classified HIR callee, so the effect pass publishes pure"
-bead = "ornadb-csenl.18"
-
-[[difference]]
-case = "valid/default-and-computed-fields.orna"
-field = "effects"
-first = "examples.valid.default-and-computed-fields::british_names=TableRead+MayFail"
-second = "examples.valid.default-and-computed-fields::british_names=pure"
-reason = "same cause as computed-field.orna: the computed-field table read is not a classified HIR callee"
-bead = "ornadb-csenl.18"
-
-[[difference]]
 case = "valid/pipeline-precedence.orna"
 field = "effects"
 first = "examples.valid.pipeline-precedence::count_is_positive=pure"
