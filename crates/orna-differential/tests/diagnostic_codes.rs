@@ -79,12 +79,10 @@ fn recorded_reason(code: &str) -> Option<&'static str> {
         "ORNA-S020-ANNOTATION" => {
             Some("public annotation: HIR and checker disagree on which bodies they reach")
         }
-        "ORNA-S022-UNSUPPORTED" => {
-            Some(
-                "HIR reports forms the H2a subset does not type, and top-level offset or affine units (units.md C6, \
+        "ORNA-S022-UNSUPPORTED" => Some(
+            "HIR reports forms the H2a subset does not type, and top-level offset or affine units (units.md C6, \
                  user modules; valid/affine-unit); otherwise unclassified",
-            )
-        }
+        ),
         "ORNA-EVAL-ARGUMENT" => {
             Some("HIR call-binding arity error; the checker maps it only in rules.rs")
         }

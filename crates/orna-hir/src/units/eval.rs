@@ -86,7 +86,8 @@ impl<'p> Evaluator<'p> {
         let program = self.program;
         let DefKind::Unit(UnitDef {
             family: Some(family),
-            factors, ..
+            factors,
+            ..
         }) = &program.defs[unit].kind
         else {
             return None;
