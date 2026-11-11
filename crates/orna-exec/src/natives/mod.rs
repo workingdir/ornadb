@@ -9,6 +9,7 @@ mod call;
 mod collection;
 mod hash;
 mod order;
+mod ovb;
 #[cfg(test)]
 mod registry_test;
 #[cfg(test)]
@@ -43,6 +44,8 @@ pub(crate) fn lookup(key: &NativeKey) -> Option<NativeFn> {
     Some(match (module.as_str(), key.name.as_str()) {
         ("core.encoding.base64", "encode") => base64::encode,
         ("core.encoding.base64", "decode") => base64::decode,
+        ("core.encoding.ovb", "encode") => ovb::encode,
+        ("core.encoding.ovb", "decode") => ovb::decode,
         ("core.bits", "bit_or") => bits::bit_or,
         ("core.bits", "bit_and") => bits::bit_and,
         ("core.bits", "bit_xor") => bits::bit_xor,
