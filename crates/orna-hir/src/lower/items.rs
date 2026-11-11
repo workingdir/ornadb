@@ -19,7 +19,7 @@ use orna_syntax::{
 use crate::{
     AssertionDef, BodyId, DefId, DefKind, DimensionDef, EnumDef, FieldDef, FieldInitializer,
     GenericParam, Idx, ImplDef, LetDef, ModuleId, NativeStaticDef, NativeTypeDef, ParamDef,
-    ProtocolDef, Stmt, TableDef, TyKind, TypeDef, UnitDef, VariantDef, Visibility,
+    ProtocolDef, Stmt, TableDef, Ty, TyKind, TypeDef, UnitDef, VariantDef, Visibility,
 };
 
 use super::declare::{Builder, DeclAst, PendingFunction, PendingKind};
@@ -382,19 +382,31 @@ impl Builder<'_> {
             }),
         );
         if let Some(initializer) = initializer {
-            let (kind, value) = self.plan_initializer(field, initializer);
-            self.pending[field.index()].kind = PendingKind::Built(DefKind::Field(FieldDef {
-                ty,
-                initializer: Some(kind),
-            }));
-            self.body_jobs.push(BodyJob::Expression {
-                def: field,
-                body: kind.body(),
-                expr: Box::new(value),
-                self_ty: Some(table),
-            });
+            self.attach_initializer(field, ty, Some(table), initializer);
         }
         field
+    }
+
+    /// Attaches an initializer body to a field that already exists. The field owns the body. An `owner`
+    /// names the row a table field's body reads as `self`; a nominal default has none and is closed.
+    fn attach_initializer(
+        &mut self,
+        field: DefId,
+        ty: Ty,
+        owner: Option<DefId>,
+        initializer: &SyntaxFieldInitializer,
+    ) {
+        let (kind, value) = self.plan_initializer(field, initializer);
+        self.pending[field.index()].kind = PendingKind::Built(DefKind::Field(FieldDef {
+            ty,
+            initializer: Some(kind),
+        }));
+        self.body_jobs.push(BodyJob::Expression {
+            def: field,
+            body: kind.body(),
+            expr: Box::new(value),
+            self_ty: owner,
+        });
     }
 
     /// Allocates the body an initializer lowers into. The field owns it, as an assertion owns its body.
@@ -594,8 +606,8 @@ impl Builder<'_> {
                     name,
                     ty,
                     visibility,
+                    initializer,
                     span,
-                    ..
                 } => {
                     let vis = if *visibility {
                         Visibility::Public
@@ -603,7 +615,7 @@ impl Builder<'_> {
                         Visibility::Private
                     };
                     let ty = super::types::lower_type(self, module, &names, ty);
-                    members.push(self.declare_nested(
+                    let field = self.declare_nested(
                         module,
                         name,
                         vis,
@@ -612,7 +624,12 @@ impl Builder<'_> {
                             ty,
                             initializer: None,
                         }),
-                    ));
+                    );
+                    if let Some(value) = initializer {
+                        let default = SyntaxFieldInitializer::Default(value.clone());
+                        self.attach_initializer(field, ty, None, &default);
+                    }
+                    members.push(field);
                 }
                 TypeMember::Assertion { value, span } => {
                     members.push(self.build_assertion(module, def, value, span.clone()));
