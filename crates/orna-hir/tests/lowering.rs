@@ -306,3 +306,108 @@ fn a_named_function_called_through_a_value_joins_its_effects() {
             .any(|kind| kind == orna_hir::EffectKind::TableRead)
     );
 }
+
+fn native_of(program: &Program, def: orna_hir::DefId) -> &orna_hir::NativeDecl {
+    let DefKind::Fn(function) = &program.defs[def].kind else {
+        panic!("`{}` is a function", program.defs[def].name.as_str());
+    };
+    let orna_hir::FnBody::Native(native) = &function.body else {
+        panic!(
+            "`{}` is a native declaration",
+            program.defs[def].name.as_str()
+        );
+    };
+    native
+}
+
+fn diagnostic_codes(program: &Program) -> Vec<&'static str> {
+    program
+        .modules
+        .iter()
+        .flat_map(|module| module.diagnostics.iter().map(|diagnostic| diagnostic.code))
+        .collect()
+}
+
+#[test]
+fn a_native_in_a_user_module_binds_to_its_library_symbol() {
+    let program = lower_one("pub native fn clock(): Int effect clock;\nfn run(): Int = clock();\n");
+    let clock = defined(&program, "main", "clock");
+    let native = native_of(&program, clock);
+    assert_eq!(
+        native.binding,
+        orna_hir::NativeBinding::Library {
+            symbol: "orna_main__clock".into()
+        }
+    );
+    assert_eq!(native.key.name.as_str(), "clock");
+    assert_eq!(native.key.module, ModulePath::new([Name::new("main")]));
+    assert!(
+        native
+            .effects
+            .kinds()
+            .any(|kind| kind == orna_hir::EffectKind::Clock),
+        "the effect clause is typed from the declared class"
+    );
+    let run = defined(&program, "main", "run");
+    let body = program.source_body(run).expect("run has a body");
+    let root = &program.bodies[body].exprs[program.bodies[body].root];
+    let ExprKind::Call(call) = &root.kind else {
+        panic!("run's root is a call");
+    };
+    assert!(matches!(call.callee, Callee::Native { def, .. } if def == clock));
+}
+
+#[test]
+fn an_embedded_native_binds_to_the_engine_registry() {
+    let program = lower_one("fn run(): Int = 1;\n");
+    let mut engine = 0usize;
+    for (_, def) in program.defs.iter_enumerated() {
+        let DefKind::Fn(function) = &def.kind else {
+            continue;
+        };
+        let orna_hir::FnBody::Native(native) = &function.body else {
+            continue;
+        };
+        let embedded = native
+            .key
+            .module
+            .segments()
+            .first()
+            .is_some_and(|name| matches!(name.as_str(), "core" | "sys"));
+        if embedded {
+            engine += 1;
+            assert_eq!(
+                native.binding,
+                orna_hir::NativeBinding::Engine {
+                    abi: orna_hir::ENGINE_NATIVE_ABI
+                }
+            );
+        }
+    }
+    assert!(
+        engine > 0,
+        "the embedded core and sys modules declare engine natives"
+    );
+}
+
+#[test]
+fn two_native_declarations_with_one_key_are_a_duplicate() {
+    let program = lower_one(
+        "pub native fn clock(): Int effect none;\npub native fn clock(): Int effect none;\n",
+    );
+    assert!(
+        diagnostic_codes(&program).contains(&"ORNA-S013-DUPLICATE"),
+        "{:?}",
+        diagnostic_codes(&program)
+    );
+}
+
+#[test]
+fn a_library_native_name_outside_ascii_has_no_symbol() {
+    let program = lower_one("pub native fn caf\u{e9}(): Int effect none;\n");
+    assert!(
+        diagnostic_codes(&program).contains(&"ORNA-S022-UNSUPPORTED"),
+        "{:?}",
+        diagnostic_codes(&program)
+    );
+}
