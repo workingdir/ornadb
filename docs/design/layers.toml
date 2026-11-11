@@ -96,6 +96,7 @@ layer = 4
 [[crate]]
 name = "orna-repl"
 layer = 5
+role = "tool"
 
 [[crate]]
 name = "orna-evaluator"
