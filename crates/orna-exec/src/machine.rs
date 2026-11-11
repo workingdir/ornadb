@@ -7,8 +7,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use orna_hir::{Body, BodyId, DefId, DefKind, FnBody, Program};
 
+use crate::dispatch::ProtocolMembers;
 use crate::error::{ExecError, Stop};
-use crate::frame::Frame;
+use crate::frame::{Frame, TypeEnv};
 use crate::link;
 use crate::natives::NativeFn;
 use crate::store::{MemoryStore, TableStore};
@@ -58,6 +59,10 @@ pub(crate) struct Machine<'p> {
     cancel: Option<Arc<AtomicBool>>,
     /// The engine natives this program's declarations bind to, built on the first native call.
     pub(crate) natives: OnceCell<HashMap<DefId, NativeFn>>,
+    /// The protocol each protocol member belongs to, built on first dispatch.
+    pub(crate) protocols: ProtocolMembers,
+    /// The ids of `core.Ordering`'s variants, built on first engine comparison.
+    pub(crate) ordering: OnceCell<[VariantIds; 3]>,
     /// The table store. Each entry-point activation opens one store activation, committed or rolled back.
     pub(crate) store: Box<dyn TableStore>,
     steps: u64,
@@ -78,6 +83,8 @@ impl<'p> Machine<'p> {
             variants: OnceCell::new(),
             cancel,
             natives: OnceCell::new(),
+            protocols: OnceCell::new(),
+            ordering: OnceCell::new(),
             store,
             steps: 0,
             calls: 0,
@@ -126,6 +133,7 @@ impl<'p> Machine<'p> {
         body_id: BodyId,
         arguments: Vec<(usize, Value)>,
         captured: &[Cell],
+        env: TypeEnv,
     ) -> Result<Value, Stop> {
         if self.depth >= self.limits.max_depth {
             return Err(Stop::Error("ORNA-EVAL-LIMIT"));
@@ -133,7 +141,7 @@ impl<'p> Machine<'p> {
         self.calls += 1;
         let program = self.program;
         let body: &'p Body = &program.bodies[body_id];
-        let mut frame = Frame::new(body.locals.len());
+        let mut frame = Frame::new(body.locals.len(), env);
         for (index, value) in arguments {
             let Some(&local) = body.params.get(index) else {
                 return Err(Stop::Error("ORNA-EVAL-ARGUMENT"));
@@ -166,7 +174,7 @@ impl<'p> Machine<'p> {
         self.store
             .begin()
             .map_err(|error| store_invariant(&error))?;
-        match self.invoke(body_id, arguments, &[]) {
+        match self.invoke(body_id, arguments, &[], None) {
             Ok(value) => {
                 self.store
                     .commit()

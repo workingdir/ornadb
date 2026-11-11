@@ -1,11 +1,9 @@
 //! `core.range` (hand-written Orna, kernel-and-library.md listing 5) over lowered source: a user program constructs a
 //! `Range` and calls `contains` through the embedded `core.range` module, then runs on the executor.
 //!
-//! BLOCKED, in order: (1) the user program does not type clean: `Range { .. }` construction and `Range<Int>` do not
-//! agree (G4), and the generic constructor and field types are not substituted (G13). `run` asserts that the user
-//! module has no diagnostics, so the un-ignored test fails at that assertion. (2) The executor cannot dispatch the
-//! generic protocol member `value.compare` from the embedded `core.range` source (H5). Remove the `ignore` attributes
-//! once both are fixed.
+//! Generic calls record their solved type arguments on the HIR callee (typeck/call.rs), so the executor
+//! monomorphises `contains<T>` from the callee's `targs`. The executor protocol dispatch is covered by
+//! tests/protocol_dispatch.rs.
 
 use orna_exec::{ExecError, ExecLimits, Value, run_entry};
 use orna_hir::{DefId, DefKind, ModulePath, Name, Program, SourceId, SourceUnit, lower, typeck};
@@ -66,7 +64,6 @@ fn boolean(source: &str) -> Result<Value, ExecError> {
 }
 
 #[test]
-#[ignore = "blocked: G4 and G13 (user program does not type), then H5 (no generic protocol dispatch in exec)"]
 fn closed_range_admits_both_bounds_only_when_inclusive() {
     assert_eq!(
         boolean(
@@ -95,7 +92,6 @@ fn closed_range_admits_both_bounds_only_when_inclusive() {
 }
 
 #[test]
-#[ignore = "blocked: G4 and G13 (user program does not type), then H5 (no generic protocol dispatch in exec)"]
 fn lower_bound_is_inclusive_and_absent_bounds_are_open() {
     assert_eq!(
         boolean(

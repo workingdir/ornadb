@@ -9,6 +9,8 @@
 
 mod binders;
 mod decimal;
+mod dispatch;
+mod engine_order;
 mod error;
 mod eval;
 mod float;
@@ -22,6 +24,7 @@ mod relation;
 mod store;
 mod table;
 mod time;
+mod unit_variant;
 mod value;
 mod variants;
 

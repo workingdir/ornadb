@@ -12,7 +12,7 @@ use orna_hir::{
 use crate::binders;
 use crate::decimal::Decimal;
 use crate::error::Stop;
-use crate::frame::Frame;
+use crate::frame::{Frame, TypeEnv, type_args};
 use crate::machine::Machine;
 use crate::natives;
 use crate::ops;
@@ -71,6 +71,7 @@ impl<'p> Machine<'p> {
                 handler,
                 arm,
             } => self.recover(body, frame, *attempt, *handler, *arm),
+            ExprKind::Def(variant) if self.is_unit_variant(*variant) => self.unit_variant(*variant),
             ExprKind::Construct { def, fields }
                 if matches!(self.program.defs[*def].kind, DefKind::Type(_)) =>
             {
@@ -156,24 +157,26 @@ impl<'p> Machine<'p> {
 
     fn call(&mut self, body: &'p Body, frame: &mut Frame, call: &Call) -> Result<Value, Stop> {
         match &call.callee {
-            Callee::Source { def, .. } => {
+            Callee::Source { def, targs } => {
                 let program = self.program;
                 let DefKind::Fn(function) = &program.defs[*def].kind else {
                     return Err(Stop::NotYet("call of a non-function definition (H4)"));
                 };
+                let callee_env = self.resolve_targs(targs, frame.env_slice())?;
+                let arguments = self.arguments(body, frame, call, &function.params, &callee_env)?;
                 let FnBody::Source(callee_body) = function.body else {
-                    return Err(Stop::NotYet(
-                        "call of a function without a source body (H5)",
-                    ));
+                    return self.dispatch(*def, type_args(&callee_env), arguments);
                 };
-                let arguments = self.arguments(body, frame, call, &function.params)?;
-                self.invoke(callee_body, arguments, &[])
+                self.invoke(callee_body, arguments, &[], callee_env)
             }
             Callee::Value { callee } => {
                 // A pipe evaluates its piped input before the stage's callee, so a failing input never reaches the
                 // callee. A direct call evaluates the callee first.
                 let input = match (call.piped, call.args.first()) {
-                    (true, Some(first)) => Some(self.argument(body, frame, first, &[])?),
+                    (true, Some(first)) => {
+                        let env = frame.env();
+                        Some(self.argument(body, frame, first, &[], &env)?)
+                    }
                     _ => None,
                 };
                 let Value::Closure(closure) = self.eval(body, frame, *callee)? else {
@@ -188,16 +191,23 @@ impl<'p> Machine<'p> {
                 {
                     return Err(Stop::Error("ORNA-EVAL-ARGUMENT"));
                 }
-                self.invoke(closure.body, arguments, &closure.captured)
+                self.invoke(
+                    closure.body,
+                    arguments,
+                    &closure.captured,
+                    closure.env.clone(),
+                )
             }
             Callee::Native { def, targs } => {
                 let program = self.program;
                 let DefKind::Fn(function) = &program.defs[*def].kind else {
                     return Err(Stop::NotYet("call of a non-function definition (H5)"));
                 };
-                let arguments = self.arguments(body, frame, call, &function.params)?;
+                let callee_targs = self.resolve_targs(targs, frame.env_slice())?;
+                let arguments =
+                    self.arguments(body, frame, call, &function.params, &callee_targs)?;
                 let values = natives::in_parameter_order(arguments, function.params.len())?;
-                self.native(*def, targs, values)
+                self.native(*def, type_args(&callee_targs), values)
             }
             Callee::Sys { .. } => Err(Stop::NotYet("sys call (H5)")),
             Callee::TableOp { table, op } => self.table_op(body, frame, call, *table, *op),
@@ -215,10 +225,11 @@ impl<'p> Machine<'p> {
         frame: &mut Frame,
         call: &Call,
         params: &[ParamDef],
+        env: &TypeEnv,
     ) -> Result<Vec<(usize, Value)>, Stop> {
         let mut arguments = Vec::with_capacity(call.args.len());
         for argument in call.args.iter() {
-            arguments.push(self.argument(body, frame, argument, params)?);
+            arguments.push(self.argument(body, frame, argument, params, env)?);
         }
         Ok(arguments)
     }
@@ -235,12 +246,13 @@ impl<'p> Machine<'p> {
         arity: usize,
     ) -> Result<Vec<(usize, Value)>, Stop> {
         let skip = usize::from(input.is_some());
+        let env = frame.env();
         let mut arguments: Vec<(usize, Value)> = input.into_iter().collect();
         for (index, argument) in call.args.iter().enumerate().skip(skip) {
             if index >= arity {
                 return Err(Stop::Error("ORNA-EVAL-ARGUMENT"));
             }
-            arguments.push(self.argument(body, frame, argument, &[])?);
+            arguments.push(self.argument(body, frame, argument, &[], &env)?);
         }
         Ok(arguments)
     }
@@ -251,6 +263,7 @@ impl<'p> Machine<'p> {
         frame: &mut Frame,
         argument: &Arg,
         params: &[ParamDef],
+        env: &TypeEnv,
     ) -> Result<(usize, Value), Stop> {
         let slot = argument.slot.as_u32() as usize;
         match argument.value {
@@ -262,7 +275,7 @@ impl<'p> Machine<'p> {
                 let Some(default) = params.get(slot).and_then(|param| param.default) else {
                     return Err(Stop::NotYet("default argument without a default body (H4)"));
                 };
-                let value = self.invoke(default, Vec::new(), &[])?;
+                let value = self.invoke(default, Vec::new(), &[], env.clone())?;
                 Ok((slot, value))
             }
         }
@@ -483,7 +496,8 @@ impl<'p> Machine<'p> {
         let DefKind::Variant(variant_def) = &program.defs[variant].kind else {
             return Err(Stop::NotYet("money or type constructor (H4)"));
         };
-        let arguments = self.arguments(body, frame, call, &[])?;
+        let env = frame.env();
+        let arguments = self.arguments(body, frame, call, &[], &env)?;
         let payload = self.payload(&variant_def.fields, arguments)?;
         Ok(Value::Enum {
             type_id: ids.type_id,
@@ -686,6 +700,7 @@ impl<'p> Machine<'p> {
         Ok(Value::Closure(Rc::new(Closure {
             body: lambda,
             captured: captured.into_boxed_slice(),
+            env: frame.env(),
         })))
     }
 

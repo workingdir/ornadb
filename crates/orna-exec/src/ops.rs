@@ -60,6 +60,11 @@ pub(crate) fn binary(
             BinOp::Ne => Ok(Value::Bool(lhs != rhs)),
             _ => Err(Stop::NotYet("operator on text")),
         },
+        (lhs @ Value::Enum { .. }, rhs @ Value::Enum { .. }) => match op {
+            BinOp::Eq => Ok(Value::Bool(lhs == rhs)),
+            BinOp::Ne => Ok(Value::Bool(lhs != rhs)),
+            _ => Err(Stop::NotYet("operator on enum values")),
+        },
         _ => Err(Stop::NotYet("operator on operands of different shapes")),
     }
 }

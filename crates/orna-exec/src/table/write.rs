@@ -37,7 +37,7 @@ pub(super) fn fill_defaults(
             continue;
         };
         let scope = raw_value::record(row.clone());
-        let value = machine.invoke(default, vec![(0, scope)], &[])?;
+        let value = machine.invoke(default, vec![(0, scope)], &[], None)?;
         row.push((name, value));
     }
     Ok(row)

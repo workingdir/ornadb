@@ -267,7 +267,7 @@ impl BodyCheck<'_> {
     }
 
     /// The `core.ops` protocol called `name`.
-    fn core_ops_protocol(&self, name: &str) -> Option<DefId> {
+    pub(super) fn core_ops_protocol(&self, name: &str) -> Option<DefId> {
         let path = ModulePath::new([Name::new("core"), Name::new("ops")]);
         let module = self
             .program

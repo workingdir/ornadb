@@ -24,6 +24,11 @@ impl Machine<'_> {
             return Err(Stop::Error("ORNA-EVAL-ARGUMENT"));
         }
         let arguments = arguments.into_iter().enumerate().collect();
-        self.invoke(closure.body, arguments, &closure.captured)
+        self.invoke(
+            closure.body,
+            arguments,
+            &closure.captured,
+            closure.env.clone(),
+        )
     }
 }

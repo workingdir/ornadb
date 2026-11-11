@@ -10,7 +10,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use orna_hir::{Idx, LocalId};
+use orna_hir::{Idx, LocalId, Ty};
 
 use crate::error::Stop;
 use crate::value::{Cell, Value};
@@ -24,18 +24,40 @@ enum Variable {
     Shared(Cell),
 }
 
+/// A call's concrete type arguments, indexed by type parameter. `None` is the empty environment, which allocates
+/// nothing; a call that binds no type parameters runs with it.
+pub(crate) type TypeEnv = Option<Rc<[Ty]>>;
+
+/// The type arguments in `env` as a slice. The empty environment is the empty slice.
+pub(crate) fn type_args(env: &TypeEnv) -> &[Ty] {
+    env.as_deref().unwrap_or(&[])
+}
+
 /// One call's local slots, indexed by [`LocalId`].
 #[derive(Debug)]
 pub(crate) struct Frame {
     slots: Vec<Option<Variable>>,
+    /// The concrete types of the type parameters this call runs with, indexed by parameter.
+    env: TypeEnv,
 }
 
 impl Frame {
-    /// A frame with `count` empty slots.
-    pub(crate) fn new(count: usize) -> Self {
+    /// A frame with `count` empty slots, running with the type environment `env`.
+    pub(crate) fn new(count: usize, env: TypeEnv) -> Self {
         Self {
             slots: std::iter::repeat_with(|| None).take(count).collect(),
+            env,
         }
+    }
+
+    /// The type environment this call runs with.
+    pub(crate) fn env(&self) -> TypeEnv {
+        self.env.clone()
+    }
+
+    /// The type environment this call runs with, as a slice.
+    pub(crate) fn env_slice(&self) -> &[Ty] {
+        type_args(&self.env)
     }
 
     /// Reads a bound slot.
