@@ -22,6 +22,8 @@ pub struct ExecLimits {
     pub max_steps: u64,
     /// Active calls allowed before `ORNA-EVAL-LIMIT`.
     pub max_depth: usize,
+    /// Elements allowed in one collection a native builds or reads before `ORNA-EVAL-LIMIT`.
+    pub max_collection_items: usize,
     /// Bytes allowed in one string value before `ORNA-EVAL-LIMIT`.
     pub max_string_bytes: usize,
     /// Decimal digits allowed in one integer value before `ORNA-EVAL-LIMIT`.

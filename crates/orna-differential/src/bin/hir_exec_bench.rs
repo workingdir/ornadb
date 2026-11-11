@@ -105,6 +105,7 @@ fn benchmark_limits() -> ExecLimits {
     ExecLimits {
         max_steps: 50_000_000,
         max_depth: 10_000,
+        max_collection_items: 1 << 20,
         max_string_bytes: 1 << 20,
         max_integer_digits: 10_000,
     }

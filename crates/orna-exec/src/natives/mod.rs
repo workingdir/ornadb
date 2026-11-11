@@ -5,6 +5,11 @@
 
 mod bits;
 mod hash;
+#[cfg(test)]
+mod registry_test;
+mod text;
+mod unicode_16_case_properties;
+mod unicode_case;
 
 use orna_hir::{DefId, NativeKey};
 
@@ -31,6 +36,16 @@ pub(crate) fn lookup(key: &NativeKey) -> Option<NativeFn> {
         ("core.hash", "domain_sha256") => hash::domain_sha256,
         ("core.hash", "to_hex") => hash::to_hex,
         ("core.hash", "from_hex") => hash::from_hex,
+        ("core.text", "trim") => text::trim,
+        ("core.text", "split") => text::split,
+        ("core.text", "join") => text::join,
+        ("core.text", "starts_with") => text::starts_with,
+        ("core.text", "ends_with") => text::ends_with,
+        ("core.text", "contains") => text::contains,
+        ("core.text", "replace") => text::replace,
+        ("core.text", "normalise") => text::normalise,
+        ("core.text", "lower") => text::lower,
+        ("core.text", "upper") => text::upper,
         _ => return None,
     })
 }
