@@ -19,6 +19,7 @@ mod stats_histogram;
 mod stats_median;
 mod stats_percentile;
 mod stats_round;
+mod stats_series;
 mod stats_stddev;
 mod stats_variance;
 mod text;
@@ -86,6 +87,9 @@ pub(crate) fn lookup(key: &NativeKey) -> Option<NativeFn> {
         ("core.stats", "sum") => collection::basic::sum,
         ("core.stats", "median") => stats_median::median,
         ("core.stats", "percentile") => stats_percentile::percentile,
+        ("core.stats", "rate") => stats_series::rate,
+        ("core.stats", "derivative") => stats_series::derivative,
+        ("core.stats", "integrate") => stats_series::integrate,
         ("core.stats", "variance") => stats_variance::variance,
         ("core.stats", "standard_deviation") => stats_stddev::standard_deviation,
         ("core.stats", "min") => stats::min,
