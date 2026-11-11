@@ -750,7 +750,7 @@ pub type CommitReview {
     pub pending_generation: Int,
 }
 
-pub type Database {
+pub type Database key id availability "catalogue" {
     pub reference: DatabaseRef,
     pub id: DatabaseId,
     pub name: Str,
@@ -765,7 +765,7 @@ pub type Database {
     pub storage_manifest_version: Str,
 }
 
-pub type Namespace {
+pub type Namespace key object availability "catalogue" {
     pub reference: NamespaceRef,
     pub object: ObjectRef,
     pub database: DatabaseRef,
@@ -774,7 +774,7 @@ pub type Namespace {
     pub docs: Str?,
 }
 
-pub type Module {
+pub type Module key object availability "catalogue" {
     pub reference: ModuleRef,
     pub object: ObjectRef,
     pub namespace: NamespaceRef,
@@ -784,7 +784,7 @@ pub type Module {
     pub diagnostics: Relation<Diagnostic>,
 }
 
-pub type Import {
+pub type Import key module, position availability "catalogue" {
     pub reference: ImportRef,
     pub module: ModuleRef,
     pub position: Int,
@@ -795,7 +795,7 @@ pub type Import {
     pub span: SourceSpan,
 }
 
-pub type File {
+pub type File key id availability "catalogue" {
     pub reference: FileRef,
     pub id: FileId,
     pub database: DatabaseRef,
@@ -809,7 +809,7 @@ pub type File {
     pub generated: Bool,
 }
 
-pub type Object {
+pub type Object key id, snapshot availability "catalogue" {
     pub reference: ObjectRef,
     pub id: ObjectId,
     pub kind: ObjectKind,
@@ -820,7 +820,7 @@ pub type Object {
     pub snapshot: SnapshotRef,
 }
 
-pub type Revision {
+pub type Revision key id availability "catalogue" {
     pub reference: RevisionRef,
     pub id: RevisionId,
     pub object: ObjectRef,
@@ -831,7 +831,7 @@ pub type Revision {
     pub definition: DefinitionRef?,
 }
 
-pub type Definition {
+pub type Definition key id availability "catalogue" {
     pub reference: DefinitionRef,
     pub id: DefinitionId,
     pub object: ObjectRef,
@@ -841,7 +841,7 @@ pub type Definition {
     pub docs: Str?,
 }
 
-pub type Type {
+pub type Type key object availability "catalogue" {
     pub reference: TypeRef,
     pub object: ObjectRef,
     pub kind: TypeKind,
@@ -853,7 +853,7 @@ pub type Type {
     pub assertions: Relation<Assertion>,
 }
 
-pub type TypeParameter {
+pub type TypeParameter key owner, position availability "catalogue" {
     pub reference: TypeParameterRef,
     pub owner: ObjectRef,
     pub name: Str,
@@ -862,7 +862,7 @@ pub type TypeParameter {
     pub inferred: Bool,
 }
 
-pub type Field {
+pub type Field key object availability "catalogue" {
     pub reference: FieldRef,
     pub object: ObjectRef,
     pub owner: TypeRef,
@@ -873,7 +873,7 @@ pub type Field {
     pub docs: Str?,
 }
 
-pub type Variant {
+pub type Variant key object availability "catalogue" {
     pub reference: VariantRef,
     pub object: ObjectRef,
     pub owner: TypeRef,
@@ -883,7 +883,7 @@ pub type Variant {
     pub docs: Str?,
 }
 
-pub type Protocol {
+pub type Protocol key object availability "catalogue" {
     pub reference: ProtocolRef,
     pub object: ObjectRef,
     pub parameters: Relation<TypeParameter>,
@@ -891,7 +891,7 @@ pub type Protocol {
     pub docs: Str?,
 }
 
-pub type ProtocolMember {
+pub type ProtocolMember key object availability "catalogue" {
     pub reference: ProtocolMemberRef,
     pub object: ObjectRef,
     pub protocol: ProtocolRef,
@@ -901,7 +901,7 @@ pub type ProtocolMember {
     pub position: Int,
 }
 
-pub type Implementation {
+pub type Implementation key object availability "catalogue" {
     pub reference: ImplementationRef,
     pub object: ObjectRef,
     pub protocol: ProtocolRef,
@@ -911,7 +911,7 @@ pub type Implementation {
     pub members: Relation<Function>,
 }
 
-pub type Function {
+pub type Function key object availability "catalogue" {
     pub reference: FunctionRef,
     pub object: ObjectRef,
     pub definition: DefinitionRef,
@@ -926,7 +926,7 @@ pub type Function {
     pub docs: Str?,
 }
 
-pub type Parameter {
+pub type Parameter key function, position availability "catalogue" {
     pub reference: ParameterRef,
     pub function: FunctionRef,
     pub name: Str,
@@ -937,7 +937,7 @@ pub type Parameter {
     pub explicit_type: Bool,
 }
 
-pub type Effect {
+pub type Effect key function, kind, target availability "catalogue" {
     pub reference: EffectRef,
     pub function: FunctionRef,
     pub kind: EffectKind,
@@ -945,7 +945,7 @@ pub type Effect {
     pub conditional: Bool,
 }
 
-pub type Table {
+pub type Table key object availability "catalogue" {
     pub reference: TableRef,
     pub object: ObjectRef,
     pub definition: DefinitionRef,
@@ -958,7 +958,7 @@ pub type Table {
     pub row_count_exact: Bool,
 }
 
-pub type Column {
+pub type Column key object availability "catalogue" {
     pub reference: ColumnRef,
     pub object: ObjectRef,
     pub table: TableRef,
@@ -972,7 +972,7 @@ pub type Column {
     pub docs: Str?,
 }
 
-pub type Key {
+pub type Key key object availability "catalogue" {
     pub reference: KeyRef,
     pub object: ObjectRef,
     pub table: TableRef,
@@ -982,7 +982,7 @@ pub type Key {
     pub path_codec: Str,
 }
 
-pub type Assertion {
+pub type Assertion key object availability "catalogue" {
     pub reference: AssertionRef,
     pub object: ObjectRef,
     pub owner: ObjectRef,
@@ -996,7 +996,7 @@ pub type Assertion {
     pub deterministic: Bool,
 }
 
-pub type Reference {
+pub type Reference key from_column availability "catalogue" {
     pub reference: ReferenceRef,
     pub from_table: TableRef,
     pub from_column: ColumnRef,
@@ -1007,7 +1007,7 @@ pub type Reference {
     pub on_rekey: ReferenceAction,
 }
 
-pub type Page {
+pub type Page key function availability "catalogue" {
     pub reference: PageRef,
     pub function: FunctionRef,
     pub path: Str,
@@ -1015,14 +1015,14 @@ pub type Page {
     pub definition: DefinitionRef,
 }
 
-pub type Dimension {
+pub type Dimension key object availability "catalogue" {
     pub reference: DimensionRef,
     pub object: ObjectRef,
     pub exponents: Value,
     pub definition: DefinitionRef,
 }
 
-pub type Unit {
+pub type Unit key object availability "catalogue" {
     pub reference: UnitRef,
     pub object: ObjectRef,
     pub dimension: DimensionRef,
@@ -1032,7 +1032,7 @@ pub type Unit {
     pub definition: DefinitionRef,
 }
 
-pub type Currency {
+pub type Currency key type availability "catalogue" {
     pub reference: CurrencyRef,
     pub type: TypeRef,
     pub code: Str,
@@ -1040,7 +1040,7 @@ pub type Currency {
     pub definition: DefinitionRef,
 }
 
-pub type SecretRequirement {
+pub type SecretRequirement key object availability "catalogue" {
     pub reference: SecretRequirementRef,
     pub object: ObjectRef,
     pub name: Str,
@@ -1049,7 +1049,7 @@ pub type SecretRequirement {
     pub definition: DefinitionRef,
 }
 
-pub type Extension {
+pub type Extension key object availability "catalogue" {
     pub reference: ExtensionRef,
     pub object: ObjectRef,
     pub component_digest: Digest,
@@ -1060,7 +1060,7 @@ pub type Extension {
     pub trust: ExtensionTrust,
 }
 
-pub type Dependency {
+pub type Dependency key from, to, kind, span availability "catalogue" {
     pub reference: DependencyRef,
     pub from: ObjectRef,
     pub to: ObjectRef,
@@ -1071,7 +1071,7 @@ pub type Dependency {
     pub conditional: Bool,
 }
 
-pub type Diagnostic {
+pub type Diagnostic key id availability "durable-observation" {
     pub reference: DiagnosticRef,
     pub id: Str,
     pub severity: Severity,
@@ -1088,7 +1088,7 @@ pub type Diagnostic {
     pub trace: TraceRef?,
 }
 
-pub type Snapshot {
+pub type Snapshot key id availability "catalogue" {
     pub reference: SnapshotRef,
     pub id: SnapshotId,
     pub kind: SnapshotKind,
@@ -1101,7 +1101,7 @@ pub type Snapshot {
     pub missing_objects: Relation<GitObject>,
 }
 
-pub type SnapshotObject {
+pub type SnapshotObject key snapshot, object availability "catalogue" {
     pub reference: SnapshotObjectRef,
     pub snapshot: SnapshotRef,
     pub object: ObjectRef,
@@ -1109,7 +1109,7 @@ pub type SnapshotObject {
     pub reachable: Bool,
 }
 
-pub type Change {
+pub type Change key snapshot, area, target availability "catalogue" {
     pub reference: ChangeRef,
     pub snapshot: SnapshotRef,
     pub target: ChangeTarget,
@@ -1125,7 +1125,7 @@ pub type Change {
     pub new_name: Str?,
 }
 
-pub type DiffEntry {
+pub type DiffEntry key from, to, change.area, change.target availability "derived" {
     pub reference: DiffEntryRef,
     pub from: SnapshotRef,
     pub to: SnapshotRef,
@@ -1134,7 +1134,7 @@ pub type DiffEntry {
     pub details: Value?,
 }
 
-pub type FileVersion {
+pub type FileVersion key file, snapshot availability "derived" {
     pub reference: FileVersionRef,
     pub file: FileRef,
     pub snapshot: SnapshotRef,
@@ -1148,7 +1148,7 @@ pub type FileVersion {
     pub generated: Bool,
 }
 
-pub type GitRepository {
+pub type GitRepository key database availability "catalogue" {
     pub reference: GitRepositoryRef,
     pub database: DatabaseRef,
     pub git_dir: Path,
@@ -1158,7 +1158,7 @@ pub type GitRepository {
     pub partial_clone: Bool,
 }
 
-pub type Commit {
+pub type Commit key oid availability "catalogue" {
     pub reference: CommitRef,
     pub oid: GitOid,
     pub snapshot: SnapshotRef,
@@ -1171,7 +1171,7 @@ pub type Commit {
     pub tree: GitObjectRef,
 }
 
-pub type TreeEntry {
+pub type TreeEntry key tree, path availability "catalogue" {
     pub reference: TreeEntryRef,
     pub tree: GitObjectRef,
     pub path: Path,
@@ -1180,7 +1180,7 @@ pub type TreeEntry {
     pub kind: GitObjectKind,
 }
 
-pub type Ref {
+pub type Ref key name availability "catalogue" {
     pub reference: RefRef,
     pub name: Str,
     pub target: GitObjectRef,
@@ -1189,7 +1189,7 @@ pub type Ref {
     pub remote: RemoteRef?,
 }
 
-pub type Branch {
+pub type Branch key name availability "catalogue" {
     pub reference: BranchRef,
     pub name: Str,
     pub commit: CommitRef,
@@ -1199,7 +1199,7 @@ pub type Branch {
     pub behind: Int?,
 }
 
-pub type Tag {
+pub type Tag key name availability "catalogue" {
     pub reference: TagRef,
     pub name: Str,
     pub object: GitObjectRef,
@@ -1208,7 +1208,7 @@ pub type Tag {
     pub tagger: PersonIdentity?,
 }
 
-pub type Remote {
+pub type Remote key name availability "catalogue" {
     pub reference: RemoteRef,
     pub name: Str,
     pub fetch_urls: [Str],
@@ -1217,7 +1217,7 @@ pub type Remote {
     pub last_error: Diagnostic?,
 }
 
-pub type Stash {
+pub type Stash key index availability "catalogue" {
     pub reference: StashRef,
     pub index: Int,
     pub commit: CommitRef,
@@ -1225,7 +1225,7 @@ pub type Stash {
     pub created: Instant?,
 }
 
-pub type GitObject {
+pub type GitObject key oid availability "catalogue" {
     pub reference: GitObjectRef,
     pub oid: GitOid,
     pub kind: GitObjectKind,
@@ -1234,7 +1234,7 @@ pub type GitObject {
     pub promisor_remote: RemoteRef?,
 }
 
-pub type WorktreeEntry {
+pub type WorktreeEntry key path availability "local-durable" {
     pub reference: WorktreeEntryRef,
     pub path: Path,
     pub index_status: ChangeKind?,
@@ -1243,7 +1243,7 @@ pub type WorktreeEntry {
     pub untracked: Bool,
 }
 
-pub type Query {
+pub type Query key id availability "durable-observation" {
     pub reference: QueryRef,
     pub id: QueryId,
     pub expression: Str?,
@@ -1260,7 +1260,7 @@ pub type Query {
     pub failure: Diagnostic?,
 }
 
-pub type Plan {
+pub type Plan key id availability "derived" {
     pub reference: PlanRef,
     pub id: Str,
     pub snapshot: SnapshotRef,
@@ -1270,7 +1270,7 @@ pub type Plan {
     pub warnings: [Diagnostic],
 }
 
-pub type PlanNode {
+pub type PlanNode key plan, position availability "derived" {
     pub reference: PlanNodeRef,
     pub plan: PlanRef,
     pub parent: PlanNodeRef?,
@@ -1286,7 +1286,7 @@ pub type PlanNode {
     pub details: Value,
 }
 
-pub type Invocation {
+pub type Invocation key id availability "durable-observation" {
     pub reference: InvocationRef,
     pub id: InvocationId,
     pub function: FunctionRef,
@@ -1305,7 +1305,7 @@ pub type Invocation {
     pub idempotency_key_hash: Digest?,
 }
 
-pub type InvocationArgument {
+pub type InvocationArgument key invocation, position availability "durable-observation" {
     pub reference: InvocationArgumentRef,
     pub invocation: InvocationRef,
     pub name: Str,
@@ -1316,7 +1316,7 @@ pub type InvocationArgument {
     pub redacted: Bool,
 }
 
-pub type Run {
+pub type Run key id availability "durable-observation" {
     pub reference: RunRef,
     pub id: RunId,
     pub consumer_identity: ConsumerIdentity,
@@ -1334,7 +1334,7 @@ pub type Run {
     pub failure: Diagnostic?,
 }
 
-pub type Transaction {
+pub type Transaction key id availability "local-durable" {
     pub reference: TransactionRef,
     pub id: TransactionId,
     pub activation: InvocationRef,
@@ -1348,7 +1348,7 @@ pub type Transaction {
     pub rolled_back: Bool,
 }
 
-pub type Trace {
+pub type Trace key id availability "durable-observation" {
     pub reference: TraceRef,
     pub id: TraceId,
     pub root_invocation: InvocationRef,
@@ -1359,7 +1359,7 @@ pub type Trace {
     pub detail_available: Bool,
 }
 
-pub type Span {
+pub type Span key id availability "durable-observation" {
     pub reference: SpanRef,
     pub id: SpanId,
     pub trace: TraceRef,
@@ -1373,7 +1373,7 @@ pub type Span {
     pub events: Relation<TraceEvent>,
 }
 
-pub type TraceEvent {
+pub type TraceEvent key span, sequence availability "durable-observation" {
     pub reference: TraceEventRef,
     pub span: SpanRef,
     pub sequence: Int,
@@ -1383,7 +1383,7 @@ pub type TraceEvent {
     pub diagnostic: Diagnostic?,
 }
 
-pub type Stream {
+pub type Stream key run, source_identity, partition availability "durable-observation" {
     pub reference: StreamRef,
     pub run: RunRef,
     pub producer: ObjectRef,
@@ -1403,7 +1403,7 @@ pub type Stream {
     pub live: Bool,
 }
 
-pub type Checkpoint {
+pub type Checkpoint key consumer_identity, source_identity, partition availability "local-durable" {
     pub reference: CheckpointRef,
     pub consumer: FunctionRef,
     pub consumer_identity: ConsumerIdentity,
@@ -1418,7 +1418,7 @@ pub type Checkpoint {
     pub last_transaction: TransactionRef,
 }
 
-pub type CheckpointUpdate {
+pub type CheckpointUpdate key transaction, checkpoint availability "local-durable" {
     pub reference: CheckpointUpdateRef,
     pub transaction: TransactionRef,
     pub checkpoint: CheckpointRef,
@@ -1428,7 +1428,7 @@ pub type CheckpointUpdate {
     pub committed: Bool,
 }
 
-pub type Failure {
+pub type Failure key consumer_identity, source_identity, partition, position_format, position availability "local-durable" {
     pub reference: FailureRef,
     pub consumer: FunctionRef,
     pub consumer_identity: ConsumerIdentity,
@@ -1455,7 +1455,7 @@ pub type Failure {
     pub checkpoint_version_before: CheckpointVersion,
 }
 
-pub type Session {
+pub type Session key id availability "live" {
     pub reference: SessionRef,
     pub id: SessionId,
     pub started: Instant,
@@ -1466,7 +1466,7 @@ pub type Session {
     pub renderer: Str?,
 }
 
-pub type Client {
+pub type Client key id availability "live" {
     pub reference: ClientRef,
     pub id: ClientId,
     pub kind: ClientKind,
@@ -1477,7 +1477,7 @@ pub type Client {
     pub redacted: Bool,
 }
 
-pub type Lease {
+pub type Lease key name availability "local-durable" {
     pub reference: LeaseRef,
     pub name: Str,
     pub holder: RuntimeId,
@@ -1487,7 +1487,7 @@ pub type Lease {
     pub generation: Int,
 }
 
-pub type Listener {
+pub type Listener key id availability "live" {
     pub reference: ListenerRef,
     pub id: Str,
     pub kind: ListenerKind,
@@ -1498,7 +1498,7 @@ pub type Listener {
     pub authenticated: Bool,
 }
 
-pub type Storage {
+pub type Storage key object availability "local-durable" {
     pub reference: StorageRef,
     pub object: ObjectRef,
     pub profile: StorageProfile,
@@ -1518,7 +1518,7 @@ pub type Storage {
     pub schema_digest: Digest,
 }
 
-pub type Segment {
+pub type Segment key id availability "catalogue" {
     pub reference: SegmentRef,
     pub id: SegmentId,
     pub table: TableRef,
@@ -1535,7 +1535,7 @@ pub type Segment {
     pub generation: Int,
 }
 
-pub type Statistic {
+pub type Statistic key segment, column, kind availability "catalogue" {
     pub reference: StatisticRef,
     pub segment: SegmentRef,
     pub column: ColumnRef,
@@ -1545,7 +1545,7 @@ pub type Statistic {
     pub valid: Bool,
 }
 
-pub type Index {
+pub type Index key object availability "catalogue" {
     pub reference: IndexRef,
     pub object: ObjectRef,
     pub table: TableRef,
@@ -1556,7 +1556,7 @@ pub type Index {
     pub valid: Bool,
 }
 
-pub type Materialization {
+pub type Materialization key object, snapshot availability "local-durable" {
     pub reference: MaterializationRef,
     pub object: ObjectRef,
     pub snapshot: SnapshotRef,
@@ -1567,7 +1567,7 @@ pub type Materialization {
     pub valid: Bool,
 }
 
-pub type Allocator {
+pub type Allocator key table availability "local-durable" {
     pub reference: AllocatorRef,
     pub table: TableRef,
     pub strategy: Str,
@@ -1576,7 +1576,7 @@ pub type Allocator {
     pub updated: Instant,
 }
 
-pub type Hydration {
+pub type Hydration key object availability "live" {
     pub reference: HydrationRef,
     pub object: GitObjectRef,
     pub remote: RemoteRef?,
@@ -1587,7 +1587,7 @@ pub type Hydration {
     pub failure: Diagnostic?,
 }
 
-pub type Compaction {
+pub type Compaction key id availability "local-durable" {
     pub reference: CompactionRef,
     pub id: Str,
     pub table: TableRef,
@@ -1600,7 +1600,7 @@ pub type Compaction {
     pub failure: Diagnostic?,
 }
 
-pub type MaintenanceJob {
+pub type MaintenanceJob key id availability "local-durable" {
     pub reference: MaintenanceJobRef,
     pub id: Str,
     pub kind: MaintenanceKind,
@@ -1612,7 +1612,7 @@ pub type MaintenanceJob {
     pub failure: Diagnostic?,
 }
 
-pub type StorageFile {
+pub type StorageFile key path availability "local-durable" {
     pub reference: StorageFileRef,
     pub path: Path,
     pub kind: StorageFileKind,
@@ -1623,7 +1623,7 @@ pub type StorageFile {
     pub redacted: Bool,
 }
 
-pub type Secret {
+pub type Secret key name availability "local-durable" {
     pub reference: SecretRef,
     pub name: Str,
     pub available: Bool,
@@ -1634,7 +1634,7 @@ pub type Secret {
     pub last_error: Diagnostic?,
 }
 
-pub type Setting {
+pub type Setting key name, scope availability "local-durable" {
     pub reference: SettingRef,
     pub name: Str,
     pub value: Value?,
@@ -1644,7 +1644,7 @@ pub type Setting {
     pub effective_at: SnapshotRef?,
 }
 
-pub type Build {
+pub type Build key id availability "durable-observation" {
     pub reference: BuildRef,
     pub id: BuildId,
     pub snapshot: SnapshotRef,
@@ -1658,7 +1658,7 @@ pub type Build {
     pub diagnostics: Relation<Diagnostic>,
 }
 
-pub type Test {
+pub type Test key build, name availability "durable-observation" {
     pub reference: TestRef,
     pub build: BuildRef,
     pub name: Str,

@@ -1147,6 +1147,7 @@ aa2b910b68e646ecf10e74f42396c5245f2dcf8ad54c5d0b277f29ba924d1942  crates/orna-ch
 a4ac8718b6d3e29582e687d15f04f657e15edeb1a0f14fdf80d5b16700d1c458  crates/orna-check/tests/fixtures/race-callback-results.orna
 ea3ce6d10567cf4d23a810dcba575fa7ddab621a2b3fe93e07e64a3ac73dc490  crates/orna-check/tests/fixtures/recovery-effects-type-family.orna
 18ff0bf2b41001095dd9767c25bb855dc7f45a88462ca490e35910f39d59fcf5  crates/orna-check/tests/fixtures/reference-values-type-family.orna
+d7ba9093afc5e2cb9e60335a24ae9e5fe1a5da9313857050ed0479c47076864f  crates/orna-check/tests/fixtures/reference/api/retired.json
 2cbb779cd5e615d7fdf91de52cc5896bb171f6b5245555ef6fd187e113b268c6  crates/orna-check/tests/fixtures/refine-evidence-yhre/owner_scope.orna
 a2d547ec628de60dec31498fb37d4aa81e8e7bee8a4ee4cb3024865cfa4964dd  crates/orna-check/tests/fixtures/refine-evidence-yhre/ports.orna
 9185d066f72be1e9bef5c5e0cc09a9babaff821d390c59dd1a334df9d87877bc  crates/orna-check/tests/fixtures/relation-bound.orna

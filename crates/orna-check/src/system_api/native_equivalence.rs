@@ -226,8 +226,7 @@ fn native_callable_signatures_match_json_catalogue() {
     );
 }
 
-const RETIRED_JSON: &str =
-    include_str!("../../../orna-conformance/tests/fixtures/reference/api/retired.json");
+const RETIRED_JSON: &str = include_str!("../../tests/fixtures/reference/api/retired.json");
 
 /// The label of a `pub native fn`: its `spelling` clause, or `sys.<name>` without one.
 fn native_label(item: &orna_syntax::Item, name: &str) -> String {
@@ -440,5 +439,62 @@ fn since_clauses_match_json_catalogue() {
     assert_eq!(
         actual, expected,
         "the `since` clauses in sys.orna must match the catalogue's `since` fields"
+    );
+}
+
+/// The `key` and `availability` clauses of each relation row type, against the catalogue's `key_fields` and
+/// `availability` fields. Both sides must name the same row types with the same key columns and availability word.
+#[test]
+fn key_and_availability_clauses_match_json_catalogue() {
+    let catalogue: serde_json::Value =
+        serde_json::from_str(SYS_JSON).expect("the catalogue must be JSON");
+    let expected: BTreeMap<String, String> = catalogue["relations"]
+        .as_array()
+        .expect("catalogue `relations` must be an array")
+        .iter()
+        .map(|relation| {
+            let name = relation["name"]
+                .as_str()
+                .expect("catalogue `name` must be a string");
+            let key: Vec<&str> = relation["key_fields"]
+                .as_array()
+                .expect("catalogue `key_fields` must be an array")
+                .iter()
+                .map(|field| {
+                    field
+                        .as_str()
+                        .expect("catalogue key field must be a string")
+                })
+                .collect();
+            let availability = relation["availability"]
+                .as_str()
+                .expect("catalogue `availability` must be a string");
+            (
+                name.to_owned(),
+                format!("key {} availability {availability}", key.join(", ")),
+            )
+        })
+        .collect();
+    let mut actual = BTreeMap::new();
+    for item in &parse_interface(SYS_ORNA).value.items {
+        let (Some(availability), Declaration::Type { name, .. }) =
+            (&item.clauses.availability, &item.declaration)
+        else {
+            continue;
+        };
+        let key: Vec<&str> = item
+            .clauses
+            .key
+            .iter()
+            .map(|segment| segment.text.as_str())
+            .collect();
+        actual.insert(
+            format!("sys.{name}"),
+            format!("key {} availability {}", key.join(", "), availability.text),
+        );
+    }
+    assert_eq!(
+        actual, expected,
+        "the `key` and `availability` clauses in sys.orna must match the catalogue's relation fields"
     );
 }

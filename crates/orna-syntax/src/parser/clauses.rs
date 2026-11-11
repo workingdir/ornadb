@@ -143,7 +143,7 @@ impl Parser {
                 clauses.class = self.clause_word_value("class", &CATALOGUE_CLASSES);
             }
             "fails" => clauses.fails = self.clause_name_list(),
-            "key" => clauses.key = self.clause_name_list(),
+            "key" => clauses.key = self.clause_key_list(),
             "since" => clauses.since = self.clause_string("since"),
             "spelling" => clauses.spelling = self.clause_string("spelling"),
             "availability" => clauses.availability = self.clause_availability(),
@@ -204,7 +204,7 @@ impl Parser {
         })
     }
 
-    /// Reads a comma-separated list of identifiers, as the `fails` and `key` clauses do.
+    /// Reads a comma-separated list of identifiers, as the `fails` clause does.
     fn clause_name_list(&mut self) -> Vec<NameSegment> {
         let mut names = Vec::new();
         loop {
@@ -224,6 +224,43 @@ impl Parser {
             self.bump();
         }
         names
+    }
+
+    /// Reads a comma-separated list of key paths, as the `key` clause does. A path is one or more identifiers joined
+    /// by `.`, so a key can name a field of a nested row: `change.area` on `DiffEntry`.
+    fn clause_key_list(&mut self) -> Vec<NameSegment> {
+        let mut keys = Vec::new();
+        loop {
+            if !self.contextual() {
+                self.error_here(INTERFACE_CLAUSE, "expected a name in the clause list");
+                break;
+            }
+            let first = self.current().clone();
+            self.bump();
+            let mut text = first.text;
+            let mut span = first.span;
+            while self.is_punct(".") {
+                self.bump();
+                if !self.contextual() {
+                    self.error_here(
+                        INTERFACE_CLAUSE,
+                        "expected a name after `.` in the clause list",
+                    );
+                    break;
+                }
+                let segment = self.current().clone();
+                self.bump();
+                text.push('.');
+                text.push_str(&segment.text);
+                span.end = segment.span.end;
+            }
+            keys.push(NameSegment { text, span });
+            if !self.is_punct(",") {
+                break;
+            }
+            self.bump();
+        }
+        keys
     }
 
     /// Reads one string literal value, with its quotes removed.
