@@ -17,6 +17,7 @@ mod eval;
 pub mod explain;
 mod float;
 mod frame;
+mod globals;
 mod link;
 mod machine;
 mod natives;
@@ -31,9 +32,10 @@ mod value;
 mod variants;
 
 pub use error::ExecError;
+pub use globals::{Globals, evaluate_global};
 pub use machine::{
-    ExecLimits, Measured, Run, measure_entry, measure_entry_with_store, run_entry,
-    run_entry_cancellable,
+    ExecLimits, Measured, Run, measure_entry, measure_entry_in, measure_entry_with_store,
+    run_entry, run_entry_cancellable,
 };
 #[cfg(feature = "test-support")]
 pub use store::contract;

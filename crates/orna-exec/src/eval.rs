@@ -72,6 +72,9 @@ impl<'p> Machine<'p> {
                 arm,
             } => self.recover(body, frame, *attempt, *handler, *arm),
             ExprKind::Def(variant) if self.is_unit_variant(*variant) => self.unit_variant(*variant),
+            ExprKind::Def(def) if matches!(self.program.defs[*def].kind, DefKind::Let(_)) => {
+                self.global(*def)
+            }
             ExprKind::Construct { def, fields }
                 if matches!(self.program.defs[*def].kind, DefKind::Type(_)) =>
             {
