@@ -18,6 +18,7 @@ mod machine;
 mod natives;
 mod ops;
 mod raw_value;
+mod relation;
 mod store;
 mod table;
 mod time;

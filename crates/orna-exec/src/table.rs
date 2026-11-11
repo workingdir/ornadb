@@ -161,7 +161,7 @@ fn read_row(
 }
 
 /// The fields of a stored row, from its canonical bytes.
-fn decode_row(bytes: &[u8]) -> Result<Vec<(Name, Value)>, Stop> {
+pub(crate) fn decode_row(bytes: &[u8]) -> Result<Vec<(Name, Value)>, Stop> {
     let stored =
         CanonicalValue::decode(bytes).map_err(|_| Stop::NotYet("stored row bytes (H6)"))?;
     match raw_value::from_raw(stored.raw())? {
