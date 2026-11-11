@@ -90,7 +90,10 @@ impl Session {
         if !parsed.is_ok() {
             // Every prompt parse failure is reported under the REPL's established code, whatever
             // the parser's own diagnostic code is.
-            return Err(ReplError::new("ORNA-EVAL-PARSE", "the input does not parse"));
+            return Err(ReplError::new(
+                "ORNA-EVAL-PARSE",
+                "the input does not parse",
+            ));
         }
         match &parsed.value {
             ReplInput::Expression(expression) => self.stage_expression(input, expression, true),
