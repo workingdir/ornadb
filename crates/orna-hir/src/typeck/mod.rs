@@ -782,7 +782,6 @@ impl<'a> BodyCheck<'a> {
             crate::Lit::Bool(_) => TyKind::Bool,
             crate::Lit::Date(_) => TyKind::Date,
             crate::Lit::Instant { .. } => TyKind::Instant,
-            crate::Lit::Period(_) => TyKind::Period,
             crate::Lit::Duration { .. } => TyKind::Duration,
             crate::Lit::None => {
                 let payload = self.infer.new_var(&mut self.program.tys, span);

@@ -116,7 +116,7 @@ impl<'p> Machine<'p> {
                 nanosecond: *nanoseconds,
             }),
             Lit::None => Ok(Value::Null),
-            Lit::Date(_) | Lit::Period(_) => Err(Stop::NotYet("literal kind (H4)")),
+            Lit::Date(_) => Err(Stop::NotYet("literal kind (H4)")),
         }
     }
 
