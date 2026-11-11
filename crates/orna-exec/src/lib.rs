@@ -8,13 +8,16 @@
 //! guessed at, so the harness can count what has been executed.
 
 mod binders;
+mod decimal;
 mod error;
 mod eval;
+mod float;
 mod frame;
 mod link;
 mod machine;
 mod natives;
 mod ops;
+mod time;
 mod value;
 mod variants;
 

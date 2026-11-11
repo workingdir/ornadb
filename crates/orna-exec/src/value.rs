@@ -11,7 +11,9 @@ use std::rc::Rc;
 
 use num_bigint::BigInt;
 use orna_hir::{BodyId, Name};
-use orna_value::{CanonicalValue, OPTION_TAG, Raw, TUPLE_TAG, UNIT_TAG};
+use orna_value::{CanonicalValue, DURATION_TAG, INSTANT_TAG, OPTION_TAG, Raw, TUPLE_TAG, UNIT_TAG};
+
+use crate::decimal::Decimal;
 
 /// One runtime value.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -22,6 +24,24 @@ pub enum Value {
     Bool(bool),
     /// An integer of arbitrary width.
     Int(BigInt),
+    /// An exact decimal.
+    Decimal(Decimal),
+    /// A binary64 float, held as its bit pattern. Every NaN is the canonical NaN.
+    Float(u64),
+    /// A point on the time axis: whole seconds since the Unix epoch and a nanosecond within the second.
+    Instant {
+        /// Seconds since the Unix epoch.
+        unix_seconds: i64,
+        /// Nanoseconds within the second, below one billion.
+        nanosecond: u32,
+    },
+    /// An elapsed span: floor-normalised whole seconds and a nonnegative nanosecond tail below one billion.
+    Duration {
+        /// Whole seconds, floor-normalised so a negative span keeps a nonnegative `nanosecond`.
+        seconds: BigInt,
+        /// Nanoseconds within the second, below one billion.
+        nanosecond: u32,
+    },
     /// A string, already unescaped.
     Text(String),
     /// A byte string: the blob a digest or a hash input is.
@@ -84,6 +104,28 @@ impl Value {
             Self::Unit => Ok(unit_raw()),
             Self::Bool(value) => Ok(Raw::Bool(*value)),
             Self::Int(value) => Ok(Raw::Int(value.clone())),
+            Self::Decimal(value) => Ok(value.to_raw()),
+            Self::Float(bits) => Ok(Raw::Float(*bits)),
+            Self::Instant {
+                unix_seconds,
+                nanosecond,
+            } => Ok(Raw::Tag(
+                INSTANT_TAG,
+                Box::new(Raw::Array(vec![
+                    Raw::Int((*unix_seconds).into()),
+                    Raw::Int((*nanosecond).into()),
+                ])),
+            )),
+            Self::Duration {
+                seconds,
+                nanosecond,
+            } => Ok(Raw::Tag(
+                DURATION_TAG,
+                Box::new(Raw::Array(vec![
+                    Raw::Int(seconds.clone()),
+                    Raw::Int((*nanosecond).into()),
+                ])),
+            )),
             Self::Text(value) => Ok(Raw::Text(value.clone())),
             Self::Blob(bytes) => Ok(Raw::Bytes(bytes.to_vec())),
             Self::Option(value) => option_raw(value.as_deref()),
