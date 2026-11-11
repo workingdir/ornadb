@@ -81,9 +81,8 @@ fn literal_text_and_parts_concatenate_in_order() {
 }
 
 #[test]
-#[ignore = "user-type Display: typeck display_callee"]
 fn a_user_type_interpolates_through_its_impl_display() {
-    let source = format!("{CONTACT}pub fn run(): Str = \"hi {{contact()}}!\";\n");
+    let source = format!("use core.display.{{Display}};\n{CONTACT}pub fn run(): Str = \"hi {{contact()}}!\";\n");
     assert_eq!(run(&source), text("hi ada!"));
 }
 
