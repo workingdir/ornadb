@@ -575,6 +575,9 @@ impl<'a> BodyCheck<'a> {
         def: DefId,
         span: SyntaxSpan,
     ) -> Result<Ty, NotYetReason> {
+        if super::quantity::is_unit(self.program, def) {
+            return self.unit_ctor_ty(body, def, call, span);
+        }
         let result = self.ctor_result_ty(def)?;
         let fields = self.ctor_fields(def)?;
         for (index, field) in fields.iter().enumerate() {

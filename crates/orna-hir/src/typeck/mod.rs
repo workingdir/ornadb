@@ -47,6 +47,7 @@ mod call;
 mod expr;
 mod operator;
 mod protocol;
+mod quantity;
 #[cfg(test)]
 mod tests;
 
@@ -829,6 +830,9 @@ impl<'a> BodyCheck<'a> {
     ) -> Result<Ty, NotYetReason> {
         let left = self.infer_expr(body, lhs, None)?;
         let right = self.infer_expr(body, rhs, None)?;
+        if let Some(result) = self.quantity_binary(body, op, left, right, rhs, span.clone()) {
+            return Ok(result);
+        }
         let comparison = matches!(
             op,
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge

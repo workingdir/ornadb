@@ -47,6 +47,7 @@ mod resolve;
 mod rules;
 mod ty;
 pub mod typeck;
+mod units;
 mod validate;
 
 pub use body::{

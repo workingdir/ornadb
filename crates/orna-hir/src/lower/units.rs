@@ -150,17 +150,26 @@ impl<'a> Builder<'a> {
     /// Resolves every queued derived-unit expression into factors, once all definitions exist.
     pub(crate) fn resolve_unit_jobs(&mut self) {
         for job in std::mem::take(&mut self.unit_jobs) {
-            let factors = job
-                .expr
-                .terms
-                .iter()
-                .filter_map(|term| self.unit_factor(&job, term))
-                .collect::<Vec<_>>();
+            let factors = self.resolve_factors(&job);
             self.pending[job.unit.index()].kind = PendingKind::Built(DefKind::Unit(UnitDef {
                 family: Some(job.family),
                 factors,
             }));
         }
+    }
+
+    /// The factors of a derived unit, or none when any term fails to resolve: a broken definition has no
+    /// key (units.md ORNA-UNIT-019), so the remaining factors must not define one.
+    fn resolve_factors(&mut self, job: &UnitJob) -> Vec<UnitFactor> {
+        let mut factors = Vec::with_capacity(job.expr.terms.len());
+        let mut broken = false;
+        for term in &job.expr.terms {
+            match self.unit_factor(job, term) {
+                Some(factor) => factors.push(factor),
+                None => broken = true,
+            }
+        }
+        if broken { Vec::new() } else { factors }
     }
 
     /// Resolves one factor of a derived unit. A qualified name (`Length.kilometre`) names a unit of

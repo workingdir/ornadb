@@ -10,6 +10,7 @@
 
 use std::collections::HashMap;
 
+use crate::ids::UnitKeyId;
 use crate::{DefId, EffectRow, Name};
 
 /// An interned type. `Copy`, and equality is identity.
@@ -89,6 +90,8 @@ pub enum TyKind {
     Digest,
     /// The unit type of an expression with no value.
     Unit,
+    /// `Quantity<N, U>`: a numeric value of type `N` (`Int`, `Decimal` or `Float`) in the unit key `U` (units.md 3.4).
+    Quantity(Ty, UnitKeyId),
     /// The type of an expression that cannot complete (`fail`, `return`,
     /// `break`, `continue`).
     Never,
