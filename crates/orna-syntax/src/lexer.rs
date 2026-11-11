@@ -187,14 +187,29 @@ pub fn lex(source: &str) -> Result<Vec<Token>, Vec<LexError>> {
     }
 }
 
+/// A `///` doc comment line. The parser attaches these to the declaration that follows (SN1, NATIVE-2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocLine {
+    pub span: SourceSpan,
+    /// The text after `///`, without one leading space.
+    pub text: String,
+}
+
 /// Lexes through recoverable errors so editor clients can keep highlighting
 /// the valid tokens surrounding an unfinished or mistyped token.
 pub(crate) fn lex_recovering(source: &str) -> (Vec<Token>, Vec<LexError>) {
+    let (tokens, errors, _docs) = lex_documented(source);
+    (tokens, errors)
+}
+
+/// Lexes through recoverable errors and also returns the `///` doc lines in source order.
+pub(crate) fn lex_documented(source: &str) -> (Vec<Token>, Vec<LexError>, Vec<DocLine>) {
     let mut l = Lexer {
         source,
         at: 0,
         tokens: Vec::new(),
         errors: Vec::new(),
+        docs: Vec::new(),
         string_nesting: NestingBudget::new(MAX_STRING_NESTING),
     };
     l.run();
@@ -203,7 +218,7 @@ pub(crate) fn lex_recovering(source: &str) -> (Vec<Token>, Vec<LexError>) {
         text: String::new(),
         span: SourceSpan::new(source.len(), source.len()),
     });
-    (l.tokens, l.errors)
+    (l.tokens, l.errors, l.docs)
 }
 // Interpolation can recurse before parser admission; bound that lexer stack
 // separately from ordinary braces and sequential string literals.
@@ -214,6 +229,7 @@ struct Lexer<'a> {
     at: usize,
     tokens: Vec<Token>,
     errors: Vec<LexError>,
+    docs: Vec<DocLine>,
     string_nesting: NestingBudget,
 }
 impl<'a> Lexer<'a> {
@@ -247,8 +263,17 @@ impl<'a> Lexer<'a> {
                 continue;
             }
             if self.take(LINE_COMMENT_START) {
+                // `///` documents the next item; `////` and longer runs stay ordinary comments.
+                let doc = self.rest().starts_with('/') && !self.rest().starts_with("//");
                 while self.at < self.source.len() && !matches!(self.peek(), '\n' | '\r') {
                     self.bump()
+                }
+                if doc {
+                    let body = &self.source[start + 3..self.at];
+                    self.docs.push(DocLine {
+                        span: SourceSpan::new(start, self.at),
+                        text: body.strip_prefix(' ').unwrap_or(body).to_string(),
+                    });
                 }
                 continue;
             }

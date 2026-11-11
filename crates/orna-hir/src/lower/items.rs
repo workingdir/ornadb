@@ -18,8 +18,8 @@ use orna_syntax::{
 
 use crate::{
     AssertionDef, BodyId, DefId, DefKind, DimensionDef, EnumDef, FieldDef, FieldInitializer,
-    GenericParam, Idx, ImplDef, LetDef, ModuleId, ParamDef, ProtocolDef, Stmt, TableDef, TypeDef,
-    UnitDef, VariantDef, Visibility,
+    GenericParam, Idx, ImplDef, LetDef, ModuleId, NativeStaticDef, NativeTypeDef, ParamDef,
+    ProtocolDef, Stmt, TableDef, TyKind, TypeDef, UnitDef, VariantDef, Visibility,
 };
 
 use super::declare::{Builder, DeclAst, PendingFunction, PendingKind};
@@ -229,6 +229,23 @@ impl Builder<'_> {
                     expr: Box::new(value),
                     self_ty: None,
                 });
+            }
+            DeclAst::NativeType(generics) => {
+                let names = generic_names(&generics);
+                let params = self.build_generics(module, &names, &generics);
+                self.pending[def.index()].kind =
+                    PendingKind::Built(DefKind::NativeType(NativeTypeDef { params }));
+            }
+            DeclAst::NativeStatic(annotation, clause) => {
+                let ty = match &annotation {
+                    Some(annotation) => super::types::lower_type(self, module, &[], annotation),
+                    None => self.program.tys.intern(TyKind::Error),
+                };
+                self.pending[def.index()].kind =
+                    PendingKind::Built(DefKind::NativeStatic(NativeStaticDef {
+                        ty,
+                        effects: declared_effects(clause.as_ref()),
+                    }));
             }
         }
     }

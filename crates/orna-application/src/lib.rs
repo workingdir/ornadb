@@ -370,7 +370,9 @@ impl ApplicationAuthority {
                     | Declaration::Enum { name, .. }
                     | Declaration::Dimension { name, .. }
                     | Declaration::Unit { name, .. }
-                    | Declaration::Type { name, .. } => name,
+                    | Declaration::Type { name, .. }
+                    | Declaration::NativeType { name, .. }
+                    | Declaration::NativeStatic { name, .. } => name,
                     Declaration::Use { .. }
                     | Declaration::Assertion { .. }
                     | Declaration::Let { .. } => continue,

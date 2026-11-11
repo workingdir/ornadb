@@ -100,6 +100,10 @@ pub(crate) enum DeclAst {
     Function(FunctionSignature, Expr),
     /// A body-less native function, in any module unit (ORNA-NATIVE-004).
     Native(FunctionSignature, Option<NativeEffectSet>),
+    /// A host-supplied opaque nominal type (`native type`).
+    NativeType(Vec<GenericParameter>),
+    /// A host-supplied singleton value (`native static`) with its written type and declared effects.
+    NativeStatic(Option<TypeExpr>, Option<NativeEffectSet>),
     /// A table.
     Table(Vec<Parameter>, Vec<TableMember>),
     /// A protocol.
@@ -164,6 +168,12 @@ impl DeclAst {
             Declaration::Native { signature, effects } => {
                 Self::Native(signature.clone(), effects.clone())
             }
+            Declaration::NativeType { generics, .. } => Self::NativeType(generics.clone()),
+            Declaration::NativeStatic {
+                annotation,
+                effects,
+                ..
+            } => Self::NativeStatic(annotation.clone(), effects.clone()),
             // `declare_item` diverts `use` declarations before this mapping runs.
             Declaration::Use { .. } => Self::Dimension,
         }
@@ -633,7 +643,9 @@ fn item_name(declaration: &Declaration) -> Option<&str> {
         | Declaration::Enum { name, .. }
         | Declaration::Dimension { name, .. }
         | Declaration::Unit { name, .. }
-        | Declaration::Type { name, .. } => Some(name),
+        | Declaration::Type { name, .. }
+        | Declaration::NativeType { name, .. }
+        | Declaration::NativeStatic { name, .. } => Some(name),
         Declaration::Function { signature, .. } => Some(&signature.name),
         Declaration::Native { signature, .. } => Some(&signature.name),
         Declaration::Assertion { .. } => Some("assert"),

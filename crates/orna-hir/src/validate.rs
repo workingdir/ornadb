@@ -358,6 +358,10 @@ impl Program {
                 self.validate_generics(&ty.params, errors);
                 self.validate_def_refs(&ty.members, "type member", errors);
             }
+            DefKind::NativeType(native) => self.validate_generics(&native.params, errors),
+            DefKind::NativeStatic(native) => {
+                self.validate_ty(native.ty, "native static type", errors)
+            }
             DefKind::Enum(enumeration) => {
                 self.validate_kinds(
                     &enumeration.variants,
