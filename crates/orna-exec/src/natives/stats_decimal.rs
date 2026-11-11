@@ -4,7 +4,7 @@
 //! `numeric_decimal` and `items`.
 
 use num_bigint::BigInt;
-use num_traits::{Signed, ToPrimitive};
+use num_traits::{Signed, ToPrimitive, Zero};
 
 use super::stats_round::{divide_rounded, round_to_scale};
 use crate::decimal::Decimal;
@@ -44,6 +44,15 @@ pub(super) fn collection_items(machine: &Machine<'_>, count: usize) -> Result<()
         Err(Stop::Error("ORNA-EVAL-LIMIT"))
     } else {
         Ok(())
+    }
+}
+
+/// The decimal view of an integer or decimal row: an integer is the decimal with exponent zero.
+pub(super) fn numeric_decimal(value: &Value) -> Result<Decimal, Stop> {
+    match value {
+        Value::Int(value) => Decimal::new(value.clone(), BigInt::zero()),
+        Value::Decimal(value) => Ok(value.clone()),
+        _ => Err(Stop::Error("ORNA-EVAL-TYPE")),
     }
 }
 

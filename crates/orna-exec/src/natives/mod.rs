@@ -18,6 +18,7 @@ mod stats_decimal;
 mod stats_histogram;
 mod stats_median;
 mod stats_round;
+mod stats_variance;
 mod text;
 mod unicode_16_case_properties;
 mod unicode_case;
@@ -82,6 +83,7 @@ pub(crate) fn lookup(key: &NativeKey) -> Option<NativeFn> {
         ("core.collection", "asof_join") => collection::keyed::asof_join,
         ("core.stats", "sum") => collection::basic::sum,
         ("core.stats", "median") => stats_median::median,
+        ("core.stats", "variance") => stats_variance::variance,
         ("core.stats", "min") => stats::min,
         ("core.stats", "max") => stats::max,
         ("core.stats", "range") => stats::range,
