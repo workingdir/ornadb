@@ -65,6 +65,7 @@ def render_operator_protocols():
         header("Operator protocols (kernel-and-library.md 4.1, D16 P1-A). Source declarations; no natives."),
         "// `Ordering` is the root `core` enum; `std.numeric` keeps its homogeneous declarations until std re-exports",
         "// this module (std is a separate repository).",
+        "use core.{Ordering};",
         "",
     ]
     for protocol, params, member, member_params, result, operators in OPERATOR_PROTOCOLS:
