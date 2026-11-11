@@ -62,6 +62,8 @@ mod option_pattern_tests;
 mod protocol;
 mod quantity;
 #[cfg(test)]
+mod temperature_tests;
+#[cfg(test)]
 mod tests;
 
 /// A body the H2a subset cannot type yet, and why.

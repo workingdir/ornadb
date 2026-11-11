@@ -134,8 +134,6 @@ impl<'a> Builder<'a> {
             DefKind::Unit(UnitDef {
                 family: Some(family),
                 factors: Vec::new(),
-                offset: None,
-                affine: false,
             }),
         );
         if let Some(expr) = &variant.unit {
@@ -156,8 +154,6 @@ impl<'a> Builder<'a> {
             self.pending[job.unit.index()].kind = PendingKind::Built(DefKind::Unit(UnitDef {
                 family: Some(job.family),
                 factors,
-                offset: None,
-                affine: false,
             }));
         }
     }
@@ -234,18 +230,5 @@ impl<'a> Builder<'a> {
             (None, Some(_)) => UnitLookup::None,
             (None, None) => self.resolve_unit(job.module, &name),
         }
-    }
-}
-
-/// The text of a unit declaration's offset when it is a numeric literal, exactly as written. A non-literal offset
-/// has no text here and is not yet evaluated, so the unit keeps no offset.
-pub(crate) fn literal_offset(offset: Option<&AstExpr>) -> Option<Box<str>> {
-    match offset? {
-        AstExpr::Literal {
-            text,
-            kind: LiteralKind::Integer | LiteralKind::Decimal | LiteralKind::Float,
-            ..
-        } => Some(Box::from(text.as_str())),
-        _ => None,
     }
 }

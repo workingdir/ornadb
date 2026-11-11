@@ -183,17 +183,24 @@ impl Builder<'_> {
             DeclAst::Unit(dimension, definition) => {
                 let ty = super::types::lower_type(self, module, &[], &dimension);
                 let _ = ty;
-                let (offset, affine) = match &definition {
+                let affine_clause = match &definition {
                     orna_syntax::UnitDefinition::Derived { offset, affine, .. } => {
-                        (super::units::literal_offset(offset.as_ref()), *affine)
+                        offset.is_some() || *affine
                     }
-                    orna_syntax::UnitDefinition::Base => (None, false),
+                    orna_syntax::UnitDefinition::Base => false,
                 };
+                if affine_clause {
+                    let span = self.pending[def.index()].span.clone();
+                    self.diagnose(
+                        module,
+                        crate::diag::UNSUPPORTED,
+                        "affine units are library types (units.md 8.5): `offset` and `affine` are not kernel clauses",
+                        span,
+                    );
+                }
                 self.pending[def.index()].kind = PendingKind::Built(DefKind::Unit(UnitDef {
                     family: None,
                     factors: Vec::new(),
-                    offset,
-                    affine,
                 }));
                 if let orna_syntax::UnitDefinition::Derived { value, offset, .. } = definition {
                     // A derived unit's expression is not part of the value

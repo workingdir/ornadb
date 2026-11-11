@@ -24,6 +24,10 @@ lists them in `HAND_WRITTEN` and fails if one of them would be emitted. Edit the
 
 - `core/range.orna`: the `Range<T>` type of kernel-and-library.md listing 5, with `contains` and the `above`/`below`
   helpers.
+- `core/temperature.orna`: the affine temperature scales of kernel-and-library.md listing 10 as library types:
+  `Temperature` (a point) and `Delta` (a difference). The kernel has no affine flag (units.md C6). Their bodies use field
+  access and struct literals, which HIR does not type yet, so those bodies are not type-checked; the instance signatures
+  are.
 - `core/units.orna`: the built-in data-size unit family (units.md section 8.2). The time family is not here yet; see
   the comment at the top of the file.
 
