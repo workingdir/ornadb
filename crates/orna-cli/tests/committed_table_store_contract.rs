@@ -39,7 +39,12 @@ impl TableStore for Seeded {
         self.0.store.rollback()
     }
 
-    fn scan(&mut self, table: TableId, bounds: KeyBounds, dir: Direction) -> Result<CursorId, StoreError> {
+    fn scan(
+        &mut self,
+        table: TableId,
+        bounds: KeyBounds,
+        dir: Direction,
+    ) -> Result<CursorId, StoreError> {
         self.0.store.scan(table, bounds, dir)
     }
 
@@ -55,7 +60,13 @@ impl TableStore for Seeded {
         self.0.store.get(table, key)
     }
 
-    fn put(&mut self, table: TableId, key: &[u8], row: &[u8], expect: Expect) -> Result<(), StoreError> {
+    fn put(
+        &mut self,
+        table: TableId,
+        key: &[u8],
+        row: &[u8],
+        expect: Expect,
+    ) -> Result<(), StoreError> {
         self.0.store.put(table, key, row, expect)
     }
 
@@ -78,7 +89,10 @@ impl SeedableStore for Seeded {
         let (first, end) = match (indices.first(), indices.last()) {
             (Some(&first), Some(&last)) => {
                 assert!(
-                    indices.iter().zip(first..).all(|(&index, expected)| index == expected),
+                    indices
+                        .iter()
+                        .zip(first..)
+                        .all(|(&index, expected)| index == expected),
                     "the contract seeds contiguous indices"
                 );
                 (first, last + 1)

@@ -46,7 +46,9 @@ const BATCH_ROWS: u32 = 2_000;
 /// The start of each seed batch for the rows `first..end`. An empty range still
 /// yields one batch, which inserts nothing.
 fn batch_starts(first: u32, end: u32) -> Vec<u32> {
-    (first..end.max(first + 1)).step_by(BATCH_ROWS as usize).collect()
+    (first..end.max(first + 1))
+        .step_by(BATCH_ROWS as usize)
+        .collect()
 }
 
 /// The Orna module with one `seed_<start>` function per batch, each inserting
@@ -94,7 +96,12 @@ pub fn committed_int_table(first: u32, end: u32) -> CommittedIntTable {
     }
 }
 
-fn open_committed(directory: &Path, object_id: [u8; 16], source: &str, first: u32) -> CommittedTableStore {
+fn open_committed(
+    directory: &Path,
+    object_id: [u8; 16],
+    source: &str,
+    first: u32,
+) -> CommittedTableStore {
     let repository = Repository::discover(directory).expect("the project repository");
     let commit = repository
         .head()
