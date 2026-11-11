@@ -104,7 +104,7 @@ fn a_unit_suffix_lowers_to_a_constructor_call() {
 
 #[test]
 fn a_suffix_without_a_unit_falls_back_to_the_builtin_postfix() {
-    let program = lower_one(&format!("{LENGTH}pub fn run(): Int = 1.day;\n"));
+    let program = lower_one(&format!("{LENGTH}pub fn run(): Duration = 1.day;\n"));
     let run = defined(&program, "main", "run");
     assert!(matches!(root_of(&program, run).kind, ExprKind::Lit(_)));
 }

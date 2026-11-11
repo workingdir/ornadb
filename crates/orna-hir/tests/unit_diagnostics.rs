@@ -84,3 +84,15 @@ fn a_conversion_without_an_exact_decimal_form_is_unit_inexact() {
         codes(&program)
     );
 }
+
+#[test]
+fn a_top_level_affine_unit_is_unsupported_not_a_kernel_clause() {
+    // units.md 8.5 and C6: an offset and the affine flag are library types, not kernel clauses.
+    let source = "pub dim Temperature;\npub unit K : Temperature base;\npub unit C : Temperature = K offset 273.15 affine;\n";
+    let program = checked(source);
+    assert!(
+        codes(&program).contains(&orna_hir::diag::UNSUPPORTED),
+        "an affine unit must report UNSUPPORTED: {:?}",
+        codes(&program)
+    );
+}

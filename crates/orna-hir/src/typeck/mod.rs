@@ -63,6 +63,8 @@ mod option_pattern_tests;
 mod protocol;
 mod quantity;
 #[cfg(test)]
+mod temperature_tests;
+#[cfg(test)]
 mod tests;
 
 /// A body the H2a subset cannot type yet, and why.
@@ -783,7 +785,6 @@ impl<'a> BodyCheck<'a> {
             crate::Lit::Bool(_) => TyKind::Bool,
             crate::Lit::Date(_) => TyKind::Date,
             crate::Lit::Instant { .. } => TyKind::Instant,
-            crate::Lit::Period(_) => TyKind::Period,
             crate::Lit::Duration { .. } => TyKind::Duration,
             crate::Lit::None => {
                 let payload = self.infer.new_var(&mut self.program.tys, span);
