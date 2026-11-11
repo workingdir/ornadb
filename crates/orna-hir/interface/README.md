@@ -25,6 +25,7 @@ lists them in `HAND_WRITTEN` and fails if one of them would be emitted. Edit the
 
 - `sys.orna`: the `sys` module, edited directly (see `docs/design/sys-as-native.md`).
 - `sys/engine.orna`: the `sys.engine` module, the 61 engine failure codes as a private `FailureCode` enum.
+- `core/display.orna`: the `Display` protocol that a string interpolation `"{x}"` calls (kernel-and-library.md 4.5, P5).
 - `core/range.orna`: the `Range<T>` type of kernel-and-library.md listing 5, with `contains` and the `above`/`below`
   helpers.
 

@@ -21,3 +21,6 @@ orna-value = { path = "../orna-value" }
 
 [dev-dependencies]
 orna-syntax = { path = "../orna-syntax" }
+
+[features]
+test-support = []

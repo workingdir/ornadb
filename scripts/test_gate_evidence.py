@@ -908,6 +908,10 @@ class ReviewFindingTests(unittest.TestCase):
             "sudo timeout -k 10 150 apt-get",
             "-o Debug::Acquire::http=true install -y --download-only --no-install-recommends",
             r"'s|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g'",
+            r"mirror+file:/etc/apt/apt-mirrors\.txt",
+            "http://archive.ubuntu.com/ubuntu/",
+            'Dir::Etc::SourceList=',
+            "is not on PATH after install",
             "tail -n 40",
         ):
             self.assertIn(needle, installer)
