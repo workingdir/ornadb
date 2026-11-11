@@ -43,6 +43,8 @@ pub struct Measured {
     /// Calls executed, counting the entry point itself. Unlike the old
     /// evaluator, nothing is memoised, so this counts every source-level call.
     pub calls: u64,
+    /// Rows the table store handed to a scan during the run. A `take` that stops early leaves the rest unread.
+    pub rows_read: u64,
 }
 
 /// The machine state of one run.
@@ -64,18 +66,28 @@ pub(crate) struct Machine<'p> {
 }
 
 impl<'p> Machine<'p> {
-    fn new(program: &'p Program, limits: ExecLimits, cancel: Option<Arc<AtomicBool>>) -> Self {
+    fn new(
+        program: &'p Program,
+        limits: ExecLimits,
+        cancel: Option<Arc<AtomicBool>>,
+        store: Box<dyn TableStore>,
+    ) -> Self {
         Self {
             program,
             limits,
             variants: OnceCell::new(),
             cancel,
             natives: OnceCell::new(),
-            store: Box::new(MemoryStore::new()),
+            store,
             steps: 0,
             calls: 0,
             depth: 0,
         }
+    }
+
+    /// Gives the store back once the run is over, with the activation's writes applied or rolled back.
+    pub(crate) fn into_store(self) -> Box<dyn TableStore> {
+        self.store
     }
 
     /// The ids of the source enum variant `variant`. The map is built on first
@@ -214,7 +226,7 @@ fn run(
     limits: ExecLimits,
     cancel: Option<Arc<AtomicBool>>,
 ) -> Run {
-    let mut machine = Machine::new(program, limits, cancel);
+    let mut machine = Machine::new(program, limits, cancel, Box::new(MemoryStore::new()));
     let result = start(&mut machine, program, entry);
     Run {
         result,
@@ -239,7 +251,7 @@ fn start(machine: &mut Machine<'_>, program: &Program, entry: DefId) -> Result<V
 }
 
 /// Runs the function `entry` with one argument per parameter, in declaration
-/// order, and reports its step and call counters.
+/// order, and reports its step, call and row-read counters.
 ///
 /// # Errors
 ///
@@ -252,6 +264,36 @@ pub fn measure_entry(
     arguments: Vec<Value>,
     limits: ExecLimits,
 ) -> Result<Measured, ExecError> {
+    measure_entry_with_store(
+        program,
+        entry,
+        arguments,
+        limits,
+        Box::new(MemoryStore::new()),
+    )
+    .0
+}
+
+/// As [`measure_entry`], but the run reads and writes `store`. The store comes back with the run's writes
+/// applied, or rolled back when the run fails, so a later run sees the rows an earlier run committed.
+pub fn measure_entry_with_store(
+    program: &Program,
+    entry: DefId,
+    arguments: Vec<Value>,
+    limits: ExecLimits,
+    store: Box<dyn TableStore>,
+) -> (Result<Measured, ExecError>, Box<dyn TableStore>) {
+    let mut machine = Machine::new(program, limits, None, store);
+    let result = measure(&mut machine, program, entry, arguments);
+    (result, machine.into_store())
+}
+
+fn measure(
+    machine: &mut Machine<'_>,
+    program: &Program,
+    entry: DefId,
+    arguments: Vec<Value>,
+) -> Result<Measured, ExecError> {
     link::check_abi(program).map_err(ExecError::NotYet)?;
     let DefKind::Fn(function) = &program.defs[entry].kind else {
         return Err(ExecError::NotYet("entry is not a function"));
@@ -263,7 +305,7 @@ pub fn measure_entry(
         return Err(ExecError::Code("ORNA-EVAL-ARGUMENT"));
     }
     let arguments = arguments.into_iter().enumerate().collect();
-    let mut machine = Machine::new(program, limits, None);
+    let rows_before = machine.store.rows_read();
     let value = machine
         .run_activation(body_id, arguments)
         .map_err(ExecError::from)?;
@@ -271,5 +313,6 @@ pub fn measure_entry(
         value,
         steps: machine.steps,
         calls: machine.calls,
+        rows_read: machine.store.rows_read() - rows_before,
     })
 }

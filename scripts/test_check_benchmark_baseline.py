@@ -36,6 +36,16 @@ class BenchmarkBaselineTests(unittest.TestCase):
             compare(BASELINE, results), ["b2_fold_1000000.calls: 3 (baseline 2)"]
         )
 
+    def test_a_rows_read_regression_fails_where_the_baseline_records_it(self) -> None:
+        baseline = {"b3_take_10": {"steps": 1, "calls": 1, "rows_read": 10, "gated": True}}
+        results = {"b3_take_10": {"steps": 1, "calls": 1, "rows_read": 100_000, "wall_ms": 1.0}}
+        self.assertEqual(compare(baseline, results), ["b3_take_10.rows_read: 100000 (baseline 10)"])
+
+    def test_rows_read_is_not_gated_where_the_baseline_omits_it(self) -> None:
+        baseline = {"b1_fib_25": {"steps": 1, "calls": 1, "gated": True}}
+        results = {"b1_fib_25": {"steps": 1, "calls": 1, "rows_read": 5, "wall_ms": 1.0}}
+        self.assertEqual(compare(baseline, results), [])
+
     def test_an_ungated_benchmark_is_not_compared(self) -> None:
         results = {
             **RESULTS,

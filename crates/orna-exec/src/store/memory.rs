@@ -38,6 +38,7 @@ pub struct MemoryStore {
     cursors: BTreeMap<CursorId, Cursor>,
     next_cursor: u64,
     read_only: bool,
+    rows_read: u64,
 }
 
 impl MemoryStore {
@@ -211,6 +212,7 @@ impl TableStore for MemoryStore {
             .ok_or(StoreError::UnknownCursor(cursor))?;
         let table = state.table;
         state.last = Some(key.clone());
+        self.rows_read += 1;
         Ok(self
             .tables
             .get(&table)
@@ -219,6 +221,10 @@ impl TableStore for MemoryStore {
                 key: key.as_slice(),
                 row: row.as_slice(),
             }))
+    }
+
+    fn rows_read(&self) -> u64 {
+        self.rows_read
     }
 
     fn close(&mut self, cursor: CursorId) {

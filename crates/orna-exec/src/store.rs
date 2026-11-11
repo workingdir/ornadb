@@ -170,4 +170,7 @@ pub trait TableStore {
     ///
     /// Store-specific failures.
     fn next_auto_id(&mut self, table: TableId) -> Result<i64, StoreError>;
+
+    /// Rows [`TableStore::next`] has returned since the store was created. A run's reads are the difference of two reads.
+    fn rows_read(&self) -> u64;
 }
