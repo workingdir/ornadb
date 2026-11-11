@@ -97,18 +97,31 @@ fn hir_rejects_a_type_mismatch_without_asserting_the_unproven_code_pairing() {
 }
 
 #[test]
-fn shadow_on_invalid_project_keeps_the_old_verdict_and_writes_differences() {
+fn shadow_on_invalid_project_keeps_the_old_verdict_and_agrees_on_code_and_line() {
     let project = project("pub fn uses(): Int = missing_name + 1;\n");
+    let output = check(&project, Some("shadow"));
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
+    let text = stderr(&output);
+    assert!(
+        text.contains("orna check shadow: agree on 1 diagnostic(s)"),
+        "stderr: {text}"
+    );
+    assert!(!text.contains("checker-only"), "stderr: {text}");
+}
+
+#[test]
+fn shadow_on_type_mismatch_reports_each_side_by_code_and_line() {
+    let project = project("pub fn wrong(): Int = \"text\";\n");
     let output = check(&project, Some("shadow"));
     assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
     let text = stderr(&output);
     assert!(text.contains("orna check shadow: differ"), "stderr: {text}");
     assert!(
-        text.contains("checker-only ORNA-S012-UNRESOLVED main.orna 0..38"),
+        text.contains("checker-only ORNA-S021-TYPE main.orna line 1"),
         "stderr: {text}"
     );
     assert!(
-        text.contains("hir-only ORNA-S012-UNRESOLVED main.orna 21..33"),
+        text.contains("hir-only ORNA-INFER-011 main.orna line 1"),
         "stderr: {text}"
     );
 }

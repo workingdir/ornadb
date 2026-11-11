@@ -2,11 +2,11 @@
 //!
 //! The old checker stays the default. `ORNA_CHECK_HIR=1` checks the project
 //! with HIR. `ORNA_CHECK_SHADOW=1` runs both checkers, writes the diagnostics on
-//! which they differ (code, logical path and primary span) to stderr, and
+//! which they differ (code, logical path and line) to stderr, and
 //! reports the old checker's verdict; it never fails because the two disagree.
 //! Shadow takes precedence when both variables are set.
 
-use std::ops::Range;
+use std::collections::BTreeMap;
 
 use orna_check::hir_check;
 use orna_check::{DiagnosticOrigin, SystemProviders};
@@ -37,7 +37,7 @@ pub(crate) fn check_project(
         Backend::Hir => hir_located(project),
         Backend::Shadow => {
             let old = old_located(project)?;
-            report_shadow(&old, &hir_located(project));
+            report_shadow(project, &old, &hir_located(project));
             old
         }
     };
@@ -83,9 +83,10 @@ fn hir_located(project: &LoadedProject) -> Located {
 
 /// Writes the difference between the two checkers to stderr, one line per
 /// diagnostic that only one side reports.
-fn report_shadow(old: &Located, hir: &Located) {
-    let old_keys = keys(old);
-    let hir_keys = keys(hir);
+fn report_shadow(project: &LoadedProject, old: &Located, hir: &Located) {
+    let sources = source_map(project);
+    let old_keys = keys(old, &sources);
+    let hir_keys = keys(hir, &sources);
     if old_keys == hir_keys {
         eprintln!(
             "orna check shadow: agree on {} diagnostic(s)",
@@ -106,23 +107,49 @@ fn report_shadow(old: &Located, hir: &Located) {
     }
 }
 
-/// One sorted key per diagnostic: its code, logical path and primary span.
-fn keys(located: &Located) -> Vec<String> {
+/// One sorted key per diagnostic: its code, logical path and 1-based line.
+///
+/// Shared codes can anchor on different tokens of the same statement, so the
+/// shadow report compares lines rather than byte spans.
+fn keys(located: &Located, sources: &BTreeMap<&str, &str>) -> Vec<String> {
     let (diagnostics, origins) = located;
     let mut keys: Vec<String> = diagnostics
         .iter()
         .zip(origins)
         .map(|(diagnostic, origin)| {
             let path = origin.logical_path.as_deref().unwrap_or("-");
-            let span = origin.primary.as_ref().map_or_else(
-                || "-".to_owned(),
-                |range: &Range<usize>| format!("{}..{}", range.start, range.end),
-            );
-            format!("{} {path} {span}", diagnostic.code())
+            let line = match (origin.primary.as_ref(), sources.get(path)) {
+                (Some(range), Some(source)) => line_at(source, range.start).to_string(),
+                _ => "-".to_owned(),
+            };
+            format!("{} {path} line {line}", diagnostic.code())
         })
         .collect();
     keys.sort();
     keys
+}
+
+/// Source text of every module and standard-library file, keyed by logical path.
+fn source_map(project: &LoadedProject) -> BTreeMap<&str, &str> {
+    project
+        .modules()
+        .iter()
+        .map(|module| (module.logical_path.as_str(), module.source.as_str()))
+        .chain(
+            project
+                .standard_sources()
+                .iter()
+                .map(|(path, source)| (path.as_str(), source.as_str())),
+        )
+        .collect()
+}
+
+/// The 1-based line that holds byte `offset` of `source`.
+fn line_at(source: &str, offset: usize) -> usize {
+    let end = offset.min(source.len());
+    source.as_bytes()[..end]
+        .split(|byte| *byte == b'\n')
+        .count()
 }
 
 /// The keys of `left` not matched by a key of `right`, counting repeats.
