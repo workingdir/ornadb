@@ -11,6 +11,7 @@ mod hash;
 mod json;
 mod order;
 mod orna;
+mod ovb;
 #[cfg(test)]
 mod registry_test;
 #[cfg(test)]
@@ -44,6 +45,8 @@ pub(crate) fn lookup(key: &NativeKey) -> Option<NativeFn> {
         ("core.encoding.orna", "encode") => orna::encode,
         ("core.encoding.orna", "decode") => orna::decode,
         ("core.encoding.json", "decode") => json::decode,
+        ("core.encoding.ovb", "encode") => ovb::encode,
+        ("core.encoding.ovb", "decode") => ovb::decode,
         ("core.encoding.json", "decode_with_options") => json::decode_with_options,
         ("core.bits", "bit_or") => bits::bit_or,
         ("core.bits", "bit_and") => bits::bit_and,
