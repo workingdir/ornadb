@@ -1,0 +1,7 @@
+// Engine-embedded module `sys.build`, hand-maintained (decision D19, sys-as-native section 2.2). It holds the 2 build
+// relation handles. Each handle is a `table_read` native static whose row type is declared in `sys.orna`; its full path
+// is `sys.build.<name>`. The structural equivalence test in orna-check compares these declarations with the
+// `grouped_handle` entries of the JSON catalogue.
+
+pub native static builds: Relation<sys.Build> effect table_read;
+pub native static tests: Relation<sys.Test> effect table_read;

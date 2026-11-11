@@ -13,7 +13,14 @@ use orna_syntax::{
 };
 
 const SYS_ORNA: &str = include_str!("../../../orna-hir/interface/sys.orna");
-const CATALOG_ORNA: &str = include_str!("../../../orna-hir/interface/sys/catalog.orna");
+/// The namespace modules that hold relation handles. Each file's handles are `sys.<module>.<name>`.
+const NAMESPACE_FILES: [(&str, &str); 5] = [
+    ("catalog", include_str!("../../../orna-hir/interface/sys/catalog.orna")),
+    ("git", include_str!("../../../orna-hir/interface/sys/git.orna")),
+    ("storage", include_str!("../../../orna-hir/interface/sys/storage.orna")),
+    ("history", include_str!("../../../orna-hir/interface/sys/history.orna")),
+    ("build", include_str!("../../../orna-hir/interface/sys/build.orna")),
+];
 const SYS_JSON: &str = include_str!("../../../orna-sys-id/catalogue/sys-1.1.0.json");
 
 /// Type names `scripts/gen_interface.py` leaves bare in the JSON (its `BUILTINS`). These are declared in
@@ -556,11 +563,12 @@ fn key_and_availability_clauses_match_json_catalogue() {
     );
 }
 
-/// The relation handles in `sys/catalog.orna` against the catalogue's `grouped_handle` fields: each
-/// `sys.catalog.<name>` must be a native static of type `Relation<T>`, where `T` is the catalogue relation's
-/// `name`. Both sides must name the same 32 handles.
+/// The relation handles in the namespace modules against the catalogue's `grouped_handle` fields, excluding
+/// `sys.rt.*` (those are fields of `RuntimeView`, not declarations). Each `sys.<module>.<name>` must be a native
+/// static of type `Relation<T>`, where `T` is the catalogue relation's `name`. Both sides must name the same 59
+/// handles.
 #[test]
-fn catalog_handles_match_json_grouped_handles() {
+fn namespace_handles_match_json_grouped_handles() {
     let catalogue: serde_json::Value =
         serde_json::from_str(SYS_JSON).expect("the catalogue must be JSON");
     let expected: BTreeMap<String, String> = catalogue["relations"]
@@ -576,27 +584,38 @@ fn catalog_handles_match_json_grouped_handles() {
                 .expect("catalogue `name` must be a string");
             (handle.to_owned(), format!("Relation<{name}>"))
         })
-        .filter(|(handle, _)| handle.starts_with("sys.catalog."))
+        .filter(|(handle, _)| {
+            NAMESPACE_FILES
+                .iter()
+                .any(|(module, _)| handle.starts_with(&format!("sys.{module}.")))
+        })
         .collect();
-    let parsed = parse_interface(CATALOG_ORNA);
-    let declared = declared_names(&parsed.value.items);
+    let declared = declared_names(&parse_interface(SYS_ORNA).value.items);
     let mut actual = BTreeMap::new();
-    for item in &parsed.value.items {
-        let Declaration::NativeStatic {
-            name,
-            annotation: Some(annotation),
-            ..
-        } = &item.declaration
-        else {
-            continue;
-        };
-        actual.insert(
-            format!("sys.catalog.{name}"),
-            render_type(annotation, &declared),
+    for (module, text) in NAMESPACE_FILES {
+        let parsed = parse_interface(text);
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "sys/{module}.orna must parse without diagnostics: {:?}",
+            parsed.diagnostics
         );
+        for item in &parsed.value.items {
+            let Declaration::NativeStatic {
+                name,
+                annotation: Some(annotation),
+                ..
+            } = &item.declaration
+            else {
+                continue;
+            };
+            actual.insert(
+                format!("sys.{module}.{name}"),
+                render_type(annotation, &declared),
+            );
+        }
     }
     assert_eq!(
         actual, expected,
-        "the handles in sys/catalog.orna must match the catalogue's grouped_handle fields"
+        "the handles in the sys namespace modules must match the catalogue's grouped_handle fields"
     );
 }
