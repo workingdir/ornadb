@@ -4,7 +4,8 @@
 **Status:** design for orchestrator review. No production code changes in this PR.
 **Superseded in part (2026-11-11):** S1 and S3 are superseded by [sys-as-native.md](sys-as-native.md) and
 [ADR 0123](../decisions/0123-sys-as-native-declarations.md), and so are sections 4.3 and 4.5. S0, S2 and S4 to S9
-stand. S0 changes its input at SN3, and S2 stands until SN7. S10 stands, scoped to the identity crate and its key enum.
+stand. S0 changes its input from the JSON catalogues to the declarations at SN2, and S2 stands until SN7. S10 stands,
+scoped to the identity crate and its key enum.
 **Authority:** `reference/Orna-1.1.0` (`api/sys.json`, `source/15-system.md`,
 `source/34-system-reference.md`, `source/33-diagnostics.md`, `profiles/coordinates.json`).
 **Scope:** the identity of `sys` functions, `sys` failure codes, `sys` relations and

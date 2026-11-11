@@ -68,7 +68,7 @@ closed boundaries; later ADRs supersede only the named deferred portion.
 | 0118 | Format-3 schema expression digests hash tokens with free references replaced by their resolved declarations, under `ornadb.computed-selector.v2` and `ornadb.refinement-assertion.v2`. | Postfix unit and currency suffixes and member names keep their spelling. |
 | 0120 | OrnaDB 1.0 CLIENT VM trust boundary (renumbered from duplicate 0101) | Host-side remote source evaluation remains normative; production CLIENT bytecode VM, artifact trust, and CLIENT sandbox contracts are deferred. |
 | 0121 | UPGRADE-3 decisions: runtime owner of activation, layering of legacy row decode and store build, and the annotation-default coordinate (operator count today; decoded-count assertion deferred to `ornadb-i6ma`). No runtime behaviour changes in this ADR. | Legacy row decode, store bootstrap, annotation-default decoding, activation, and the `orna upgrade --to-format 3` surface remain deferred; the format-2 compact reader stays out of scope until a format-2 record shape is specified. |
-| 0123 | The `sys` surface is declared in Orna: `sys.orna` hand-written, JSON as exporter output only (D19). Supersedes ADR 0111 and ADR 0112 in part. | Staging SN1 to SN8 in `docs/design/sys-as-native.md`; the ADR 0111 provider protocol and phases 2 to 6 stand. |
+| 0123 | The `sys` surface is declared in Orna, and no API definition is JSON (D19). `sys.orna` and `core/*.orna` are hand-written and the JSON catalogues are deleted. Supersedes ADR 0111 and ADR 0112 in part. | Staging SN1 to SN8 in `docs/design/sys-as-native.md`; the ADR 0111 provider protocol and phases 2 to 6 stand. |
 
 ## Current work ADRs
 

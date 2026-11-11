@@ -3,7 +3,8 @@
 **Status:** Accepted (design and phased implementation plan)
 
 **Superseded in part by [ADR 0123](0123-sys-as-native-declarations.md) (2026-11-11):** the authored inventory is no
-longer a method-attribute registry (the Decision paragraph and "Registry and baked-module boundary"). The provider
+longer a method-attribute registry (the Decision paragraph and "Registry and baked-module boundary"), and the registry
+no longer emits `api/sys.json` (item 3 of the Decision, and phases 0 and 1). No API definition is JSON. The provider
 protocol, the role contract and phases 2 to 6 stand.
 
 **Issue:** `ornadb-c66c2` ([GitHub #5386](https://github.com/workingdir/ornadb/issues/5386))
