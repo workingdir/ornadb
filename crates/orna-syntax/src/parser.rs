@@ -2786,8 +2786,7 @@ impl Parser {
             ItemKind::Use => self.use_declaration(),
             ItemKind::Function => self.function_declaration(start),
             ItemKind::Native => {
-                // `at_native_declaration` proved the keyword after `native`.
-                self.bump();
+                // The outer `bump` consumed `native`; the form keyword is read here and consumed by its arm.
                 let form = self.keyword();
                 if matches!(form, Some(Keyword::Type | Keyword::Static)) && !self.interface {
                     self.error_here(
@@ -2806,7 +2805,10 @@ impl Parser {
                         self.bump();
                         self.native_static_declaration(start)
                     }
-                    _ => self.native_declaration(start),
+                    _ => {
+                        self.bump();
+                        self.native_declaration(start)
+                    }
                 }
             }
             ItemKind::Table | ItemKind::Protocol => self.table_or_protocol_declaration(kind),
