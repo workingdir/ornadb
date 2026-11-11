@@ -15,6 +15,7 @@ members = [
     "crates/orna-lsp",
     "crates/orna-live",
     "crates/orna-link",
+    "crates/orna-native-loader",
     "crates/orna-protocol",
     "crates/orna-project",
     "crates/orna-project-repl",

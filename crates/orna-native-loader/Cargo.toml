@@ -1,0 +1,25 @@
+[package]
+name = "orna-native-loader"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.95"
+license.workspace = true
+description = "Loads Orna native libraries whose bytes match their pinned digest: private staging, ABI and symbol checks (Orna 1.1.0)"
+
+# Layer 2 (docs/design/layers.toml): depends on no workspace crate. The link plan
+# (orna-link, layer 4) passes the digest and the expected ABI in, so this crate
+# never reads a manifest or names a link type. It is the only crate that loads
+# shared libraries, and it is called by no analysis tool or language server.
+
+[dependencies]
+libloading = "0.8.9"
+sha2 = "0.10.9"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2.189"
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+tempfile = "3.27.0"
+
+[dev-dependencies]
+tempfile = "3.27.0"
