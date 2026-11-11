@@ -24,12 +24,21 @@ pub(in crate::natives) fn variance(
     let [rows, scale, rounding] = exactly(arguments)?;
     let rows = list(rows)?;
     let scale = options(&machine.limits, &[scale, rounding])?;
+    variance_of(machine, &rows, scale)
+}
+
+/// The population variance of already-parsed rows and scale, shared with `standard_deviation`.
+pub(super) fn variance_of(
+    machine: &mut Machine<'_>,
+    rows: &[Value],
+    scale: Option<usize>,
+) -> Result<Value, Stop> {
     collection_items(machine, rows.len())?;
     let Some(first) = rows.first() else {
         return Ok(Value::Null);
     };
     if rows.iter().all(|value| matches!(value, Value::Float(_))) {
-        return float_variance(machine, &rows);
+        return float_variance(machine, rows);
     }
     if !matches!(first, Value::Int(_) | Value::Decimal(_))
         || !rows
@@ -39,7 +48,7 @@ pub(in crate::natives) fn variance(
         return Err(Stop::Error("ORNA-EVAL-TYPE"));
     }
     let preserve_decimal = rows.iter().any(|value| matches!(value, Value::Decimal(_)));
-    exact_variance(machine, &rows, scale, preserve_decimal)
+    exact_variance(machine, rows, scale, preserve_decimal)
 }
 
 /// The float variance: the mean in one pass, then the mean squared deviation in a second. Each pass is one step per row.
