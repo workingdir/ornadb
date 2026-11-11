@@ -33,6 +33,7 @@ const FILES: [(&str, &str); 17] = [
         include_str!("../interface/core/temperature.orna"),
     ),
     ("core.units", include_str!("../interface/core/units.orna")),
+    (
         "core.display",
         include_str!("../interface/core/display.orna"),
     ),
