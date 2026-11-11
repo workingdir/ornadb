@@ -7,11 +7,13 @@
 use std::cmp::Ordering;
 
 use crate::error::Stop;
+use crate::machine::ExecLimits;
 use crate::machine::Machine;
 use crate::natives::order::extreme;
 use crate::natives::values::{exactly, list, list_of};
-use crate::ops::checked;
+use crate::ops::binary;
 use crate::value::Value;
+use orna_hir::BinOp;
 
 /// `min<T>(rows: [T]): T?`. `null` for no rows; otherwise the option of the smallest row. One step per row.
 pub(in crate::natives) fn min(
@@ -46,12 +48,7 @@ pub(in crate::natives) fn range(
     let (Some(low), Some(high)) = (present(low), present(high)) else {
         return Ok(Value::Null);
     };
-    match (low, high) {
-        (Value::Int(low), Value::Int(high)) => {
-            Ok(Value::Int(checked(high - low, &machine.limits)?))
-        }
-        _ => Err(Stop::Error("ORNA-EVAL-TYPE")),
-    }
+    binary(BinOp::Sub, high, low, &machine.limits)
 }
 
 /// `mode<T>(rows: [T]): [T]`. The rows that occur most often, in the order each first occurs. One step per row; an
@@ -65,7 +62,11 @@ pub(in crate::natives) fn mode(
     let mut counts: Vec<(Value, usize)> = Vec::new();
     for value in rows.iter() {
         machine.tick(1)?;
-        if let Some((_, count)) = counts.iter_mut().find(|(current, _)| current == value) {
+        let limits = &machine.limits;
+        if let Some((_, count)) = counts
+            .iter_mut()
+            .find(|(current, _)| equal(limits, current, value))
+        {
             *count = count.checked_add(1).ok_or(Stop::Error("ORNA-EVAL-LIMIT"))?;
         } else {
             counts.push((value.clone(), 1));
@@ -79,6 +80,14 @@ pub(in crate::natives) fn mode(
             .map(|(value, _)| value)
             .collect(),
     ))
+}
+
+/// The old `==` on two rows: a comparison that errors (closures, mismatched shapes) counts as not equal.
+fn equal(limits: &ExecLimits, lhs: &Value, rhs: &Value) -> bool {
+    matches!(
+        binary(BinOp::Eq, lhs.clone(), rhs.clone(), limits),
+        Ok(Value::Bool(true))
+    )
 }
 
 /// The stats extreme: `null` for no rows, otherwise the collection extreme (an option).
