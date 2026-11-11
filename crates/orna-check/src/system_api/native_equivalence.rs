@@ -556,9 +556,9 @@ fn key_and_availability_clauses_match_json_catalogue() {
     );
 }
 
-/// The relation handles in `sys/catalog.orna` against the catalogue's `grouped_handle` fields: each `sys.catalog.<name>`
-/// must be a native static of type `Relation<T>`, where `T` is the catalogue relation's `name` without its `sys.`
-/// prefix. Both sides must name the same 32 handles.
+/// The relation handles in `sys/catalog.orna` against the catalogue's `grouped_handle` fields: each
+/// `sys.catalog.<name>` must be a native static of type `Relation<T>`, where `T` is the catalogue relation's
+/// `name`. Both sides must name the same 32 handles.
 #[test]
 fn catalog_handles_match_json_grouped_handles() {
     let catalogue: serde_json::Value =
@@ -574,8 +574,7 @@ fn catalog_handles_match_json_grouped_handles() {
             let name = relation["name"]
                 .as_str()
                 .expect("catalogue `name` must be a string");
-            let row = name.strip_prefix("sys.").unwrap_or(name);
-            (handle.to_owned(), format!("Relation<{row}>"))
+            (handle.to_owned(), format!("Relation<{name}>"))
         })
         .filter(|(handle, _)| handle.starts_with("sys.catalog."))
         .collect();
