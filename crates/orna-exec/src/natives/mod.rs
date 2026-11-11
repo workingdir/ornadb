@@ -3,8 +3,14 @@
 //! Each family is one module, copied from the old evaluator's family of the same name. The old `Value` is private to
 //! the old evaluator, so these functions work on [`crate::value::Value`] and share no code with it.
 
+mod base64;
 mod bits;
 mod hash;
+#[cfg(test)]
+mod registry_test;
+mod text;
+mod unicode_16_case_properties;
+mod unicode_case;
 
 use orna_hir::{DefId, NativeKey};
 
@@ -20,6 +26,8 @@ pub(crate) type NativeFn = fn(&mut Machine<'_>, Vec<Value>) -> Result<Value, Sto
 pub(crate) fn lookup(key: &NativeKey) -> Option<NativeFn> {
     let module = key.module.to_string();
     Some(match (module.as_str(), key.name.as_str()) {
+        ("core.encoding.base64", "encode") => base64::encode,
+        ("core.encoding.base64", "decode") => base64::decode,
         ("core.bits", "bit_or") => bits::bit_or,
         ("core.bits", "bit_and") => bits::bit_and,
         ("core.bits", "bit_xor") => bits::bit_xor,
@@ -31,6 +39,16 @@ pub(crate) fn lookup(key: &NativeKey) -> Option<NativeFn> {
         ("core.hash", "domain_sha256") => hash::domain_sha256,
         ("core.hash", "to_hex") => hash::to_hex,
         ("core.hash", "from_hex") => hash::from_hex,
+        ("core.text", "trim") => text::trim,
+        ("core.text", "split") => text::split,
+        ("core.text", "join") => text::join,
+        ("core.text", "starts_with") => text::starts_with,
+        ("core.text", "ends_with") => text::ends_with,
+        ("core.text", "contains") => text::contains,
+        ("core.text", "replace") => text::replace,
+        ("core.text", "normalise") => text::normalise,
+        ("core.text", "lower") => text::lower,
+        ("core.text", "upper") => text::upper,
         _ => return None,
     })
 }

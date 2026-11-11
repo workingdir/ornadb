@@ -13,6 +13,8 @@ description = "Executor over the typed HIR for the Orna 1.1.0 language (stage H4
 num-integer = "0.1.47"
 num-traits = "0.2.19"
 sha2 = "0.10.9"
+unicode-case-mapping = "=1.0.0"
+unicode-normalization = "=0.1.24"
 num-bigint = "0.4.6"
 orna-hir = { path = "../orna-hir" }
 orna-value = { path = "../orna-value" }
