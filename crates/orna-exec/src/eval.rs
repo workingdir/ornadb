@@ -94,11 +94,21 @@ impl<'p> Machine<'p> {
                 exponent,
             } => Decimal::new(coefficient.clone(), exponent.clone()).map(Value::Decimal),
             Lit::Float(bits) => Ok(crate::float::canonical(f64::from_bits(*bits))),
-            Lit::None
-            | Lit::Date(_)
-            | Lit::Instant { .. }
-            | Lit::Period(_)
-            | Lit::Duration { .. } => Err(Stop::NotYet("literal kind (H4)")),
+            Lit::Instant {
+                seconds,
+                nanoseconds,
+            } => Ok(Value::Instant {
+                unix_seconds: *seconds,
+                nanosecond: *nanoseconds,
+            }),
+            Lit::Duration {
+                seconds,
+                nanoseconds,
+            } => Ok(Value::Duration {
+                seconds: ops::checked(seconds.clone(), &self.limits)?,
+                nanosecond: *nanoseconds,
+            }),
+            Lit::None | Lit::Date(_) | Lit::Period(_) => Err(Stop::NotYet("literal kind (H4)")),
         }
     }
 

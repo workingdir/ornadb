@@ -17,6 +17,7 @@ mod link;
 mod machine;
 mod natives;
 mod ops;
+mod time;
 mod value;
 mod variants;
 

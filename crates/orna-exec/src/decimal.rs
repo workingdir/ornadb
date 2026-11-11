@@ -18,7 +18,7 @@ use crate::value::Value;
 
 /// The largest exponent magnitude, and so the largest scale a decimal operation may align or create. This is the old
 /// evaluator's `DEFAULT_INTEGER_DIGITS`.
-const MAX_EXPONENT: usize = 1_024;
+pub(crate) const MAX_EXPONENT: usize = 1_024;
 
 /// An exact decimal: `coefficient * 10^exponent10`, normalised.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -57,6 +57,16 @@ impl Decimal {
             coefficient,
             exponent10,
         })
+    }
+
+    /// The normalised coefficient.
+    pub(crate) fn coefficient(&self) -> &BigInt {
+        &self.coefficient
+    }
+
+    /// The normalised power of ten.
+    pub(crate) fn exponent10(&self) -> &BigInt {
+        &self.exponent10
     }
 
     /// The canonical raw form: a decimal tag over `[coefficient, exponent]`.

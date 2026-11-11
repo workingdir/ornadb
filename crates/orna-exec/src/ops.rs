@@ -15,6 +15,7 @@ use crate::decimal;
 use crate::error::Stop;
 use crate::float;
 use crate::machine::ExecLimits;
+use crate::time;
 use crate::value::Value;
 
 pub(crate) fn unary(op: UnOp, operand: Value) -> Result<Value, Stop> {
@@ -35,6 +36,9 @@ pub(crate) fn binary(
 ) -> Result<Value, Stop> {
     if matches!(op, BinOp::Eq | BinOp::Ne) && (contains_closure(&lhs) || contains_closure(&rhs)) {
         return Err(Stop::Error("ORNA-EVAL-UNSUPPORTED"));
+    }
+    if time::is_temporal(&lhs) || time::is_temporal(&rhs) {
+        return time::binary(op, lhs, rhs, limits);
     }
     match (lhs, rhs) {
         (Value::Int(lhs), Value::Int(rhs)) => int_binary(op, &lhs, &rhs, limits),
@@ -112,7 +116,7 @@ fn integer_power(mut base: BigInt, exponent: &BigInt, limits: &ExecLimits) -> Re
 }
 
 /// Checks one integer result against the digit quota.
-fn checked(value: BigInt, limits: &ExecLimits) -> Result<BigInt, Stop> {
+pub(crate) fn checked(value: BigInt, limits: &ExecLimits) -> Result<BigInt, Stop> {
     if value.magnitude().to_str_radix(10).len() > limits.max_integer_digits {
         Err(Stop::Error("ORNA-EVAL-LIMIT"))
     } else {
