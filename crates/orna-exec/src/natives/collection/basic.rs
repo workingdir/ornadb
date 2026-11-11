@@ -51,7 +51,7 @@ pub(in crate::natives) fn sum(machine: &mut Machine<'_>, arguments: Vec<Value>) 
 pub(in crate::natives) fn first(_machine: &mut Machine<'_>, arguments: Vec<Value>) -> Result<Value, Stop> {
     let [rows] = exactly(arguments)?;
     let rows = list(rows)?;
-    Ok(rows.first().cloned().map_or_else(none, some))
+    Ok(rows.first().cloned().map_or(Value::Null, some))
 }
 
 /// `last<T>(rows: [T]): T?`. No step.

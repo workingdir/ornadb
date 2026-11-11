@@ -28,6 +28,9 @@ pub enum Value {
     Blob(Rc<[u8]>),
     /// An optional value: `None`, or `Some` of the value it holds.
     Option(Option<Rc<Value>>),
+    /// The absent value of a flat option (D3): `null`, whose canonical raw form is `Raw::Null`. The old evaluator
+    /// returns it for an absent `first` and for an absent `asof_join` row.
+    Null,
     /// A tuple. The empty tuple is distinct from [`Value::Unit`] so that a
     /// tuple pattern matches only a tuple, as in the old pipeline.
     Tuple(Rc<[Value]>),
@@ -87,6 +90,7 @@ impl Value {
             Self::Text(value) => Ok(Raw::Text(value.clone())),
             Self::Blob(bytes) => Ok(Raw::Bytes(bytes.to_vec())),
             Self::Option(value) => option_raw(value.as_deref()),
+            Self::Null => Ok(Raw::Null),
             Self::Tuple(values) if values.is_empty() => Ok(unit_raw()),
             Self::Tuple(values) => Ok(Raw::Tag(TUPLE_TAG, Box::new(array(values)?))),
             Self::List(values) => array(values),

@@ -5,7 +5,7 @@ use std::cmp::Ordering;
 use crate::error::Stop;
 use crate::machine::Machine;
 use crate::natives::order::{check_asof_time, check_group_key, compare_group_keys, compare_sort_keys};
-use crate::natives::values::{canonical_bytes, exactly, list, list_of, none, pair, some};
+use crate::natives::values::{canonical_bytes, exactly, list, list_of, pair, some};
 use crate::value::Value;
 
 /// `group_by<T, K>(values: [T], key: fn(T): K): [(K, [T])]`. One step per row keyed, and each key must be a lawful group
@@ -93,7 +93,7 @@ pub(in crate::natives) fn asof_join(machine: &mut Machine<'_>, arguments: Vec<Va
                 selected = Some(index);
             }
         }
-        let matched = selected.map_or_else(none, |index| some(right[index].clone()));
+        let matched = selected.map_or(Value::Null, |index| some(right[index].clone()));
         joined.push(pair(left_row.clone(), matched));
     }
     Ok(list_of(joined))
