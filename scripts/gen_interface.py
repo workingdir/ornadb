@@ -219,9 +219,14 @@ def main(argv):
     if "--check" in argv:
         current = OUTPUT.read_text(encoding="utf-8") if OUTPUT.exists() else ""
         if current != text:
-            print(f"gen_interface: {OUTPUT.relative_to(ROOT)} is stale; run scripts/gen_interface.py", file=sys.stderr)
+            print(
+                f"gen_interface: {OUTPUT.relative_to(ROOT)} differs from the generator (D19: hand-maintained)",
+                file=sys.stderr,
+            )
             return 1
         return 0
+    if "--bootstrap" not in argv:
+        fail("sys.orna is hand-maintained (D19); bootstrap only with --bootstrap")
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     OUTPUT.write_text(text, encoding="utf-8")
     return 0
