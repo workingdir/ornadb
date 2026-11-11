@@ -50,8 +50,7 @@ pub enum SigType {
 impl SigType {
     /// Renders the type in the catalogue's compact, deterministic notation.
     ///
-    /// This notation is the `std_intrinsics.json` wire form. It is deliberately
-    /// close to Orna source notation but keeps type parameters explicit as
+    /// The notation is deliberately close to Orna source notation but keeps type parameters explicit as
     /// `Param(n)` so two signatures cannot compare equal by accident.
     pub fn render(&self) -> String {
         match self {
