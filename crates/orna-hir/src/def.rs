@@ -5,7 +5,7 @@
 //! it: [`FnBody::Source`] points at an Orna body, [`FnBody::Native`] records
 //! how the link step binds it: the engine registry or a shared library.
 
-use orna_syntax::SyntaxSpan as SourceSpan;
+use orna_syntax::{InterfaceClauses, SyntaxSpan as SourceSpan};
 
 use crate::{BodyId, DefId, ModuleId, ModulePath, Name, PatId, Ty};
 
@@ -29,6 +29,10 @@ pub struct Def {
     pub vis: Visibility,
     /// Where it was written.
     pub span: SourceSpan,
+    /// The `///` doc comment lines written directly above it, without the marker.
+    pub docs: Vec<String>,
+    /// Its interface clauses (`since`, `removed`, `fails`, ...). Empty outside the engine's interface.
+    pub clauses: InterfaceClauses,
     /// What it declares.
     pub kind: DefKind,
 }

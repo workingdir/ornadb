@@ -951,6 +951,8 @@ mod tests {
             name: Name::new("run"),
             vis: Visibility::Public,
             span: span(0),
+            docs: Vec::new(),
+            clauses: orna_syntax::InterfaceClauses::default(),
             kind: DefKind::Fn(FnDef {
                 generics: Vec::new(),
                 params: Vec::new(),

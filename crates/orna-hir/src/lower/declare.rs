@@ -12,9 +12,9 @@
 use std::collections::BTreeMap;
 
 use orna_syntax::{
-    Declaration, EnumVariant, Expr, FunctionSignature, GenericParameter, Implementation, Item,
-    NativeEffectSet, Parameter, Pattern, ProtocolMember, SyntaxSpan, TableMember, TypeExpr,
-    TypeRepresentation, UnitDefinition, UseTail,
+    Declaration, EnumVariant, Expr, FunctionSignature, GenericParameter, Implementation,
+    InterfaceClauses, Item, NativeEffectSet, Parameter, Pattern, ProtocolMember, SyntaxSpan,
+    TableMember, TypeExpr, TypeRepresentation, UnitDefinition, UseTail,
 };
 
 use crate::Idx;
@@ -51,6 +51,10 @@ pub(crate) struct PendingDef {
     pub(crate) vis: Visibility,
     /// Where it was written.
     pub(crate) span: SyntaxSpan,
+    /// The `///` doc comment lines above the declaration.
+    pub(crate) docs: Vec<String>,
+    /// The interface clauses of the declaration.
+    pub(crate) clauses: InterfaceClauses,
     /// What it declares.
     pub(crate) kind: PendingKind,
 }
@@ -326,6 +330,8 @@ impl<'a> Builder<'a> {
         let vis = visibility(&item.visibility);
         let decl = DeclAst::of(&item.declaration);
         let def = self.declare_top_level(module, name, vis, item.span.clone(), decl);
+        self.pending[def.index()].docs = item.docs.clone();
+        self.pending[def.index()].clauses = item.clauses.clone();
         if vis == Visibility::Public {
             let exported = self.pending[def.index()].name.clone();
             let inserted = self.program.modules[module]
@@ -406,6 +412,8 @@ impl<'a> Builder<'a> {
             name,
             vis,
             span: span.clone(),
+            docs: Vec::new(),
+            clauses: InterfaceClauses::default(),
             kind,
         });
         self.program.modules[module].items.push(def);
@@ -598,6 +606,8 @@ impl<'a> Builder<'a> {
                 name: item.name,
                 vis: item.vis,
                 span: item.span,
+                docs: item.docs,
+                clauses: item.clauses,
                 kind,
             });
         }
