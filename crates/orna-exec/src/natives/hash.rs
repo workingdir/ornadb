@@ -60,7 +60,7 @@ pub(super) fn domain_sha256(
     hasher.update(domain.as_bytes());
     hasher.update([0]);
     hasher.update(&payload[..]);
-    Ok(Value::Blob(Rc::from(hasher.finalize().as_slice())))
+    Ok(Value::Digest(hasher.finalize().into()))
 }
 
 /// `to_hex(Digest): Str`: the 32 bytes as 64 lowercase hexadecimal digits.
@@ -70,10 +70,9 @@ pub(super) fn to_hex(
     arguments: Vec<Value>,
 ) -> Result<Value, Stop> {
     machine.tick(1)?;
-    let digest = blob(one(arguments)?)?;
-    if digest.len() != 32 {
+    let Value::Digest(digest) = one(arguments)? else {
         return Err(Stop::Error("ORNA-EVAL-TYPE"));
-    }
+    };
     let mut output = String::with_capacity(64);
     for &byte in digest.iter() {
         output.push(char::from(HEX_DIGITS[usize::from(byte >> 4)]));
@@ -97,15 +96,17 @@ pub(super) fn from_hex(
         && encoded
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
-    let decoded = valid.then(|| Rc::new(Value::Blob(decode(encoded.as_bytes()))));
+    let decoded = valid.then(|| Rc::new(Value::Digest(decode(encoded.as_bytes()))));
     Ok(Value::Option(decoded))
 }
 
 /// The bytes of validated lowercase hexadecimal text, two digits to a byte.
-fn decode(hex: &[u8]) -> Rc<[u8]> {
-    hex.chunks_exact(2)
-        .map(|pair| (nibble(pair[0]) << 4) | nibble(pair[1]))
-        .collect()
+fn decode(hex: &[u8]) -> [u8; 32] {
+    let mut bytes = [0; 32];
+    for (slot, pair) in bytes.iter_mut().zip(hex.chunks_exact(2)) {
+        *slot = (nibble(pair[0]) << 4) | nibble(pair[1]);
+    }
+    bytes
 }
 
 fn nibble(digit: u8) -> u8 {
@@ -117,7 +118,7 @@ fn nibble(digit: u8) -> u8 {
 }
 
 fn digest(input: &[u8]) -> Value {
-    Value::Blob(Rc::from(Sha256::digest(input).as_slice()))
+    Value::Digest(Sha256::digest(input).into())
 }
 
 /// The one argument of a unary native, or a type error for any other arity.

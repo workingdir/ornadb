@@ -16,8 +16,6 @@ const LIMITS: ExecLimits = ExecLimits {
 };
 
 const HELLO_DIGEST: &str = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
-const HASH_OF_HELLO_DIGEST: &str =
-    "9595c9df90075148eb06860365df33584b75bff782a510c6cd4883a419833d50";
 const HEAD: &str = "use core.hash;\n";
 
 fn lower_one(source: &str) -> Program {
@@ -92,9 +90,10 @@ fn sha256_text_and_to_hex_produce_the_known_digest() {
 fn sha256_of_a_blob_hashes_its_bytes() {
     assert_eq!(
         run(&format!(
-            "{HEAD}pub fn run(): Str = hash.to_hex(hash.sha256(hash.sha256_text(\"hello\")));\n"
+            "{HEAD}use core.encoding.base64;\n\
+             pub fn run(): Str = hash.to_hex(hash.sha256(base64.decode(\"aGVsbG8=\")));\n"
         )),
-        Ok(text(HASH_OF_HELLO_DIGEST))
+        Ok(text(HELLO_DIGEST))
     );
 }
 
@@ -104,9 +103,9 @@ fn from_hex_accepts_exactly_lowercase_digests() {
         run(&format!(
             "{HEAD}pub fn run(): Digest? = hash.from_hex(\"{HELLO_DIGEST}\");\n"
         )),
-        Ok(Value::Option(Some(Rc::new(Value::Blob(Rc::from(
-            decode(HELLO_DIGEST).as_slice()
-        ))))))
+        Ok(Value::Option(Some(Rc::new(Value::Digest(
+            decode(HELLO_DIGEST).try_into().expect("32 bytes")
+        )))))
     );
     let uppercase = HELLO_DIGEST.to_uppercase();
     assert_eq!(

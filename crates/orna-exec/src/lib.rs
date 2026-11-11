@@ -8,6 +8,9 @@
 //! guessed at, so the harness can count what has been executed.
 
 mod binders;
+mod calendar;
+#[cfg(test)]
+mod canonical_tests;
 mod decimal;
 mod dispatch;
 mod engine_display;

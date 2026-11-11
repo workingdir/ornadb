@@ -11,8 +11,12 @@ use std::rc::Rc;
 
 use num_bigint::BigInt;
 use orna_hir::{BodyId, Name, Ty};
-use orna_value::{CanonicalValue, DURATION_TAG, INSTANT_TAG, OPTION_TAG, Raw, TUPLE_TAG, UNIT_TAG};
+use orna_value::{
+    CanonicalValue, DIGEST_TAG, DURATION_TAG, INSTANT_TAG, MONEY_TAG, OPTION_TAG, Raw, TUPLE_TAG,
+    UNIT_TAG, UUID_TAG,
+};
 
+use crate::calendar;
 use crate::decimal::Decimal;
 
 /// One runtime value.
@@ -46,6 +50,21 @@ pub enum Value {
     Text(String),
     /// A byte string: the blob a digest or a hash input is.
     Blob(Rc<[u8]>),
+    /// A calendar date, as days since 1970-01-01.
+    Date(i64),
+    /// A calendar period of whole days, kept distinct from an elapsed duration.
+    Period(BigInt),
+    /// A UUID: its 16 bytes.
+    Uuid([u8; 16]),
+    /// A nominal `Digest`: the 32 bytes of a SHA-256 commitment.
+    Digest([u8; 32]),
+    /// An exact monetary amount, its currency named by the 16-byte object id of the currency type.
+    Money {
+        /// The exact amount.
+        amount: Decimal,
+        /// The currency's object id.
+        currency: [u8; 16],
+    },
     /// An optional value: `None`, or `Some` of the value it holds.
     Option(Option<Rc<Value>>),
     /// The absent value of a flat option (D3): `null`, whose canonical raw form is `Raw::Null`. The old evaluator
@@ -133,6 +152,23 @@ impl Value {
             )),
             Self::Text(value) => Ok(Raw::Text(value.clone())),
             Self::Blob(bytes) => Ok(Raw::Bytes(bytes.to_vec())),
+            Self::Date(days) => calendar::date_raw(*days).map_err(|_| "ORNA-EVAL-VALUE"),
+            Self::Period(_) => Err("ORNA-EVAL-UNSUPPORTED"),
+            Self::Uuid(bytes) => Ok(Raw::Tag(UUID_TAG, Box::new(Raw::Bytes(bytes.to_vec())))),
+            Self::Digest(bytes) => Ok(Raw::Tag(
+                DIGEST_TAG,
+                Box::new(Raw::Array(vec![
+                    Raw::Text("sha256".to_owned()),
+                    Raw::Bytes(bytes.to_vec()),
+                ])),
+            )),
+            Self::Money { amount, currency } => Ok(Raw::Tag(
+                MONEY_TAG,
+                Box::new(Raw::Array(vec![
+                    amount.to_raw(),
+                    Raw::Tag(UUID_TAG, Box::new(Raw::Bytes(currency.to_vec()))),
+                ])),
+            )),
             Self::Option(value) => option_raw(value.as_deref()),
             Self::Null => Ok(Raw::Null),
             Self::Tuple(values) if values.is_empty() => Ok(unit_raw()),
