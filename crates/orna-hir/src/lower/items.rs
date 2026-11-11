@@ -1014,6 +1014,12 @@ impl Builder<'_> {
                 .intern(crate::TyKind::Adt(owner, Box::new([])));
             let span = orna_syntax::SyntaxSpan::new(0, 0);
             let slot = state.add_local(crate::Name::new("self"), ty, span);
+            if matches!(
+                self.pending[def.index()].kind,
+                super::declare::PendingKind::Built(crate::DefKind::Field(_))
+            ) {
+                state.row = Some(super::row::RowScope { slot, table: owner });
+            }
             state.params.push(slot);
         }
         let root = lower_expr(self, &mut state, expr);

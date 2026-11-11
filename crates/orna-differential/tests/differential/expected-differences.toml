@@ -124,6 +124,14 @@ reason = "the name is a `sys` or engine-native `std` surface member; `core.orna`
 bead = "ornadb-csenl.20"
 
 [[difference]]
+case = "invalid/computed-field-effect.orna"
+field = "resolution-unresolved"
+first = "get:0"
+second = "get:1"
+reason = "the name is a `sys` or engine-native `std` surface member; `core.orna` and `sys.orna` declare those surfaces in stage H5 (D12), until then HIR has no declaration to resolve it to. The computed field body is lowered by stage H6 slice B1, so the same call the assertion fixture already reports is now reported from a field initializer too"
+bead = "ornadb-csenl.20"
+
+[[difference]]
 case = "invalid/calendar-bucket-no-zone.orna"
 field = "resolution-unresolved"
 first = "energy:0"
@@ -1059,7 +1067,7 @@ bead = "ornadb-csenl.16"
 
 [[environment]]
 category = "harness-environment-names"
-count = 12
+count = 13
 reason = "harness bindings: the expression fixtures (fallback, left, middle, missing) and the example cases use names the harness supplies (log, process, read, rows, get, valid_email) or that the corpus mentions without declaring (EmailHeader, in From<EmailHeader>). The case declares none of them, so each use is an environment blocker that the harness fidelity work closes"
 bead = "ornadb-csenl.15"
 
