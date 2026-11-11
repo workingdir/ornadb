@@ -10,10 +10,12 @@ mod collection;
 mod hash;
 mod json;
 mod order;
+mod orna;
 #[cfg(test)]
 mod registry_test;
 #[cfg(test)]
 mod registry_tests;
+mod schema;
 mod stats;
 mod text;
 mod time;
@@ -39,6 +41,7 @@ pub(crate) fn lookup(key: &NativeKey) -> Option<NativeFn> {
         ("core.encoding.base64", "encode") => base64::encode,
         ("core.encoding.base64", "decode") => base64::decode,
         ("core.encoding.json", "encode") => json::encode,
+        ("core.encoding.orna", "encode") => orna::encode,
         ("core.encoding.json", "decode") => json::decode,
         ("core.encoding.json", "decode_with_options") => json::decode_with_options,
         ("core.bits", "bit_or") => bits::bit_or,

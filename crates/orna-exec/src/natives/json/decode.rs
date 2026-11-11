@@ -3,14 +3,14 @@
 
 use std::rc::Rc;
 
-use orna_hir::{BodyId, DefKind, Ty, TyKind};
+use orna_hir::{DefKind, Ty, TyKind};
 
 use super::number;
 use super::parse::{Node, invalid};
-use super::scope::{Field, Scope, concrete_env, record_fields, resolve};
 use crate::error::Stop;
 use crate::float;
 use crate::machine::Machine;
+use crate::natives::schema::{Field, Scope, default_value, record_fields, resolve};
 use crate::value::Value;
 
 /// How the decoder treats an object key the record does not declare.
@@ -164,15 +164,4 @@ fn record<'a>(
     }
     values.sort_by(|left, right| left.0.as_str().cmp(right.0.as_str()));
     Ok(Value::Record(Rc::from(values)))
-}
-
-/// Runs a field's default initializer in the record's concrete type environment.
-fn default_value(
-    machine: &mut Machine<'_>,
-    body: BodyId,
-    args: &[Ty],
-    scope: Option<&Scope<'_>>,
-) -> Result<Value, Stop> {
-    let env = concrete_env(machine.program, args, scope)?;
-    machine.invoke(body, Vec::new(), &[], env)
 }

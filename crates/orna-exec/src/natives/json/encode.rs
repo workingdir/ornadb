@@ -5,9 +5,9 @@
 use orna_hir::{DefKind, Name, Ty, TyKind};
 
 use super::number;
-use super::scope::{Field, Scope, record_fields, resolve};
 use crate::error::Stop;
 use crate::machine::Machine;
+use crate::natives::schema::{Field, Scope, record_fields, resolve};
 use crate::value::Value;
 
 /// Appends the JSON form of `value`, written as type `ty` in `scope`, to `out`.

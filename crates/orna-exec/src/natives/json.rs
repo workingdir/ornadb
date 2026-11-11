@@ -5,7 +5,6 @@ mod decode;
 mod encode;
 mod number;
 mod parse;
-mod scope;
 #[cfg(test)]
 mod tests;
 

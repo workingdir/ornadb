@@ -1,6 +1,6 @@
-//! Resolves the types a JSON codec walks. A generic record's field types name its parameters, and a parameter stands for
-//! an argument of the record type that holds the field. A scope keeps those arguments by reference, so no type is
-//! interned while a value is walked.
+//! Resolves the types a schema-directed codec walks: the JSON and Orna text codecs share it. A generic record's field
+//! types name its parameters, and a parameter stands for an argument of the record type that holds the field. A scope
+//! keeps those arguments by reference, so no type is interned while a value is walked.
 
 use std::rc::Rc;
 
@@ -8,6 +8,8 @@ use orna_hir::{BodyId, DefId, DefKind, Name, Program, Ty, TyKind};
 
 use crate::error::Stop;
 use crate::frame::TypeEnv;
+use crate::machine::Machine;
+use crate::value::Value;
 
 /// The type arguments of one generic record and the scope those arguments were written in.
 pub(super) struct Scope<'a> {
@@ -44,7 +46,7 @@ pub(super) fn resolve<'a>(
 }
 
 /// The fields of a nominal record, in declaration order. A computed field is derived from the row and never stored, so
-/// it is not part of the record's JSON form. Any other kind of definition is not a record.
+/// it is not part of the record's text form. Any other kind of definition is not a record.
 pub(super) fn record_fields(program: &Program, def: DefId) -> Result<Vec<Field<'_>>, Stop> {
     let DefKind::Type(type_def) = &program.defs[def].kind else {
         return Err(Stop::Error("ORNA-EVAL-UNSUPPORTED"));
@@ -89,6 +91,17 @@ pub(super) fn concrete_env(
         concrete.push(ty);
     }
     Ok(Some(Rc::from(concrete)))
+}
+
+/// Runs a field's default initializer in the record's concrete type environment.
+pub(super) fn default_value(
+    machine: &mut Machine<'_>,
+    body: BodyId,
+    args: &[Ty],
+    scope: Option<&Scope<'_>>,
+) -> Result<Value, Stop> {
+    let env = concrete_env(machine.program, args, scope)?;
+    machine.invoke(body, Vec::new(), &[], env)
 }
 
 /// Whether a type names a generic parameter anywhere inside it.
