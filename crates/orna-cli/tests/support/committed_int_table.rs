@@ -5,6 +5,7 @@
 
 use std::{
     collections::BTreeMap,
+    fmt::Write,
     path::Path,
     process::{Command, Output},
 };
@@ -57,10 +58,12 @@ pub fn seed_source(first: u32, end: u32) -> String {
     let mut source = format!("pub table {TABLE}(id: Int) {{\n    label: Str,\n}}\n\n");
     for start in batch_starts(first, end) {
         let batch_end = (start + BATCH_ROWS).min(end);
-        source.push_str(&format!(
+        writeln!(
+            source,
             "pub fn seed_{start}() {{\n    let cursor = {start};\n    while cursor < {batch_end} {{\n        \
-             {TABLE}.insert({{ id: cursor, label: \"row\" }});\n        cursor += 1;\n    }};\n}}\n\n"
-        ));
+             {TABLE}.insert({{ id: cursor, label: \"row\" }});\n        cursor += 1;\n    }};\n}}\n"
+        )
+        .expect("writing to a String cannot fail");
     }
     source
 }
@@ -115,7 +118,7 @@ fn open_committed(
         .admit_module_with_committed_table_metadata(
             "main.orna",
             source,
-            &format!("seed_{first}"),
+            format!("seed_{first}"),
             [CommittedTableIdentity::new(TABLE, object_id)],
         )
         .expect("the committed table admits");
