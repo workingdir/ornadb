@@ -543,3 +543,33 @@ fn a_derived_family_accepts_its_own_quotient_unit_as_written() {
     assert_eq!(result(&program, "run"), "Speed");
     assert!(conversion_factors(&program, "run").is_empty());
 }
+
+#[test]
+fn a_relation_stage_on_a_table_path_takes_the_table_as_argument_zero() {
+    let mut program = program("table Note(id: Int) { }\npub fn run() = Note.take(0);\n");
+    typeck(&mut program);
+    let note = definition(&program, "Note");
+    let body_id = program
+        .source_body(definition(&program, "run"))
+        .expect("run has a body");
+    let body = &program.bodies[body_id];
+    let ExprKind::Call(call) = &body.exprs[body.root].kind else {
+        panic!("run's root is a call");
+    };
+    assert!(matches!(
+        call.callee,
+        crate::Callee::Relational {
+            op: crate::RelOp::Take
+        }
+    ));
+    assert!(call.piped, "a settled relation stage is piped");
+    let receiver = call
+        .args
+        .iter()
+        .find(|argument| argument.slot.as_u32() == 0)
+        .expect("slot 0 is the receiver");
+    assert!(matches!(
+        receiver.value,
+        crate::ArgValue::Expr(expr) if matches!(body.exprs[expr].kind, ExprKind::Def(def) if def == note)
+    ));
+}

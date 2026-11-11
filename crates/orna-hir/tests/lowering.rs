@@ -236,6 +236,23 @@ fn a_table_operation_is_classified_once() {
     ));
 }
 
+#[test]
+fn a_relation_stage_on_a_table_path_keeps_the_table_as_its_receiver() {
+    let program = lower_one("table Note(id: Int) { }\npub fn run() = Note.take(0);\n");
+    let note = defined(&program, "main", "Note");
+    let run = defined(&program, "main", "run");
+    let body = program.source_body(run).expect("run has a body");
+    let root = &program.bodies[body].exprs[program.bodies[body].root];
+    let ExprKind::Call(call) = &root.kind else {
+        panic!("run's root is a call");
+    };
+    let Callee::Pending { base, name } = &call.callee else {
+        panic!("a relation stage is pending until typeck settles it");
+    };
+    assert_eq!(name.as_str(), "take");
+    assert!(matches!(program.bodies[body].exprs[*base].kind, ExprKind::Def(def) if def == note));
+}
+
 /// The field definition at `index` of the table named `table`.
 fn table_field(program: &Program, table: &str, index: usize) -> orna_hir::DefId {
     let DefKind::Table(table_def) = &program.defs[defined(program, "main", table)].kind else {

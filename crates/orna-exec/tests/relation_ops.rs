@@ -4,7 +4,7 @@
 use std::rc::Rc;
 
 use orna_exec::{ExecError, ExecLimits, Value, run_entry};
-use orna_hir::{DefId, DefKind, ModulePath, Name, Program, SourceId, SourceUnit, lower};
+use orna_hir::{DefId, DefKind, ModulePath, Name, Program, SourceId, SourceUnit, lower, typeck};
 use orna_syntax::parse_module_with_file;
 
 const LIMITS: ExecLimits = ExecLimits {
@@ -22,12 +22,14 @@ fn lower_one(source: &str) -> Program {
         "test source must parse: {:?}",
         parsed.diagnostics
     );
-    let program = lower(&[SourceUnit {
+    let mut program = lower(&[SourceUnit {
         source: SourceId::new(0),
         tree: &parsed.value,
         path: ModulePath::new([Name::new("main")]),
     }]);
     assert_eq!(program.validate(), Ok(()), "lowered program must validate");
+    typeck(&mut program);
+    assert_eq!(program.validate(), Ok(()), "typed program must validate");
     program
 }
 
@@ -66,9 +68,7 @@ fn list(rows: Vec<Value>) -> Value {
 
 #[test]
 fn a_filter_over_a_table_collects_the_matching_rows_in_key_order() {
-    let source = format!(
-        "{NOTE}pub fn run() {{\n{THREE}    Note.filter(row => row.id > 1)\n}}\n"
-    );
+    let source = format!("{NOTE}pub fn run() {{\n{THREE}    Note.filter(row => row.id > 1)\n}}\n");
     assert_eq!(
         run(&source),
         Ok(list(vec![note_row(2, "b"), note_row(3, "c")]))
@@ -77,9 +77,7 @@ fn a_filter_over_a_table_collects_the_matching_rows_in_key_order() {
 
 #[test]
 fn a_map_over_a_table_collects_the_transformed_rows() {
-    let source = format!(
-        "{NOTE}pub fn run() {{\n{THREE}    Note.map(row => row.text)\n}}\n"
-    );
+    let source = format!("{NOTE}pub fn run() {{\n{THREE}    Note.map(row => row.text)\n}}\n");
     assert_eq!(
         run(&source),
         Ok(list(vec![
@@ -109,29 +107,21 @@ fn take_zero_yields_no_rows() {
 
 #[test]
 fn exists_is_true_when_a_row_satisfies_the_predicate() {
-    let source = format!(
-        "{NOTE}pub fn run() {{\n{THREE}    Note.exists(row => row.id == 3)\n}}\n"
-    );
+    let source = format!("{NOTE}pub fn run() {{\n{THREE}    Note.exists(row => row.id == 3)\n}}\n");
     assert_eq!(run(&source), Ok(Value::Bool(true)));
 }
 
 #[test]
 fn exists_is_false_when_no_row_satisfies_the_predicate() {
-    let source = format!(
-        "{NOTE}pub fn run() {{\n{THREE}    Note.exists(row => row.id > 5)\n}}\n"
-    );
+    let source = format!("{NOTE}pub fn run() {{\n{THREE}    Note.exists(row => row.id > 5)\n}}\n");
     assert_eq!(run(&source), Ok(Value::Bool(false)));
 }
 
 #[test]
 fn every_is_false_at_the_first_failing_row_and_true_when_all_hold() {
-    let all = format!(
-        "{NOTE}pub fn run() {{\n{THREE}    Note.every(row => row.id > 0)\n}}\n"
-    );
+    let all = format!("{NOTE}pub fn run() {{\n{THREE}    Note.every(row => row.id > 0)\n}}\n");
     assert_eq!(run(&all), Ok(Value::Bool(true)));
-    let some = format!(
-        "{NOTE}pub fn run() {{\n{THREE}    Note.every(row => row.id > 1)\n}}\n"
-    );
+    let some = format!("{NOTE}pub fn run() {{\n{THREE}    Note.every(row => row.id > 1)\n}}\n");
     assert_eq!(run(&some), Ok(Value::Bool(false)));
 }
 

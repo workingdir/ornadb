@@ -146,7 +146,7 @@ fn every<'p>(
     frame: &mut Frame,
     call: &Call,
 ) -> Result<Value, Stop> {
-    holds_for(machine, body, frame, call, true)
+    holds_for(machine, body, frame, call, false)
 }
 
 /// Whether some row satisfies the predicate. Without a predicate, the rows are Bools and one must be true.
@@ -156,17 +156,17 @@ fn exists<'p>(
     frame: &mut Frame,
     call: &Call,
 ) -> Result<Value, Stop> {
-    holds_for(machine, body, frame, call, false)
+    holds_for(machine, body, frame, call, true)
 }
 
-/// The shared walk of `every` (`target` true) and `exists` (`target` false). It stops at the first row whose truth
-/// equals `target`, and yields that `target` came up when the walk stops early.
+/// The shared walk of `every` and `exists`. It stops at the first row whose truth equals `decisive`: a failing row
+/// settles `every` (`decisive` false), a satisfying row settles `exists` (`decisive` true).
 fn holds_for<'p>(
     machine: &mut Machine<'p>,
     body: &'p Body,
     frame: &mut Frame,
     call: &Call,
-    target: bool,
+    decisive: bool,
 ) -> Result<Value, Stop> {
     let pipeline = input(machine, body, frame, call)?;
     let predicate = predicate(machine, body, frame, call)?;
@@ -179,12 +179,12 @@ fn holds_for<'p>(
             }
             None => truth(row)?,
         };
-        if holds == target {
+        if holds == decisive {
             stopped = true;
             return Ok(false);
         }
         Ok(true)
     })?;
-    // `every` holds when no row broke it; `exists` holds when some row satisfied it.
-    Ok(Value::Bool(if target { !stopped } else { stopped }))
+    // A decisive row settles `exists` true and `every` false; with none, `every` holds and `exists` does not.
+    Ok(Value::Bool(if decisive { stopped } else { !stopped }))
 }
