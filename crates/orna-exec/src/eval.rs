@@ -42,6 +42,10 @@ impl<'p> Machine<'p> {
             }
             ExprKind::Logic { op, lhs, rhs } => self.logic(body, frame, *op, *lhs, *rhs),
             ExprKind::Call(call) => self.call(body, frame, call),
+            ExprKind::UnitConvert { operand, factor } => {
+                let value = self.eval(body, frame, *operand)?;
+                self.scale_value(&value, factor.numerator(), factor.denominator())
+            }
             ExprKind::Block { stmts, tail } => self.block(body, frame, stmts, *tail),
             ExprKind::If { cond, then, els } => self.conditional(body, frame, *cond, *then, *els),
             ExprKind::While {
@@ -219,7 +223,7 @@ impl<'p> Machine<'p> {
         }
     }
 
-    fn arguments(
+    pub(crate) fn arguments(
         &mut self,
         body: &'p Body,
         frame: &mut Frame,
@@ -489,6 +493,14 @@ impl<'p> Machine<'p> {
         call: &Call,
         variant: DefId,
     ) -> Result<Value, Stop> {
+        if self.is_unit_ctor(variant) {
+            let env = frame.env();
+            let arguments = self.arguments(body, frame, call, &[], &env)?;
+            let Ok([(_, value)]) = <[(usize, Value); 1]>::try_from(arguments) else {
+                return Err(Stop::NotYet("unit literal arity (H4)"));
+            };
+            return Ok(value);
+        }
         let Some(ids) = self.variant_ids_of(variant) else {
             return Err(Stop::NotYet("money or type constructor (H4)"));
         };
