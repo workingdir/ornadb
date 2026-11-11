@@ -24,7 +24,11 @@ pub fn submit(session: &mut Session, input: &str) -> Result<Option<Value>, ReplE
 ///
 /// # Errors
 /// Returns an I/O error from reading `input` or writing either writer.
-pub fn run_lines<R: BufRead, O: Write, E: Write>(input: R, out: &mut O, err: &mut E) -> io::Result<bool> {
+pub fn run_lines<R: BufRead, O: Write, E: Write>(
+    input: R,
+    out: &mut O,
+    err: &mut E,
+) -> io::Result<bool> {
     let mut session = Session::new();
     let mut all_accepted = true;
     for line in input.lines() {

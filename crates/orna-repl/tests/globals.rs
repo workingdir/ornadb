@@ -44,5 +44,8 @@ fn global_let_is_read_by_a_function_call_input() {
     let mut session = Session::new();
     run(&mut session, "fn double(x: Int): Int = x * 2;");
     run(&mut session, "let amount = 21;");
-    assert_eq!(run(&mut session, "double(amount)"), Some(Value::from(42_i64)));
+    assert_eq!(
+        run(&mut session, "double(amount)"),
+        Some(Value::from(42_i64))
+    );
 }

@@ -72,7 +72,8 @@ pub(crate) fn span_text<'a>(source: &'a str, span: &SourceSpan) -> Result<&'a st
 
 /// The identifier spellings in `text`, in source order.
 pub(crate) fn identifiers(text: &str) -> Result<Vec<String>, ReplError> {
-    let tokens = lex(text).map_err(|_| ReplError::new("ORNA-REPL-INTERNAL", "the composed input does not lex"))?;
+    let tokens = lex(text)
+        .map_err(|_| ReplError::new("ORNA-REPL-INTERNAL", "the composed input does not lex"))?;
     Ok(tokens
         .into_iter()
         .filter(|token| matches!(token.kind, TokenKind::Identifier { .. }))

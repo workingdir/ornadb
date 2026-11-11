@@ -56,7 +56,10 @@ fn collect_fixtures() -> BTreeMap<String, String> {
     for dir in FIXTURE_DIRS {
         for entry in fs::read_dir(crates.join(dir)).expect("fixture directory") {
             let path = entry.expect("fixture entry").path();
-            let name = path.file_name().and_then(|name| name.to_str()).expect("fixture name");
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("fixture name");
             if name.starts_with("repl-inline-") && name.ends_with(".orna") {
                 let source = fs::read_to_string(&path).expect("fixture source");
                 fixtures.insert(format!("{dir}/{name}"), source);
@@ -73,7 +76,9 @@ fn parse_exclusions() -> BTreeMap<String, String> {
         .map(str::trim_end)
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .map(|line| {
-            let (path, reason) = line.split_once(' ').expect("exclusion line is path<SPACE>reason");
+            let (path, reason) = line
+                .split_once(' ')
+                .expect("exclusion line is path<SPACE>reason");
             (path.to_owned(), reason.to_owned())
         })
         .collect()
@@ -102,7 +107,10 @@ fn repl_inline_fixtures_agree_with_the_old_repl() {
         }
     }
     let runnable = fixtures.len() - exclusions.len();
-    eprintln!("repl-inline differential: agreed {agreed} of {runnable} runnable, {} total", fixtures.len());
+    eprintln!(
+        "repl-inline differential: agreed {agreed} of {runnable} runnable, {} total",
+        fixtures.len()
+    );
     eprintln!("disagreements: {}", disagreed.len());
     assert!(
         agreed >= AGREED_FLOOR,
