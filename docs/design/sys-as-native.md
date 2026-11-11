@@ -554,8 +554,8 @@ Three drift checks replace today's. All three run in `just sys-artifact-ci` and 
 
 ### 2.6 Host operations
 
-Conclusion: the mechanism covers the 21 host operations, and I leave them out of the first cut. They have their own
-attribute (`#[sys_host_operation]`, 21 uses in `crates/orna-sys/src/host_*.rs`), their own generator
+Conclusion: the mechanism covers the 21 host operations. Decided: they move at SN7, not in the first cut. They have
+their own attribute (`#[sys_host_operation]`, 21 uses in `crates/orna-sys/src/host_*.rs`), their own generator
 (`crates/orna-sys-codegen/src/build_host.rs`) and their own parity tests.
 
 [native-declarations.md](native-declarations.md) section 4 (N4) puts the `std.io` leaves in `sys.orna`, and
@@ -573,8 +573,8 @@ consumes them". `#[sys_host_operation]` and `build_host.rs` still consume them u
 
 Conclusion: Rust needs typed names for the closed vocabularies that it branches on. Those are mainly the failure codes
 and the callable keys that hosts register. Rust does not need descriptor tables, one trait method per callable, relation
-field tables or provider link tables. The lowered declarations hold that metadata. I recommend that the build generates
-only the names, and that hosts bind by registration at link (option E).
+field tables or provider link tables. The lowered declarations hold that metadata. Decided: the build generates only
+the names, and hosts bind by registration at link (option E).
 
 What the measurements say (section 1.3). `SysFailureCode` is named in 25 files. `SysFunction` is named in 16 files, and
 most of those hits are the 82 classification methods of one host, 67 of which return `Unavailable`. The relation,
@@ -1219,8 +1219,9 @@ Each item says what it changes. The owner can reopen any of them, and D19 says w
 8. **Failure-code form.** Decided: F1 (section 3.4), an enum with `__` as the segment break, kept out of the
    user-visible surface. The 61 engine codes get a second enum under `sys.engine`.
 9. **Typed ids and bindings.** Decided: option E (section 3). A small generated id set names what Rust names: failure
-   codes and callable keys. Hosts register by qualified name at link. A test checks that every declared callable is
-   implemented or on the pinned not-yet list. No hot path looks up a string, because names are consulted at link only.
+   codes and callable keys. Hosts register by qualified name at link. A build-time test checks that every declared
+   callable is implemented or on the pinned not-yet list. No hot path looks up a string, because names are consulted at
+   link only.
 10. **Lifecycle form.** Decided: L1 (section 4.3). The clauses `since`, `removed`, `formerly` and `deprecated` sit on
     the declaration, and doc tags are excluded.
 11. **Sealed ids.** Decided: the 27 sealed functions and 4 engine types stay as data with the archive, until the
