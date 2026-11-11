@@ -142,7 +142,6 @@ impl<'p> Machine<'p> {
             }),
             Lit::None => Ok(Value::Null),
             Lit::Date(days) => Ok(Value::Date(*days)),
-            Lit::Period(days) => Ok(Value::Period(ops::checked(days.clone(), &self.limits)?)),
         }
     }
 

@@ -1,0 +1,35 @@
+// Hand-written Orna source, not generated. See README.md in this directory.
+//
+// core.temperature: affine temperature scales as library types (kernel-and-library.md listing 10; ORNA-UNIT-005 as
+// two types). The kernel has no affine flag (units.md C6). `Temperature` is a point on the scale and `Delta` is a
+// difference. `Temperature + Temperature` has no instance, so it is a type error. The point-minus-point instance is
+// spelled `Sub<Self, Delta>`: a type's own name as a protocol argument inside its `impl` does not resolve yet
+// (listing 10 gap, "instance resolution"), while `Self` does.
+use core.ops.{Add, Sub, Mul};
+
+// A point on a Kelvin-based scale. `point - point` is a `Delta`; `point + delta` is a point.
+pub type Temperature {
+    pub kelvin: Decimal,
+
+    impl Sub<Self, Delta> {
+        fn sub(self, other: Temperature): Delta = Delta { kelvin: self.kelvin - other.kelvin };
+    }
+    impl Add<Delta, Temperature> {
+        fn add(self, change: Delta): Temperature = Temperature { kelvin: self.kelvin + change.kelvin };
+    }
+}
+
+// A difference between two temperatures. A difference is linear: it adds to other differences and to points.
+pub type Delta {
+    pub kelvin: Decimal,
+
+    impl Add<Delta, Delta> {
+        fn add(self, other: Delta): Delta = Delta { kelvin: self.kelvin + other.kelvin };
+    }
+    impl Mul<Decimal, Delta> {
+        fn mul(self, factor: Decimal): Delta = Delta { kelvin: self.kelvin * factor };
+    }
+    impl Add<Temperature, Temperature> {
+        fn add(self, point: Temperature): Temperature = Temperature { kelvin: point.kelvin + self.kelvin };
+    }
+}

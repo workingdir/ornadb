@@ -1,7 +1,6 @@
-//! The Date and Period literals the HIR lowers, run through the executor, against the old evaluator's values: a Date is
-//! its day count since 1970-01-01, and a `N.day` Period is the whole-day count kept apart from an elapsed duration.
+//! The Date literal the HIR lowers, run through the executor, against the old evaluator's value: a Date is its day
+//! count since 1970-01-01.
 
-use num_bigint::BigInt;
 use orna_exec::{ExecError, ExecLimits, Value, run_entry};
 use orna_hir::{DefId, DefKind, ModulePath, Name, Program, SourceId, SourceUnit, lower};
 use orna_syntax::parse_module_with_file;
@@ -69,13 +68,5 @@ fn date_literal_is_its_day_count_from_the_epoch() {
     assert_eq!(
         run("pub fn run(): Date = 2024-02-29;\n"),
         Ok(Value::Date(19_782))
-    );
-}
-
-#[test]
-fn period_literal_is_a_whole_day_count_distinct_from_a_duration() {
-    assert_eq!(
-        run("pub fn run(): Period = 3.days;\n"),
-        Ok(Value::Period(BigInt::from(3)))
     );
 }

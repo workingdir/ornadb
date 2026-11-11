@@ -42,17 +42,13 @@ pub(crate) fn lower_literal(text: &str, kind: LiteralKind) -> Option<Lit> {
 /// The payload of a numeric literal followed by a built-in postfix name
 /// (`12.34.decimal`, `1.day`, `3.hour`). `None` when the name is not one of
 /// them, or the value has no canonical payload (a duration that is not on the
-/// nanosecond grid, or a day count on a decimal literal).
+/// nanosecond grid).
 pub(crate) fn lower_numeric_postfix(text: &str, kind: LiteralKind, name: &str) -> Option<Lit> {
     if !matches!(kind, LiteralKind::Integer | LiteralKind::Decimal) {
         return None;
     }
     match builtin_postfix(name)? {
         PostfixUnit::Decimal => parse_decimal(text),
-        PostfixUnit::Days if matches!(kind, LiteralKind::Integer) => {
-            parse_int(text).map(Lit::Period)
-        }
-        PostfixUnit::Days => None,
         PostfixUnit::Duration(seconds_per_unit) => duration_postfix(text, seconds_per_unit),
     }
 }
@@ -62,9 +58,8 @@ pub(crate) fn lower_numeric_postfix(text: &str, kind: LiteralKind, name: &str) -
 enum PostfixUnit {
     /// `12.34.decimal`: the literal is a decimal value.
     Decimal,
-    /// `1.day`: a whole-day count, read as a period.
-    Days,
-    /// `3.hour`: an elapsed duration, the value times this many seconds.
+    /// `3.hour`, `1.day`: an elapsed duration, the value times this many seconds.
+    /// A day is a 24-hour span (units.md Q1), not a calendar period.
     Duration(u32),
 }
 
@@ -73,7 +68,7 @@ enum PostfixUnit {
 fn builtin_postfix(name: &str) -> Option<PostfixUnit> {
     Some(match name {
         "decimal" => PostfixUnit::Decimal,
-        "day" | "days" => PostfixUnit::Days,
+        "day" | "days" => PostfixUnit::Duration(86_400),
         "hour" | "hours" => PostfixUnit::Duration(3_600),
         "minute" | "minutes" | "min" => PostfixUnit::Duration(60),
         "second" | "seconds" | "s" => PostfixUnit::Duration(1),
