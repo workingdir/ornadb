@@ -10,6 +10,7 @@ use orna_hir::{
 };
 
 use crate::binders;
+use crate::decimal::Decimal;
 use crate::error::Stop;
 use crate::frame::Frame;
 use crate::machine::Machine;
@@ -88,8 +89,11 @@ impl<'p> Machine<'p> {
                 }
                 Ok(Value::Text(text.to_string()))
             }
-            Lit::Decimal { .. }
-            | Lit::Float(_)
+            Lit::Decimal {
+                coefficient,
+                exponent,
+            } => Decimal::new(coefficient.clone(), exponent.clone()).map(Value::Decimal),
+            Lit::Float(_)
             | Lit::None
             | Lit::Date(_)
             | Lit::Instant { .. }

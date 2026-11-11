@@ -13,6 +13,8 @@ use num_bigint::BigInt;
 use orna_hir::{BodyId, Name};
 use orna_value::{CanonicalValue, OPTION_TAG, Raw, TUPLE_TAG, UNIT_TAG};
 
+use crate::decimal::Decimal;
+
 /// One runtime value.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Value {
@@ -22,6 +24,8 @@ pub enum Value {
     Bool(bool),
     /// An integer of arbitrary width.
     Int(BigInt),
+    /// An exact decimal.
+    Decimal(Decimal),
     /// A string, already unescaped.
     Text(String),
     /// A byte string: the blob a digest or a hash input is.
@@ -84,6 +88,7 @@ impl Value {
             Self::Unit => Ok(unit_raw()),
             Self::Bool(value) => Ok(Raw::Bool(*value)),
             Self::Int(value) => Ok(Raw::Int(value.clone())),
+            Self::Decimal(value) => Ok(value.to_raw()),
             Self::Text(value) => Ok(Raw::Text(value.clone())),
             Self::Blob(bytes) => Ok(Raw::Bytes(bytes.to_vec())),
             Self::Option(value) => option_raw(value.as_deref()),

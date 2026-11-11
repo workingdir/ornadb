@@ -8,6 +8,7 @@
 //! guessed at, so the harness can count what has been executed.
 
 mod binders;
+mod decimal;
 mod error;
 mod eval;
 mod frame;
