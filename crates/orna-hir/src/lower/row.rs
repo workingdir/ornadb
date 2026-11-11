@@ -6,7 +6,9 @@
 
 use orna_syntax::SyntaxSpan;
 
-use crate::{DefId, DefKind, ExprId, ExprKind, FieldRef, Idx, LocalId, Name, NameTarget, Ty, UseContext};
+use crate::{
+    DefId, DefKind, ExprId, ExprKind, FieldRef, Idx, LocalId, Name, NameTarget, Ty, UseContext,
+};
 
 use super::BodyState;
 use super::declare::{Builder, PendingKind};
@@ -49,7 +51,13 @@ pub(crate) fn lower_sibling_field(
     let row = state.row?;
     let (field, ty) = sibling_field(builder, row.table, name)?;
     let row_ty = state.locals[row.slot].ty;
-    let base = push_typed(builder, state, ExprKind::Local(row.slot), span.clone(), row_ty);
+    let base = push_typed(
+        builder,
+        state,
+        ExprKind::Local(row.slot),
+        span.clone(),
+        row_ty,
+    );
     super::record_body_use(
         &mut builder.program,
         state.module,
