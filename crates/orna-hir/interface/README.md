@@ -24,5 +24,7 @@ lists them in `HAND_WRITTEN` and fails if one of them would be emitted. Edit the
 
 - `core/range.orna`: the `Range<T>` type of kernel-and-library.md listing 5, with `contains` and the `above`/`below`
   helpers.
+- `core/units.orna`: the built-in data-size unit family (units.md section 8.2). The time family is not here yet; see
+  the comment at the top of the file.
 
 Hand-written modules must lower with zero diagnostics (`crates/orna-hir/tests/embedded_clean.rs`).

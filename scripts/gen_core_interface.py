@@ -28,7 +28,7 @@ EXPORT = ROOT / "crates/orna-intrinsics/std_intrinsics.json"
 INTERFACE = ROOT / "crates/orna-hir/interface"
 # Hand-written Orna under the interface directory (not generated). The generator must never emit these; the README in
 # that directory lists which files are generated and which are hand-written.
-HAND_WRITTEN = ("core/range.orna",)
+HAND_WRITTEN = ("core/range.orna", "core/units.orna")
 
 # Root environment rows (hir.md 2.6: `Some`, `now`, `uuid7`, `error` are core natives).
 # `fail` stays an `IntrinsicForm` (abrupt evaluation rule), so it is not a native.
