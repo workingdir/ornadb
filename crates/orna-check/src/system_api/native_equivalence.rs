@@ -363,9 +363,9 @@ fn removed_callables_match_retired_json() {
     }
 }
 
-/// `formerly` clauses against `removed_names`: each names a retired name whose replacement is this callable and
-/// whose diagnostic is the clause's. The reverse direction (a `removed_names` replacement with no `formerly`
-/// clause) is not asserted yet: `sys.runtime` -> `sys.rt` waits for the singleton declarations.
+/// `formerly` clauses against `removed_names`: each names a retired name whose replacement is the declaration carrying
+/// the clause, and whose diagnostic is the clause's. Every `removed_names` replacement must have a declaration that
+/// carries the matching `formerly` clause, in both directions. Native callables and native statics both carry it.
 #[test]
 fn formerly_clauses_agree_with_removed_names() {
     let catalogue: serde_json::Value =
@@ -374,18 +374,24 @@ fn formerly_clauses_agree_with_removed_names() {
         .as_object()
         .expect("catalogue `removed_names` must be an object");
     let mut differences = Vec::new();
+    let mut declared_formerly: BTreeSet<String> = BTreeSet::new();
     for item in &parse_interface(SYS_ORNA).value.items {
         let Some(clause) = &item.clauses.formerly else {
             continue;
         };
-        let Declaration::Native { signature, .. } = &item.declaration else {
-            differences.push(format!(
-                "`formerly {}` is not on a native callable",
-                clause.name.text
-            ));
-            continue;
+        let name = match &item.declaration {
+            Declaration::Native { signature, .. } => signature.name.as_str(),
+            Declaration::NativeStatic { name, .. } => name.as_str(),
+            _ => {
+                differences.push(format!(
+                    "`formerly {}` is not on a native callable or native static",
+                    clause.name.text
+                ));
+                continue;
+            }
         };
-        let label = native_label(item, &signature.name);
+        let label = native_label(item, name);
+        declared_formerly.insert(clause.name.text.clone());
         let entry = removed_names.get(&clause.name.text);
         let replacement = entry.and_then(|entry| entry["replacement"].as_str());
         let diagnostic = entry.and_then(|entry| entry["diagnostic"].as_str());
@@ -401,11 +407,61 @@ fn formerly_clauses_agree_with_removed_names() {
             ));
         }
     }
+    for (old, entry) in removed_names {
+        let Some(replacement) = entry["replacement"].as_str() else {
+            continue;
+        };
+        if !declared_formerly.contains(old) {
+            differences.push(format!(
+                "`{old}` is replaced by `{replacement}` in removed_names but no declaration carries `formerly \"{old}\"`"
+            ));
+        }
+    }
     assert!(
         differences.is_empty(),
         "{} formerly clause(s) disagree with removed_names:\n{}",
         differences.len(),
         differences.join("\n")
+    );
+}
+
+/// The native statics in `sys.orna` against the catalogue's `singletons`: each name with its type. Availability is
+/// catalogue prose that no declaration carries, so it is not compared.
+#[test]
+fn singletons_match_json_catalogue() {
+    let catalogue: serde_json::Value =
+        serde_json::from_str(SYS_JSON).expect("the catalogue must be JSON");
+    let expected: BTreeMap<String, String> = catalogue["singletons"]
+        .as_array()
+        .expect("catalogue `singletons` must be an array")
+        .iter()
+        .map(|singleton| {
+            let name = singleton["name"]
+                .as_str()
+                .expect("catalogue singleton `name` must be a string");
+            let ty = singleton["type"]
+                .as_str()
+                .expect("catalogue singleton `type` must be a string");
+            (name.to_owned(), ty.to_owned())
+        })
+        .collect();
+    let parsed = parse_interface(SYS_ORNA);
+    let declared = declared_names(&parsed.value.items);
+    let mut actual = BTreeMap::new();
+    for item in &parsed.value.items {
+        let Declaration::NativeStatic {
+            name,
+            annotation: Some(annotation),
+            ..
+        } = &item.declaration
+        else {
+            continue;
+        };
+        actual.insert(native_label(item, name), render_type(annotation, &declared));
+    }
+    assert_eq!(
+        actual, expected,
+        "the native statics in sys.orna must match the catalogue's singletons"
     );
 }
 

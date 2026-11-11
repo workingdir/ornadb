@@ -698,6 +698,11 @@ pub type ReplView {
     pub watched_expressions: Relation<Watch>,
 }
 
+pub native static database: DatabaseView effect none;
+pub native static current: CurrentContext effect none;
+pub native static rt: RuntimeView effect none formerly "sys.runtime" diagnostic "ORNA100-E-SYS-RUNTIME";
+pub native static repl: ReplView effect none;
+
 pub type ChangeTarget {
     pub kind: ChangeTargetKind,
     pub object: ObjectId?,
