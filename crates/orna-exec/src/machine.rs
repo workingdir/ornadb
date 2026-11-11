@@ -11,6 +11,8 @@ use crate::error::{ExecError, Stop};
 use crate::frame::Frame;
 use crate::link;
 use crate::natives::NativeFn;
+use crate::store::{MemoryStore, TableStore};
+use crate::table::store_invariant;
 use crate::value::{Cell, Value};
 use crate::variants::{VariantIds, variant_ids};
 
@@ -54,6 +56,8 @@ pub(crate) struct Machine<'p> {
     cancel: Option<Arc<AtomicBool>>,
     /// The engine natives this program's declarations bind to, built on the first native call.
     pub(crate) natives: OnceCell<HashMap<DefId, NativeFn>>,
+    /// The table store. Each entry-point activation opens one store activation, committed or rolled back.
+    pub(crate) store: Box<dyn TableStore>,
     steps: u64,
     calls: u64,
     depth: usize,
@@ -67,6 +71,7 @@ impl<'p> Machine<'p> {
             variants: OnceCell::new(),
             cancel,
             natives: OnceCell::new(),
+            store: Box::new(MemoryStore::new()),
             steps: 0,
             calls: 0,
             depth: 0,
@@ -102,8 +107,8 @@ impl<'p> Machine<'p> {
     /// Runs one body with its argument slots and capture slots already bound.
     /// A `return` ends the call with its value.
     ///
-    /// A failing activation drops its frame. The pure core holds no other
-    /// state, so a failure has nothing to roll back at the activation boundary.
+    /// A failing activation drops its frame. The store is rolled back by [`Machine::run_activation`] at the
+    /// entry boundary, which owns the store activation.
     pub(crate) fn invoke(
         &mut self,
         body_id: BodyId,
@@ -132,6 +137,36 @@ impl<'p> Machine<'p> {
         match result {
             Ok(value) | Err(Stop::Return(value)) => Ok(value),
             Err(stop) => Err(stop),
+        }
+    }
+
+    /// Runs the activation of `body_id` inside one store activation. The writes commit when it returns a value
+    /// and roll back when it stops with any error, so a failed entry leaves the store unchanged.
+    ///
+    /// # Errors
+    ///
+    /// The activation's own stop, or [`Stop::NotYet`] when the store breaks its activation contract.
+    pub(crate) fn run_activation(
+        &mut self,
+        body_id: BodyId,
+        arguments: Vec<(usize, Value)>,
+    ) -> Result<Value, Stop> {
+        self.store
+            .begin()
+            .map_err(|error| store_invariant(&error))?;
+        match self.invoke(body_id, arguments, &[]) {
+            Ok(value) => {
+                self.store
+                    .commit()
+                    .map_err(|error| store_invariant(&error))?;
+                Ok(value)
+            }
+            Err(stop) => {
+                self.store
+                    .rollback()
+                    .map_err(|error| store_invariant(&error))?;
+                Err(stop)
+            }
         }
     }
 }
@@ -199,7 +234,7 @@ fn start(machine: &mut Machine<'_>, program: &Program, entry: DefId) -> Result<V
         return Err(ExecError::NotYet("entry has no source body"));
     };
     machine
-        .invoke(body_id, Vec::new(), &[])
+        .run_activation(body_id, Vec::new())
         .map_err(ExecError::from)
 }
 
@@ -230,7 +265,7 @@ pub fn measure_entry(
     let arguments = arguments.into_iter().enumerate().collect();
     let mut machine = Machine::new(program, limits, None);
     let value = machine
-        .invoke(body_id, arguments, &[])
+        .run_activation(body_id, arguments)
         .map_err(ExecError::from)?;
     Ok(Measured {
         value,

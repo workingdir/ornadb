@@ -179,7 +179,7 @@ impl<'p> Machine<'p> {
                 self.native(*def, values)
             }
             Callee::Sys { .. } => Err(Stop::NotYet("sys call (H5)")),
-            Callee::TableOp { .. } => Err(Stop::NotYet("table operation (H6)")),
+            Callee::TableOp { table, op } => self.table_op(body, frame, call, *table, *op),
             Callee::Relational { .. } => Err(Stop::NotYet("relation stage (H7)")),
             Callee::Intrinsic(IntrinsicForm::Fail) => self.fail(body, frame, call),
             Callee::Intrinsic(_) => Err(Stop::NotYet("intrinsic form (H4)")),

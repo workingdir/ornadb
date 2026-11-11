@@ -16,6 +16,7 @@ mod machine;
 mod natives;
 mod ops;
 mod store;
+mod table;
 mod value;
 mod variants;
 
