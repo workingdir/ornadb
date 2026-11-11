@@ -14,6 +14,7 @@ use orna_hir::{DefId, DefKind, FnBody, Program, Ty, TyKind};
 
 use crate::engine_order;
 use crate::error::Stop;
+use crate::frame::TypeEnv;
 use crate::machine::Machine;
 use crate::natives;
 use crate::value::Value;
@@ -24,16 +25,16 @@ pub(crate) type ProtocolMembers = OnceCell<HashMap<DefId, DefId>>;
 
 impl<'p> Machine<'p> {
     /// The concrete type arguments of a call whose arguments are `targs`, written in the caller's terms and resolved
-    /// against the caller's environment `env`. An empty list shares the machine's empty environment.
-    pub(crate) fn resolve_targs(&self, targs: &[Ty], env: &[Ty]) -> Result<Rc<[Ty]>, Stop> {
+    /// against the caller's environment `env`. An empty list is the empty environment, which allocates nothing.
+    pub(crate) fn resolve_targs(&self, targs: &[Ty], env: &[Ty]) -> Result<TypeEnv, Stop> {
         if targs.is_empty() {
-            return Ok(Rc::clone(&self.empty_env));
+            return Ok(None);
         }
         let mut resolved = Vec::with_capacity(targs.len());
         for ty in targs {
             resolved.push(self.resolve_ty(*ty, env)?);
         }
-        Ok(resolved.into())
+        Ok(Some(resolved.into()))
     }
 
     fn resolve_ty(&self, ty: Ty, env: &[Ty]) -> Result<Ty, Stop> {
@@ -121,10 +122,10 @@ impl<'p> Machine<'p> {
         let FnBody::Source(body) = function.body else {
             return Err(Stop::NotYet("instance member without a source body (H5)"));
         };
-        let own: Rc<[Ty]> = if env.len() > arity + 1 {
-            Rc::from(&env[arity + 1..])
+        let own: TypeEnv = if env.len() > arity + 1 {
+            Some(Rc::from(&env[arity + 1..]))
         } else {
-            Rc::clone(&self.empty_env)
+            None
         };
         self.invoke(body, arguments, &[], own)
     }

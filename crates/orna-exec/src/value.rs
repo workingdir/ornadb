@@ -93,7 +93,7 @@ pub struct Closure {
     /// The captured variables, in the order of the body's captures.
     pub captured: Box<[Cell]>,
     /// The type environment the lambda was created in, which its body runs with.
-    pub env: Rc<[Ty]>,
+    pub env: Option<Rc<[Ty]>>,
 }
 
 impl Value {

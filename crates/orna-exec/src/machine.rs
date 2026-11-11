@@ -2,15 +2,14 @@
 
 use std::cell::OnceCell;
 use std::collections::HashMap;
-use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use orna_hir::{Body, BodyId, DefId, DefKind, FnBody, Program, Ty};
+use orna_hir::{Body, BodyId, DefId, DefKind, FnBody, Program};
 
 use crate::dispatch::ProtocolMembers;
 use crate::error::{ExecError, Stop};
-use crate::frame::Frame;
+use crate::frame::{Frame, TypeEnv};
 use crate::link;
 use crate::natives::NativeFn;
 use crate::value::{Cell, Value};
@@ -56,8 +55,6 @@ pub(crate) struct Machine<'p> {
     cancel: Option<Arc<AtomicBool>>,
     /// The engine natives this program's declarations bind to, built on the first native call.
     pub(crate) natives: OnceCell<HashMap<DefId, NativeFn>>,
-    /// The empty type environment, shared by every call that binds no type parameters.
-    pub(crate) empty_env: Rc<[Ty]>,
     /// The protocol each protocol member belongs to, built on first dispatch.
     pub(crate) protocols: ProtocolMembers,
     /// The ids of `core.Ordering`'s variants, built on first engine comparison.
@@ -75,7 +72,6 @@ impl<'p> Machine<'p> {
             variants: OnceCell::new(),
             cancel,
             natives: OnceCell::new(),
-            empty_env: Rc::from(Vec::new()),
             protocols: OnceCell::new(),
             ordering: OnceCell::new(),
             steps: 0,
@@ -120,7 +116,7 @@ impl<'p> Machine<'p> {
         body_id: BodyId,
         arguments: Vec<(usize, Value)>,
         captured: &[Cell],
-        env: Rc<[Ty]>,
+        env: TypeEnv,
     ) -> Result<Value, Stop> {
         if self.depth >= self.limits.max_depth {
             return Err(Stop::Error("ORNA-EVAL-LIMIT"));
@@ -211,7 +207,7 @@ fn start(machine: &mut Machine<'_>, program: &Program, entry: DefId) -> Result<V
         return Err(ExecError::NotYet("entry has no source body"));
     };
     machine
-        .invoke(body_id, Vec::new(), &[], Rc::clone(&machine.empty_env))
+        .invoke(body_id, Vec::new(), &[], None)
         .map_err(ExecError::from)
 }
 
@@ -242,7 +238,7 @@ pub fn measure_entry(
     let arguments = arguments.into_iter().enumerate().collect();
     let mut machine = Machine::new(program, limits, None);
     let value = machine
-        .invoke(body_id, arguments, &[], Rc::clone(&machine.empty_env))
+        .invoke(body_id, arguments, &[], None)
         .map_err(ExecError::from)?;
     Ok(Measured {
         value,

@@ -6,13 +6,13 @@ use num_traits::ToPrimitive;
 use orna_hir::{
     Arg, ArgValue, Arm, AssignOp, BinOp, Body, BodyId, Call, Callee, DefId, DefKind, ExprId,
     ExprKind, FieldRef, FnBody, IntrinsicForm, Lit, LocalId, LogicOp, Name, ParamDef, Pat, PatId,
-    Place, Stmt, Ty,
+    Place, Stmt,
 };
 
 use crate::binders;
 use crate::decimal::Decimal;
 use crate::error::Stop;
-use crate::frame::Frame;
+use crate::frame::{Frame, TypeEnv, type_args};
 use crate::machine::Machine;
 use crate::natives;
 use crate::ops;
@@ -161,10 +161,10 @@ impl<'p> Machine<'p> {
                 let DefKind::Fn(function) = &program.defs[*def].kind else {
                     return Err(Stop::NotYet("call of a non-function definition (H4)"));
                 };
-                let callee_env = self.resolve_targs(targs, &frame.env())?;
+                let callee_env = self.resolve_targs(targs, frame.env_slice())?;
                 let arguments = self.arguments(body, frame, call, &function.params, &callee_env)?;
                 let FnBody::Source(callee_body) = function.body else {
-                    return self.dispatch(*def, &callee_env, arguments);
+                    return self.dispatch(*def, type_args(&callee_env), arguments);
                 };
                 self.invoke(callee_body, arguments, &[], callee_env)
             }
@@ -194,7 +194,7 @@ impl<'p> Machine<'p> {
                     closure.body,
                     arguments,
                     &closure.captured,
-                    Rc::clone(&closure.env),
+                    closure.env.clone(),
                 )
             }
             Callee::Native { def, targs } => {
@@ -202,11 +202,11 @@ impl<'p> Machine<'p> {
                 let DefKind::Fn(function) = &program.defs[*def].kind else {
                     return Err(Stop::NotYet("call of a non-function definition (H5)"));
                 };
-                let callee_targs = self.resolve_targs(targs, &frame.env())?;
+                let callee_targs = self.resolve_targs(targs, frame.env_slice())?;
                 let arguments =
                     self.arguments(body, frame, call, &function.params, &callee_targs)?;
                 let values = natives::in_parameter_order(arguments, function.params.len())?;
-                self.native(*def, &callee_targs, values)
+                self.native(*def, type_args(&callee_targs), values)
             }
             Callee::Sys { .. } => Err(Stop::NotYet("sys call (H5)")),
             Callee::TableOp { .. } => Err(Stop::NotYet("table operation (H6)")),
@@ -224,7 +224,7 @@ impl<'p> Machine<'p> {
         frame: &mut Frame,
         call: &Call,
         params: &[ParamDef],
-        env: &Rc<[Ty]>,
+        env: &TypeEnv,
     ) -> Result<Vec<(usize, Value)>, Stop> {
         let mut arguments = Vec::with_capacity(call.args.len());
         for argument in call.args.iter() {
@@ -262,7 +262,7 @@ impl<'p> Machine<'p> {
         frame: &mut Frame,
         argument: &Arg,
         params: &[ParamDef],
-        env: &Rc<[Ty]>,
+        env: &TypeEnv,
     ) -> Result<(usize, Value), Stop> {
         let slot = argument.slot.as_u32() as usize;
         match argument.value {
@@ -274,7 +274,7 @@ impl<'p> Machine<'p> {
                 let Some(default) = params.get(slot).and_then(|param| param.default) else {
                     return Err(Stop::NotYet("default argument without a default body (H4)"));
                 };
-                let value = self.invoke(default, Vec::new(), &[], Rc::clone(env))?;
+                let value = self.invoke(default, Vec::new(), &[], env.clone())?;
                 Ok((slot, value))
             }
         }
