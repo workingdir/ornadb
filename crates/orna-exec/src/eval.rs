@@ -183,14 +183,14 @@ impl<'p> Machine<'p> {
                 }
                 self.invoke(closure.body, arguments, &closure.captured)
             }
-            Callee::Native { def, .. } => {
+            Callee::Native { def, targs } => {
                 let program = self.program;
                 let DefKind::Fn(function) = &program.defs[*def].kind else {
                     return Err(Stop::NotYet("call of a non-function definition (H5)"));
                 };
                 let arguments = self.arguments(body, frame, call, &function.params)?;
                 let values = natives::in_parameter_order(arguments, function.params.len())?;
-                self.native(*def, values)
+                self.native(*def, targs, values)
             }
             Callee::Sys { .. } => Err(Stop::NotYet("sys call (H5)")),
             Callee::TableOp { .. } => Err(Stop::NotYet("table operation (H6)")),
