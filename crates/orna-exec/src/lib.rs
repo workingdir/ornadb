@@ -10,6 +10,7 @@
 mod binders;
 mod decimal;
 mod dispatch;
+mod engine_display;
 mod engine_order;
 mod error;
 mod eval;
