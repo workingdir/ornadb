@@ -13,6 +13,7 @@
     "orna-hir",
     "orna-intrinsics",
     "orna-live",
+    "orna-link",
     "orna-lsp",
     "orna-project",
     "orna-project-repl",
