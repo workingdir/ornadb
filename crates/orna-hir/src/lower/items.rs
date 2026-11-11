@@ -181,44 +181,7 @@ impl Builder<'_> {
                     PendingKind::Built(DefKind::Dimension(DimensionDef { unit: None }));
             }
             DeclAst::Unit(dimension, definition) => {
-                let ty = super::types::lower_type(self, module, &[], &dimension);
-                let _ = ty;
-                let affine_clause = match &definition {
-                    orna_syntax::UnitDefinition::Derived { offset, affine, .. } => {
-                        offset.is_some() || *affine
-                    }
-                    orna_syntax::UnitDefinition::Base => false,
-                };
-                if affine_clause {
-                    let span = self.pending[def.index()].span.clone();
-                    self.diagnose(
-                        module,
-                        crate::diag::UNSUPPORTED,
-                        "affine units are library types (units.md 8.5): `offset` and `affine` are not kernel clauses",
-                        span,
-                    );
-                }
-                self.pending[def.index()].kind = PendingKind::Built(DefKind::Unit(UnitDef {
-                    family: None,
-                    factors: Vec::new(),
-                }));
-                if let orna_syntax::UnitDefinition::Derived { value, offset, .. } = definition {
-                    // A derived unit's expression is not part of the value
-                    // model, but its names are still written in the module:
-                    // lower it so the editor index sees them.
-                    let expressions = std::iter::once(value.clone())
-                        .chain(offset.clone())
-                        .collect::<Vec<_>>();
-                    for expr in expressions {
-                        let body = self.allocate_body(def);
-                        self.body_jobs.push(BodyJob::Expression {
-                            def,
-                            body,
-                            expr: Box::new(expr),
-                            self_ty: None,
-                        });
-                    }
-                }
+                self.build_unit(def, module, dimension, definition)
             }
             DeclAst::Type(generics, representation) => {
                 self.build_type(def, module, &generics, &representation);
@@ -244,6 +207,51 @@ impl Builder<'_> {
                     def,
                     body,
                     expr: Box::new(value),
+                    self_ty: None,
+                });
+            }
+        }
+    }
+
+    /// Builds a unit: lowers its dimension, rejects the affine clauses and lowers
+    /// the names a derived unit's value writes.
+    fn build_unit(
+        &mut self,
+        def: DefId,
+        module: ModuleId,
+        dimension: TypeExpr,
+        definition: orna_syntax::UnitDefinition,
+    ) {
+        let _ = super::types::lower_type(self, module, &[], &dimension);
+        let affine_clause = match &definition {
+            orna_syntax::UnitDefinition::Derived { offset, affine, .. } => {
+                offset.is_some() || *affine
+            }
+            orna_syntax::UnitDefinition::Base => false,
+        };
+        if affine_clause {
+            let span = self.pending[def.index()].span.clone();
+            self.diagnose(
+                module,
+                crate::diag::UNSUPPORTED,
+                "affine units are library types (units.md 8.5): `offset` and `affine` are not kernel clauses",
+                span,
+            );
+        }
+        self.pending[def.index()].kind = PendingKind::Built(DefKind::Unit(UnitDef {
+            family: None,
+            factors: Vec::new(),
+        }));
+        if let orna_syntax::UnitDefinition::Derived { value, offset, .. } = definition {
+            // A derived unit's expression is not part of the value model, but its
+            // names are still written in the module: lower it so the editor index
+            // sees them.
+            for expr in std::iter::once(value).chain(offset) {
+                let body = self.allocate_body(def);
+                self.body_jobs.push(BodyJob::Expression {
+                    def,
+                    body,
+                    expr: Box::new(expr),
                     self_ty: None,
                 });
             }
