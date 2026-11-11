@@ -673,6 +673,13 @@ fallback stays kernel (ORNA-PRES-002 and -006).
 
 **What I do until told otherwise:** P5-A with the spec signature `display(self, context: DisplayContext)`.
 
+**Deviation (as built):** the shipped protocol is `fn display(self): Str`, with no context parameter. This matches
+`docs/language/reference/02-types.md` (`pub protocol Display`) and `crates/orna-hir/interface/core/display.orna`. The
+default `DisplayContext` of P5-A is not implemented: it needs the locale and zone from the activation snapshot, which
+P1 step zero does not supply yet. Scalars `Bool`, `Int`, `Decimal` and `Str` stay engine-derived; any other type needs
+an `impl Display` in its own module. Revisit when `DisplayContext` exists.
+
+
 **Cost** `[INFERENCE]`: replaces `displayable` (`H:typeck/mod.rs:715-732`) with instance lookup, plus one kernel
 instance table for scalars; deletes the evaluator's `Str`-only check.
 
