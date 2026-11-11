@@ -34,3 +34,5 @@ pub use store::{
     CursorId, Direction, Expect, KeyBounds, MemoryStore, RowRef, StoreError, TableId, TableStore,
 };
 pub use value::Value;
+#[cfg(feature = "test-support")]
+pub use store::contract;

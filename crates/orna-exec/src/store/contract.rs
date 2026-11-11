@@ -1,12 +1,15 @@
-//! Contract tests every [`TableStore`] implementation must pass. The
-//! in-memory store runs them here; the SQLite and Git stores join by calling
-//! [`run_contract`] with their own constructor.
+//! Contract tests every [`TableStore`] implementation must pass, exported as
+//! [`run_contract`] behind the `test-support` feature. The in-memory store runs
+//! them in this crate; the SQLite and Git stores join by calling [`run_contract`]
+//! with their own constructor.
 
 use std::ops::Bound;
 
 use orna_hir::DefId;
 
-use super::{CursorId, Direction, Expect, KeyBounds, MemoryStore, StoreError, TableId, TableStore};
+#[cfg(test)]
+use super::{CursorId, MemoryStore};
+use super::{Direction, Expect, KeyBounds, StoreError, TableId, TableStore};
 
 fn table(raw: u32) -> TableId {
     DefId::new(raw)
@@ -244,11 +247,13 @@ pub fn run_contract<S: TableStore>(make: impl Fn() -> S) {
     large_tables_are_not_capped(make());
 }
 
+#[cfg(test)]
 #[test]
 fn memory_store_meets_the_contract() {
     run_contract(MemoryStore::new);
 }
 
+#[cfg(test)]
 #[test]
 fn snapshots_read_committed_rows_and_refuse_writes() {
     let t = table(1);
@@ -270,6 +275,7 @@ fn snapshots_read_committed_rows_and_refuse_writes() {
     );
 }
 
+#[cfg(test)]
 #[test]
 fn cursor_ids_are_distinct() {
     let mut store = MemoryStore::new();

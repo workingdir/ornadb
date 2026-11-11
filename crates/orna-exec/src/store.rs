@@ -13,8 +13,8 @@ use orna_hir::DefId;
 pub use memory::MemoryStore;
 
 mod memory;
-#[cfg(test)]
-mod tests;
+#[cfg(any(test, feature = "test-support"))]
+pub mod contract;
 
 /// A table, named by its definition in the program.
 pub type TableId = DefId;
