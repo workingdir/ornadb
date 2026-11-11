@@ -66,6 +66,10 @@ name = "orna-hir"
 layer = 3
 
 [[crate]]
+name = "orna-link"
+layer = 4
+
+[[crate]]
 name = "orna-sys-id"
 layer = 3
 
@@ -225,6 +229,11 @@ reason = "production in-degree 0 and not declared a tool; the LSP is its own bin
 id = "V10"
 key = "orphan:orna-traceability"
 reason = "production in-degree 0 and not declared a tool; moves under tools/ with no production dependent"
+
+[[known]]
+id = "L1"
+key = "orphan:orna-link"
+reason = "slice 2a: the manifest and link plan have no production dependent yet; the library step that calls them (dlopen, C ABI, symbol lookup) is slice 2b, which wires orna-link into the link path"
 
 [[known]]
 id = "V12"
