@@ -344,7 +344,12 @@ impl SystemApi {
     }
 
     pub(crate) fn from_json(source: &str) -> Result<Self, SystemApiError> {
-        let raw = raw_document(source)?;
+        Self::from_raw(raw_document(source)?)
+    }
+
+    /// Validates a decoded descriptor document. Every catalogue source (JSON today, `sys.orna` once SN3 lands) meets
+    /// the same validation here.
+    fn from_raw(raw: RawSystemApi) -> Result<Self, SystemApiError> {
         let inventory = Inventory {
             singletons: raw.counts.singletons,
             opaque_identifiers: raw.counts.opaque_identifiers,
