@@ -16,6 +16,7 @@ const LIMITS: ExecLimits = ExecLimits {
 
 const HELLO_DIGEST: &str = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
 const HASH_OF_HELLO_DIGEST: &str = "9595c9df90075148eb06860365df33584b75bff782a510c6cd4883a419833d50";
+const HEAD: &str = "use core.hash;\n";
 
 fn lower_one(source: &str) -> Program {
     let parsed = parse_module_with_file(source, "test.orna");
@@ -25,6 +26,14 @@ fn lower_one(source: &str) -> Program {
         tree: &parsed.value,
         path: ModulePath::new([Name::new("main")]),
     }]);
+    let user = ModulePath::new([Name::new("main")]);
+    let diagnostics: Vec<String> = program
+        .modules
+        .iter()
+        .filter(|module| module.path == user)
+        .flat_map(|module| module.diagnostics.iter().map(|diagnostic| format!("{diagnostic:?}")))
+        .collect();
+    assert!(diagnostics.is_empty(), "lowering diagnostics: {diagnostics:?}");
     assert_eq!(program.validate(), Ok(()), "lowered program must validate");
     program
 }
@@ -55,7 +64,7 @@ fn decode(hex: &str) -> Vec<u8> {
 #[test]
 fn sha256_text_and_to_hex_produce_the_known_digest() {
     assert_eq!(
-        run("pub fn run(): Str = core.hash.to_hex(core.hash.sha256_text(\"hello\"));\n"),
+        run(&format!("{HEAD}pub fn run(): Str = hash.to_hex(hash.sha256_text(\"hello\"));\n")),
         Ok(text(HELLO_DIGEST))
     );
 }
@@ -63,7 +72,9 @@ fn sha256_text_and_to_hex_produce_the_known_digest() {
 #[test]
 fn sha256_of_a_blob_hashes_its_bytes() {
     assert_eq!(
-        run("pub fn run(): Str = core.hash.to_hex(core.hash.sha256(core.hash.sha256_text(\"hello\")));\n"),
+        run(&format!(
+            "{HEAD}pub fn run(): Str = hash.to_hex(hash.sha256(hash.sha256_text(\"hello\")));\n"
+        )),
         Ok(text(HASH_OF_HELLO_DIGEST))
     );
 }
@@ -71,18 +82,18 @@ fn sha256_of_a_blob_hashes_its_bytes() {
 #[test]
 fn from_hex_accepts_exactly_lowercase_digests() {
     assert_eq!(
-        run(&format!("pub fn run(): Digest? = core.hash.from_hex(\"{HELLO_DIGEST}\");\n")),
+        run(&format!("{HEAD}pub fn run(): Digest? = hash.from_hex(\"{HELLO_DIGEST}\");\n")),
         Ok(Value::Option(Some(Rc::new(Value::Blob(Rc::from(
             decode(HELLO_DIGEST).as_slice()
         ))))))
     );
     let uppercase = HELLO_DIGEST.to_uppercase();
     assert_eq!(
-        run(&format!("pub fn run(): Digest? = core.hash.from_hex(\"{uppercase}\");\n")),
+        run(&format!("{HEAD}pub fn run(): Digest? = hash.from_hex(\"{uppercase}\");\n")),
         Ok(Value::Option(None))
     );
     assert_eq!(
-        run("pub fn run(): Digest? = core.hash.from_hex(\"abc\");\n"),
+        run(&format!("{HEAD}pub fn run(): Digest? = hash.from_hex(\"abc\");\n")),
         Ok(Value::Option(None))
     );
 }

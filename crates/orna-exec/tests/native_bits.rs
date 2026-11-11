@@ -20,6 +20,14 @@ fn lower_one(source: &str) -> Program {
         tree: &parsed.value,
         path: ModulePath::new([Name::new("main")]),
     }]);
+    let user = ModulePath::new([Name::new("main")]);
+    let diagnostics: Vec<String> = program
+        .modules
+        .iter()
+        .filter(|module| module.path == user)
+        .flat_map(|module| module.diagnostics.iter().map(|diagnostic| format!("{diagnostic:?}")))
+        .collect();
+    assert!(diagnostics.is_empty(), "lowering diagnostics: {diagnostics:?}");
     assert_eq!(program.validate(), Ok(()), "lowered program must validate");
     program
 }
@@ -41,33 +49,36 @@ fn int(value: &str) -> Value {
 
 #[test]
 fn bitwise_operations_are_two_complement() {
-    assert_eq!(run("pub fn run(): Int = std.bits.bit_or(5, 2);\n"), Ok(int("7")));
-    assert_eq!(run("pub fn run(): Int = std.bits.bit_and(5, 3);\n"), Ok(int("1")));
-    assert_eq!(run("pub fn run(): Int = std.bits.bit_xor(5, 3);\n"), Ok(int("6")));
-    assert_eq!(run("pub fn run(): Int = std.bits.bit_not(0);\n"), Ok(int("-1")));
-    assert_eq!(run("pub fn run(): Int = std.bits.bit_not(-1);\n"), Ok(int("0")));
+    let head = "use core.bits;\n";
+    assert_eq!(run(&format!("{head}pub fn run(): Int = bits.bit_or(5, 2);\n")), Ok(int("7")));
+    assert_eq!(run(&format!("{head}pub fn run(): Int = bits.bit_and(5, 3);\n")), Ok(int("1")));
+    assert_eq!(run(&format!("{head}pub fn run(): Int = bits.bit_xor(5, 3);\n")), Ok(int("6")));
+    assert_eq!(run(&format!("{head}pub fn run(): Int = bits.bit_not(0);\n")), Ok(int("-1")));
+    assert_eq!(run(&format!("{head}pub fn run(): Int = bits.bit_not(-1);\n")), Ok(int("0")));
 }
 
 #[test]
 fn shifts_are_exact_and_right_shift_is_arithmetic() {
-    assert_eq!(run("pub fn run(): Int = std.bits.shift_left(-3, 2);\n"), Ok(int("-12")));
-    assert_eq!(run("pub fn run(): Int = std.bits.shift_right(-9, 2);\n"), Ok(int("-3")));
+    let head = "use core.bits;\n";
+    assert_eq!(run(&format!("{head}pub fn run(): Int = bits.shift_left(-3, 2);\n")), Ok(int("-12")));
+    assert_eq!(run(&format!("{head}pub fn run(): Int = bits.shift_right(-9, 2);\n")), Ok(int("-3")));
     assert_eq!(
-        run("pub fn run(): Int = std.bits.shift_left(1, 100);\n"),
+        run(&format!("{head}pub fn run(): Int = bits.shift_left(1, 100);\n")),
         Ok(int("1267650600228229401496703205376"))
     );
-    assert_eq!(run("pub fn run(): Int = std.bits.shift_right(5, 100);\n"), Ok(int("0")));
-    assert_eq!(run("pub fn run(): Int = std.bits.shift_right(-5, 100);\n"), Ok(int("-1")));
+    assert_eq!(run(&format!("{head}pub fn run(): Int = bits.shift_right(5, 100);\n")), Ok(int("0")));
+    assert_eq!(run(&format!("{head}pub fn run(): Int = bits.shift_right(-5, 100);\n")), Ok(int("-1")));
 }
 
 #[test]
 fn negative_shift_count_is_the_old_value_code() {
+    let head = "use core.bits;\n";
     assert_eq!(
-        run("pub fn run(): Int = std.bits.shift_left(1, -1);\n"),
+        run(&format!("{head}pub fn run(): Int = bits.shift_left(1, -1);\n")),
         Err(ExecError::Code("ORNA-EVAL-VALUE"))
     );
     assert_eq!(
-        run("pub fn run(): Int = std.bits.shift_right(1, -1);\n"),
+        run(&format!("{head}pub fn run(): Int = bits.shift_right(1, -1);\n")),
         Err(ExecError::Code("ORNA-EVAL-VALUE"))
     );
 }
@@ -75,7 +86,7 @@ fn negative_shift_count_is_the_old_value_code() {
 #[test]
 fn shift_past_the_digit_limit_is_the_old_limit_code() {
     assert_eq!(
-        run("pub fn run(): Int = std.bits.shift_left(1, 1000000);\n"),
+        run("use core.bits;\npub fn run(): Int = bits.shift_left(1, 1000000);\n"),
         Err(ExecError::Code("ORNA-EVAL-LIMIT"))
     );
 }
