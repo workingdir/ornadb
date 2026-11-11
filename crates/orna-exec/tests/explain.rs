@@ -2,17 +2,22 @@
 //! evaluating anything.
 
 use orna_exec::explain::{
-    Callback, Operator, OperatorKind, explain_function, explain_query, render_function, render_operator,
+    Callback, Operator, OperatorKind, explain_function, explain_query, render_function,
+    render_operator,
 };
 use orna_hir::{
-    Body, BodyId, Callee, DefId, DefKind, EffectKind, EffectSet, ExprId, ExprKind, FnBody, ModulePath, Name, Program,
-    RelOp, SourceId, SourceUnit, lower, typeck,
+    Body, BodyId, Callee, DefId, DefKind, EffectKind, EffectSet, ExprId, ExprKind, FnBody,
+    ModulePath, Name, Program, RelOp, SourceId, SourceUnit, lower, typeck,
 };
 use orna_syntax::parse_module_with_file;
 
 fn lower_one(source: &str) -> Program {
     let parsed = parse_module_with_file(source, "test.orna");
-    assert!(parsed.is_ok(), "test source must parse: {:?}", parsed.diagnostics);
+    assert!(
+        parsed.is_ok(),
+        "test source must parse: {:?}",
+        parsed.diagnostics
+    );
     let mut program = lower(&[SourceUnit {
         source: SourceId::new(0),
         tree: &parsed.value,
@@ -39,7 +44,9 @@ fn body_of(program: &Program, def: DefId) -> BodyId {
     match &program.defs[def].kind {
         DefKind::Fn(function) => match function.body {
             FnBody::Source(body) => body,
-            FnBody::Native(_) | FnBody::Signature => panic!("{} has no Orna body", program.defs[def].name.as_str()),
+            FnBody::Native(_) | FnBody::Signature => {
+                panic!("{} has no Orna body", program.defs[def].name.as_str())
+            }
         },
         _ => panic!("{} is not a function", program.defs[def].name.as_str()),
     }
@@ -58,7 +65,8 @@ fn outermost_stage(body: &Body, op: RelOp) -> ExprId {
             ExprKind::Call(call) => {
                 matches!(call.callee, Callee::Relational { .. })
                     && call.args.iter().any(|argument| {
-                        argument.slot.as_u32() == 0 && argument.value == orna_hir::ArgValue::Expr(candidate)
+                        argument.slot.as_u32() == 0
+                            && argument.value == orna_hir::ArgValue::Expr(candidate)
                     })
             }
             _ => false,
@@ -94,13 +102,17 @@ fn take_over_a_table_shows_the_take_above_the_scan() {
     assert_eq!(scan.effects, EffectSet::single(EffectKind::TableRead));
     assert!(scan.inputs.is_empty());
 
-    assert_eq!(render_operator(&program, &root), "take effects=pure\n  scan Note effects=table_read\n");
+    assert_eq!(
+        render_operator(&program, &root),
+        "take effects=pure\n  scan Note effects=table_read\n"
+    );
 }
 
 #[test]
 fn a_chain_of_stages_nests_each_stage_over_the_one_before_it() {
-    let source =
-        format!("{NOTE}pub fn run() {{\n    Note.filter(row => row.id > 1).map(row => row.text).take(2)\n}}\n");
+    let source = format!(
+        "{NOTE}pub fn run() {{\n    Note.filter(row => row.id > 1).map(row => row.text).take(2)\n}}\n"
+    );
     let (program, root) = explain_stage(&source, RelOp::Take);
 
     assert_eq!(root.kind, OperatorKind::Take);
@@ -148,7 +160,10 @@ fn a_named_callback_reports_its_definition() {
     let (program, root) = explain_stage(&source, RelOp::Filter);
 
     assert_eq!(root.kind, OperatorKind::Filter);
-    assert_eq!(root.callback, Some(Callback::Def(def_named(&program, "keep"))));
+    assert_eq!(
+        root.callback,
+        Some(Callback::Def(def_named(&program, "keep")))
+    );
     assert_eq!(root.inputs[0].kind, OperatorKind::Scan);
 }
 
@@ -159,7 +174,11 @@ fn explaining_a_function_reports_its_signature_effects_and_tables() {
     let run = def_named(&program, "run");
     let explain = explain_function(&program, run).expect("run is a function");
 
-    assert!(explain.signature.starts_with("run("), "signature was {}", explain.signature);
+    assert!(
+        explain.signature.starts_with("run("),
+        "signature was {}",
+        explain.signature
+    );
     assert!(explain.effects.contains(EffectKind::TableRead));
     assert_eq!(explain.tables, vec![def_named(&program, "Note")]);
     assert!(render_function(&program, &explain).contains("tables: Note"));
@@ -167,9 +186,12 @@ fn explaining_a_function_reports_its_signature_effects_and_tables() {
 
 #[test]
 fn a_function_reports_the_tables_of_the_functions_it_calls() {
-    let source = format!("{NOTE}pub fn first() {{\n    Note.take(1)\n}}\npub fn run() {{\n    first()\n}}\n");
+    let source = format!(
+        "{NOTE}pub fn first() {{\n    Note.take(1)\n}}\npub fn run() {{\n    first()\n}}\n"
+    );
     let program = lower_one(&source);
-    let explain = explain_function(&program, def_named(&program, "run")).expect("run is a function");
+    let explain =
+        explain_function(&program, def_named(&program, "run")).expect("run is a function");
 
     assert_eq!(explain.tables, vec![def_named(&program, "Note")]);
 }
@@ -178,7 +200,8 @@ fn a_function_reports_the_tables_of_the_functions_it_calls() {
 fn a_pure_function_reports_no_tables() {
     let source = "pub fn run(): Int {\n    1 + 2\n}\n";
     let program = lower_one(source);
-    let explain = explain_function(&program, def_named(&program, "run")).expect("run is a function");
+    let explain =
+        explain_function(&program, def_named(&program, "run")).expect("run is a function");
 
     assert!(explain.tables.is_empty());
     assert!(render_function(&program, &explain).contains("tables: none"));
@@ -187,5 +210,8 @@ fn a_pure_function_reports_no_tables() {
 #[test]
 fn explaining_a_non_function_reports_nothing() {
     let program = lower_one(&format!("{NOTE}pub fn run(): Int {{\n    1\n}}\n"));
-    assert_eq!(explain_function(&program, def_named(&program, "Note")), None);
+    assert_eq!(
+        explain_function(&program, def_named(&program, "Note")),
+        None
+    );
 }

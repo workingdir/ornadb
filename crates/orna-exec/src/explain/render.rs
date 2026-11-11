@@ -15,12 +15,20 @@ pub fn render_operator(program: &Program, root: &Operator) -> String {
 /// The function explain: its signature, its effects, and the tables it reaches.
 #[must_use]
 pub fn render_function(program: &Program, explain: &FunctionExplain) -> String {
-    let tables: Vec<&str> = explain.tables.iter().map(|table| name(program, *table)).collect();
+    let tables: Vec<&str> = explain
+        .tables
+        .iter()
+        .map(|table| name(program, *table))
+        .collect();
     format!(
         "{}\neffects: {}\ntables: {}\n",
         explain.signature,
         effects_text(explain.effects),
-        if tables.is_empty() { "none".to_owned() } else { tables.join(", ") }
+        if tables.is_empty() {
+            "none".to_owned()
+        } else {
+            tables.join(", ")
+        }
     )
 }
 
@@ -37,7 +45,10 @@ fn push_operator(program: &Program, operator: &Operator, depth: usize, out: &mut
 
 fn label(program: &Program, operator: &Operator) -> String {
     match operator.kind {
-        OperatorKind::Scan => format!("scan {}", operator.table.map_or("?", |table| name(program, table))),
+        OperatorKind::Scan => format!(
+            "scan {}",
+            operator.table.map_or("?", |table| name(program, table))
+        ),
         OperatorKind::Filter => format!("filter {}", callback_text(program, operator.callback)),
         OperatorKind::Map => format!("map {}", callback_text(program, operator.callback)),
         OperatorKind::Take => "take".to_owned(),
@@ -64,7 +75,11 @@ fn effects_text(effects: EffectSet) -> String {
         return "opaque".to_owned();
     }
     let kinds: Vec<&str> = effects.kinds().map(effect_class).collect();
-    if kinds.is_empty() { "pure".to_owned() } else { kinds.join(",") }
+    if kinds.is_empty() {
+        "pure".to_owned()
+    } else {
+        kinds.join(",")
+    }
 }
 
 const fn effect_class(kind: EffectKind) -> &'static str {

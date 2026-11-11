@@ -5,7 +5,8 @@
 //! reports is one the executor applies. It evaluates nothing and reads no rows.
 
 use orna_hir::{
-    ArgValue, Body, BodyId, Call, Callee, DefId, DefKind, EffectKind, EffectSet, ExprId, ExprKind, Program, RelOp,
+    ArgValue, Body, BodyId, Call, Callee, DefId, DefKind, EffectKind, EffectSet, ExprId, ExprKind,
+    Program, RelOp,
 };
 
 use crate::relation::is_stage;
@@ -109,7 +110,13 @@ fn stage(program: &Program, body: &Body, call: &Call, op: RelOp) -> Operator {
         Some(input) => vec![operator(program, body, input)],
         None => Vec::new(),
     };
-    Operator { kind, table: None, callback, effects, inputs }
+    Operator {
+        kind,
+        table: None,
+        callback,
+        effects,
+        inputs,
+    }
 }
 
 /// The callback a stage calls: argument 1. Its effects are the effects of the named function or lambda.
@@ -122,7 +129,9 @@ fn callback(program: &Program, body: &Body, call: &Call) -> (Callback, EffectSet
             DefKind::Fn(function) => (Callback::Def(*def), function.effects),
             _ => (Callback::Dynamic, EffectSet::opaque()),
         },
-        ExprKind::Lambda { body: lambda, .. } => (Callback::Lambda(*lambda), program.bodies[*lambda].effects),
+        ExprKind::Lambda { body: lambda, .. } => {
+            (Callback::Lambda(*lambda), program.bodies[*lambda].effects)
+        }
         _ => (Callback::Dynamic, EffectSet::opaque()),
     }
 }
@@ -140,7 +149,10 @@ fn external() -> Operator {
 
 /// The expression bound to argument `slot`, if the call binds it to a written expression.
 fn argument_expr(call: &Call, slot: usize) -> Option<ExprId> {
-    let argument = call.args.iter().find(|argument| argument.slot.as_u32() as usize == slot)?;
+    let argument = call
+        .args
+        .iter()
+        .find(|argument| argument.slot.as_u32() as usize == slot)?;
     match argument.value {
         ArgValue::Expr(id) => Some(id),
         ArgValue::Default => None,

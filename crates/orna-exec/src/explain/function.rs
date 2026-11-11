@@ -3,7 +3,9 @@
 //! The walk follows the calls a function body makes to other Orna functions, and the table operations and table
 //! names in each body, including lambda bodies. It evaluates nothing.
 
-use orna_hir::{BodyId, Callee, DefId, DefKind, EffectSet, ExprKind, FnBody, FnDef, Program, print_signature};
+use orna_hir::{
+    BodyId, Callee, DefId, DefKind, EffectSet, ExprKind, FnBody, FnDef, Program, print_signature,
+};
 
 /// What the explain of one function reports.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -25,7 +27,11 @@ pub fn explain_function(program: &Program, def: DefId) -> Option<FunctionExplain
     };
     let mut walk = Walk::default();
     walk.function(program, def);
-    Some(FunctionExplain { signature, effects: function.effects, tables: walk.tables })
+    Some(FunctionExplain {
+        signature,
+        effects: function.effects,
+        tables: walk.tables,
+    })
 }
 
 /// The definitions and bodies already visited, and the tables found so far.
@@ -42,7 +48,11 @@ impl Walk {
             return;
         }
         self.functions.push(def);
-        if let DefKind::Fn(FnDef { body: FnBody::Source(body), .. }) = &program.defs[def].kind {
+        if let DefKind::Fn(FnDef {
+            body: FnBody::Source(body),
+            ..
+        }) = &program.defs[def].kind
+        {
             self.body(program, *body);
         }
     }
@@ -54,7 +64,9 @@ impl Walk {
         self.bodies.push(id);
         for expr in program.bodies[id].exprs.iter() {
             match &expr.kind {
-                ExprKind::Def(def) if matches!(program.defs[*def].kind, DefKind::Table(_)) => self.table(*def),
+                ExprKind::Def(def) if matches!(program.defs[*def].kind, DefKind::Table(_)) => {
+                    self.table(*def)
+                }
                 ExprKind::Lambda { body, .. } => self.body(program, *body),
                 ExprKind::Call(call) => match &call.callee {
                     Callee::TableOp { table, .. } => self.table(*table),
