@@ -79,7 +79,10 @@ impl CommittedTableStore {
         let mut opened = BTreeMap::new();
         for (id, name) in names {
             let schema = tables.get(&name).ok_or(StoreError::UnknownTable(id))?;
-            let object_id = table_ids.get(&name).copied().ok_or(StoreError::UnknownTable(id))?;
+            let object_id = table_ids
+                .get(&name)
+                .copied()
+                .ok_or(StoreError::UnknownTable(id))?;
             let resolved = ProjectLoader::default()
                 .resolve_committed_source_table_schema(repository, commit, object_id)
                 .map_err(|_| StoreError::Backend(STORAGE_CONTRACT))?;
@@ -99,7 +102,9 @@ impl CommittedTableStore {
     }
 
     fn table(&self, table: TableId) -> Result<&OpenedTable, StoreError> {
-        self.tables.get(&table).ok_or(StoreError::UnknownTable(table))
+        self.tables
+            .get(&table)
+            .ok_or(StoreError::UnknownTable(table))
     }
 }
 
@@ -116,7 +121,12 @@ impl TableStore for CommittedTableStore {
         Err(StoreError::NoActivation)
     }
 
-    fn scan(&mut self, table: TableId, bounds: KeyBounds, dir: Direction) -> Result<CursorId, StoreError> {
+    fn scan(
+        &mut self,
+        table: TableId,
+        bounds: KeyBounds,
+        dir: Direction,
+    ) -> Result<CursorId, StoreError> {
         let opened = self.table(table)?;
         let mut cursor = Cursor {
             table,
@@ -152,8 +162,12 @@ impl TableStore for CommittedTableStore {
             rows_read,
             ..
         } = self;
-        let state = cursors.get_mut(&cursor).ok_or(StoreError::UnknownCursor(cursor))?;
-        let opened = tables.get(&state.table).ok_or(StoreError::UnknownTable(state.table))?;
+        let state = cursors
+            .get_mut(&cursor)
+            .ok_or(StoreError::UnknownCursor(cursor))?;
+        let opened = tables
+            .get(&state.table)
+            .ok_or(StoreError::UnknownTable(state.table))?;
         while state.buffered.is_empty() && !state.finished {
             fill_page(opened, state)?;
         }
@@ -161,10 +175,7 @@ impl TableStore for CommittedTableStore {
         if state.current.is_some() {
             *rows_read += 1;
         }
-        Ok(state
-            .current
-            .as_ref()
-            .map(|(key, row)| RowRef { key, row }))
+        Ok(state.current.as_ref().map(|(key, row)| RowRef { key, row }))
     }
 
     fn close(&mut self, cursor: CursorId) {
@@ -177,7 +188,8 @@ impl TableStore for CommittedTableStore {
         let Some(typed) = typed_key_of_runtime(key, opened.text_primary_key) else {
             return Ok(None);
         };
-        let range = KeyRange::new(Some(typed), None, 1).map_err(|_| StoreError::Backend(RANGE_READ))?;
+        let range =
+            KeyRange::new(Some(typed), None, 1).map_err(|_| StoreError::Backend(RANGE_READ))?;
         let rows = opened
             .graph
             .range_rows(&range, &opened.read_scope)
@@ -195,7 +207,13 @@ impl TableStore for CommittedTableStore {
             .map_err(|_| StoreError::Backend(STORAGE_CONTRACT))
     }
 
-    fn put(&mut self, _table: TableId, _key: &[u8], _row: &[u8], _expect: Expect) -> Result<(), StoreError> {
+    fn put(
+        &mut self,
+        _table: TableId,
+        _key: &[u8],
+        _row: &[u8],
+        _expect: Expect,
+    ) -> Result<(), StoreError> {
         Err(StoreError::ReadOnly)
     }
 
@@ -216,7 +234,8 @@ impl TableStore for CommittedTableStore {
 /// resuming after the last key of the previous page. Rows below the lower bound are
 /// read and dropped; the first row at or above the upper bound ends the scan.
 fn fill_page(table: &OpenedTable, cursor: &mut Cursor) -> Result<(), StoreError> {
-    let range = KeyRange::new(None, None, PAGE_ROWS).map_err(|_| StoreError::Backend(RANGE_READ))?;
+    let range =
+        KeyRange::new(None, None, PAGE_ROWS).map_err(|_| StoreError::Backend(RANGE_READ))?;
     let range = match cursor.resume_after.take() {
         Some(key) => range
             .with_resume_after(key)
@@ -247,7 +266,8 @@ fn fill_page(table: &OpenedTable, cursor: &mut Cursor) -> Result<(), StoreError>
         let above_lower = above_lower(&cursor.bounds, &key);
         cursor.last_key = Some(key.clone());
         if above_lower {
-            let tuple = stored_tuple_of_row(table, row).map_err(|_| StoreError::Backend(STORAGE_CONTRACT))?;
+            let tuple = stored_tuple_of_row(table, row)
+                .map_err(|_| StoreError::Backend(STORAGE_CONTRACT))?;
             cursor.buffered.push_back((key, tuple));
         }
     }
