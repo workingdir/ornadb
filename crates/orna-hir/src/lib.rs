@@ -28,7 +28,6 @@
 
 #![forbid(unsafe_code)]
 
-pub mod engine_order;
 mod body;
 mod call;
 mod def;
@@ -36,6 +35,7 @@ pub mod diag;
 mod effect_pass;
 mod effects;
 mod embedded;
+pub mod engine_order;
 mod ids;
 pub mod infer;
 mod lower;
