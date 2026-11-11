@@ -14,7 +14,9 @@ use crate::error::Stop;
 use crate::frame::Frame;
 use crate::machine::Machine;
 use crate::value::Value;
-use pipeline::{Pipeline, is_stage, truth};
+use pipeline::{Pipeline, truth};
+
+pub(crate) use pipeline::is_stage;
 
 /// Evaluates the relation call `call` of `op`. A stage collects its rows into a list. A terminal consumes them.
 pub(crate) fn relational<'p>(

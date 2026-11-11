@@ -14,6 +14,7 @@ mod engine_display;
 mod engine_order;
 mod error;
 mod eval;
+pub mod explain;
 mod float;
 mod frame;
 mod link;
