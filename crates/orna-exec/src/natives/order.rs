@@ -41,7 +41,9 @@ pub(super) fn compare_sort_keys(left: &Value, right: &Value) -> Result<Ordering,
         (Value::Blob(left), Value::Blob(right)) => Ok(left[..].cmp(&right[..])),
         (Value::Text(left), Value::Text(right)) => Ok(left.cmp(right)),
         (Value::Int(left), Value::Int(right)) => Ok(left.cmp(right)),
-        (Value::Tuple(left), Value::Tuple(right)) => compare_lexical(left, right, compare_sort_keys),
+        (Value::Tuple(left), Value::Tuple(right)) => {
+            compare_lexical(left, right, compare_sort_keys)
+        }
         _ => Err(Stop::Error("ORNA-EVAL-TYPE")),
     }
 }
@@ -52,7 +54,9 @@ pub(super) fn compare_group_keys(left: &Value, right: &Value) -> Result<Ordering
         (Value::Bool(left), Value::Bool(right)) => Ok(left.cmp(right)),
         (Value::Int(left), Value::Int(right)) => Ok(left.cmp(right)),
         (Value::Text(left), Value::Text(right)) => Ok(left.cmp(right)),
-        (Value::Tuple(left), Value::Tuple(right)) => compare_lexical(left, right, compare_group_keys),
+        (Value::Tuple(left), Value::Tuple(right)) => {
+            compare_lexical(left, right, compare_group_keys)
+        }
         _ => Err(Stop::Error("ORNA-EVAL-TYPE")),
     }
 }
@@ -106,7 +110,11 @@ pub(super) fn stable_order(machine: &mut Machine<'_>, keys: &[Value]) -> Result<
 /// The smallest (`replace_on` is `Less`) or largest (`Greater`) of `rows` as an option. Each element costs one step and
 /// must be a lawful sort key. An element replaces the candidate only when it compares strictly past it, so the first
 /// of equal elements wins.
-pub(super) fn extreme(machine: &mut Machine<'_>, rows: &[Value], replace_on: Ordering) -> Result<Value, Stop> {
+pub(super) fn extreme(
+    machine: &mut Machine<'_>,
+    rows: &[Value],
+    replace_on: Ordering,
+) -> Result<Value, Stop> {
     let mut candidate: Option<&Value> = None;
     for value in rows {
         machine.tick(1)?;

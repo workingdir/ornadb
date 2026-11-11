@@ -10,7 +10,11 @@ impl Machine<'_> {
     /// charges, and the native that calls it charges what the old evaluator charged. A callee that is not a closure is
     /// a type error. An argument count or binder the closure does not take is an argument error, as a value call
     /// reports it.
-    pub(crate) fn call_closure(&mut self, callee: &Value, arguments: Vec<Value>) -> Result<Value, Stop> {
+    pub(crate) fn call_closure(
+        &mut self,
+        callee: &Value,
+        arguments: Vec<Value>,
+    ) -> Result<Value, Stop> {
         let Value::Closure(closure) = callee else {
             return Err(Stop::Error("ORNA-EVAL-TYPE"));
         };

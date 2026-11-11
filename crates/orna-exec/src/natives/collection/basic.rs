@@ -1,8 +1,8 @@
 //! The `core.collection` natives over whole lists that take no closure: counting, union, sums, the ends, slices,
 //! distinct elements and extremes. Each function charges the steps the old evaluator charged.
 
-use std::collections::HashSet;
 use std::cmp::Ordering;
+use std::collections::HashSet;
 
 use num_bigint::BigInt;
 use num_traits::{Signed, ToPrimitive};
@@ -15,7 +15,10 @@ use crate::ops::checked;
 use crate::value::Value;
 
 /// `count<T>(rows: [T]): Int`. One step.
-pub(in crate::natives) fn count(machine: &mut Machine<'_>, arguments: Vec<Value>) -> Result<Value, Stop> {
+pub(in crate::natives) fn count(
+    machine: &mut Machine<'_>,
+    arguments: Vec<Value>,
+) -> Result<Value, Stop> {
     let [rows] = exactly(arguments)?;
     let rows = list(rows)?;
     machine.tick(1)?;
@@ -23,7 +26,10 @@ pub(in crate::natives) fn count(machine: &mut Machine<'_>, arguments: Vec<Value>
 }
 
 /// `union<T>(left: [T], right: [T]): [T]`, and `__list_concat`. One step per element of both lists.
-pub(in crate::natives) fn union_rows(machine: &mut Machine<'_>, arguments: Vec<Value>) -> Result<Value, Stop> {
+pub(in crate::natives) fn union_rows(
+    machine: &mut Machine<'_>,
+    arguments: Vec<Value>,
+) -> Result<Value, Stop> {
     let [left, right] = exactly(arguments)?;
     let left = list(left)?;
     let right = list(right)?;
@@ -33,7 +39,10 @@ pub(in crate::natives) fn union_rows(machine: &mut Machine<'_>, arguments: Vec<V
 
 /// `sum<T>(rows: [T]): T`, and `__numeric_sum`. One step per element; only integers are summed here. A non-integer
 /// element is unsupported, as the old evaluator reports it.
-pub(in crate::natives) fn sum(machine: &mut Machine<'_>, arguments: Vec<Value>) -> Result<Value, Stop> {
+pub(in crate::natives) fn sum(
+    machine: &mut Machine<'_>,
+    arguments: Vec<Value>,
+) -> Result<Value, Stop> {
     let [rows] = exactly(arguments)?;
     let rows = list(rows)?;
     let mut total = BigInt::from(0);
@@ -48,28 +57,40 @@ pub(in crate::natives) fn sum(machine: &mut Machine<'_>, arguments: Vec<Value>) 
 }
 
 /// `first<T>(rows: [T]): T?`. No step.
-pub(in crate::natives) fn first(_machine: &mut Machine<'_>, arguments: Vec<Value>) -> Result<Value, Stop> {
+pub(in crate::natives) fn first(
+    _machine: &mut Machine<'_>,
+    arguments: Vec<Value>,
+) -> Result<Value, Stop> {
     let [rows] = exactly(arguments)?;
     let rows = list(rows)?;
     Ok(rows.first().cloned().map_or(Value::Null, some))
 }
 
 /// `last<T>(rows: [T]): T?`. No step.
-pub(in crate::natives) fn last(_machine: &mut Machine<'_>, arguments: Vec<Value>) -> Result<Value, Stop> {
+pub(in crate::natives) fn last(
+    _machine: &mut Machine<'_>,
+    arguments: Vec<Value>,
+) -> Result<Value, Stop> {
     let [rows] = exactly(arguments)?;
     let rows = list(rows)?;
     Ok(rows.last().cloned().map_or_else(none, some))
 }
 
 /// `min<T>(rows: [T]): T?`, and `__minimum`.
-pub(in crate::natives) fn min_value(machine: &mut Machine<'_>, arguments: Vec<Value>) -> Result<Value, Stop> {
+pub(in crate::natives) fn min_value(
+    machine: &mut Machine<'_>,
+    arguments: Vec<Value>,
+) -> Result<Value, Stop> {
     let [rows] = exactly(arguments)?;
     let rows = list(rows)?;
     extreme(machine, &rows, Ordering::Less)
 }
 
 /// `max<T>(rows: [T]): T?`, and `__maximum`.
-pub(in crate::natives) fn max_value(machine: &mut Machine<'_>, arguments: Vec<Value>) -> Result<Value, Stop> {
+pub(in crate::natives) fn max_value(
+    machine: &mut Machine<'_>,
+    arguments: Vec<Value>,
+) -> Result<Value, Stop> {
     let [rows] = exactly(arguments)?;
     let rows = list(rows)?;
     extreme(machine, &rows, Ordering::Greater)
@@ -77,7 +98,10 @@ pub(in crate::natives) fn max_value(machine: &mut Machine<'_>, arguments: Vec<Va
 
 /// `take<T>(rows: [T], count: Int): [T]`. A negative count is a value error; a count past the end takes every row.
 /// One step per row taken.
-pub(in crate::natives) fn take_rows(machine: &mut Machine<'_>, arguments: Vec<Value>) -> Result<Value, Stop> {
+pub(in crate::natives) fn take_rows(
+    machine: &mut Machine<'_>,
+    arguments: Vec<Value>,
+) -> Result<Value, Stop> {
     let [rows, count] = exactly(arguments)?;
     let rows = list(rows)?;
     let count = int(count)?;
@@ -92,7 +116,10 @@ pub(in crate::natives) fn take_rows(machine: &mut Machine<'_>, arguments: Vec<Va
 
 /// `drop<T>(rows: [T], count: Int): [T]`. A negative count is a value error; a count past the end drops every row.
 /// One step per row kept.
-pub(in crate::natives) fn drop_rows(machine: &mut Machine<'_>, arguments: Vec<Value>) -> Result<Value, Stop> {
+pub(in crate::natives) fn drop_rows(
+    machine: &mut Machine<'_>,
+    arguments: Vec<Value>,
+) -> Result<Value, Stop> {
     let [rows, count] = exactly(arguments)?;
     let rows = list(rows)?;
     let count = int(count)?;
@@ -118,7 +145,10 @@ fn prefix_length(count: &BigInt, length: usize) -> Result<usize, Stop> {
 
 /// `distinct<T>(rows: [T]): [T]`. One step per row, and one more per row kept. Rows are the same when their canonical
 /// encodings are, and the first of equal rows is kept, in source order.
-pub(in crate::natives) fn distinct(machine: &mut Machine<'_>, arguments: Vec<Value>) -> Result<Value, Stop> {
+pub(in crate::natives) fn distinct(
+    machine: &mut Machine<'_>,
+    arguments: Vec<Value>,
+) -> Result<Value, Stop> {
     let [rows] = exactly(arguments)?;
     let rows = list(rows)?;
     let mut seen = HashSet::new();

@@ -4,13 +4,18 @@ use std::cmp::Ordering;
 
 use crate::error::Stop;
 use crate::machine::Machine;
-use crate::natives::order::{check_asof_time, check_group_key, compare_group_keys, compare_sort_keys};
+use crate::natives::order::{
+    check_asof_time, check_group_key, compare_group_keys, compare_sort_keys,
+};
 use crate::natives::values::{canonical_bytes, exactly, list, list_of, pair, some};
 use crate::value::Value;
 
 /// `group_by<T, K>(values: [T], key: fn(T): K): [(K, [T])]`. One step per row keyed, and each key must be a lawful group
 /// key. Groups keep their first-seen row order, and the groups themselves are sorted by key.
-pub(in crate::natives) fn group_by(machine: &mut Machine<'_>, arguments: Vec<Value>) -> Result<Value, Stop> {
+pub(in crate::natives) fn group_by(
+    machine: &mut Machine<'_>,
+    arguments: Vec<Value>,
+) -> Result<Value, Stop> {
     let [rows, key] = exactly(arguments)?;
     let rows = list(rows)?;
     let mut groups: Vec<(Value, Vec<Value>)> = Vec::new();
@@ -33,7 +38,9 @@ pub(in crate::natives) fn group_by(machine: &mut Machine<'_>, arguments: Vec<Val
     // An insertion sort keeps the ordering decision fallible, as the old evaluator's does.
     for index in 1..groups.len() {
         let mut current = index;
-        while current > 0 && compare_group_keys(&groups[current - 1].0, &groups[current].0)? == Ordering::Greater {
+        while current > 0
+            && compare_group_keys(&groups[current - 1].0, &groups[current].0)? == Ordering::Greater
+        {
             groups.swap(current - 1, current);
             current -= 1;
         }
@@ -50,7 +57,10 @@ pub(in crate::natives) fn group_by(machine: &mut Machine<'_>, arguments: Vec<Val
 /// whose time is the latest at or before the left row's time. Equal times break on the right row's canonical bytes,
 /// the greater winning. One step per left and right row for each selector, and one per candidate pair compared.
 /// An empty left list returns at once, without evaluating the right side.
-pub(in crate::natives) fn asof_join(machine: &mut Machine<'_>, arguments: Vec<Value>) -> Result<Value, Stop> {
+pub(in crate::natives) fn asof_join(
+    machine: &mut Machine<'_>,
+    arguments: Vec<Value>,
+) -> Result<Value, Stop> {
     let [left, right, time, by] = exactly(arguments)?;
     let left = list(left)?;
     let right = list(right)?;
@@ -100,7 +110,12 @@ pub(in crate::natives) fn asof_join(machine: &mut Machine<'_>, arguments: Vec<Va
 }
 
 /// The as-of time key and the group key of one row. Each selector call charges one step before it runs.
-fn keys_of(machine: &mut Machine<'_>, time: &Value, by: &Value, row: &Value) -> Result<(Value, Value), Stop> {
+fn keys_of(
+    machine: &mut Machine<'_>,
+    time: &Value,
+    by: &Value,
+    row: &Value,
+) -> Result<(Value, Value), Stop> {
     machine.tick(1)?;
     let time_key = machine.call_closure(time, vec![row.clone()])?;
     check_asof_time(&time_key)?;
