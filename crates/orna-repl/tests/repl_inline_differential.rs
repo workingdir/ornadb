@@ -4,7 +4,8 @@
 //! `orna-project-repl`. Each fixture that needs only a standalone session is run through the new session and
 //! through a fresh old `ReplSession`, and the canonical result or the error code must match. Fixtures that need
 //! a repository, a snapshot, a watch or persistence are listed in `repl_inline_exclusions.txt` with a reason.
-//! `AGREED_FLOOR` is a ratchet: the agreed count must not drop, and it is raised when it rises.
+//! Runnable fixtures that disagree are listed with a reason in `repl_inline_differing.txt`; the disagreement set must
+//! match that list exactly. `AGREED_FLOOR` is a ratchet: the agreed count must not drop, and it is raised when it rises.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -20,7 +21,8 @@ const FIXTURE_DIRS: [&str; 3] = [
     "orna-project-repl/src/fixtures",
 ];
 const EXCLUSIONS: &str = include_str!("repl_inline_exclusions.txt");
-const AGREED_FLOOR: usize = 11;
+const DIFFERING: &str = include_str!("repl_inline_differing.txt");
+const AGREED_FLOOR: usize = 15;
 
 #[derive(Debug, PartialEq)]
 enum Outcome {
@@ -84,6 +86,26 @@ fn parse_exclusions() -> BTreeMap<String, String> {
         .collect()
 }
 
+/// The expected-disagreement table: the `## expected` section of `repl_inline_differing.txt`, one
+/// `<fixture path> <reason>` per line. Blank lines and `#` comments are ignored.
+fn parse_expected() -> BTreeMap<String, String> {
+    let section = DIFFERING
+        .split_once("\n## expected\n")
+        .expect("differing list has an expected section")
+        .1;
+    section
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|line| {
+            let (path, reason) = line
+                .split_once(' ')
+                .expect("expected line is path<SPACE>reason");
+            (path.to_owned(), reason.to_owned())
+        })
+        .collect()
+}
+
 #[test]
 fn repl_inline_fixtures_agree_with_the_old_repl() {
     let fixtures = collect_fixtures();
@@ -92,6 +114,7 @@ fn repl_inline_fixtures_agree_with_the_old_repl() {
         assert!(fixtures.contains_key(path), "stale exclusion: {path}");
     }
 
+    let expected = parse_expected();
     let mut agreed = 0;
     let mut disagreed = Vec::new();
     for (path, source) in &fixtures {
@@ -106,12 +129,25 @@ fn repl_inline_fixtures_agree_with_the_old_repl() {
             disagreed.push(path.clone());
         }
     }
+    for path in expected.keys() {
+        assert!(fixtures.contains_key(path), "stale expectation: {path}");
+        assert!(
+            disagreed.contains(path),
+            "stale expectation, now agrees with the old REPL: {path}"
+        );
+    }
+    for path in &disagreed {
+        assert!(
+            expected.contains_key(path),
+            "unclassified disagreement, add it to repl_inline_differing.txt with a reason: {path}"
+        );
+    }
     let runnable = fixtures.len() - exclusions.len();
     eprintln!(
-        "repl-inline differential: agreed {agreed} of {runnable} runnable, {} total",
-        fixtures.len()
+        "repl-inline differential: agreed {agreed} of {runnable} runnable, {} total, {} expected disagreements",
+        fixtures.len(),
+        expected.len()
     );
-    eprintln!("disagreements: {}", disagreed.len());
     assert!(
         agreed >= AGREED_FLOOR,
         "agreed {agreed} dropped below the ratchet floor {AGREED_FLOOR}"

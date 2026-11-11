@@ -88,11 +88,9 @@ impl Session {
     pub fn stage(&self, input: &str) -> Result<Staged, ReplError> {
         let parsed = parse_repl(input);
         if !parsed.is_ok() {
-            let code = parsed
-                .diagnostics
-                .first()
-                .map_or("ORNA-REPL-INTERNAL", |diagnostic| diagnostic.code);
-            return Err(ReplError::new(code, "the input does not parse"));
+            // Every prompt parse failure is reported under the REPL's established code, whatever
+            // the parser's own diagnostic code is.
+            return Err(ReplError::new("ORNA-EVAL-PARSE", "the input does not parse"));
         }
         match &parsed.value {
             ReplInput::Expression(expression) => self.stage_expression(input, expression, true),
