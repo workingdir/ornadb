@@ -238,6 +238,11 @@ impl InferCtxt {
             | TyKind::Duration
             | TyKind::Period
             | TyKind::Digest
+            | TyKind::Path
+            | TyKind::TimeZone
+            | TyKind::Locale
+            | TyKind::PresentContext
+            | TyKind::PresentTree
             | TyKind::Unit
             | TyKind::Never
             | TyKind::Error
