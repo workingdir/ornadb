@@ -8,11 +8,39 @@ use std::ops::Bound;
 use orna_hir::DefId;
 
 #[cfg(test)]
-use super::{CursorId, MemoryStore};
-use super::{Direction, Expect, KeyBounds, StoreError, TableId, TableStore};
+use super::CursorId;
+use super::{Direction, Expect, KeyBounds, MemoryStore, StoreError, TableId, TableStore};
 
 fn table(raw: u32) -> TableId {
     DefId::new(raw)
+}
+
+/// A [`TableStore`] the read-side cases can build with rows. A seeded store holds
+/// valid rows for its own encoding, so the cases never assume a row shape.
+pub trait SeedableStore: TableStore {
+    /// A store whose `table(1)` holds one row for each index in `indices`, at [`SeedableStore::key`].
+    fn seeded(indices: &[u32]) -> Self;
+
+    /// The canonical key of `index`. Ascending indices give ascending keys.
+    fn key(index: u32) -> Vec<u8>;
+}
+
+impl SeedableStore for MemoryStore {
+    fn seeded(indices: &[u32]) -> Self {
+        let mut store = MemoryStore::new();
+        store.begin().expect("begin");
+        for &index in indices {
+            store
+                .put(table(1), &Self::key(index), b"row", Expect::Absent)
+                .expect("seed");
+        }
+        store.commit().expect("commit");
+        store
+    }
+
+    fn key(index: u32) -> Vec<u8> {
+        index.to_be_bytes().to_vec()
+    }
 }
 
 fn keys(
@@ -110,51 +138,41 @@ pub fn expectations_are_checked<S: TableStore>(mut store: S) {
 }
 
 /// A scan visits keys in canonical byte order, forward and reverse, within bounds.
-pub fn scans_are_ordered_and_bounded<S: TableStore>(mut store: S) {
+/// The seeded store holds indices 0 to 4.
+pub fn scans_are_ordered_and_bounded<S: SeedableStore>(mut store: S) {
     let t = table(1);
-    let inserted: [&[u8]; 5] = [b"c", b"a", b"e", b"b", b"d"];
-    store.begin().expect("begin");
-    for key in inserted {
-        store.put(t, key, b"row", Expect::Absent).expect("insert");
-    }
-    store.commit().expect("commit");
-
     let all = keys(&mut store, t, KeyBounds::all(), Direction::Forward);
-    let expected: Vec<Vec<u8>> = [b"a", b"b", b"c", b"d", b"e"]
-        .iter()
-        .map(|key| key.to_vec())
-        .collect();
+    let expected: Vec<Vec<u8>> = (0..5).map(S::key).collect();
     assert_eq!(all, expected);
 
     let reversed = keys(&mut store, t, KeyBounds::all(), Direction::Reverse);
     assert_eq!(reversed, all.iter().rev().cloned().collect::<Vec<_>>());
 
     let inner = KeyBounds {
-        lower: Bound::Excluded(b"a".to_vec()),
-        upper: Bound::Included(b"d".to_vec()),
+        lower: Bound::Excluded(S::key(0)),
+        upper: Bound::Included(S::key(3)),
     };
     assert_eq!(
         keys(&mut store, t, inner.clone(), Direction::Forward),
-        vec![b"b".to_vec(), b"c".to_vec(), b"d".to_vec()]
+        (1..=3).map(S::key).collect::<Vec<_>>()
     );
     assert_eq!(
         keys(&mut store, t, inner, Direction::Reverse),
-        vec![b"d".to_vec(), b"c".to_vec(), b"b".to_vec()]
+        (1..=3).rev().map(S::key).collect::<Vec<_>>()
     );
 }
 
 /// Empty or inverted bounds yield no rows and never panic.
-pub fn empty_bounds_yield_nothing<S: TableStore>(mut store: S) {
+pub fn empty_bounds_yield_nothing<S: SeedableStore>(mut store: S) {
     let t = table(1);
-    committed_row(&mut store, t, b"b", b"row");
     let inverted = KeyBounds {
-        lower: Bound::Included(b"z".to_vec()),
-        upper: Bound::Included(b"a".to_vec()),
+        lower: Bound::Included(S::key(5)),
+        upper: Bound::Included(S::key(0)),
     };
     assert!(keys(&mut store, t, inverted, Direction::Forward).is_empty());
     let touching = KeyBounds {
-        lower: Bound::Excluded(b"b".to_vec()),
-        upper: Bound::Excluded(b"b".to_vec()),
+        lower: Bound::Excluded(S::key(1)),
+        upper: Bound::Excluded(S::key(1)),
     };
     assert!(keys(&mut store, t, touching, Direction::Reverse).is_empty());
 }
@@ -217,40 +235,39 @@ pub fn auto_ids_survive_rollback<S: TableStore>(mut store: S) {
     assert_eq!(store.next_auto_id(t).expect("third"), 3);
 }
 
+/// Rows the large-table case seeds: more than the retired 2,048-row cap.
+const LARGE_ROWS: u32 = 3_000;
+
 /// Scanning more than 2,048 rows is not capped: the whole table is visited.
-pub fn large_tables_are_not_capped<S: TableStore>(mut store: S) {
-    let t = table(1);
-    const ROWS: u32 = 3_000;
-    store.begin().expect("begin");
-    for index in 0..ROWS {
-        store
-            .put(t, &index.to_be_bytes(), b"row", Expect::Absent)
-            .expect("insert");
-    }
-    store.commit().expect("commit");
-    let visited = keys(&mut store, t, KeyBounds::all(), Direction::Forward);
-    assert_eq!(visited.len(), ROWS as usize);
+pub fn large_tables_are_not_capped<S: SeedableStore>(mut store: S) {
+    let visited = keys(&mut store, table(1), KeyBounds::all(), Direction::Forward);
+    assert_eq!(visited.len(), LARGE_ROWS as usize);
 }
 
-/// Runs every contract case. `make` builds a fresh, empty store for each case.
-pub fn run_contract<S: TableStore>(make: impl Fn() -> S) {
+/// The read-side cases. Each one receives a store seeded with the rows it reads.
+pub fn run_read_contract<S: SeedableStore>() {
+    scans_are_ordered_and_bounded(S::seeded(&[0, 1, 2, 3, 4]));
+    empty_bounds_yield_nothing(S::seeded(&[1]));
+    closed_cursors_are_unknown(S::seeded(&[]));
+    large_tables_are_not_capped(S::seeded(&(0..LARGE_ROWS).collect::<Vec<_>>()));
+}
+
+/// The write-side cases, which need a store that accepts writes. `make` builds a fresh, empty store for each case.
+pub fn run_write_contract<S: TableStore>(make: impl Fn() -> S) {
     writes_need_an_activation(make());
     activations_do_not_nest(make());
     commit_keeps_and_rollback_undoes(make());
     rollback_restores_the_first_state(make());
     expectations_are_checked(make());
-    scans_are_ordered_and_bounded(make());
-    empty_bounds_yield_nothing(make());
     cursors_read_their_own_writes(make());
-    closed_cursors_are_unknown(make());
     auto_ids_survive_rollback(make());
-    large_tables_are_not_capped(make());
 }
 
 #[cfg(test)]
 #[test]
 fn memory_store_meets_the_contract() {
-    run_contract(MemoryStore::new);
+    run_read_contract::<MemoryStore>();
+    run_write_contract(MemoryStore::new);
 }
 
 #[cfg(test)]
