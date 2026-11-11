@@ -34,12 +34,6 @@ orna-project-repl/src/fixtures/repl-inline-pub-fn-local-value-int-int-value-1-be
 orna-project-repl/src/fixtures/repl-inline-pub-fn-seeded-int-40-d5abd82d.orna
 orna-project-repl/src/fixtures/repl-inline-pub-fn-seeded-int-40-df4e01cd.orna
 
-# D value reported: new Some(value), old None (4)
-orna-evaluator/src/fixtures/repl-inline-let-add-42-ec4eaa20.orna
-orna-evaluator/src/fixtures/repl-inline-let-n-20-51d2bc4b.orna
-orna-evaluator/src/fixtures/repl-inline-let-value-add-add-1-41-b2900ee5.orna
-orna-project-repl/src/fixtures/repl-inline-let-answer-41-c31c6eb5.orna
-
 # E parse code name: new ORNA-PARSE-001, old ORNA-EVAL-PARSE (3)
 orna-project-repl/src/fixtures/repl-inline-empty-module.orna
 orna-project-repl/src/fixtures/repl-inline-pub-fn-value-int-42-fn-hidden-int-99-3655e003.orna

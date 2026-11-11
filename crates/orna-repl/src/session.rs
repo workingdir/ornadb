@@ -200,13 +200,16 @@ impl Session {
                     None
                 };
                 let name = name.clone();
-                Ok(self.staged(evaluated, |typed| {
+                let mut staged = self.staged(evaluated, |typed| {
                     Change::Bind(Binding {
                         name,
                         typed,
                         global: declaration,
                     })
-                }))
+                });
+                // A `let` binds its name and produces no value at the prompt.
+                staged.result = None;
+                Ok(staged)
             }
             Declaration::Function { signature, .. } => {
                 check_name(&signature.name)?;

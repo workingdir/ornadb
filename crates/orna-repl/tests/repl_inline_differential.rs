@@ -20,7 +20,7 @@ const FIXTURE_DIRS: [&str; 3] = [
     "orna-project-repl/src/fixtures",
 ];
 const EXCLUSIONS: &str = include_str!("repl_inline_exclusions.txt");
-const AGREED_FLOOR: usize = 7;
+const AGREED_FLOOR: usize = 11;
 
 #[derive(Debug, PartialEq)]
 enum Outcome {
