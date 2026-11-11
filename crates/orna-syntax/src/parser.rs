@@ -105,7 +105,7 @@ fn position_at(source: &str, at: usize) -> SourcePosition {
 /// a `\n` starts a new line, every other scalar (including the `\r` of a CRLF
 /// pair) advances the column, and a scalar is counted only once it ends at or
 /// before the requested byte.
-struct SourceLines<'a> {
+pub(crate) struct SourceLines<'a> {
     source: &'a str,
     /// Byte offset just after each `\n`, in source order.
     line_starts: Vec<usize>,
@@ -1030,12 +1030,16 @@ impl Expr {
 }
 
 pub fn parse_module(source: &str) -> Parse<SyntaxTree> {
+    parse_items(source, true)
+}
+/// Parses a module's items. `module` false admits a top-level `let`, as the REPL session does.
+pub(crate) fn parse_items(source: &str, module: bool) -> Parse<SyntaxTree> {
     let mut p = Parser::new(source);
     p.validate_token_grammar();
     let mut items = Vec::new();
     while !p.eof() {
         p.budget.reset();
-        if let Some(item) = p.item(true) {
+        if let Some(item) = p.item(module) {
             items.push(item)
         } else {
             p.recover_top()
@@ -1161,7 +1165,7 @@ pub fn parse_expression_with_file(source: &str, file: impl Into<String>) -> Pars
 
 /// Gives every span of `parsed`, and of its diagnostics, the file and the
 /// 1-based line and column of its offsets in `source`.
-fn located<T>(
+pub(crate) fn located<T>(
     mut parsed: Parse<T>,
     source: &str,
     file: &str,
@@ -1518,7 +1522,7 @@ fn annotate_type_member(member: &mut TypeMember, source: &SourceLines<'_>, file:
         }
     }
 }
-fn annotate_tree(tree: &mut SyntaxTree, source: &SourceLines<'_>, file: &str) {
+pub(crate) fn annotate_tree(tree: &mut SyntaxTree, source: &SourceLines<'_>, file: &str) {
     annotate_span(&mut tree.span, source, file);
     for item in &mut tree.items {
         annotate_item(item, source, file)

@@ -10,6 +10,7 @@ pub mod editor;
 mod lexer;
 mod parser;
 mod semicolon;
+mod session;
 mod string_literal;
 pub mod visit;
 
@@ -17,6 +18,7 @@ pub use admission::{
     ParseContext, SourceDocumentId, SyntaxAdmissionError, admit_diagnostic, admit_span,
 };
 pub use semicolon::MissingSemicolon;
+pub use session::parse_session_module_with_file;
 pub use string_literal::{StringEscapeError, unescape_string_body, unescape_string_literal};
 
 pub use lexer::{
