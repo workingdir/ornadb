@@ -282,3 +282,46 @@ fn an_absent_first_encodes_to_the_canonical_null_the_old_evaluator_produces() {
     assert_eq!(absent.to_raw(), Ok(orna_value::Raw::Null));
     assert_eq!(Value::Null.to_raw(), Ok(orna_value::Raw::Null));
 }
+
+/// The value of `run` for a `core.stats` body that is one call expression.
+fn call_stats(body: &str) -> Result<Value, ExecError> {
+    run(&format!(
+        "use core.stats;\nuse core.collection;\npub fn run() = {body};\n"
+    ))
+}
+
+#[test]
+fn sum_min_max_range_and_mode_match_the_old_stats_fixtures() {
+    assert_eq!(call_stats("stats.sum([1, 2, 3])"), Ok(int(6)));
+    assert_eq!(call_stats("stats.min([3, 1, 2])"), Ok(some(int(1))));
+    assert_eq!(call_stats("stats.max([3, 1, 2])"), Ok(some(int(3))));
+    assert_eq!(call_stats("stats.range([3, 1, 2])"), Ok(int(2)));
+    assert_eq!(call_stats("stats.mode([3, 1, 3, 2, 2])"), Ok(ints(&[3, 2])));
+}
+
+#[test]
+fn stats_extremes_range_and_mode_of_no_rows_are_null_or_empty() {
+    assert_eq!(
+        call_stats("stats.min(collection.drop([1], 1))"),
+        Ok(Value::Null)
+    );
+    assert_eq!(
+        call_stats("stats.max(collection.drop([1], 1))"),
+        Ok(Value::Null)
+    );
+    assert_eq!(
+        call_stats("stats.range(collection.drop([1], 1))"),
+        Ok(Value::Null)
+    );
+    assert_eq!(
+        call_stats("stats.mode(collection.drop([1], 1))"),
+        Ok(ints(&[]))
+    );
+    assert_eq!(call_stats("stats.sum(collection.drop([1], 1))"), Ok(int(0)));
+}
+
+#[test]
+fn stats_mode_keeps_every_row_tied_for_the_most_occurrences() {
+    assert_eq!(call_stats("stats.mode([2, 1, 1, 2])"), Ok(ints(&[2, 1])));
+    assert_eq!(call_stats("stats.mode([7])"), Ok(ints(&[7])));
+}

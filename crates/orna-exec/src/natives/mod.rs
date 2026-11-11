@@ -10,6 +10,7 @@ mod hash;
 mod order;
 #[cfg(test)]
 mod registry_tests;
+mod stats;
 mod values;
 
 use orna_hir::{DefId, NativeKey};
@@ -67,6 +68,11 @@ pub(crate) fn lookup(key: &NativeKey) -> Option<NativeFn> {
         ("core.collection", "rank") => collection::closure::rank,
         ("core.collection", "group_by") => collection::keyed::group_by,
         ("core.collection", "asof_join") => collection::keyed::asof_join,
+        ("core.stats", "sum") => collection::basic::sum,
+        ("core.stats", "min") => stats::min,
+        ("core.stats", "max") => stats::max,
+        ("core.stats", "range") => stats::range,
+        ("core.stats", "mode") => stats::mode,
         _ => return None,
     })
 }
