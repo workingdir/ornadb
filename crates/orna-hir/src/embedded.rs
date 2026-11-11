@@ -78,6 +78,12 @@ pub(crate) fn parse_all() -> Vec<EmbeddedModule> {
         .collect()
 }
 
+/// The parsed embedded modules. They are parsed once per process and shared by every lowering.
+pub(crate) fn parsed() -> &'static [EmbeddedModule] {
+    static PARSED: std::sync::LazyLock<Vec<EmbeddedModule>> = std::sync::LazyLock::new(parse_all);
+    &PARSED
+}
+
 /// The source id of the `index`th embedded module.
 pub(crate) fn source_id(index: usize) -> SourceId {
     let offset = u32::try_from(index).expect("embedded module count fits u32");
