@@ -15,7 +15,7 @@
 # (169 cases), the evaluator's expression fixtures (42), the REPL admission
 # fixtures (14) and the pinned standard modules (77). 5,399 programs were excluded
 # at H0; the embedded interface tree (16, including the hand-written core.range, core.temperature and core.units), the native parser
-# fixtures (27) and the unit-family parser fixtures (12) were added later, so 5,453 programs are excluded here. The
+# fixtures (27) and the unit-family parser fixtures (12) were added later, so 5,454 programs are excluded here. The
 # follow-up PRs move them across family by family.
 
 [[excluded]]
