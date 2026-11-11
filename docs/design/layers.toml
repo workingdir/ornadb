@@ -230,10 +230,13 @@ id = "V10"
 key = "orphan:orna-traceability"
 reason = "production in-degree 0 and not declared a tool; moves under tools/ with no production dependent"
 
+# Short-lived debt, retired by slice 2b: 2b wires orna-link into the library link path
+# (the step that calls LinkPlan, then dlopen and the C ABI), which gives it a production
+# dependent and lets this entry be deleted in the same PR.
 [[known]]
 id = "L1"
 key = "orphan:orna-link"
-reason = "slice 2a: the manifest and link plan have no production dependent yet; the library step that calls them (dlopen, C ABI, symbol lookup) is slice 2b, which wires orna-link into the link path"
+reason = "short-lived: slice 2a's manifest and link plan have no production dependent until slice 2b wires orna-link into the link path, which retires this entry"
 
 [[known]]
 id = "V12"
