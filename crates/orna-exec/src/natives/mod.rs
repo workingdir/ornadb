@@ -37,10 +37,15 @@ pub(crate) fn lookup(key: &NativeKey) -> Option<NativeFn> {
 
 /// The argument values in parameter order. Each argument names the parameter slot it binds. A slot with no argument,
 /// with two, or past the arity is an argument error.
-pub(crate) fn in_parameter_order(arguments: Vec<(usize, Value)>, arity: usize) -> Result<Vec<Value>, Stop> {
+pub(crate) fn in_parameter_order(
+    arguments: Vec<(usize, Value)>,
+    arity: usize,
+) -> Result<Vec<Value>, Stop> {
     let mut slots: Vec<Option<Value>> = vec![None; arity];
     for (slot, value) in arguments {
-        let entry = slots.get_mut(slot).ok_or(Stop::Error("ORNA-EVAL-ARGUMENT"))?;
+        let entry = slots
+            .get_mut(slot)
+            .ok_or(Stop::Error("ORNA-EVAL-ARGUMENT"))?;
         if entry.replace(value).is_some() {
             return Err(Stop::Error("ORNA-EVAL-ARGUMENT"));
         }

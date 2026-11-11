@@ -30,9 +30,13 @@ pub(super) fn sha256_text(machine: &mut Machine<'_>, arguments: Vec<Value>) -> R
 
 /// `domain_sha256(Str, Blob): Digest`: SHA-256 over the domain, a zero byte, then the payload. The domain is non-empty
 /// ASCII without NUL, and the payload is bounded by the string limit.
-pub(super) fn domain_sha256(machine: &mut Machine<'_>, arguments: Vec<Value>) -> Result<Value, Stop> {
+pub(super) fn domain_sha256(
+    machine: &mut Machine<'_>,
+    arguments: Vec<Value>,
+) -> Result<Value, Stop> {
     machine.tick(1)?;
-    let [domain, payload] = <[Value; 2]>::try_from(arguments).map_err(|_| Stop::Error("ORNA-EVAL-TYPE"))?;
+    let [domain, payload] =
+        <[Value; 2]>::try_from(arguments).map_err(|_| Stop::Error("ORNA-EVAL-TYPE"))?;
     let domain = text(domain)?;
     let payload = blob(payload)?;
     if domain.is_empty()

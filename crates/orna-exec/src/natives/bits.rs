@@ -38,7 +38,8 @@ pub(super) fn shift_left(machine: &mut Machine<'_>, arguments: Vec<Value>) -> Re
     if value.is_zero() {
         return integer(machine, value);
     }
-    let bit_limit = u64::try_from(machine.limits.max_integer_digits.saturating_mul(4)).unwrap_or(u64::MAX);
+    let bit_limit =
+        u64::try_from(machine.limits.max_integer_digits.saturating_mul(4)).unwrap_or(u64::MAX);
     let shift = count
         .to_u64()
         .filter(|shift| value.bits().saturating_add(*shift) <= bit_limit)
@@ -73,13 +74,15 @@ fn integer(machine: &Machine<'_>, value: BigInt) -> Result<Value, Stop> {
 
 /// The two integer arguments of a binary native, or an error for any other arity or type.
 fn binary(arguments: Vec<Value>) -> Result<(BigInt, BigInt), Stop> {
-    let [lhs, rhs] = <[Value; 2]>::try_from(arguments).map_err(|_| Stop::Error("ORNA-EVAL-UNSUPPORTED"))?;
+    let [lhs, rhs] =
+        <[Value; 2]>::try_from(arguments).map_err(|_| Stop::Error("ORNA-EVAL-UNSUPPORTED"))?;
     Ok((int(lhs)?, int(rhs)?))
 }
 
 /// The one integer argument of a unary native, or an error for any other arity or type.
 fn unary(arguments: Vec<Value>) -> Result<BigInt, Stop> {
-    let [value] = <[Value; 1]>::try_from(arguments).map_err(|_| Stop::Error("ORNA-EVAL-UNSUPPORTED"))?;
+    let [value] =
+        <[Value; 1]>::try_from(arguments).map_err(|_| Stop::Error("ORNA-EVAL-UNSUPPORTED"))?;
     int(value)
 }
 

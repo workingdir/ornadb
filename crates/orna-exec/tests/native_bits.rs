@@ -14,7 +14,11 @@ const LIMITS: ExecLimits = ExecLimits {
 
 fn lower_one(source: &str) -> Program {
     let parsed = parse_module_with_file(source, "test.orna");
-    assert!(parsed.is_ok(), "test source must parse: {:?}", parsed.diagnostics);
+    assert!(
+        parsed.is_ok(),
+        "test source must parse: {:?}",
+        parsed.diagnostics
+    );
     let program = lower(&[SourceUnit {
         source: SourceId::new(0),
         tree: &parsed.value,
@@ -25,9 +29,17 @@ fn lower_one(source: &str) -> Program {
         .modules
         .iter()
         .filter(|module| module.path == user)
-        .flat_map(|module| module.diagnostics.iter().map(|diagnostic| format!("{diagnostic:?}")))
+        .flat_map(|module| {
+            module
+                .diagnostics
+                .iter()
+                .map(|diagnostic| format!("{diagnostic:?}"))
+        })
         .collect();
-    assert!(diagnostics.is_empty(), "lowering diagnostics: {diagnostics:?}");
+    assert!(
+        diagnostics.is_empty(),
+        "lowering diagnostics: {diagnostics:?}"
+    );
     assert_eq!(program.validate(), Ok(()), "lowered program must validate");
     program
 }
@@ -38,7 +50,10 @@ fn run(source: &str) -> Result<Value, ExecError> {
         .modules
         .iter()
         .flat_map(|module| module.items.iter().copied())
-        .find(|def| matches!(program.defs[*def].kind, DefKind::Fn(_)) && program.defs[*def].name.as_str() == "run")
+        .find(|def| {
+            matches!(program.defs[*def].kind, DefKind::Fn(_))
+                && program.defs[*def].name.as_str() == "run"
+        })
         .expect("the source defines `run`");
     run_entry(&program, run_def, LIMITS).result
 }
@@ -50,35 +65,76 @@ fn int(value: &str) -> Value {
 #[test]
 fn bitwise_operations_are_two_complement() {
     let head = "use core.bits;\n";
-    assert_eq!(run(&format!("{head}pub fn run(): Int = bits.bit_or(5, 2);\n")), Ok(int("7")));
-    assert_eq!(run(&format!("{head}pub fn run(): Int = bits.bit_and(5, 3);\n")), Ok(int("1")));
-    assert_eq!(run(&format!("{head}pub fn run(): Int = bits.bit_xor(5, 3);\n")), Ok(int("6")));
-    assert_eq!(run(&format!("{head}pub fn run(): Int = bits.bit_not(0);\n")), Ok(int("-1")));
-    assert_eq!(run(&format!("{head}pub fn run(): Int = bits.bit_not(-1);\n")), Ok(int("0")));
+    assert_eq!(
+        run(&format!("{head}pub fn run(): Int = bits.bit_or(5, 2);\n")),
+        Ok(int("7"))
+    );
+    assert_eq!(
+        run(&format!("{head}pub fn run(): Int = bits.bit_and(5, 3);\n")),
+        Ok(int("1"))
+    );
+    assert_eq!(
+        run(&format!("{head}pub fn run(): Int = bits.bit_xor(5, 3);\n")),
+        Ok(int("6"))
+    );
+    assert_eq!(
+        run(&format!("{head}pub fn run(): Int = bits.bit_not(0);\n")),
+        Ok(int("-1"))
+    );
+    assert_eq!(
+        run(&format!("{head}pub fn run(): Int = bits.bit_not(-1);\n")),
+        Ok(int("0"))
+    );
 }
 
 #[test]
 fn shifts_are_exact_and_right_shift_is_arithmetic() {
     let head = "use core.bits;\n";
-    assert_eq!(run(&format!("{head}pub fn run(): Int = bits.shift_left(-3, 2);\n")), Ok(int("-12")));
-    assert_eq!(run(&format!("{head}pub fn run(): Int = bits.shift_right(-9, 2);\n")), Ok(int("-3")));
     assert_eq!(
-        run(&format!("{head}pub fn run(): Int = bits.shift_left(1, 100);\n")),
+        run(&format!(
+            "{head}pub fn run(): Int = bits.shift_left(-3, 2);\n"
+        )),
+        Ok(int("-12"))
+    );
+    assert_eq!(
+        run(&format!(
+            "{head}pub fn run(): Int = bits.shift_right(-9, 2);\n"
+        )),
+        Ok(int("-3"))
+    );
+    assert_eq!(
+        run(&format!(
+            "{head}pub fn run(): Int = bits.shift_left(1, 100);\n"
+        )),
         Ok(int("1267650600228229401496703205376"))
     );
-    assert_eq!(run(&format!("{head}pub fn run(): Int = bits.shift_right(5, 100);\n")), Ok(int("0")));
-    assert_eq!(run(&format!("{head}pub fn run(): Int = bits.shift_right(-5, 100);\n")), Ok(int("-1")));
+    assert_eq!(
+        run(&format!(
+            "{head}pub fn run(): Int = bits.shift_right(5, 100);\n"
+        )),
+        Ok(int("0"))
+    );
+    assert_eq!(
+        run(&format!(
+            "{head}pub fn run(): Int = bits.shift_right(-5, 100);\n"
+        )),
+        Ok(int("-1"))
+    );
 }
 
 #[test]
 fn negative_shift_count_is_the_old_value_code() {
     let head = "use core.bits;\n";
     assert_eq!(
-        run(&format!("{head}pub fn run(): Int = bits.shift_left(1, -1);\n")),
+        run(&format!(
+            "{head}pub fn run(): Int = bits.shift_left(1, -1);\n"
+        )),
         Err(ExecError::Code("ORNA-EVAL-VALUE"))
     );
     assert_eq!(
-        run(&format!("{head}pub fn run(): Int = bits.shift_right(1, -1);\n")),
+        run(&format!(
+            "{head}pub fn run(): Int = bits.shift_right(1, -1);\n"
+        )),
         Err(ExecError::Code("ORNA-EVAL-VALUE"))
     );
 }
