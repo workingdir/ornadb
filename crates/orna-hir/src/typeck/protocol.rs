@@ -52,6 +52,7 @@ impl BodyCheck<'_> {
             .get(&owner)
             .cloned()
             .unwrap_or_default();
+        let receiver_args = self.nominal_args(receiver);
         let mut candidates = Vec::new();
         for implementation in implementations {
             let DefKind::Impl(declared) = &self.program.defs[implementation].kind else {
@@ -60,7 +61,11 @@ impl BodyCheck<'_> {
             let Some(protocol) = declared.protocol else {
                 continue;
             };
-            let args = declared.protocol_args.clone();
+            let raw_args = declared.protocol_args.clone();
+            let args: Box<[Ty]> = raw_args
+                .iter()
+                .map(|argument| self.substitute(*argument, &receiver_args))
+                .collect();
             if let Some(member) = self.protocol_member(protocol, args.len(), name) {
                 candidates.push(Candidate {
                     protocol,
@@ -108,6 +113,14 @@ impl BodyCheck<'_> {
         let mut targs = args.to_vec();
         targs.push(receiver);
         self.protocol_callee(*member, targs, span).map(Some)
+    }
+
+    /// The type arguments of a nominal receiver; any other type has none.
+    pub(super) fn nominal_args(&self, ty: Ty) -> Box<[Ty]> {
+        match self.kind_of(ty) {
+            Some(TyKind::Adt(_, arguments)) => arguments,
+            _ => Box::new([]),
+        }
     }
 
     /// The bounds a generic parameter of the body's definition declares.

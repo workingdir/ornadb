@@ -271,7 +271,7 @@ impl Builder<'_> {
                     implementation,
                     span,
                 } => {
-                    self.build_implementation(def, module, implementation, span.clone());
+                    self.build_implementation(def, module, &[], implementation, span.clone());
                 }
             }
         }
@@ -400,6 +400,7 @@ impl Builder<'_> {
         unit_family: bool,
     ) {
         let names = generic_names(generics);
+        let inherited = self.build_generics(module, &names, generics);
         let mut lowered = Vec::new();
         for variant in variants {
             if unit_family {
@@ -423,7 +424,7 @@ impl Builder<'_> {
         let mut members = Vec::new();
         for implementation in implementations {
             let span = implementation.span.clone();
-            members.push(self.build_implementation(def, module, implementation, span));
+            members.push(self.build_implementation(def, module, &inherited, implementation, span));
         }
         self.pending[def.index()].kind = PendingKind::Built(DefKind::Enum(EnumDef {
             variants: lowered,
@@ -497,8 +498,13 @@ impl Builder<'_> {
                     implementation,
                     span,
                 } => {
-                    let implementation =
-                        self.build_implementation(def, module, implementation, span.clone());
+                    let implementation = self.build_implementation(
+                        def,
+                        module,
+                        &params,
+                        implementation,
+                        span.clone(),
+                    );
                     members.push(implementation);
                 }
             }
@@ -512,21 +518,32 @@ impl Builder<'_> {
         &mut self,
         owner: DefId,
         module: ModuleId,
+        inherited: &[GenericParam],
         implementation: &Implementation,
         span: SyntaxSpan,
     ) -> DefId {
         // A method's receiver `self` has the implementing type (decision D1: the receiver is not written out),
         // and `Self` written in the implementation names that type.
-        let receiver = self
-            .program
-            .tys
-            .intern(crate::TyKind::Adt(owner, Box::new([])));
+        let names = inherited
+            .iter()
+            .map(|generic| generic.name.clone())
+            .collect::<Vec<_>>();
+        let args = (0..inherited.len())
+            .map(|index| {
+                let index = u32::try_from(index).expect("generic parameters fit u32");
+                self.program
+                    .tys
+                    .intern(crate::TyKind::Param(crate::ParamIdx::new(index)))
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        let receiver = self.program.tys.intern(crate::TyKind::Adt(owner, args));
         self.self_ty = Some(receiver);
         let protocol = self.resolve_protocol(module, &implementation.protocol);
         let protocol_args = match &implementation.protocol {
             TypeExpr::Name { arguments, .. } => arguments
                 .iter()
-                .map(|argument| super::types::lower_type(self, module, &[], argument))
+                .map(|argument| super::types::lower_type(self, module, &names, argument))
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
             _ => Vec::new().into_boxed_slice(),
@@ -538,9 +555,9 @@ impl Builder<'_> {
                     signature,
                     body,
                     span,
-                } => {
-                    members.push(self.build_impl_function(module, receiver, signature, body, span))
-                }
+                } => members.push(
+                    self.build_impl_function(module, receiver, inherited, signature, body, span),
+                ),
                 ImplMember::Static {
                     name,
                     ty,
@@ -556,7 +573,7 @@ impl Builder<'_> {
                     );
                     let body = self.allocate_body(member_def);
                     if let Some(ty) = ty {
-                        let _ = super::types::lower_type(self, module, &[], ty);
+                        let _ = super::types::lower_type(self, module, &names, ty);
                     }
                     self.pending[member_def.index()].kind =
                         PendingKind::Built(DefKind::Let(LetDef { body }));
@@ -598,6 +615,7 @@ impl Builder<'_> {
         &mut self,
         module: ModuleId,
         receiver: crate::Ty,
+        inherited: &[GenericParam],
         signature: &FunctionSignature,
         body: &Expr,
         span: &SyntaxSpan,
@@ -610,8 +628,13 @@ impl Builder<'_> {
             DefKind::Unit(UnitDef::default()),
         );
         let body_id = self.allocate_body(member_def);
-        let names = generic_names(&signature.generics);
-        let generics = self.build_generics(module, &names, &signature.generics);
+        let mut names = inherited
+            .iter()
+            .map(|generic| generic.name.clone())
+            .collect::<Vec<_>>();
+        names.extend(generic_names(&signature.generics));
+        let mut generics = inherited.to_vec();
+        generics.extend(self.build_generics(module, &names, &signature.generics));
         let (params, defaults) = self.build_parameters(
             member_def,
             module,
