@@ -9,6 +9,8 @@ use orna_hir::{Body, BodyId, DefId, DefKind, FnBody, Program};
 
 use crate::error::{ExecError, Stop};
 use crate::frame::Frame;
+use crate::link;
+use crate::natives::NativeFn;
 use crate::value::{Cell, Value};
 use crate::variants::{VariantIds, variant_ids};
 
@@ -48,6 +50,8 @@ pub(crate) struct Machine<'p> {
     /// The owner's cancellation request. Once set, the run ends with
     /// [`Stop::Cancelled`] at its next step.
     cancel: Option<Arc<AtomicBool>>,
+    /// The engine natives this program's declarations bind to, built on the first native call.
+    pub(crate) natives: OnceCell<HashMap<DefId, NativeFn>>,
     steps: u64,
     calls: u64,
     depth: usize,
@@ -60,6 +64,7 @@ impl<'p> Machine<'p> {
             limits,
             variants: OnceCell::new(),
             cancel,
+            natives: OnceCell::new(),
             steps: 0,
             calls: 0,
             depth: 0,
@@ -181,6 +186,7 @@ fn run(
 }
 
 fn start(machine: &mut Machine<'_>, program: &Program, entry: DefId) -> Result<Value, ExecError> {
+    link::check_abi(program).map_err(ExecError::NotYet)?;
     let DefKind::Fn(function) = &program.defs[entry].kind else {
         return Err(ExecError::NotYet("entry is not a function"));
     };
@@ -209,6 +215,7 @@ pub fn measure_entry(
     arguments: Vec<Value>,
     limits: ExecLimits,
 ) -> Result<Measured, ExecError> {
+    link::check_abi(program).map_err(ExecError::NotYet)?;
     let DefKind::Fn(function) = &program.defs[entry].kind else {
         return Err(ExecError::NotYet("entry is not a function"));
     };
