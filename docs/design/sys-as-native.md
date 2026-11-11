@@ -416,9 +416,9 @@ table. `[DECIDED]` The sealed ids stay as data with the archive until the archiv
 
 Conclusion: `sys.orna` needs one existing form, one decided form, one new form, doc comments, and a short list of
 clauses. Every clause word is contextual. None becomes a keyword, so ORNA-LEX-007 (the keyword set) is unchanged and
-`since` or `key` stay usable as names, as `native` and `effect` are ([native-declarations.md](native-declarations.md)
-section 3.3). The clauses are legal in engine-embedded modules only. A user module that writes one gets a parse
-diagnostic, in the manner of ORNA091-E-NATIVE-PLACE `[PROPOSAL]`.
+`since`, `key` or `class` stay usable as names, as `native` and `effect` are
+([native-declarations.md](native-declarations.md) section 3.3). The clauses are legal in engine-embedded modules only.
+A user module that writes one gets a parse diagnostic, in the manner of ORNA091-E-NATIVE-PLACE `[PROPOSAL]`.
 
 | Form | Carries | Precedent |
 |---|---|---|
@@ -893,8 +893,9 @@ SN1 forms --> SN2 lossless sys.orna + exporter --> SN3 flip --> SN4 old pipeline
   (`crates/orna-hir/src/lower/mod.rs:73`). An amendment document beside `docs/spec-extensions/NATIVE-1.md` states the
   grammar.
 * Proof: parser tests per form (accept, reject when malformed, reject in a user module). "Not a keyword" tests in the
-  manner of N1: `fn since()`, `x.key` and `{removed: 1}` still parse. A snapshot test shows that every `.orna` file in
-  the tree parses to the tree it did before. `embedded_clean.rs` passes. The differential harness is unchanged.
+  manner of N1: `fn since()`, `x.key`, `x.class` and `{removed: 1}` still parse. A snapshot test shows that every
+  `.orna` file in the tree parses to the tree it did before. `embedded_clean.rs` passes. The differential harness is
+  unchanged.
 * Deletes: nothing. Risk: comments become data for every module. A `///` line before a declaration gains meaning.
 
 **SN2: a lossless `sys.orna` and the exporter. The first proof.**
