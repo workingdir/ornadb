@@ -15,7 +15,7 @@ use orna_hir::{Idx, ModuleOrigin};
 
 /// Cases whose diagnostic code sets differ, measured when this test landed.
 /// The count may only go down.
-const RECORDED_CODE_DIFFERENCES: usize = 154;
+const RECORDED_CODE_DIFFERENCES: usize = 153;
 
 /// The old checker's diagnostic codes for a case.
 fn checker_codes(case: &Case) -> Option<BTreeSet<String>> {
@@ -80,7 +80,10 @@ fn recorded_reason(code: &str) -> Option<&'static str> {
             Some("public annotation: HIR and checker disagree on which bodies they reach")
         }
         "ORNA-S022-UNSUPPORTED" => {
-            Some("HIR reports forms the H2a subset does not type; unclassified")
+            Some(
+                "HIR reports forms the H2a subset does not type, and top-level offset or affine units (units.md C6, \
+                 user modules; valid/affine-unit); otherwise unclassified",
+            )
         }
         "ORNA-EVAL-ARGUMENT" => {
             Some("HIR call-binding arity error; the checker maps it only in rules.rs")
