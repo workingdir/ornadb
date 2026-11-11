@@ -1511,8 +1511,9 @@ type, and H4 only needs types from H2 for arithmetic selection; section 7.2).
   `Host`, and the native families ported one PR each (bits, text, hash, base64,
   json, orna and ovb codecs, math, time, random, money, collections, stats,
   streams, concurrent, ui, then `sys`).
-- **Acceptance.** `api/sys.json` generated from `sys.orna` is byte-equal to
-  the checked-in file. Per family, the standard-library tests
+- **Acceptance.** The structural equivalence test (`orna-check/src/system_api/native_equivalence.rs`) shows that the
+  `sys.orna` declarations match the checked-in `sys-1.1.0` catalogue model. No JSON is generated (D19). Per family,
+  the standard-library tests
   (`orna-evaluator/tests/standard_*.rs`, `std_intrinsic_*.rs`) pass on the
   new executor through the harness; step parity per family against
   `std_intrinsic_step_parity.rs`'s baseline. A deliberately unbound declaration
