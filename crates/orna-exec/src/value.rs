@@ -11,7 +11,7 @@ use std::rc::Rc;
 
 use num_bigint::BigInt;
 use orna_hir::{BodyId, Name};
-use orna_value::{CanonicalValue, Raw, TUPLE_TAG, UNIT_TAG};
+use orna_value::{CanonicalValue, OPTION_TAG, Raw, TUPLE_TAG, UNIT_TAG};
 
 /// One runtime value.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -24,6 +24,10 @@ pub enum Value {
     Int(BigInt),
     /// A string, already unescaped.
     Text(String),
+    /// A byte string: the blob a digest or a hash input is.
+    Blob(Rc<[u8]>),
+    /// An optional value: `None`, or `Some` of the value it holds.
+    Option(Option<Rc<Value>>),
     /// A tuple. The empty tuple is distinct from [`Value::Unit`] so that a
     /// tuple pattern matches only a tuple, as in the old pipeline.
     Tuple(Rc<[Value]>),
@@ -81,6 +85,8 @@ impl Value {
             Self::Bool(value) => Ok(Raw::Bool(*value)),
             Self::Int(value) => Ok(Raw::Int(value.clone())),
             Self::Text(value) => Ok(Raw::Text(value.clone())),
+            Self::Blob(bytes) => Ok(Raw::Bytes(bytes.to_vec())),
+            Self::Option(value) => option_raw(value.as_deref()),
             Self::Tuple(values) if values.is_empty() => Ok(unit_raw()),
             Self::Tuple(values) => Ok(Raw::Tag(TUPLE_TAG, Box::new(array(values)?))),
             Self::List(values) => array(values),
@@ -94,6 +100,15 @@ impl Value {
 /// The unit value's raw form.
 fn unit_raw() -> Raw {
     Raw::Tag(UNIT_TAG, Box::new(Raw::Array(Vec::new())))
+}
+
+/// The canonical raw form of an optional value: a tag over `[1, value]` for `Some`, and over `[0]` for `None`.
+fn option_raw(value: Option<&Value>) -> Result<Raw, &'static str> {
+    let parts = match value {
+        Some(value) => vec![Raw::Int(BigInt::from(1)), value.to_raw()?],
+        None => vec![Raw::Int(BigInt::from(0))],
+    };
+    Ok(Raw::Tag(OPTION_TAG, Box::new(Raw::Array(parts))))
 }
 
 /// An array of values in order.

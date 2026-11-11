@@ -13,6 +13,7 @@ use crate::binders;
 use crate::error::Stop;
 use crate::frame::Frame;
 use crate::machine::Machine;
+use crate::natives;
 use crate::ops;
 use crate::value::{Closure, Payload, Value};
 
@@ -168,7 +169,15 @@ impl<'p> Machine<'p> {
                 }
                 self.invoke(closure.body, arguments, &closure.captured)
             }
-            Callee::Native { .. } => Err(Stop::NotYet("native call (H5)")),
+            Callee::Native { def, .. } => {
+                let program = self.program;
+                let DefKind::Fn(function) = &program.defs[*def].kind else {
+                    return Err(Stop::NotYet("call of a non-function definition (H5)"));
+                };
+                let arguments = self.arguments(body, frame, call, &function.params)?;
+                let values = natives::in_parameter_order(arguments, function.params.len())?;
+                self.native(*def, values)
+            }
             Callee::Sys { .. } => Err(Stop::NotYet("sys call (H5)")),
             Callee::TableOp { .. } => Err(Stop::NotYet("table operation (H6)")),
             Callee::Relational { .. } => Err(Stop::NotYet("relation stage (H7)")),
