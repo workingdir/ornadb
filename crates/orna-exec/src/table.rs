@@ -3,20 +3,26 @@
 //! A row is the canonical map of its stored fields, keyed by field name. A key
 //! is the canonical encoding of its one component, or of the array of its
 //! components for a composite key, in the table's declared key order.
+//!
+//! Every write reaches the store through [`put_row`] or a delete in this
+//! module, so the rules for a row are stated once, here and in `write`.
+
+mod write;
 
 use orna_hir::{
-    Arg, ArgValue, Body, Call, DefId, DefKind, FieldInitializer, Name, TableDef, TableOp,
+    ArgValue, Body, Call, DefId, DefKind, FieldInitializer, Name, Program, TableDef, TableOp,
 };
 use orna_value::{CanonicalValue, Raw};
 
 use crate::error::Stop;
 use crate::frame::Frame;
 use crate::machine::Machine;
+use crate::raw_value;
 use crate::store::{Expect, StoreError};
 use crate::value::Value;
 
 impl<'p> Machine<'p> {
-    /// Runs one table operation of `table`. Only `insert` and `delete` run in this stage.
+    /// Runs one table operation of `table`. The reads run in slice C of H6.
     pub(crate) fn table_op(
         &mut self,
         body: &'p Body,
@@ -33,15 +39,24 @@ impl<'p> Machine<'p> {
         };
         match op {
             TableOp::Insert => {
-                let row = self.single_argument(body, frame, call)?;
-                insert(self, table, schema, row)
+                let [row]: [Value; 1] = self.table_arguments(body, frame, call)?;
+                insert(self, table, schema, &row)
             }
             TableOp::Delete => {
-                let key = self.single_argument(body, frame, call)?;
+                let [key]: [Value; 1] = self.table_arguments(body, frame, call)?;
                 delete(self, table, &key)
             }
-            TableOp::Upsert | TableOp::Update | TableOp::Rekey => {
-                Err(Stop::NotYet("table write (H6 slice B3)"))
+            TableOp::Upsert => {
+                let [patch]: [Value; 1] = self.table_arguments(body, frame, call)?;
+                write::upsert(self, table, schema, &patch)
+            }
+            TableOp::Update => {
+                let [key, patch]: [Value; 2] = self.table_arguments(body, frame, call)?;
+                write::update(self, table, schema, &key, &patch)
+            }
+            TableOp::Rekey => {
+                let [old_key, new_key]: [Value; 2] = self.table_arguments(body, frame, call)?;
+                write::rekey(self, table, schema, &old_key, &new_key)
             }
             TableOp::Count | TableOp::First | TableOp::One | TableOp::AsOf => {
                 Err(Stop::NotYet("table read (H6 slice C)"))
@@ -49,59 +64,70 @@ impl<'p> Machine<'p> {
         }
     }
 
-    /// The value of the call's only argument.
-    fn single_argument(
+    /// The values of the table call's `N` arguments, in order. A call with another count, or with a
+    /// defaulted argument, is an argument error.
+    fn table_arguments<const N: usize>(
         &mut self,
         body: &'p Body,
         frame: &mut Frame,
         call: &Call,
-    ) -> Result<Value, Stop> {
-        let [
-            Arg {
-                value: ArgValue::Expr(argument),
-                ..
-            },
-        ] = &call.args[..]
-        else {
-            return Err(Stop::Error("ORNA-EVAL-TABLE-ARGUMENT"));
-        };
-        self.eval(body, frame, *argument)
+    ) -> Result<[Value; N], Stop> {
+        let mut values = Vec::with_capacity(N);
+        for argument in call.args.iter() {
+            let ArgValue::Expr(id) = argument.value else {
+                return Err(Stop::Error("ORNA-EVAL-TABLE-ARGUMENT"));
+            };
+            values.push(self.eval(body, frame, id)?);
+        }
+        values
+            .try_into()
+            .map_err(|_| Stop::Error("ORNA-EVAL-TABLE-ARGUMENT"))
     }
 }
 
-/// Writes a new row and returns it. It fails when the row does not fit the table or its key already holds a row.
+/// Writes a new row and returns it. The defaults fill the fields the row omits.
 fn insert(
     machine: &mut Machine<'_>,
     table: DefId,
     schema: &TableDef,
-    row: Value,
+    row: &Value,
 ) -> Result<Value, Stop> {
-    let Value::Record(fields) = &row else {
-        return Err(Stop::Error("ORNA-EVAL-TABLE-ROW"));
-    };
-    check_row(machine.program, schema, fields)?;
-    let key = key_of_row(machine.program, schema, fields)?;
-    let bytes = encode(row.to_raw().map_err(Stop::Error)?, "ORNA-EVAL-VALUE")?;
-    machine
-        .store
-        .put(table, &key, &bytes, Expect::Absent)
-        .map_err(|error| match error {
-            StoreError::Expectation(_) => Stop::Error("ORNA-EVAL-TABLE-DUPLICATE-KEY"),
-            other => store_invariant(&other),
-        })?;
+    let fields = write::fill_defaults(machine, schema, record_fields(row)?, false)?;
+    insert_fields(machine, table, schema, fields)
+}
+
+/// Checks a complete row and writes it at its key, which must hold no row.
+fn insert_fields(
+    machine: &mut Machine<'_>,
+    table: DefId,
+    schema: &TableDef,
+    fields: Vec<(Name, Value)>,
+) -> Result<Value, Stop> {
+    let program = machine.program;
+    check_row(program, schema, &fields)?;
+    let key = key_of_row(program, schema, &fields)?;
+    let row = raw_value::record(fields);
+    put_row(
+        machine,
+        table,
+        &key,
+        &row,
+        Expect::Absent,
+        "ORNA-EVAL-TABLE-DUPLICATE-KEY",
+    )?;
     Ok(row)
 }
 
 /// Removes the row at the key `key` names. It fails when no row is there.
 fn delete(machine: &mut Machine<'_>, table: DefId, key: &Value) -> Result<Value, Stop> {
-    let key = encode(key.to_raw().map_err(Stop::Error)?, "ORNA-EVAL-TABLE-KEY")?;
+    let key = key_bytes(key)?;
     if machine
         .store
         .get(table, &key)
         .map_err(|error| store_invariant(&error))?
         .is_none()
     {
-        return Err(Stop::Error("ORNA-EVAL-TABLE-MISSING-ROW"));
+        return Err(absent_row_needs_snapshot());
     }
     machine
         .store
@@ -110,12 +136,68 @@ fn delete(machine: &mut Machine<'_>, table: DefId, key: &Value) -> Result<Value,
     Ok(Value::Unit)
 }
 
-/// Checks that `row` names only stored fields of `schema` and gives every stored field that has no default.
-fn check_row(
-    program: &orna_hir::Program,
-    schema: &TableDef,
-    row: &[(Name, Value)],
+/// The stop for a write that names a key with no stored row. The old pipeline answers from an activation snapshot
+/// that this executor does not bind until H5, so the absence cannot yet be reported as `MISSING-ROW` honestly.
+pub(super) fn absent_row_needs_snapshot() -> Stop {
+    Stop::NotYet("missing-row write needs the activation snapshot (H5)")
+}
+
+/// The stored fields of the row at `key`, or `None` when no row is there.
+fn read_row(
+    machine: &mut Machine<'_>,
+    table: DefId,
+    key: &[u8],
+) -> Result<Option<Vec<(Name, Value)>>, Stop> {
+    let Some(bytes) = machine
+        .store
+        .get(table, key)
+        .map_err(|error| store_invariant(&error))?
+    else {
+        return Ok(None);
+    };
+    let stored =
+        CanonicalValue::decode(&bytes).map_err(|_| Stop::NotYet("stored row bytes (H6)"))?;
+    match raw_value::from_raw(stored.raw())? {
+        Value::Record(fields) => Ok(Some(fields.to_vec())),
+        _ => Err(Stop::NotYet("stored row that is not a record (H6)")),
+    }
+}
+
+/// Writes `row` at `key`. A violated `expect` fails with `code`.
+fn put_row(
+    machine: &mut Machine<'_>,
+    table: DefId,
+    key: &[u8],
+    row: &Value,
+    expect: Expect,
+    code: &'static str,
 ) -> Result<(), Stop> {
+    let bytes = encode(row.to_raw().map_err(Stop::Error)?, "ORNA-EVAL-VALUE")?;
+    machine
+        .store
+        .put(table, key, &bytes, expect)
+        .map_err(|error| match error {
+            StoreError::Expectation(_) => Stop::Error(code),
+            other => store_invariant(&other),
+        })
+}
+
+/// The fields of a row value, or `ORNA-EVAL-TABLE-ROW` when the value is not a record.
+fn record_fields(row: &Value) -> Result<Vec<(Name, Value)>, Stop> {
+    let Value::Record(fields) = row else {
+        return Err(Stop::Error("ORNA-EVAL-TABLE-ROW"));
+    };
+    Ok(fields.to_vec())
+}
+
+/// The canonical key of the key value `key`, as a table's delete, update and rekey name it.
+fn key_bytes(key: &Value) -> Result<Vec<u8>, Stop> {
+    encode(key.to_raw().map_err(Stop::Error)?, "ORNA-EVAL-TABLE-KEY")
+}
+
+/// Checks that `row` names only stored fields of `schema` and names every stored field. A computed field is
+/// never stored, so a row that names one is rejected.
+fn check_row(program: &Program, schema: &TableDef, row: &[(Name, Value)]) -> Result<(), Stop> {
     for (name, _) in row {
         match field_named(program, schema, name) {
             Some(field) if !is_computed(program, field) => {}
@@ -123,23 +205,22 @@ fn check_row(
         }
     }
     for field in &schema.fields {
+        if is_computed(program, *field) {
+            continue;
+        }
         let named = row
             .iter()
             .any(|(name, _)| name.as_str() == field_text(program, *field));
-        if named || is_computed(program, *field) {
-            continue;
+        if !named {
+            return Err(Stop::Error("ORNA-EVAL-TABLE-ROW"));
         }
-        return Err(match initializer(program, *field) {
-            Some(FieldInitializer::Default(_)) => Stop::NotYet("table field default (H6 slice B3)"),
-            _ => Stop::Error("ORNA-EVAL-TABLE-ROW"),
-        });
     }
     Ok(())
 }
 
 /// The key of `fields` in the table's declared key order.
 fn key_of_row(
-    program: &orna_hir::Program,
+    program: &Program,
     schema: &TableDef,
     fields: &[(Name, Value)],
 ) -> Result<Vec<u8>, Stop> {
@@ -169,7 +250,7 @@ fn encode(raw: Raw, code: &'static str) -> Result<Vec<u8>, Stop> {
 }
 
 /// The stored field of `schema` named `name`.
-fn field_named(program: &orna_hir::Program, schema: &TableDef, name: &Name) -> Option<DefId> {
+fn field_named(program: &Program, schema: &TableDef, name: &Name) -> Option<DefId> {
     schema
         .fields
         .iter()
@@ -177,18 +258,18 @@ fn field_named(program: &orna_hir::Program, schema: &TableDef, name: &Name) -> O
         .find(|field| field_text(program, *field) == name.as_str())
 }
 
-fn field_text(program: &orna_hir::Program, field: DefId) -> &str {
+fn field_text(program: &Program, field: DefId) -> &str {
     program.defs[field].name.as_str()
 }
 
-fn initializer(program: &orna_hir::Program, field: DefId) -> Option<FieldInitializer> {
+fn initializer(program: &Program, field: DefId) -> Option<FieldInitializer> {
     match &program.defs[field].kind {
         DefKind::Field(def) => def.initializer,
         _ => None,
     }
 }
 
-fn is_computed(program: &orna_hir::Program, field: DefId) -> bool {
+fn is_computed(program: &Program, field: DefId) -> bool {
     matches!(
         initializer(program, field),
         Some(FieldInitializer::Computed(_))

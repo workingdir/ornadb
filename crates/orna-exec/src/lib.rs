@@ -15,6 +15,7 @@ mod link;
 mod machine;
 mod natives;
 mod ops;
+mod raw_value;
 mod store;
 mod table;
 mod value;

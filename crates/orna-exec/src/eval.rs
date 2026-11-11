@@ -564,7 +564,13 @@ impl<'p> Machine<'p> {
                 .iter()
                 .find(|(key, _)| key == name)
                 .map(|(_, value)| value),
-            FieldRef::Def(_) => return Err(Stop::NotYet("field access by definition")),
+            FieldRef::Def(def) => {
+                let name = self.program.defs[*def].name.as_str();
+                fields
+                    .iter()
+                    .find(|(key, _)| key.as_str() == name)
+                    .map(|(_, value)| value)
+            }
         };
         found.cloned().ok_or(Stop::Error("ORNA-EVAL-FIELD"))
     }
