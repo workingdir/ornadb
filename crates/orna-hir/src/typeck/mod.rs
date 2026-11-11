@@ -55,6 +55,8 @@ mod family;
 mod generics_tests;
 mod nominal;
 mod operator;
+#[cfg(test)]
+mod option_pattern_tests;
 mod protocol;
 mod quantity;
 #[cfg(test)]
@@ -1107,6 +1109,12 @@ impl<'a> BodyCheck<'a> {
                     self.bind_pattern(body, *pattern, field_ty, span.clone())?;
                 }
                 Ok(())
+            }
+            Pat::Some(inner) => {
+                let payload = self.infer.new_var(&mut self.program.tys, span.clone());
+                let option = self.intern(TyKind::Option(payload));
+                self.unify(ty, option, span.clone());
+                self.bind_pattern(body, inner, payload, span)
             }
         }
     }

@@ -30,6 +30,7 @@ mod free_names;
 mod imports;
 mod items;
 mod literals;
+mod option_pats;
 mod pats;
 mod types;
 mod units;

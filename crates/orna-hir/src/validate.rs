@@ -810,6 +810,7 @@ impl Program {
                     self.validate_pat_ref(body_id, body, *pat, errors);
                 }
             }
+            Pat::Some(inner) => self.validate_pat_ref(body_id, body, *inner, errors),
         }
     }
 
