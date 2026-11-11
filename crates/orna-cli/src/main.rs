@@ -7,6 +7,7 @@ mod assertion_gate;
 mod checkout_assertion_gate;
 mod cli_annotate;
 mod cli_args;
+mod cli_check_backend;
 mod cli_checkout;
 mod cli_commit;
 mod cli_dispatch;
@@ -1430,26 +1431,7 @@ fn semantic_catalogue(
 
 fn check_project(endpoint: &Endpoint, color_enabled: bool) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
-    let catalogue = semantic_catalogue(&project)?;
-    let analysis = orna_check::analyze_with_providers(
-        project.modules(),
-        &catalogue,
-        orna_check::SystemProviders::Production,
-    );
-    if analysis.is_ok() {
-        write_success_line("project valid", color_enabled)
-    } else {
-        let first = analysis
-            .diagnostics
-            .first()
-            .expect("non-empty diagnostics when semantic analysis fails");
-        Err(Diagnostic::target_with_detail(
-            "E2101",
-            "project semantic analysis failed",
-            "fix the first reported source contract error, then run check again",
-            format!("{}: {}", first.code(), first.message()),
-        ))
-    }
+    cli_check_backend::check_project(&project, color_enabled)
 }
 
 fn execution_project(project: &orna_project::LoadedProject) -> ProjectUnit {

@@ -63,7 +63,9 @@ pub fn check(inputs: &[ModuleInput], standard: &[StandardSource]) -> Checked {
 
 /// Parses every source, project first and then standard, with its logical path.
 fn parse_all(inputs: &[ModuleInput], standard: &[StandardSource]) -> Vec<(String, SyntaxTree)> {
-    let project = inputs.iter().map(|input| (&input.logical_path, &input.source));
+    let project = inputs
+        .iter()
+        .map(|input| (&input.logical_path, &input.source));
     let standard = standard.iter().map(|(logical, text)| (logical, text));
     project
         .chain(standard)
