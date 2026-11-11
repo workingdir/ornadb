@@ -33,6 +33,8 @@ pub use machine::{
     ExecLimits, Measured, Run, measure_entry, measure_entry_with_store, run_entry,
     run_entry_cancellable,
 };
+#[cfg(feature = "test-support")]
+pub use store::contract;
 pub use store::{
     CursorId, Direction, Expect, KeyBounds, MemoryStore, RowRef, StoreError, TableId, TableStore,
 };
