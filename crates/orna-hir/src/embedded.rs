@@ -8,7 +8,7 @@
 //! loads them ahead of every caller's sources, so a native call always has a
 //! signature to type against.
 
-use orna_syntax::{SyntaxTree, parse_module_with_file};
+use orna_syntax::{SyntaxTree, parse_interface_with_file};
 
 use crate::{ModulePath, Name, NativeAbi, SourceId};
 
@@ -23,7 +23,7 @@ pub const ENGINE_NATIVE_ABI: NativeAbi = NativeAbi::new(1);
 pub(crate) const EMBEDDED_SOURCE_BASE: u32 = u32::MAX - 64;
 
 /// Every embedded interface file: its dotted module path and its text.
-const FILES: [(&str, &str); 17] = [
+const FILES: [(&str, &str); 23] = [
     ("core", include_str!("../interface/core.orna")),
     ("core.bits", include_str!("../interface/core/bits.orna")),
     ("core.ops", include_str!("../interface/core/ops.orna")),
@@ -62,6 +62,12 @@ const FILES: [(&str, &str); 17] = [
     ("core.text", include_str!("../interface/core/text.orna")),
     ("core.time", include_str!("../interface/core/time.orna")),
     ("sys", include_str!("../interface/sys.orna")),
+    ("sys.engine", include_str!("../interface/sys/engine.orna")),
+    ("sys.catalog", include_str!("../interface/sys/catalog.orna")),
+    ("sys.git", include_str!("../interface/sys/git.orna")),
+    ("sys.storage", include_str!("../interface/sys/storage.orna")),
+    ("sys.history", include_str!("../interface/sys/history.orna")),
+    ("sys.build", include_str!("../interface/sys/build.orna")),
 ];
 
 /// One parsed embedded module.
@@ -81,10 +87,16 @@ pub(crate) fn parse_all() -> Vec<EmbeddedModule> {
         .iter()
         .map(|(dotted, text)| {
             let path = ModulePath::new(dotted.split('.').map(Name::new));
-            let tree = parse_module_with_file(text, format!("interface/{dotted}.orna")).value;
+            let tree = parse_interface_with_file(text, format!("interface/{dotted}.orna")).value;
             EmbeddedModule { path, tree }
         })
         .collect()
+}
+
+/// The parsed embedded modules. They are parsed once per process and shared by every lowering.
+pub(crate) fn parsed() -> &'static [EmbeddedModule] {
+    static PARSED: std::sync::LazyLock<Vec<EmbeddedModule>> = std::sync::LazyLock::new(parse_all);
+    &PARSED
 }
 
 /// The source id of the `index`th embedded module.
@@ -100,7 +112,7 @@ mod tests {
     #[test]
     fn embedded_interfaces_parse_cleanly() {
         for (dotted, text) in FILES {
-            let parsed = parse_module_with_file(text, dotted);
+            let parsed = parse_interface_with_file(text, dotted);
             assert!(
                 parsed.diagnostics.is_empty(),
                 "{dotted} has parse diagnostics: {:?}",

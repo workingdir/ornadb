@@ -1,0 +1,10 @@
+// Engine-embedded module `sys.history`, hand-maintained (decision D19, sys-as-native section 2.2). It holds the 5
+// history relation handles. Each handle is a `table_read` native static whose row type is declared in `sys.orna`; its
+// full path is `sys.history.<name>`. The structural equivalence test in orna-check compares these declarations with the
+// `grouped_handle` entries of the JSON catalogue.
+
+pub native static snapshots: Relation<sys.Snapshot> effect table_read;
+pub native static snapshot_objects: Relation<sys.SnapshotObject> effect table_read;
+pub native static changes: Relation<sys.Change> effect table_read;
+pub native static diffs: Relation<sys.DiffEntry> effect table_read;
+pub native static file_versions: Relation<sys.FileVersion> effect table_read;

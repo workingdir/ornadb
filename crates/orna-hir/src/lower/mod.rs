@@ -70,7 +70,7 @@ pub struct SourceUnit<'a> {
 /// rejecting it, so validation failures are lowering bugs.
 #[must_use]
 pub fn lower(sources: &[SourceUnit<'_>]) -> Program {
-    let embedded = crate::embedded::parse_all();
+    let embedded = crate::embedded::parsed();
     let mut units: Vec<SourceUnit<'_>> = embedded
         .iter()
         .enumerate()

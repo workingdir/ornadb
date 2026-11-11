@@ -358,6 +358,10 @@ impl Program {
                 self.validate_generics(&ty.params, errors);
                 self.validate_def_refs(&ty.members, "type member", errors);
             }
+            DefKind::NativeType(native) => self.validate_generics(&native.params, errors),
+            DefKind::NativeStatic(native) => {
+                self.validate_ty(native.ty, "native static type", errors)
+            }
             DefKind::Enum(enumeration) => {
                 self.validate_kinds(
                     &enumeration.variants,
@@ -947,6 +951,8 @@ mod tests {
             name: Name::new("run"),
             vis: Visibility::Public,
             span: span(0),
+            docs: Vec::new(),
+            clauses: orna_syntax::InterfaceClauses::default(),
             kind: DefKind::Fn(FnDef {
                 generics: Vec::new(),
                 params: Vec::new(),

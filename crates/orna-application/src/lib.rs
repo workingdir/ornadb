@@ -44,8 +44,9 @@ pub use orna_security::{
     RetainedArtifactError,
 };
 use orna_syntax::{
-    CaseArm, Declaration, Expr, FieldInitializer, Item, Pattern, Statement, StringSegment,
-    SyntaxTree, TableMember, UseTail, Visibility, parse_module_with_file, parse_repl,
+    CaseArm, Declaration, Expr, FieldInitializer, FunctionSignature, Item, Pattern, Statement,
+    StringSegment, SyntaxTree, TableMember, UseTail, Visibility, parse_module_with_file,
+    parse_repl,
 };
 use orna_sys_id::{SysFailureCode, SysFunction, SysGroupedHandle, SysRelation};
 use orna_value::{CanonicalSnapshot, CanonicalValue, OvbRaw, SafeText};
@@ -329,40 +330,15 @@ impl ApplicationAuthority {
                 // catalogue-only and were already verified by the semantic catalogue.
                 let name = match item.declaration {
                     Declaration::Function { signature, body } => {
-                        let key = format!("{namespace}.{}", signature.name);
-                        if functions.contains_key(&key) {
-                            return Err(StandardCatalogueError::DuplicateDeclaration);
-                        }
-                        let lookup_name =
-                            if let Some(submodule) = namespace.strip_prefix("std.time.") {
-                                format!("{submodule}.{}", signature.name)
-                            } else {
-                                signature.name.clone()
-                            };
-                        let module = orna_intrinsics::Module::from_path(&namespace).or_else(|| {
-                            namespace
-                                .starts_with("std.time.duration.")
-                                .then_some(orna_intrinsics::Module::Time)
-                        });
-                        if let Some(intrinsic) =
-                            module.and_then(|module| orna_intrinsics::lookup(module, &lookup_name))
-                            && intrinsic.dispatch != orna_intrinsics::Dispatch::SourceOnly
-                            && intrinsic.binds_declaration(&lookup_name)
-                            && intrinsic.pins.contains(orna_intrinsics::CURRENT_STD_PIN)
-                        {
-                            intrinsics.insert(key.clone(), intrinsic.id);
-                        }
-                        if is_public {
-                            public.insert(key.clone());
-                        }
-                        functions.insert(
-                            key,
-                            PureFunction {
-                                parameters: signature.parameters,
-                                body,
-                                environment: Environment::new(),
-                            },
-                        );
+                        Self::admit_standard_function(
+                            &namespace,
+                            signature,
+                            body,
+                            is_public,
+                            &mut functions,
+                            &mut intrinsics,
+                            &mut public,
+                        )?;
                         continue;
                     }
                     Declaration::Table { name, .. }
@@ -370,7 +346,9 @@ impl ApplicationAuthority {
                     | Declaration::Enum { name, .. }
                     | Declaration::Dimension { name, .. }
                     | Declaration::Unit { name, .. }
-                    | Declaration::Type { name, .. } => name,
+                    | Declaration::Type { name, .. }
+                    | Declaration::NativeType { name, .. }
+                    | Declaration::NativeStatic { name, .. } => name,
                     Declaration::Use { .. }
                     | Declaration::Assertion { .. }
                     | Declaration::Let { .. } => continue,
@@ -411,6 +389,53 @@ impl ApplicationAuthority {
         self.standard_non_function = non_function;
         self.standard_preludes = preludes;
         Ok(self)
+    }
+
+    /// Admits one standard function: its executable body, its intrinsic binding when the
+    /// pinned catalogue names one, and its public export when it is `pub`.
+    fn admit_standard_function(
+        namespace: &str,
+        signature: FunctionSignature,
+        body: Expr,
+        is_public: bool,
+        functions: &mut BTreeMap<String, PureFunction>,
+        intrinsics: &mut BTreeMap<String, orna_intrinsics::IntrinsicId>,
+        public: &mut BTreeSet<String>,
+    ) -> Result<(), StandardCatalogueError> {
+        let key = format!("{namespace}.{}", signature.name);
+        if functions.contains_key(&key) {
+            return Err(StandardCatalogueError::DuplicateDeclaration);
+        }
+        let lookup_name = if let Some(submodule) = namespace.strip_prefix("std.time.") {
+            format!("{submodule}.{}", signature.name)
+        } else {
+            signature.name.clone()
+        };
+        let module = orna_intrinsics::Module::from_path(namespace).or_else(|| {
+            namespace
+                .starts_with("std.time.duration.")
+                .then_some(orna_intrinsics::Module::Time)
+        });
+        if let Some(intrinsic) =
+            module.and_then(|module| orna_intrinsics::lookup(module, &lookup_name))
+            && intrinsic.dispatch != orna_intrinsics::Dispatch::SourceOnly
+            && intrinsic.binds_declaration(&lookup_name)
+            && intrinsic.pins.contains(orna_intrinsics::CURRENT_STD_PIN)
+        {
+            intrinsics.insert(key.clone(), intrinsic.id);
+        }
+        if is_public {
+            public.insert(key.clone());
+        }
+        functions.insert(
+            key,
+            PureFunction {
+                parameters: signature.parameters,
+                body,
+                environment: Environment::new(),
+            },
+        );
+        Ok(())
     }
 
     /// Applies the standard dependency captured by `project`, when it has one.

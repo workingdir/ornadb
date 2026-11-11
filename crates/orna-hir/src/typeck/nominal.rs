@@ -19,6 +19,7 @@ impl BodyCheck<'_> {
             .map(|definition| &definition.kind)
         {
             Some(DefKind::Type(definition)) => definition.params.len(),
+            Some(DefKind::NativeType(definition)) => definition.params.len(),
             _ => 0,
         };
         (0..count)

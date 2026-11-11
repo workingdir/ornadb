@@ -1,0 +1,15 @@
+// Engine-embedded module `sys.git`, hand-maintained (decision D19, sys-as-native section 2.2). It holds the 10 git
+// relation handles. Each handle is a `table_read` native static whose row type is declared in `sys.orna`; its full
+// path is `sys.git.<name>`. The structural equivalence test in orna-check compares these declarations with the
+// `grouped_handle` entries of the JSON catalogue.
+
+pub native static repositories: Relation<sys.GitRepository> effect table_read;
+pub native static commits: Relation<sys.Commit> effect table_read;
+pub native static tree_entries: Relation<sys.TreeEntry> effect table_read;
+pub native static refs: Relation<sys.Ref> effect table_read;
+pub native static branches: Relation<sys.Branch> effect table_read;
+pub native static tags: Relation<sys.Tag> effect table_read;
+pub native static remotes: Relation<sys.Remote> effect table_read;
+pub native static stashes: Relation<sys.Stash> effect table_read;
+pub native static objects: Relation<sys.GitObject> effect table_read;
+pub native static worktree: Relation<sys.WorktreeEntry> effect table_read;

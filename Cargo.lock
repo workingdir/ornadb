@@ -1885,6 +1885,7 @@ name = "orna-sys-id"
 version = "1.0.0"
 dependencies = [
  "orna-base",
+ "orna-syntax",
  "serde_json",
 ]
 

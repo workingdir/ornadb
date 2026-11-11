@@ -1,0 +1,15 @@
+// Engine-embedded module `sys.storage`, hand-maintained (decision D19, sys-as-native section 2.2). It holds the 10
+// storage relation handles. Each handle is a `table_read` native static whose row type is declared in `sys.orna`; its
+// full path is `sys.storage.<name>`. The structural equivalence test in orna-check compares these declarations with the
+// `grouped_handle` entries of the JSON catalogue.
+
+pub native static objects: Relation<sys.Storage> effect table_read;
+pub native static segments: Relation<sys.Segment> effect table_read;
+pub native static statistics: Relation<sys.Statistic> effect table_read;
+pub native static indexes: Relation<sys.Index> effect table_read;
+pub native static materializations: Relation<sys.Materialization> effect table_read;
+pub native static allocators: Relation<sys.Allocator> effect table_read;
+pub native static hydrations: Relation<sys.Hydration> effect table_read;
+pub native static compactions: Relation<sys.Compaction> effect table_read;
+pub native static maintenance: Relation<sys.MaintenanceJob> effect table_read;
+pub native static files: Relation<sys.StorageFile> effect table_read;

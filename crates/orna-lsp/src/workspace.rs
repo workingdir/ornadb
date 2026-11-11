@@ -596,6 +596,8 @@ impl Workspace {
                 }
                 _ => DeclaredKind::Field,
             },
+            DefKind::NativeType(_) => DeclaredKind::Type,
+            DefKind::NativeStatic(_) => DeclaredKind::Let,
             DefKind::Impl(_) | DefKind::Assertion(_) => return None,
         };
         let selection = selection_span(&self.modules[module].file, &def.span, def.name.as_str())?;

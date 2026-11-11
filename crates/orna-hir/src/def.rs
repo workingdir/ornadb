@@ -5,7 +5,7 @@
 //! it: [`FnBody::Source`] points at an Orna body, [`FnBody::Native`] records
 //! how the link step binds it: the engine registry or a shared library.
 
-use orna_syntax::SyntaxSpan as SourceSpan;
+use orna_syntax::{InterfaceClauses, SyntaxSpan as SourceSpan};
 
 use crate::{BodyId, DefId, ModuleId, ModulePath, Name, PatId, Ty};
 
@@ -29,6 +29,10 @@ pub struct Def {
     pub vis: Visibility,
     /// Where it was written.
     pub span: SourceSpan,
+    /// The `///` doc comment lines written directly above it, without the marker.
+    pub docs: Vec<String>,
+    /// Its interface clauses (`since`, `removed`, `fails`, ...). Empty outside the engine's interface.
+    pub clauses: InterfaceClauses,
     /// What it declares.
     pub kind: DefKind,
 }
@@ -60,6 +64,10 @@ pub enum DefKind {
     Assertion(AssertionDef),
     /// A table, nominal or enum-payload field.
     Field(FieldDef),
+    /// A host-supplied opaque nominal type (`native type`).
+    NativeType(NativeTypeDef),
+    /// A host-supplied singleton value (`native static`).
+    NativeStatic(NativeStaticDef),
 }
 
 impl DefKind {
@@ -327,6 +335,22 @@ pub struct UnitFactor {
 pub struct LetDef {
     /// The initializer body.
     pub body: BodyId,
+}
+
+/// A host-supplied opaque nominal type.
+#[derive(Clone, Debug)]
+pub struct NativeTypeDef {
+    /// Its generic parameters.
+    pub params: Vec<GenericParam>,
+}
+
+/// A host-supplied singleton value, with its written type and declared effects.
+#[derive(Clone, Debug)]
+pub struct NativeStaticDef {
+    /// The written type. The error type after a recovered parse, which the parser has already reported.
+    pub ty: Ty,
+    /// The effect kinds the `effect` clause names.
+    pub effects: crate::EffectSet,
 }
 
 /// An assertion.
