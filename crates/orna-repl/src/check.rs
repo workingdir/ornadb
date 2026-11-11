@@ -1,10 +1,10 @@
 //! Lowers and typechecks a composed module, then evaluates its entry on the executor.
 
-use orna_exec::{ExecError, ExecLimits, Value, measure_entry};
+use orna_exec::{ExecError, ExecLimits, Globals, MemoryStore, Value, measure_entry_in};
 use orna_hir::{
     DefId, DefKind, ModulePath, Name, Program, SourceId, SourceUnit, lower, print_type, typeck,
 };
-use orna_syntax::parse_module_with_file;
+use orna_syntax::parse_session_module_with_file;
 
 use crate::compose::ENTRY;
 use crate::error::ReplError;
@@ -30,7 +30,7 @@ pub(crate) struct Evaluated {
 
 /// Lowers and typechecks `source`. The first diagnostic raised in the session module rejects it.
 pub(crate) fn lower_checked(source: &str) -> Result<Program, ReplError> {
-    let parsed = parse_module_with_file(source, "repl.orna");
+    let parsed = parse_session_module_with_file(source, "repl.orna");
     if !parsed.is_ok() {
         return Err(ReplError::new(
             "ORNA-REPL-INTERNAL",
@@ -60,9 +60,14 @@ pub(crate) fn lower_checked(source: &str) -> Result<Program, ReplError> {
 }
 
 /// Lowers `source`, finds its entry, and evaluates it with `arguments` in parameter order unless it is effectful.
-pub(crate) fn evaluate(source: &str, arguments: Vec<Value>) -> Result<Evaluated, ReplError> {
+/// Each `seed` is the value of the module-level `let` of that name, so that `let` is kept and not evaluated again.
+pub(crate) fn evaluate(
+    source: &str,
+    arguments: Vec<Value>,
+    seeds: &[(String, Value)],
+) -> Result<Evaluated, ReplError> {
     let program = lower_checked(source)?;
-    let entry = entry_of(&program)
+    let entry = module_def(&program, ENTRY, |kind| matches!(kind, DefKind::Fn(_)))
         .ok_or_else(|| ReplError::new("ORNA-REPL-INTERNAL", "the composed session has no entry"))?;
     let DefKind::Fn(function) = &program.defs[entry].kind else {
         return Err(ReplError::new(
@@ -78,7 +83,25 @@ pub(crate) fn evaluate(source: &str, arguments: Vec<Value>) -> Result<Evaluated,
             effectful: true,
         });
     }
-    let measured = measure_entry(&program, entry, arguments, LIMITS).map_err(exec_error)?;
+    let mut globals = Globals::new();
+    for (name, value) in seeds {
+        let def = module_def(&program, name, |kind| matches!(kind, DefKind::Let(_))).ok_or_else(|| {
+            ReplError::new(
+                "ORNA-REPL-INTERNAL",
+                format!("the session global {name} is not a module let"),
+            )
+        })?;
+        globals.insert(def, value.clone());
+    }
+    let (result, _store) = measure_entry_in(
+        &program,
+        entry,
+        arguments,
+        LIMITS,
+        Box::new(MemoryStore::new()),
+        &mut globals,
+    );
+    let measured = result.map_err(exec_error)?;
     Ok(Evaluated {
         value: Some(measured.value),
         ty,
@@ -86,16 +109,14 @@ pub(crate) fn evaluate(source: &str, arguments: Vec<Value>) -> Result<Evaluated,
     })
 }
 
-fn entry_of(program: &Program) -> Option<DefId> {
+/// The definition named `name` in the session module, of a kind `kind` accepts.
+fn module_def(program: &Program, name: &str, kind: impl Fn(&DefKind) -> bool) -> Option<DefId> {
     program
         .modules
         .iter()
         .filter(|module| module.path.to_string() == MODULE)
         .flat_map(|module| module.items.iter().copied())
-        .find(|def| {
-            program.defs[*def].name.as_str() == ENTRY
-                && matches!(program.defs[*def].kind, DefKind::Fn(_))
-        })
+        .find(|def| program.defs[*def].name.as_str() == name && kind(&program.defs[*def].kind))
 }
 
 fn exec_error(error: ExecError) -> ReplError {

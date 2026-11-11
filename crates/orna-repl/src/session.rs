@@ -1,7 +1,9 @@
 //! The session: accumulated definitions and top-level bindings, and the stage / commit / rollback contract.
 //!
 //! A name is defined once. Defining a name again, as a function or as a `let`, removes the earlier definition, so
-//! the later one shadows it. A `let` binds a value that later inputs see as a parameter of their entry function.
+//! the later one shadows it. A `let` that reads neither `$_` nor an earlier binding is a module-level `let`: it is
+//! evaluated once, and later inputs read its kept value. Any other `let` binds a value that later inputs see as a
+//! parameter of their entry function.
 
 use orna_exec::Value;
 use orna_syntax::{
@@ -18,9 +20,6 @@ struct Definition {
     text: String,
 }
 
-/// Entry parameter names with their types, paired with the argument values in the same order.
-type ParameterSet = (Vec<(String, String)>, Vec<Value>);
-
 /// A value with the printed type the HIR gave it.
 #[derive(Clone, Debug)]
 struct Typed {
@@ -32,6 +31,17 @@ struct Typed {
 struct Binding {
     name: String,
     typed: Typed,
+    /// The declaration of the module-level `let` when the binding is a global; `None` for a parameter.
+    global: Option<String>,
+}
+
+/// What one input sees: its entry parameters with their values, the module-level `let`s its module carries, and the
+/// values those `let`s are seeded with.
+struct Scope {
+    parameters: Vec<(String, String)>,
+    arguments: Vec<Value>,
+    globals: Vec<String>,
+    seeds: Vec<(String, Value)>,
 }
 
 /// The session: every definition and binding a commit has applied, and the previous result, `$_`.
@@ -141,10 +151,10 @@ impl Session {
     ) -> Result<Staged, ReplError> {
         let references = compose::expression_references(expression)?;
         let body = compose::rewrite(input, &expression.span(), &references)?;
-        let (parameters, arguments) = self.parameters(&references)?;
-        let entry = compose::entry(&parameters, None, &body);
-        let source = self.module_source("", Some(&entry));
-        let evaluated = check::evaluate(&source, arguments)?;
+        let scope = self.scope(&references, &compose::identifiers(&body)?, "")?;
+        let entry = compose::entry(&scope.parameters, None, &body);
+        let source = self.module_source(&scope, "", Some(&entry));
+        let evaluated = check::evaluate(&source, scope.arguments, &scope.seeds)?;
         Ok(self.staged(evaluated, |typed| {
             if keep {
                 Change::Evaluate(typed)
@@ -170,16 +180,29 @@ impl Session {
                 check_name(name)?;
                 let references = compose::expression_references(value)?;
                 let body = compose::rewrite(input, &value.span(), &references)?;
+                let identifiers = compose::identifiers(&body)?;
+                let global = references.is_empty() && !self.reads_binding(&identifiers);
                 let annotation = annotation
                     .as_ref()
                     .map(|annotation| compose::span_text(input, annotation.span()))
                     .transpose()?;
-                let (parameters, arguments) = self.parameters(&references)?;
-                let entry = compose::entry(&parameters, annotation, &body);
-                let source = self.module_source(name, Some(&entry));
-                let evaluated = check::evaluate(&source, arguments)?;
+                let scope = self.scope(&references, &identifiers, name)?;
+                let entry = compose::entry(&scope.parameters, annotation, &body);
+                let source = self.module_source(&scope, name, Some(&entry));
+                let evaluated = check::evaluate(&source, scope.arguments, &scope.seeds)?;
+                let declaration = if global {
+                    Some(compose::declaration_text(input, item)?)
+                } else {
+                    None
+                };
                 let name = name.clone();
-                Ok(self.staged(evaluated, |typed| Change::Bind(Binding { name, typed })))
+                Ok(self.staged(evaluated, |typed| {
+                    Change::Bind(Binding {
+                        name,
+                        typed,
+                        global: declaration,
+                    })
+                }))
             }
             Declaration::Function { signature, .. } => {
                 check_name(&signature.name)?;
@@ -242,27 +265,54 @@ impl Session {
         }
     }
 
-    /// The entry parameters and their argument values: every binding, then `$_` when the input reads it.
-    fn parameters(&self, references: &[SourceSpan]) -> Result<ParameterSet, ReplError> {
-        let mut parameters: Vec<(String, String)> = self
-            .bindings
+    /// Whether an input's identifiers name an existing binding, global or parameter.
+    fn reads_binding(&self, identifiers: &[String]) -> bool {
+        identifiers
             .iter()
-            .map(|binding| (binding.name.clone(), binding.typed.ty.clone()))
-            .collect();
-        let mut arguments: Vec<Value> = self
-            .bindings
-            .iter()
-            .map(|binding| binding.typed.value.clone())
-            .collect();
+            .any(|identifier| self.bindings.iter().any(|binding| binding.name == *identifier))
+    }
+
+    /// The scope of one input. `shadowed` is the name a `let` input binds: its earlier global is hidden, and it is
+    /// passed as a parameter only when the input reads it. Every parameter binding is passed; `$_` is passed when the
+    /// input reads it.
+    fn scope(
+        &self,
+        references: &[SourceSpan],
+        identifiers: &[String],
+        shadowed: &str,
+    ) -> Result<Scope, ReplError> {
+        let mut scope = Scope {
+            parameters: Vec::new(),
+            arguments: Vec::new(),
+            globals: Vec::new(),
+            seeds: Vec::new(),
+        };
+        for binding in &self.bindings {
+            match &binding.global {
+                Some(text) if binding.name != shadowed => {
+                    scope.globals.push(text.clone());
+                    scope
+                        .seeds
+                        .push((binding.name.clone(), binding.typed.value.clone()));
+                }
+                Some(_) if !identifiers.contains(&binding.name) => {}
+                _ => {
+                    scope
+                        .parameters
+                        .push((binding.name.clone(), binding.typed.ty.clone()));
+                    scope.arguments.push(binding.typed.value.clone());
+                }
+            }
+        }
         if !references.is_empty() {
             let last = self
                 .last
                 .as_ref()
                 .ok_or_else(|| ReplError::new("ORNA-EVAL-NAME", "$_ has no previous result"))?;
-            parameters.push((LAST.to_owned(), last.ty.clone()));
-            arguments.push(last.value.clone());
+            scope.parameters.push((LAST.to_owned(), last.ty.clone()));
+            scope.arguments.push(last.value.clone());
         }
-        Ok((parameters, arguments))
+        Ok(scope)
     }
 
     fn definitions_except<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a str> + 'a {
@@ -272,9 +322,13 @@ impl Session {
             .map(|definition| definition.text.as_str())
     }
 
-    /// The module source for one input: the definitions it keeps, then its entry.
-    fn module_source(&self, shadowed: &str, entry: Option<&str>) -> String {
-        compose::module(self.definitions_except(shadowed), entry)
+    /// The module source for one input: the definitions it keeps, its module-level `let`s, then its entry.
+    fn module_source(&self, scope: &Scope, shadowed: &str, entry: Option<&str>) -> String {
+        compose::module(
+            self.definitions_except(shadowed)
+                .chain(scope.globals.iter().map(String::as_str)),
+            entry,
+        )
     }
 }
 

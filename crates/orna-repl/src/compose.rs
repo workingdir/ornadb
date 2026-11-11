@@ -3,7 +3,7 @@
 //! The REPL's `$_` is not Orna syntax, so every occurrence is rewritten to the parameter [`LAST`] before lowering.
 
 use orna_syntax::visit::{Visit, walk_declaration, walk_expr};
-use orna_syntax::{Declaration, Expr, Item, SyntaxSpan as SourceSpan};
+use orna_syntax::{Declaration, Expr, Item, SyntaxSpan as SourceSpan, TokenKind, lex};
 
 use crate::error::ReplError;
 
@@ -68,6 +68,16 @@ pub(crate) fn declaration_references(
 /// The source text one span covers.
 pub(crate) fn span_text<'a>(source: &'a str, span: &SourceSpan) -> Result<&'a str, ReplError> {
     source.get(span.start..span.end).ok_or_else(internal_span)
+}
+
+/// The identifier spellings in `text`, in source order.
+pub(crate) fn identifiers(text: &str) -> Result<Vec<String>, ReplError> {
+    let tokens = lex(text).map_err(|_| ReplError::new("ORNA-REPL-INTERNAL", "the composed input does not lex"))?;
+    Ok(tokens
+        .into_iter()
+        .filter(|token| matches!(token.kind, TokenKind::Identifier { .. }))
+        .map(|token| token.text)
+        .collect())
 }
 
 /// The text of a whole declaration, terminated by `;` as the module grammar requires.
