@@ -8,6 +8,7 @@ mod bits;
 mod call;
 mod collection;
 mod hash;
+mod json;
 mod order;
 #[cfg(test)]
 mod registry_test;
@@ -37,6 +38,9 @@ pub(crate) fn lookup(key: &NativeKey) -> Option<NativeFn> {
     Some(match (module.as_str(), key.name.as_str()) {
         ("core.encoding.base64", "encode") => base64::encode,
         ("core.encoding.base64", "decode") => base64::decode,
+        ("core.encoding.json", "encode") => json::encode,
+        ("core.encoding.json", "decode") => json::decode,
+        ("core.encoding.json", "decode_with_options") => json::decode_with_options,
         ("core.bits", "bit_or") => bits::bit_or,
         ("core.bits", "bit_and") => bits::bit_and,
         ("core.bits", "bit_xor") => bits::bit_xor,
