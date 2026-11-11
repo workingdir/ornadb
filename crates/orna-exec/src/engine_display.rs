@@ -44,7 +44,8 @@ fn decimal_text(value: &Decimal) -> Result<String, Stop> {
         let zeros = usize::try_from(exponent).map_err(|_| Stop::Error("ORNA-EVAL-LIMIT"))?;
         return Ok(format!("{sign}{digits}{}", "0".repeat(zeros)));
     }
-    let scale = usize::try_from(exponent.unsigned_abs()).map_err(|_| Stop::Error("ORNA-EVAL-LIMIT"))?;
+    let scale =
+        usize::try_from(exponent.unsigned_abs()).map_err(|_| Stop::Error("ORNA-EVAL-LIMIT"))?;
     let padded = if digits.len() <= scale {
         format!("{}{digits}", "0".repeat(scale - digits.len() + 1))
     } else {

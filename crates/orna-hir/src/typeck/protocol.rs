@@ -157,7 +157,12 @@ impl BodyCheck<'_> {
     }
 
     /// The member of `protocol` called `name`, when the protocol takes `arguments` type arguments.
-    pub(super) fn protocol_member(&self, protocol: DefId, arguments: usize, name: &Name) -> Option<DefId> {
+    pub(super) fn protocol_member(
+        &self,
+        protocol: DefId,
+        arguments: usize,
+        name: &Name,
+    ) -> Option<DefId> {
         let DefKind::Protocol(declared) = &self.program.defs[protocol].kind else {
             return None;
         };

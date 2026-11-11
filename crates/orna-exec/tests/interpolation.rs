@@ -63,7 +63,10 @@ fn an_int_interpolates_as_its_decimal_text() {
 
 #[test]
 fn a_bool_interpolates_as_true_or_false() {
-    assert_eq!(run("pub fn run(): Str = \"{true}/{false}\";\n"), text("true/false"));
+    assert_eq!(
+        run("pub fn run(): Str = \"{true}/{false}\";\n"),
+        text("true/false")
+    );
 }
 
 #[test]
@@ -76,13 +79,18 @@ fn a_decimal_interpolates_in_plain_fixed_point() {
 
 #[test]
 fn literal_text_and_parts_concatenate_in_order() {
-    assert_eq!(run("pub fn run(): Str = \"a{1}b{true}c\";\n"), text("a1btruec"));
+    assert_eq!(
+        run("pub fn run(): Str = \"a{1}b{true}c\";\n"),
+        text("a1btruec")
+    );
     assert_eq!(run("pub fn run(): Str = \"{1}{2}\";\n"), text("12"));
 }
 
 #[test]
 fn a_user_type_interpolates_through_its_impl_display() {
-    let source = format!("use core.display.{{Display}};\n{CONTACT}pub fn run(): Str = \"hi {{contact()}}!\";\n");
+    let source = format!(
+        "use core.display.{{Display}};\n{CONTACT}pub fn run(): Str = \"hi {{contact()}}!\";\n"
+    );
     assert_eq!(run(&source), text("hi ada!"));
 }
 

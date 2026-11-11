@@ -5,8 +5,8 @@ use std::rc::Rc;
 use num_traits::ToPrimitive;
 use orna_hir::{
     Arg, ArgValue, Arm, AssignOp, BinOp, Body, BodyId, Call, Callee, DefId, DefKind, ExprId,
-    ExprKind, FieldRef, FnBody, IntrinsicForm, Lit, LocalId, LogicOp, Name, ParamDef, Pat, PatId,
-    InterpPart, Place, Stmt,
+    ExprKind, FieldRef, FnBody, InterpPart, IntrinsicForm, Lit, LocalId, LogicOp, Name, ParamDef,
+    Pat, PatId, Place, Stmt,
 };
 
 use crate::binders;
@@ -84,7 +84,12 @@ impl<'p> Machine<'p> {
 
     /// Runs an interpolation: each expression part is a `Display` call yielding its text, and the parts concatenate
     /// in order, bounded by the string limit.
-    fn interpolate(&mut self, body: &'p Body, frame: &mut Frame, parts: &'p [InterpPart]) -> Result<Value, Stop> {
+    fn interpolate(
+        &mut self,
+        body: &'p Body,
+        frame: &mut Frame,
+        parts: &'p [InterpPart],
+    ) -> Result<Value, Stop> {
         let mut text = String::new();
         for part in parts {
             match part {

@@ -6,7 +6,10 @@
 use orna_syntax::SyntaxSpan;
 
 use crate::diag::GENERIC_OVERLAP;
-use crate::{Arg, ArgValue, Body, Call, Callee, DefId, DefKind, Expr, ExprId, ExprKind, InterpPart, ModulePath, Name, ParamIdx, Ty, TyKind};
+use crate::{
+    Arg, ArgValue, Body, Call, Callee, DefId, DefKind, Expr, ExprId, ExprKind, InterpPart,
+    ModulePath, Name, ParamIdx, Ty, TyKind,
+};
 
 use super::{BodyCheck, NotYetReason};
 
@@ -71,9 +74,9 @@ impl BodyCheck<'_> {
     /// and the conflict is recorded.
     fn display_callee(&mut self, ty: Ty, span: SyntaxSpan) -> Result<Option<Callee>, NotYetReason> {
         let name = Name::new("display");
-        let protocol = self
-            .core_display_protocol()
-            .ok_or_else(|| NotYetReason::Unsupported("the `core.display` protocol is not declared".into()))?;
+        let protocol = self.core_display_protocol().ok_or_else(|| {
+            NotYetReason::Unsupported("the `core.display` protocol is not declared".into())
+        })?;
         let member = self.protocol_member(protocol, 0, &name).ok_or_else(|| {
             NotYetReason::Unsupported("the `Display` protocol has no `display` member".into())
         })?;
@@ -98,7 +101,9 @@ impl BodyCheck<'_> {
             0 => {
                 let shown = crate::print::print_type(self.program, ty);
                 self.conflict(
-                    format!("no `Display` instance for {shown}: interpolating it needs `impl Display`"),
+                    format!(
+                        "no `Display` instance for {shown}: interpolating it needs `impl Display`"
+                    ),
                     span,
                 );
                 Ok(None)
@@ -121,23 +126,30 @@ impl BodyCheck<'_> {
 
     /// How many `Display` implementations a nominal owner declares.
     fn display_implementations(&self, owner: DefId, protocol: DefId) -> usize {
-        self.program.instances.get(&owner).map_or(0, |implementations| {
-            implementations
-                .iter()
-                .filter(|implementation| {
-                    matches!(
-                        &self.program.defs[**implementation].kind,
-                        DefKind::Impl(declared) if declared.protocol == Some(protocol)
-                    )
-                })
-                .count()
-        })
+        self.program
+            .instances
+            .get(&owner)
+            .map_or(0, |implementations| {
+                implementations
+                    .iter()
+                    .filter(|implementation| {
+                        matches!(
+                            &self.program.defs[**implementation].kind,
+                            DefKind::Impl(declared) if declared.protocol == Some(protocol)
+                        )
+                    })
+                    .count()
+            })
     }
 
     /// The `Display` protocol, exported by the embedded `core.display` module.
     fn core_display_protocol(&self) -> Option<DefId> {
         let path = ModulePath::new([Name::new("core"), Name::new("display")]);
-        let module = self.program.modules.iter().find(|module| module.path == path)?;
+        let module = self
+            .program
+            .modules
+            .iter()
+            .find(|module| module.path == path)?;
         module.exports.get(&Name::new("Display")).copied()
     }
 }

@@ -28,7 +28,10 @@ const FILES: [(&str, &str); 15] = [
     ("core.bits", include_str!("../interface/core/bits.orna")),
     ("core.ops", include_str!("../interface/core/ops.orna")),
     ("core.range", include_str!("../interface/core/range.orna")),
-    ("core.display", include_str!("../interface/core/display.orna")),
+    (
+        "core.display",
+        include_str!("../interface/core/display.orna"),
+    ),
     (
         "core.collection",
         include_str!("../interface/core/collection.orna"),
