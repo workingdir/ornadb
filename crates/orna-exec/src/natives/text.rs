@@ -4,6 +4,7 @@
 
 use std::rc::Rc;
 
+use orna_hir::Ty;
 use unicode_normalization::UnicodeNormalization;
 
 use super::unicode_case::{lowercase, uppercase, white_space};
@@ -12,13 +13,21 @@ use crate::machine::Machine;
 use crate::value::Value;
 
 /// `trim(Str): Str`, removing leading and trailing White_Space of Unicode 16.0.0.
-pub(super) fn trim(machine: &mut Machine<'_>, arguments: Vec<Value>) -> Result<Value, Stop> {
+pub(super) fn trim(
+    machine: &mut Machine<'_>,
+    _targs: &[Ty],
+    arguments: Vec<Value>,
+) -> Result<Value, Stop> {
     let [value] = strings::<1>(arguments)?;
     bounded(machine, value.trim_matches(white_space).to_owned())
 }
 
 /// `split(Str, Str): [Str]`. Leading and trailing empty fields are kept; an empty separator splits into scalar values.
-pub(super) fn split(machine: &mut Machine<'_>, arguments: Vec<Value>) -> Result<Value, Stop> {
+pub(super) fn split(
+    machine: &mut Machine<'_>,
+    _targs: &[Ty],
+    arguments: Vec<Value>,
+) -> Result<Value, Stop> {
     let [value, separator] = strings::<2>(arguments)?;
     let count = if separator.is_empty() {
         value.chars().count()
@@ -42,7 +51,11 @@ pub(super) fn split(machine: &mut Machine<'_>, arguments: Vec<Value>) -> Result<
 }
 
 /// `join([Str], Str): Str`, the elements separated by the separator. The result is bounded as it grows.
-pub(super) fn join(machine: &mut Machine<'_>, arguments: Vec<Value>) -> Result<Value, Stop> {
+pub(super) fn join(
+    machine: &mut Machine<'_>,
+    _targs: &[Ty],
+    arguments: Vec<Value>,
+) -> Result<Value, Stop> {
     let [values, separator] =
         <[Value; 2]>::try_from(arguments).map_err(|_| Stop::Error("ORNA-EVAL-TYPE"))?;
     let (Value::List(values), Value::Text(separator)) = (values, separator) else {
@@ -69,6 +82,7 @@ pub(super) fn join(machine: &mut Machine<'_>, arguments: Vec<Value>) -> Result<V
 /// `starts_with(Str, Str): Bool`.
 pub(super) fn starts_with(
     _machine: &mut Machine<'_>,
+    _targs: &[Ty],
     arguments: Vec<Value>,
 ) -> Result<Value, Stop> {
     let [value, prefix] = strings::<2>(arguments)?;
@@ -76,25 +90,41 @@ pub(super) fn starts_with(
 }
 
 /// `ends_with(Str, Str): Bool`.
-pub(super) fn ends_with(_machine: &mut Machine<'_>, arguments: Vec<Value>) -> Result<Value, Stop> {
+pub(super) fn ends_with(
+    _machine: &mut Machine<'_>,
+    _targs: &[Ty],
+    arguments: Vec<Value>,
+) -> Result<Value, Stop> {
     let [value, suffix] = strings::<2>(arguments)?;
     Ok(Value::Bool(value.ends_with(suffix.as_str())))
 }
 
 /// `contains(Str, Str): Bool`.
-pub(super) fn contains(_machine: &mut Machine<'_>, arguments: Vec<Value>) -> Result<Value, Stop> {
+pub(super) fn contains(
+    _machine: &mut Machine<'_>,
+    _targs: &[Ty],
+    arguments: Vec<Value>,
+) -> Result<Value, Stop> {
     let [value, needle] = strings::<2>(arguments)?;
     Ok(Value::Bool(value.contains(needle.as_str())))
 }
 
 /// `replace(Str, Str, Str): Str`. The replacement is non-overlapping and left to right, as `str::replace` does.
-pub(super) fn replace(machine: &mut Machine<'_>, arguments: Vec<Value>) -> Result<Value, Stop> {
+pub(super) fn replace(
+    machine: &mut Machine<'_>,
+    _targs: &[Ty],
+    arguments: Vec<Value>,
+) -> Result<Value, Stop> {
     let [value, from, to] = strings::<3>(arguments)?;
     bounded(machine, value.replace(from.as_str(), to.as_str()))
 }
 
 /// `normalise(Str, Str): Str`. The form labels `NFC` and `NFD` are the canonical forms; any other label is refused.
-pub(super) fn normalise(machine: &mut Machine<'_>, arguments: Vec<Value>) -> Result<Value, Stop> {
+pub(super) fn normalise(
+    machine: &mut Machine<'_>,
+    _targs: &[Ty],
+    arguments: Vec<Value>,
+) -> Result<Value, Stop> {
     let [value, form] = strings::<2>(arguments)?;
     match form.as_str() {
         "NFC" => bounded(machine, value.nfc().collect()),
@@ -104,13 +134,21 @@ pub(super) fn normalise(machine: &mut Machine<'_>, arguments: Vec<Value>) -> Res
 }
 
 /// `lower(Str): Str`, under the Unicode 16.0.0 lowercase mapping with the Final_Sigma rule.
-pub(super) fn lower(machine: &mut Machine<'_>, arguments: Vec<Value>) -> Result<Value, Stop> {
+pub(super) fn lower(
+    machine: &mut Machine<'_>,
+    _targs: &[Ty],
+    arguments: Vec<Value>,
+) -> Result<Value, Stop> {
     let [value] = strings::<1>(arguments)?;
     bounded(machine, lowercase(&value))
 }
 
 /// `upper(Str): Str`, under the Unicode 16.0.0 uppercase mapping.
-pub(super) fn upper(machine: &mut Machine<'_>, arguments: Vec<Value>) -> Result<Value, Stop> {
+pub(super) fn upper(
+    machine: &mut Machine<'_>,
+    _targs: &[Ty],
+    arguments: Vec<Value>,
+) -> Result<Value, Stop> {
     let [value] = strings::<1>(arguments)?;
     bounded(machine, uppercase(&value))
 }

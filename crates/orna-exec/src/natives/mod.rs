@@ -5,14 +5,21 @@
 
 mod base64;
 mod bits;
+mod call;
+mod collection;
 mod hash;
+mod order;
 #[cfg(test)]
 mod registry_test;
+#[cfg(test)]
+mod registry_tests;
+mod stats;
 mod text;
 mod unicode_16_case_properties;
 mod unicode_case;
+mod values;
 
-use orna_hir::{DefId, NativeKey};
+use orna_hir::{DefId, NativeKey, Ty};
 
 use crate::error::Stop;
 use crate::link;
@@ -20,7 +27,7 @@ use crate::machine::Machine;
 use crate::value::Value;
 
 /// One engine native. It runs on the machine, which holds the limits and the step counter it charges.
-pub(crate) type NativeFn = fn(&mut Machine<'_>, Vec<Value>) -> Result<Value, Stop>;
+pub(crate) type NativeFn = fn(&mut Machine<'_>, &[Ty], Vec<Value>) -> Result<Value, Stop>;
 
 /// The engine native implementing the declaration `key`, if the registry has one.
 pub(crate) fn lookup(key: &NativeKey) -> Option<NativeFn> {
@@ -39,6 +46,41 @@ pub(crate) fn lookup(key: &NativeKey) -> Option<NativeFn> {
         ("core.hash", "domain_sha256") => hash::domain_sha256,
         ("core.hash", "to_hex") => hash::to_hex,
         ("core.hash", "from_hex") => hash::from_hex,
+        ("core.collection", "count") | ("core.collection", "__list_length") => {
+            collection::basic::count
+        }
+        ("core.collection", "union") | ("core.collection", "__list_concat") => {
+            collection::basic::union_rows
+        }
+        ("core.collection", "sum") | ("core.collection", "__numeric_sum") => collection::basic::sum,
+        ("core.collection", "first") => collection::basic::first,
+        ("core.collection", "last") => collection::basic::last,
+        ("core.collection", "min") | ("core.collection", "__minimum") => {
+            collection::basic::min_value
+        }
+        ("core.collection", "max") | ("core.collection", "__maximum") => {
+            collection::basic::max_value
+        }
+        ("core.collection", "take") => collection::basic::take_rows,
+        ("core.collection", "drop") => collection::basic::drop_rows,
+        ("core.collection", "distinct") => collection::basic::distinct,
+        ("core.collection", "map") => collection::closure::map,
+        ("core.collection", "flat_map") => collection::closure::flat_map,
+        ("core.collection", "filter") => collection::closure::filter,
+        ("core.collection", "every") => collection::closure::every,
+        ("core.collection", "exists") => collection::closure::exists,
+        ("core.collection", "one") => collection::closure::one,
+        ("core.collection", "sort_by") | ("core.collection", "__stable_sort") => {
+            collection::closure::sort_by
+        }
+        ("core.collection", "rank") => collection::closure::rank,
+        ("core.collection", "group_by") => collection::keyed::group_by,
+        ("core.collection", "asof_join") => collection::keyed::asof_join,
+        ("core.stats", "sum") => collection::basic::sum,
+        ("core.stats", "min") => stats::min,
+        ("core.stats", "max") => stats::max,
+        ("core.stats", "range") => stats::range,
+        ("core.stats", "mode") => stats::mode,
         ("core.text", "trim") => text::trim,
         ("core.text", "split") => text::split,
         ("core.text", "join") => text::join,
@@ -75,13 +117,18 @@ pub(crate) fn in_parameter_order(
 }
 
 impl Machine<'_> {
-    /// Runs the engine native bound to `def` on `arguments`, which are in parameter order. A declaration the registry
-    /// does not implement stops the run as not yet ported.
-    pub(crate) fn native(&mut self, def: DefId, arguments: Vec<Value>) -> Result<Value, Stop> {
+    /// Runs the engine native bound to `def` on `arguments`, which are in parameter order. `targs` are the call's
+    /// generic arguments. A declaration the registry does not implement stops the run as not yet ported.
+    pub(crate) fn native(
+        &mut self,
+        def: DefId,
+        targs: &[Ty],
+        arguments: Vec<Value>,
+    ) -> Result<Value, Stop> {
         let natives = self.natives.get_or_init(|| link::bind(self.program));
         let Some(native) = natives.get(&def).copied() else {
             return Err(Stop::NotYet("engine native not ported yet (H5)"));
         };
-        native(self, arguments)
+        native(self, targs, arguments)
     }
 }

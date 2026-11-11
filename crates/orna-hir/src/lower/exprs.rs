@@ -205,7 +205,10 @@ fn lower_field(
     if let AstExpr::Literal { text, kind, .. } = base
         && let Some(literal) = super::literals::lower_numeric_postfix(text, *kind, name)
     {
-        return push(builder, state, ExprKind::Lit(literal), span.clone());
+        // The old evaluator charges the base literal and the field access that names the unit: two steps.
+        let literal = push(builder, state, ExprKind::Lit(literal), span.clone());
+        state.exprs[literal].weight = 2;
+        return literal;
     }
     let member_of_path = qualified_member(builder, state, base, name);
     let base = lower_expr(builder, state, base);

@@ -10,6 +10,7 @@ use orna_hir::{
 };
 
 use crate::binders;
+use crate::decimal::Decimal;
 use crate::error::Stop;
 use crate::frame::Frame;
 use crate::machine::Machine;
@@ -88,13 +89,26 @@ impl<'p> Machine<'p> {
                 }
                 Ok(Value::Text(text.to_string()))
             }
-            Lit::Decimal { .. }
-            | Lit::Float(_)
-            | Lit::None
-            | Lit::Date(_)
-            | Lit::Instant { .. }
-            | Lit::Period(_)
-            | Lit::Duration { .. } => Err(Stop::NotYet("literal kind (H4)")),
+            Lit::Decimal {
+                coefficient,
+                exponent,
+            } => Decimal::new(coefficient.clone(), exponent.clone()).map(Value::Decimal),
+            Lit::Float(bits) => Ok(crate::float::canonical(f64::from_bits(*bits))),
+            Lit::Instant {
+                seconds,
+                nanoseconds,
+            } => Ok(Value::Instant {
+                unix_seconds: *seconds,
+                nanosecond: *nanoseconds,
+            }),
+            Lit::Duration {
+                seconds,
+                nanoseconds,
+            } => Ok(Value::Duration {
+                seconds: ops::checked(seconds.clone(), &self.limits)?,
+                nanosecond: *nanoseconds,
+            }),
+            Lit::None | Lit::Date(_) | Lit::Period(_) => Err(Stop::NotYet("literal kind (H4)")),
         }
     }
 
@@ -169,14 +183,14 @@ impl<'p> Machine<'p> {
                 }
                 self.invoke(closure.body, arguments, &closure.captured)
             }
-            Callee::Native { def, .. } => {
+            Callee::Native { def, targs } => {
                 let program = self.program;
                 let DefKind::Fn(function) = &program.defs[*def].kind else {
                     return Err(Stop::NotYet("call of a non-function definition (H5)"));
                 };
                 let arguments = self.arguments(body, frame, call, &function.params)?;
                 let values = natives::in_parameter_order(arguments, function.params.len())?;
-                self.native(*def, values)
+                self.native(*def, targs, values)
             }
             Callee::Sys { .. } => Err(Stop::NotYet("sys call (H5)")),
             Callee::TableOp { table, op } => self.table_op(body, frame, call, *table, *op),

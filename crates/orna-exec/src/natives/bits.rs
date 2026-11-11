@@ -2,35 +2,56 @@
 
 use num_bigint::BigInt;
 use num_traits::{Signed, ToPrimitive, Zero};
+use orna_hir::Ty;
 
 use crate::error::Stop;
 use crate::machine::Machine;
 use crate::value::Value;
 
-pub(super) fn bit_or(machine: &mut Machine<'_>, arguments: Vec<Value>) -> Result<Value, Stop> {
+pub(super) fn bit_or(
+    machine: &mut Machine<'_>,
+    _targs: &[Ty],
+    arguments: Vec<Value>,
+) -> Result<Value, Stop> {
     let (lhs, rhs) = binary(arguments)?;
     integer(machine, lhs | rhs)
 }
 
-pub(super) fn bit_and(machine: &mut Machine<'_>, arguments: Vec<Value>) -> Result<Value, Stop> {
+pub(super) fn bit_and(
+    machine: &mut Machine<'_>,
+    _targs: &[Ty],
+    arguments: Vec<Value>,
+) -> Result<Value, Stop> {
     let (lhs, rhs) = binary(arguments)?;
     integer(machine, lhs & rhs)
 }
 
-pub(super) fn bit_xor(machine: &mut Machine<'_>, arguments: Vec<Value>) -> Result<Value, Stop> {
+pub(super) fn bit_xor(
+    machine: &mut Machine<'_>,
+    _targs: &[Ty],
+    arguments: Vec<Value>,
+) -> Result<Value, Stop> {
     let (lhs, rhs) = binary(arguments)?;
     integer(machine, lhs ^ rhs)
 }
 
 /// The bitwise complement, which for an integer is `-value - 1`.
-pub(super) fn bit_not(machine: &mut Machine<'_>, arguments: Vec<Value>) -> Result<Value, Stop> {
+pub(super) fn bit_not(
+    machine: &mut Machine<'_>,
+    _targs: &[Ty],
+    arguments: Vec<Value>,
+) -> Result<Value, Stop> {
     let value = unary(arguments)?;
     integer(machine, -value - BigInt::from(1))
 }
 
 /// `value` shifted left by `count` bits. A negative count is a value error, and a shift past the digit limit is a
 /// limit error.
-pub(super) fn shift_left(machine: &mut Machine<'_>, arguments: Vec<Value>) -> Result<Value, Stop> {
+pub(super) fn shift_left(
+    machine: &mut Machine<'_>,
+    _targs: &[Ty],
+    arguments: Vec<Value>,
+) -> Result<Value, Stop> {
     let (value, count) = binary(arguments)?;
     if count.is_negative() {
         return Err(Stop::Error("ORNA-EVAL-VALUE"));
@@ -50,7 +71,11 @@ pub(super) fn shift_left(machine: &mut Machine<'_>, arguments: Vec<Value>) -> Re
 
 /// `value` shifted right by `count` bits, arithmetically. A count at or past the bit length leaves `0`, or `-1` for a
 /// negative value. A negative count is a value error.
-pub(super) fn shift_right(machine: &mut Machine<'_>, arguments: Vec<Value>) -> Result<Value, Stop> {
+pub(super) fn shift_right(
+    machine: &mut Machine<'_>,
+    _targs: &[Ty],
+    arguments: Vec<Value>,
+) -> Result<Value, Stop> {
     let (value, count) = binary(arguments)?;
     if count.is_negative() {
         return Err(Stop::Error("ORNA-EVAL-VALUE"));
