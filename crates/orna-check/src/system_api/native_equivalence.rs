@@ -643,7 +643,7 @@ fn declared_prose(
             }
             _ => format!("undocumented:{}", item.docs.join(" ")),
         };
-        insert_prose(&mut prose, key, &item.docs);
+        insert_prose(&mut prose, key, &split_failure_codes(&item.docs).0);
     }
     prose
 }
@@ -665,6 +665,58 @@ fn prose_matches_json_catalogue() {
         "prose differs between sys.orna doc comments and the JSON catalogue",
         &json_prose(&catalogue),
         &declared_prose(&parsed.value.items, &catalogue),
+    );
+}
+
+/// Splits a declaration's doc lines into its prose lines and the `- CODE` items of its `Failure codes:` section. The
+/// section runs from its heading to the first doc line that is not a list item.
+fn split_failure_codes(docs: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut prose = Vec::new();
+    let mut codes = Vec::new();
+    let mut in_codes = false;
+    for line in docs {
+        let trimmed = line.trim();
+        match trimmed.strip_prefix("- ") {
+            Some(code) if in_codes => codes.push(code.trim().to_owned()),
+            _ if trimmed == "Failure codes:" => in_codes = true,
+            _ => {
+                in_codes = false;
+                prose.push(line.clone());
+            }
+        }
+    }
+    (prose, codes)
+}
+
+/// The `Failure codes:` section of `sys.orna` against the catalogue's flat `failure_codes` list. Exactly one
+/// declaration owns the section, and it names every catalogue code in catalogue order.
+#[test]
+fn failure_codes_match_json_catalogue() {
+    let catalogue: serde_json::Value =
+        serde_json::from_str(SYS_JSON).expect("the catalogue must be JSON");
+    let parsed = parse_interface(SYS_ORNA);
+    assert!(
+        parsed.diagnostics.is_empty(),
+        "sys.orna must parse without diagnostics: {:?}",
+        parsed.diagnostics
+    );
+    let owners: Vec<Vec<String>> = parsed
+        .value
+        .items
+        .iter()
+        .map(|item| split_failure_codes(&item.docs).1)
+        .filter(|codes| !codes.is_empty())
+        .collect();
+    assert_eq!(
+        owners.len(),
+        1,
+        "exactly one declaration must own the failure codes: {owners:?}"
+    );
+    let declared: Vec<&str> = owners[0].iter().map(String::as_str).collect();
+    assert_eq!(
+        declared,
+        json_list(&catalogue, "failure_codes"),
+        "failure codes differ between sys.orna and the JSON catalogue"
     );
 }
 

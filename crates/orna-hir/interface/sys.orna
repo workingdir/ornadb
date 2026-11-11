@@ -840,6 +840,74 @@ pub native static database: DatabaseView effect none;
 /// Availability: every activation
 pub native static current: CurrentContext effect none;
 /// Availability: every command/runtime owner
+/// Failure codes:
+/// - sys.version.incompatible
+/// - sys.context.repl_unavailable
+/// - sys.object.not_found
+/// - sys.object.ambiguous
+/// - sys.object.wrong_kind
+/// - sys.snapshot.not_found
+/// - sys.snapshot.incomplete
+/// - sys.source.unavailable
+/// - sys.source.redacted
+/// - sys.handle.foreign_runtime
+/// - sys.handle.expired
+/// - sys.invoke.argument_missing
+/// - sys.invoke.argument_unknown
+/// - sys.invoke.argument_type
+/// - sys.invoke.return_type
+/// - sys.invoke.effect_unavailable
+/// - sys.invoke.idempotency_mismatch
+/// - sys.invoke.await_timeout
+/// - sys.invoke.not_callable
+/// - sys.invoke.revision_unavailable
+/// - sys.checkpoint.not_found
+/// - sys.checkpoint.conflict
+/// - sys.checkpoint.not_replayable
+/// - sys.failure.state_conflict
+/// - sys.failure.skip_unsupported
+/// - sys.admin.read_only
+/// - sys.admin.busy
+/// - sys.admin.assertion_failed
+/// - sys.admin.missing_object
+/// - sys.admin.verification_failed
+/// - sys.storage.corrupt
+/// - sys.storage.unavailable
+/// - sys.storage.unrepresentable_key
+/// - sys.storage.rewrite_conflict
+/// - sys.redaction.denied
+/// - sys.invoke.snapshot_mismatch
+/// - sys.invoke.transaction_mode
+/// - sys.git.unborn_head
+/// - sys.git.uncommitted_snapshot
+/// - sys.git.dirty_conflict
+/// - sys.git.stale_plan
+/// - sys.failure.stale_version
+/// - sys.snapshot.expired
+/// - sys.git.invalid_ref
+/// - sys.git.branch_exists
+/// - sys.git.nothing_to_commit
+/// - sys.blob.bounds
+/// - sys.blob.limit
+/// - sys.blob.length_mismatch
+/// - sys.blob.unavailable
+/// - sys.blob.corrupt
+/// - sys.blob.collision
+/// - sys.blob.writer_state
+/// - sys.blob.source_changed
+/// - sys.blob.source_denied
+/// - sys.blob.reference_context
+/// - sys.git.stale_review
+/// - sys.blob.invalid_media_type
+/// - sys.blob.invalid_suffix
+/// - sys.blob.incompatible_suffix
+/// - sys.vfs.name_collision
+/// - sys.vfs.invalid_document
+/// - sys.vfs.stale_edit
+/// - sys.vfs.unsupported
+/// - sys.vfs.draft_retained
+/// - sys.format.unsupported
+/// - sys.codec.unsupported_value_profile
 pub native static rt: RuntimeView effect none formerly "sys.runtime" diagnostic "ORNA100-E-SYS-RUNTIME";
 /// Availability: REPL only; otherwise sys.context.repl_unavailable
 pub native static repl: ReplView effect none;
