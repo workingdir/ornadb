@@ -18,6 +18,7 @@ mod registry_test;
 mod registry_tests;
 mod schema;
 mod stats;
+mod stats_mean;
 mod text;
 mod time;
 mod time_format;
@@ -94,6 +95,7 @@ pub(crate) fn lookup(key: &NativeKey) -> Option<NativeFn> {
         ("core.stats", "max") => stats::max,
         ("core.stats", "range") => stats::range,
         ("core.stats", "mode") => stats::mode,
+        ("core.stats", "mean") => stats_mean::mean,
         ("core.text", "trim") => text::trim,
         ("core.text", "split") => text::split,
         ("core.text", "join") => text::join,

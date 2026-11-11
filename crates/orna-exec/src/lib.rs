@@ -12,6 +12,7 @@ mod calendar;
 #[cfg(test)]
 mod canonical_tests;
 mod decimal;
+mod decimal_round;
 mod dispatch;
 mod engine_display;
 mod engine_order;
