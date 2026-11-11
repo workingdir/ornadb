@@ -1,11 +1,9 @@
 //! `core.range` (hand-written Orna, kernel-and-library.md listing 5) over lowered source: a user program constructs a
 //! `Range` and calls `contains` through the embedded `core.range` module, then runs on the executor.
 //!
-//! BLOCKED (HIR typeck, not exec): a call to a user-generic fn (`contains<T>`) whose type arguments are inferred
-//! never has those solved targs written back to `Callee::Source.targs`; typeck/call.rs `source_call_ty` creates the
-//! inference variables but `finish` zonks only expression and local types. The executor then sees an empty
-//! environment and fails with `NotYet("type argument outside the caller's environment (H5)")`. The executor protocol
-//! dispatch is covered by tests/protocol_dispatch.rs. Remove the `ignore` attributes once HIR records targs.
+//! Generic calls record their solved type arguments on the HIR callee (typeck/call.rs), so the executor
+//! monomorphises `contains<T>` from the callee's `targs`. The executor protocol dispatch is covered by
+//! tests/protocol_dispatch.rs.
 
 use orna_exec::{ExecError, ExecLimits, Value, run_entry};
 use orna_hir::{DefId, DefKind, ModulePath, Name, Program, SourceId, SourceUnit, lower, typeck};
@@ -66,7 +64,6 @@ fn boolean(source: &str) -> Result<Value, ExecError> {
 }
 
 #[test]
-#[ignore = "blocked: HIR does not record inferred type arguments on generic calls (see module doc)"]
 fn closed_range_admits_both_bounds_only_when_inclusive() {
     assert_eq!(
         boolean(
@@ -95,7 +92,6 @@ fn closed_range_admits_both_bounds_only_when_inclusive() {
 }
 
 #[test]
-#[ignore = "blocked: HIR does not record inferred type arguments on generic calls (see module doc)"]
 fn lower_bound_is_inclusive_and_absent_bounds_are_open() {
     assert_eq!(
         boolean(

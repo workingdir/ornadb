@@ -70,6 +70,7 @@ impl<'p> Machine<'p> {
                 handler,
                 arm,
             } => self.recover(body, frame, *attempt, *handler, *arm),
+            ExprKind::Def(variant) if self.is_unit_variant(*variant) => self.unit_variant(*variant),
             ExprKind::Construct { def, fields }
                 if matches!(self.program.defs[*def].kind, DefKind::Type(_)) =>
             {
@@ -189,7 +190,12 @@ impl<'p> Machine<'p> {
                 {
                     return Err(Stop::Error("ORNA-EVAL-ARGUMENT"));
                 }
-                self.invoke(closure.body, arguments, &closure.captured, Rc::clone(&closure.env))
+                self.invoke(
+                    closure.body,
+                    arguments,
+                    &closure.captured,
+                    Rc::clone(&closure.env),
+                )
             }
             Callee::Native { def, targs } => {
                 let program = self.program;
@@ -197,7 +203,8 @@ impl<'p> Machine<'p> {
                     return Err(Stop::NotYet("call of a non-function definition (H5)"));
                 };
                 let callee_targs = self.resolve_targs(targs, &frame.env())?;
-                let arguments = self.arguments(body, frame, call, &function.params, &callee_targs)?;
+                let arguments =
+                    self.arguments(body, frame, call, &function.params, &callee_targs)?;
                 let values = natives::in_parameter_order(arguments, function.params.len())?;
                 self.native(*def, &callee_targs, values)
             }
