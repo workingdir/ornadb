@@ -86,6 +86,7 @@ mod secrets;
 pub(crate) use secrets::*;
 mod analysis_support;
 pub use analysis_support::*;
+pub mod hir_check;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModuleInput {
