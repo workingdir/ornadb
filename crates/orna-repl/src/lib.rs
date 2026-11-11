@@ -6,14 +6,20 @@
 //!
 //! The HIR offers no incremental add, so the session keeps its accumulated definitions as source and lowers them
 //! again on each stage. Redefinition, shadowing and `$_` follow the old REPL's rules; `tests/session.rs` pins them.
+//!
+//! [`run_lines`] drives a session from a reader, one submission per non-empty line; the `orna-repl-session`
+//! binary is its stdin front end.
 
 #![forbid(unsafe_code)]
 
 mod check;
 mod compose;
+mod driver;
 mod error;
+mod render;
 mod session;
 mod standard;
 
+pub use driver::{run_lines, submit};
 pub use error::ReplError;
 pub use session::{Session, Staged};
