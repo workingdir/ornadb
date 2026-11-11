@@ -5,7 +5,7 @@
 //! The rules mirror the old checker's enum and boolean `case` rules
 //! (ORNA-S021-TYPE). A wildcard arm covers no enum variant: the checker rejects
 //! a wildcard on an enum outright, so HIR counts it as covering nothing.
-//! Option `case` coverage is not ported: HIR has no `Some(x)` pattern yet.
+//! Option `case` coverage is not ported yet.
 
 use std::collections::BTreeSet;
 

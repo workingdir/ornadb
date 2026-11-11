@@ -767,6 +767,10 @@ impl<'p> Machine<'p> {
                 _ => Ok(false),
             },
             Pat::Ctor { def, fields } => self.matches_variant(body, frame, *def, fields, value),
+            Pat::Some(inner) => match value {
+                Value::Null => Ok(false),
+                _ => self.matches(body, frame, *inner, value),
+            },
         }
     }
 

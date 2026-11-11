@@ -77,5 +77,6 @@ fn collect_binders(body: &Body, pat: PatId, names: &mut Vec<Name>) {
                 collect_binders(body, *item, names);
             }
         }
+        Pat::Some(inner) => collect_binders(body, *inner, names),
     }
 }

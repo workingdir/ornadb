@@ -39,4 +39,7 @@ pub enum Pat {
         /// Field patterns, each naming a field definition.
         fields: Box<[(DefId, PatId)]>,
     },
+    /// `Some(p)`: a non-null option whose value matches `p`. The sub-pattern
+    /// sees the same value, since an option's present value is the payload.
+    Some(PatId),
 }

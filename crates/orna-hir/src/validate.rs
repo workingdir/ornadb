@@ -33,7 +33,7 @@
 use crate::ids::Idx;
 use crate::{
     ArgValue, Body, BodyId, Callee, Def, DefId, DefKind, Expr, ExprId, ExprKind, FieldRef, FnBody,
-    LocalId, ModuleId, Name, Pat, PatId, Place, Program, Ty,
+    LocalId, ModuleId, Name, PatId, Place, Program, Ty,
 };
 
 /// One invariant a lowered program violates.
@@ -231,6 +231,7 @@ pub enum ValidationError {
 }
 mod field;
 mod generics;
+mod pats;
 
 impl Program {
     /// Checks every structural invariant and returns all violations.
@@ -767,48 +768,6 @@ impl Program {
             Place::Index { base, index } => {
                 self.validate_place(body_id, body, base, errors);
                 self.validate_expr_ref(body_id, body, *index, errors);
-            }
-        }
-    }
-
-    fn validate_pat(
-        &self,
-        body_id: BodyId,
-        body: &Body,
-        pat: &Pat,
-        errors: &mut Vec<ValidationError>,
-    ) {
-        match pat {
-            Pat::Wild | Pat::Lit(_) => {}
-            Pat::Bind { local } => self.validate_local(body_id, body, *local, errors),
-            Pat::Tuple(pats) => {
-                for pat in pats.iter() {
-                    self.validate_pat_ref(body_id, body, *pat, errors);
-                }
-            }
-            Pat::List {
-                prefix,
-                rest,
-                suffix,
-            } => {
-                for pat in prefix.iter().chain(suffix.iter()) {
-                    self.validate_pat_ref(body_id, body, *pat, errors);
-                }
-                if let Some(rest) = rest {
-                    self.validate_local(body_id, body, *rest, errors);
-                }
-            }
-            Pat::Record(fields) => {
-                for (_, pat) in fields.iter() {
-                    self.validate_pat_ref(body_id, body, *pat, errors);
-                }
-            }
-            Pat::Ctor { def, fields } => {
-                self.validate_def_ref(*def, errors);
-                for (field, pat) in fields.iter() {
-                    self.validate_def_ref(*field, errors);
-                    self.validate_pat_ref(body_id, body, *pat, errors);
-                }
             }
         }
     }
