@@ -16,6 +16,7 @@ use crate::frame::{Frame, TypeEnv, type_args};
 use crate::machine::Machine;
 use crate::natives;
 use crate::ops;
+use crate::relation;
 use crate::value::{Closure, Payload, Value};
 
 impl<'p> Machine<'p> {
@@ -209,8 +210,8 @@ impl<'p> Machine<'p> {
                 self.native(*def, type_args(&callee_targs), values)
             }
             Callee::Sys { .. } => Err(Stop::NotYet("sys call (H5)")),
-            Callee::TableOp { .. } => Err(Stop::NotYet("table operation (H6)")),
-            Callee::Relational { .. } => Err(Stop::NotYet("relation stage (H7)")),
+            Callee::TableOp { table, op } => self.table_op(body, frame, call, *table, *op),
+            Callee::Relational { op } => relation::relational(self, body, frame, call, *op),
             Callee::Intrinsic(IntrinsicForm::Fail) => self.fail(body, frame, call),
             Callee::Intrinsic(_) => Err(Stop::NotYet("intrinsic form (H4)")),
             Callee::Pending { .. } => Err(Stop::NotYet("member call awaiting the type pass (H2)")),
@@ -781,6 +782,10 @@ impl<'p> Machine<'p> {
                 _ => Ok(false),
             },
             Pat::Ctor { def, fields } => self.matches_variant(body, frame, *def, fields, value),
+            Pat::Some(inner) => match value {
+                Value::Null => Ok(false),
+                _ => self.matches(body, frame, *inner, value),
+            },
         }
     }
 

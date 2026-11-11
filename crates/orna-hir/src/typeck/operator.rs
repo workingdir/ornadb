@@ -95,7 +95,9 @@ impl BodyCheck<'_> {
         }
         let owner = self.nominal_owner(left)?;
         let protocol = self.core_ops_protocol(operator.protocol)?;
-        let found = self.operator_implementations(owner, protocol, &operator, Some(right));
+        let receiver_args = self.nominal_args(left);
+        let found =
+            self.operator_implementations(owner, &receiver_args, protocol, &operator, Some(right));
         let Some(implementation) =
             self.settle_operator(found, &operator, (left, Some(right)), &span)
         else {
@@ -134,7 +136,8 @@ impl BodyCheck<'_> {
             member: "compare",
             output: true,
         };
-        let found = self.operator_implementations(owner, protocol, &operator, None);
+        let receiver_args = self.nominal_args(left);
+        let found = self.operator_implementations(owner, &receiver_args, protocol, &operator, None);
         let Some(implementation) =
             self.settle_operator(found, &operator, (left, Some(right)), &span)
         else {
@@ -208,7 +211,9 @@ impl BodyCheck<'_> {
             output: false,
         };
         let protocol = self.core_ops_protocol(operator.protocol)?;
-        let found = self.operator_implementations(owner, protocol, &operator, Some(value));
+        let receiver_args = self.nominal_args(container);
+        let found =
+            self.operator_implementations(owner, &receiver_args, protocol, &operator, Some(value));
         let Some(implementation) =
             self.settle_operator(found, &operator, (value, Some(container)), &span)
         else {
@@ -241,7 +246,8 @@ impl BodyCheck<'_> {
             output: true,
         };
         let protocol = self.core_ops_protocol(operator.protocol)?;
-        let found = self.operator_implementations(owner, protocol, &operator, None);
+        let receiver_args = self.nominal_args(operand_ty);
+        let found = self.operator_implementations(owner, &receiver_args, protocol, &operator, None);
         let Some(implementation) =
             self.settle_operator(found, &operator, (operand_ty, None), &span)
         else {
@@ -276,8 +282,9 @@ impl BodyCheck<'_> {
     /// `right` filters on the protocol's first type argument: the right operand for
     /// the arithmetic operators, the value for `Contains`.
     fn operator_implementations(
-        &self,
+        &mut self,
         owner: DefId,
+        receiver_args: &[Ty],
         protocol: DefId,
         operator: &OperatorProtocol,
         right: Option<Ty>,
@@ -287,23 +294,28 @@ impl BodyCheck<'_> {
             .program
             .instances
             .get(&owner)
-            .map(Vec::as_slice)
+            .cloned()
             .unwrap_or_default();
         let mut found = Vec::new();
         for implementation in implementations {
-            let DefKind::Impl(declared) = &self.program.defs[*implementation].kind else {
+            let DefKind::Impl(declared) = &self.program.defs[implementation].kind else {
                 continue;
             };
             if declared.protocol != Some(protocol) {
                 continue;
             }
+            let raw_args = declared.protocol_args.clone();
+            let members = declared.members.clone();
+            let protocol_args: Vec<Ty> = raw_args
+                .iter()
+                .map(|argument| self.substitute(*argument, receiver_args))
+                .collect();
             if let Some(right) = right
-                && declared.protocol_args.first() != Some(&right)
+                && protocol_args.first() != Some(&right)
             {
                 continue;
             }
-            let Some(member) = declared
-                .members
+            let Some(member) = members
                 .iter()
                 .copied()
                 .find(|member| self.program.defs[*member].name == member_name)
@@ -313,15 +325,18 @@ impl BodyCheck<'_> {
             let DefKind::Fn(function) = &self.program.defs[member].kind else {
                 continue;
             };
+            let declared_params: Vec<Ty> = function.params.iter().map(|param| param.ty).collect();
+            let declared_output = function.ret;
+            let params = declared_params
+                .iter()
+                .map(|parameter| self.substitute(*parameter, receiver_args))
+                .collect();
+            let output = self.substitute(declared_output, receiver_args);
             found.push(Implementation {
                 member,
-                params: function.params.iter().map(|param| param.ty).collect(),
-                output: function.ret,
-                protocol_output: declared
-                    .protocol_args
-                    .last()
-                    .copied()
-                    .filter(|_| operator.output),
+                params,
+                output,
+                protocol_output: protocol_args.last().copied().filter(|_| operator.output),
             });
         }
         found

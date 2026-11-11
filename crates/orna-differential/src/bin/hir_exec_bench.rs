@@ -27,8 +27,9 @@ use orna_differential::{
     case::{Case, Family, Source},
     observe_new::lower_case,
 };
-use orna_exec::{ExecLimits, Measured, Value, measure_entry};
+use orna_exec::{ExecLimits, Measured, MemoryStore, TableStore, Value, measure_entry_with_store};
 use orna_hir::{DefId, DefKind, Program};
+use orna_value::{CanonicalValue, Raw};
 
 /// Counts every heap allocation the process makes, so a run's allocations are the
 /// difference of two reads around it. The harness runs on one thread, so the count
@@ -87,8 +88,8 @@ pub fn total(n: Int): Int {
 const B2_ARGUMENT: i64 = 1_000_000;
 const B2_RESULT: i64 = 500_000_500_000;
 
-/// B3, a filter over 10^5 rows of an in-memory table. The executor has no table
-/// scan yet, so it is reported under `not_yet`, never measured.
+/// B3, a filter over 10^5 rows of an in-memory table, and the pull-tree property: `first_ten` stops the scan
+/// after ten rows, so the store reports ten rows read where `hot` reads all of them.
 const B3_SOURCE: &str = "\
 pub table Reading(id: Int) {
     value: Int,
@@ -97,7 +98,14 @@ pub table Reading(id: Int) {
 pub fn hot(): Int {
     Reading | filter(r => r.value > 50) | count
 }
+
+pub fn first_ten(): Int {
+    Reading | take(10) | count
+}
 ";
+const B3_ROWS: i64 = 100_000;
+const B3_HOT_RESULT: i64 = 49_000;
+const B3_FIRST_TEN_RESULT: i64 = 10;
 
 /// The limits of every benchmark: the H0 step budget, with the executor's
 /// depth and width bounds set well above what the benchmarks reach.
@@ -137,17 +145,50 @@ struct Outcome {
     allocations: usize,
 }
 
-/// Runs one entry with the given integer arguments. Only the run is timed and
-/// counted; building the argument values happens before either starts.
-fn run(program: &Program, entry: DefId, arguments: &[i64]) -> Result<Outcome, String> {
+/// Encodes `raw` in the canonical form the store keeps rows and keys in.
+fn canonical(raw: Raw) -> Result<Vec<u8>, String> {
+    CanonicalValue::new(raw)
+        .and_then(|value| value.encode())
+        .map_err(|error| format!("canonical encoding failed: {error:?}"))
+}
+
+/// The table store with the `Reading` rows of B3 committed, as a prior session would leave them.
+fn seeded_reading_store(program: &Program) -> Result<Box<dyn TableStore>, String> {
+    let table = program
+        .defs
+        .iter_enumerated()
+        .find(|(_, def)| def.name.to_string() == "Reading" && matches!(def.kind, DefKind::Table(_)))
+        .map(|(id, _)| id)
+        .ok_or_else(|| "b3-filter: no table Reading".to_owned())?;
+    let mut store = MemoryStore::new();
+    for id in 0..B3_ROWS {
+        let key = canonical(Raw::Int(id.into()))?;
+        let row = canonical(Raw::Map(vec![
+            (Raw::Text("id".to_owned()), Raw::Int(id.into())),
+            (Raw::Text("value".to_owned()), Raw::Int((id % 100).into())),
+        ]))?;
+        store.seed(table, &key, &row);
+    }
+    Ok(Box::new(store))
+}
+
+/// Runs one entry with the given integer arguments against `store`. Only the run is timed and
+/// counted; building the argument values and the store happens before either starts.
+fn run(
+    program: &Program,
+    entry: DefId,
+    arguments: &[i64],
+    store: Box<dyn TableStore>,
+) -> Result<Outcome, String> {
     let values: Vec<Value> = arguments
         .iter()
         .map(|argument| Value::from(*argument))
         .collect();
     let allocations_before = ALLOCATIONS.load(Ordering::Relaxed);
     let started = Instant::now();
-    let measured = measure_entry(program, entry, values, benchmark_limits())
-        .map_err(|error| format!("{error:?}"))?;
+    let (measured, _store) =
+        measure_entry_with_store(program, entry, values, benchmark_limits(), store);
+    let measured = measured.map_err(|error| format!("{error:?}"))?;
     let wall_ms = started.elapsed().as_secs_f64() * 1_000.0;
     let allocations = ALLOCATIONS.load(Ordering::Relaxed) - allocations_before;
     Ok(Outcome {
@@ -170,45 +211,73 @@ fn expect(outcome: &Outcome, expected: i64, benchmark: &str) -> Result<(), Strin
     }
 }
 
-fn record(name: &str, outcome: &Outcome) -> String {
+/// Asserts the store reported exactly `expected` rows read, so a scan that stops early or reads too far fails.
+fn expect_rows(outcome: &Outcome, expected: u64, benchmark: &str) -> Result<(), String> {
+    if outcome.measured.rows_read == expected {
+        Ok(())
+    } else {
+        Err(format!(
+            "{benchmark} read {} rows, expected {expected}",
+            outcome.measured.rows_read
+        ))
+    }
+}
+
+/// One benchmark's JSON entry. Only the table benchmarks record `rows_read`; the others read no rows.
+fn record(name: &str, outcome: &Outcome, reads_rows: bool) -> String {
+    let rows_read = if reads_rows {
+        format!(",\"rows_read\":{}", outcome.measured.rows_read)
+    } else {
+        String::new()
+    };
     format!(
-        "{name:?}:{{\"steps\":{},\"calls\":{},\"allocations\":{},\"wall_ms\":{:.3}}}",
+        "{name:?}:{{\"steps\":{},\"calls\":{},\"allocations\":{}{rows_read},\"wall_ms\":{:.3}}}",
         outcome.measured.steps, outcome.measured.calls, outcome.allocations, outcome.wall_ms
     )
 }
 
 fn measure_benchmarks() -> Result<String, String> {
     let (b1_program, b1_entry) = lower_entry("b1-fib", "b1-fib.orna", B1_SOURCE, "fib")?;
-    let b1 = run(&b1_program, b1_entry, &[B1_ARGUMENT])?;
+    let b1 = run(
+        &b1_program,
+        b1_entry,
+        &[B1_ARGUMENT],
+        Box::new(MemoryStore::new()),
+    )?;
     expect(&b1, B1_RESULT, "b1_fib_25")?;
 
     let (b2_program, b2_entry) = lower_entry("b2-fold", "b2-fold.orna", B2_SOURCE, "total")?;
-    let b2 = run(&b2_program, b2_entry, &[B2_ARGUMENT])?;
+    let b2 = run(
+        &b2_program,
+        b2_entry,
+        &[B2_ARGUMENT],
+        Box::new(MemoryStore::new()),
+    )?;
     expect(&b2, B2_RESULT, "b2_fold_1000000")?;
 
-    let b3_not_yet = match lower_entry("b3-filter", "b3-filter.orna", B3_SOURCE, "hot") {
-        Ok((program, entry)) => match run(&program, entry, &[]) {
-            Ok(_) => {
-                return Err(
-                    "b3_filter_100000 ran although the executor has no table scan".to_owned(),
-                );
-            }
-            Err(reason) => reason,
-        },
-        Err(reason) => reason,
-    };
+    let (hot_program, hot_entry) = lower_entry("b3-filter", "b3-filter.orna", B3_SOURCE, "hot")?;
+    let hot_store = seeded_reading_store(&hot_program)?;
+    let b3_hot = run(&hot_program, hot_entry, &[], hot_store)?;
+    expect(&b3_hot, B3_HOT_RESULT, "b3_filter_100000")?;
+    expect_rows(&b3_hot, B3_ROWS as u64, "b3_filter_100000")?;
+
+    let (take_program, take_entry) =
+        lower_entry("b3-take", "b3-take.orna", B3_SOURCE, "first_ten")?;
+    let take_store = seeded_reading_store(&take_program)?;
+    let b3_take = run(&take_program, take_entry, &[], take_store)?;
+    expect(&b3_take, B3_FIRST_TEN_RESULT, "b3_take_10")?;
+    expect_rows(&b3_take, 10, "b3_take_10")?;
 
     let mut text = String::from("{\"pipeline\":\"exec\",\"benchmarks\":{");
     let _ = write!(
         text,
-        "{},{}",
-        record("b1_fib_25", &b1),
-        record("b2_fold_1000000", &b2)
+        "{},{},{},{}",
+        record("b1_fib_25", &b1, false),
+        record("b2_fold_1000000", &b2, false),
+        record("b3_filter_100000", &b3_hot, true),
+        record("b3_take_10", &b3_take, true)
     );
-    let _ = write!(
-        text,
-        "}},\"not_yet\":{{\"b3_filter_100000\":{b3_not_yet:?}}}}}"
-    );
+    text.push_str("}}");
     Ok(text)
 }
 
@@ -230,10 +299,12 @@ mod tests {
     use super::measure_benchmarks;
 
     #[test]
-    fn record_lists_b1_and_b2_gated_and_b3_not_yet() {
-        let text = measure_benchmarks().expect("the executor runs B1 and B2");
+    fn record_lists_every_benchmark_with_its_counters() {
+        let text = measure_benchmarks().expect("the executor runs B1, B2 and B3");
         assert!(text.starts_with("{\"pipeline\":\"exec\",\"benchmarks\":{\"b1_fib_25\":{"));
         assert!(text.contains("\"b2_fold_1000000\":{"));
-        assert!(text.contains("\"not_yet\":{\"b3_filter_100000\":\"NotYet("));
+        assert!(text.contains("\"b3_filter_100000\":{"));
+        assert!(text.contains("\"b3_take_10\":{"));
+        assert!(text.contains("\"rows_read\":10,"));
     }
 }

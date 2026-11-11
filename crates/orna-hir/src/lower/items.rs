@@ -11,15 +11,15 @@
 //! body is.
 
 use orna_syntax::{
-    EnumPayloadField, EnumVariant, Expr, FunctionSignature, GenericParameter, ImplMember,
-    Implementation, NativeEffectSet, Parameter, Pattern, ProtocolMember, SyntaxSpan, TableMember,
-    TypeExpr, TypeMember, TypeRepresentation,
+    EnumPayloadField, EnumVariant, Expr, FieldInitializer as SyntaxFieldInitializer,
+    FunctionSignature, GenericParameter, ImplMember, Implementation, NativeEffectSet, Parameter,
+    Pattern, ProtocolMember, SyntaxSpan, TableMember, TypeExpr, TypeMember, TypeRepresentation,
 };
 
 use crate::{
-    AssertionDef, BodyId, DefId, DefKind, DimensionDef, EnumDef, FieldDef, GenericParam, Idx,
-    ImplDef, LetDef, ModuleId, ParamDef, ProtocolDef, Stmt, TableDef, TypeDef, UnitDef, VariantDef,
-    Visibility,
+    AssertionDef, BodyId, DefId, DefKind, DimensionDef, EnumDef, FieldDef, FieldInitializer,
+    GenericParam, Idx, ImplDef, LetDef, ModuleId, ParamDef, ProtocolDef, Stmt, TableDef, TypeDef,
+    UnitDef, VariantDef, Visibility,
 };
 
 use super::declare::{Builder, DeclAst, PendingFunction, PendingKind};
@@ -253,7 +253,10 @@ impl Builder<'_> {
                 &parameter_name(&parameter.pattern, index),
                 Visibility::Public,
                 parameter.span.clone(),
-                DefKind::Field(FieldDef { ty }),
+                DefKind::Field(FieldDef {
+                    ty,
+                    initializer: None,
+                }),
             );
             fields.push(field);
             key.push(field);
@@ -261,8 +264,20 @@ impl Builder<'_> {
         let mut assertions = Vec::new();
         for member in members {
             match member {
-                TableMember::Field { name, ty, span, .. } => {
-                    fields.push(self.build_field(module, name, ty, span.clone()));
+                TableMember::Field {
+                    name,
+                    ty,
+                    initializer,
+                    span,
+                } => {
+                    fields.push(self.build_field(
+                        def,
+                        module,
+                        name,
+                        ty,
+                        initializer.as_ref(),
+                        span.clone(),
+                    ));
                 }
                 TableMember::Assertion { value, span } => {
                     assertions.push(self.build_assertion(module, def, value, span.clone()));
@@ -271,7 +286,7 @@ impl Builder<'_> {
                     implementation,
                     span,
                 } => {
-                    self.build_implementation(def, module, implementation, span.clone());
+                    self.build_implementation(def, module, &[], implementation, span.clone());
                 }
             }
         }
@@ -282,22 +297,59 @@ impl Builder<'_> {
         }));
     }
 
-    /// Builds one field definition.
+    /// Builds one table field. An initializer lowers to a body owned by the field, with `self`
+    /// naming the row, as an assertion's body is.
     fn build_field(
         &mut self,
+        table: DefId,
         module: ModuleId,
         name: &str,
         ty: &TypeExpr,
+        initializer: Option<&SyntaxFieldInitializer>,
         span: SyntaxSpan,
     ) -> DefId {
         let ty = super::types::lower_type(self, module, &[], ty);
-        self.declare_nested(
+        let field = self.declare_nested(
             module,
             name,
             Visibility::Public,
             span,
-            DefKind::Field(FieldDef { ty }),
-        )
+            DefKind::Field(FieldDef {
+                ty,
+                initializer: None,
+            }),
+        );
+        if let Some(initializer) = initializer {
+            let (kind, value) = self.plan_initializer(field, initializer);
+            self.pending[field.index()].kind = PendingKind::Built(DefKind::Field(FieldDef {
+                ty,
+                initializer: Some(kind),
+            }));
+            self.body_jobs.push(BodyJob::Expression {
+                def: field,
+                body: kind.body(),
+                expr: Box::new(value),
+                self_ty: Some(table),
+            });
+        }
+        field
+    }
+
+    /// Allocates the body an initializer lowers into. The field owns it, as an assertion owns its body.
+    fn plan_initializer(
+        &mut self,
+        field: DefId,
+        initializer: &SyntaxFieldInitializer,
+    ) -> (FieldInitializer, Expr) {
+        let body = self.allocate_body(field);
+        match initializer {
+            SyntaxFieldInitializer::Default(value) => {
+                (FieldInitializer::Default(body), value.clone())
+            }
+            SyntaxFieldInitializer::Computed(value) => {
+                (FieldInitializer::Computed(body), value.clone())
+            }
+        }
     }
 
     /// Builds one assertion definition and its body job.
@@ -376,7 +428,10 @@ impl Builder<'_> {
                         name,
                         Visibility::Public,
                         span.clone(),
-                        DefKind::Field(FieldDef { ty }),
+                        DefKind::Field(FieldDef {
+                            ty,
+                            initializer: None,
+                        }),
                     ));
                 }
             }
@@ -400,6 +455,7 @@ impl Builder<'_> {
         unit_family: bool,
     ) {
         let names = generic_names(generics);
+        let inherited = self.build_generics(module, &names, generics);
         let mut lowered = Vec::new();
         for variant in variants {
             if unit_family {
@@ -423,7 +479,7 @@ impl Builder<'_> {
         let mut members = Vec::new();
         for implementation in implementations {
             let span = implementation.span.clone();
-            members.push(self.build_implementation(def, module, implementation, span));
+            members.push(self.build_implementation(def, module, &inherited, implementation, span));
         }
         self.pending[def.index()].kind = PendingKind::Built(DefKind::Enum(EnumDef {
             variants: lowered,
@@ -445,7 +501,10 @@ impl Builder<'_> {
             &field.name,
             Visibility::Public,
             field.span.clone(),
-            DefKind::Field(FieldDef { ty }),
+            DefKind::Field(FieldDef {
+                ty,
+                initializer: None,
+            }),
         )
     }
 
@@ -487,7 +546,10 @@ impl Builder<'_> {
                         name,
                         vis,
                         span.clone(),
-                        DefKind::Field(FieldDef { ty }),
+                        DefKind::Field(FieldDef {
+                            ty,
+                            initializer: None,
+                        }),
                     ));
                 }
                 TypeMember::Assertion { value, span } => {
@@ -497,8 +559,13 @@ impl Builder<'_> {
                     implementation,
                     span,
                 } => {
-                    let implementation =
-                        self.build_implementation(def, module, implementation, span.clone());
+                    let implementation = self.build_implementation(
+                        def,
+                        module,
+                        &params,
+                        implementation,
+                        span.clone(),
+                    );
                     members.push(implementation);
                 }
             }
@@ -512,21 +579,32 @@ impl Builder<'_> {
         &mut self,
         owner: DefId,
         module: ModuleId,
+        inherited: &[GenericParam],
         implementation: &Implementation,
         span: SyntaxSpan,
     ) -> DefId {
         // A method's receiver `self` has the implementing type (decision D1: the receiver is not written out),
         // and `Self` written in the implementation names that type.
-        let receiver = self
-            .program
-            .tys
-            .intern(crate::TyKind::Adt(owner, Box::new([])));
+        let names = inherited
+            .iter()
+            .map(|generic| generic.name.clone())
+            .collect::<Vec<_>>();
+        let args = (0..inherited.len())
+            .map(|index| {
+                let index = u32::try_from(index).expect("generic parameters fit u32");
+                self.program
+                    .tys
+                    .intern(crate::TyKind::Param(crate::ParamIdx::new(index)))
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        let receiver = self.program.tys.intern(crate::TyKind::Adt(owner, args));
         self.self_ty = Some(receiver);
         let protocol = self.resolve_protocol(module, &implementation.protocol);
         let protocol_args = match &implementation.protocol {
             TypeExpr::Name { arguments, .. } => arguments
                 .iter()
-                .map(|argument| super::types::lower_type(self, module, &[], argument))
+                .map(|argument| super::types::lower_type(self, module, &names, argument))
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
             _ => Vec::new().into_boxed_slice(),
@@ -538,9 +616,9 @@ impl Builder<'_> {
                     signature,
                     body,
                     span,
-                } => {
-                    members.push(self.build_impl_function(module, receiver, signature, body, span))
-                }
+                } => members.push(
+                    self.build_impl_function(module, receiver, inherited, signature, body, span),
+                ),
                 ImplMember::Static {
                     name,
                     ty,
@@ -556,7 +634,7 @@ impl Builder<'_> {
                     );
                     let body = self.allocate_body(member_def);
                     if let Some(ty) = ty {
-                        let _ = super::types::lower_type(self, module, &[], ty);
+                        let _ = super::types::lower_type(self, module, &names, ty);
                     }
                     self.pending[member_def.index()].kind =
                         PendingKind::Built(DefKind::Let(LetDef { body }));
@@ -598,6 +676,7 @@ impl Builder<'_> {
         &mut self,
         module: ModuleId,
         receiver: crate::Ty,
+        inherited: &[GenericParam],
         signature: &FunctionSignature,
         body: &Expr,
         span: &SyntaxSpan,
@@ -610,8 +689,13 @@ impl Builder<'_> {
             DefKind::Unit(UnitDef::default()),
         );
         let body_id = self.allocate_body(member_def);
-        let names = generic_names(&signature.generics);
-        let generics = self.build_generics(module, &names, &signature.generics);
+        let mut names = inherited
+            .iter()
+            .map(|generic| generic.name.clone())
+            .collect::<Vec<_>>();
+        names.extend(generic_names(&signature.generics));
+        let mut generics = inherited.to_vec();
+        generics.extend(self.build_generics(module, &names, &signature.generics));
         let (params, defaults) = self.build_parameters(
             member_def,
             module,
@@ -953,6 +1037,12 @@ impl Builder<'_> {
                 .intern(crate::TyKind::Adt(owner, Box::new([])));
             let span = orna_syntax::SyntaxSpan::new(0, 0);
             let slot = state.add_local(crate::Name::new("self"), ty, span);
+            if matches!(
+                self.pending[def.index()].kind,
+                super::declare::PendingKind::Built(crate::DefKind::Field(_))
+            ) {
+                state.row = Some(super::row::RowScope { slot, table: owner });
+            }
             state.params.push(slot);
         }
         let root = lower_expr(self, &mut state, expr);

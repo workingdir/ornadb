@@ -54,7 +54,11 @@ mod family;
 #[cfg(test)]
 mod generics_tests;
 mod nominal;
+#[cfg(test)]
+mod null_compare_tests;
 mod operator;
+#[cfg(test)]
+mod option_pattern_tests;
 mod protocol;
 mod quantity;
 #[cfg(test)]
@@ -864,8 +868,8 @@ impl<'a> BodyCheck<'a> {
                 return Ok(self.error());
             }
         }
-        let left_resolved = self.resolved(left);
-        let right_resolved = self.resolved(right);
+        let left_resolved = self.zonk(left);
+        let right_resolved = self.zonk(right);
         if let Some(result) =
             crate::ops::binary(&mut self.program.tys, op, left_resolved, right_resolved)
         {
@@ -1110,6 +1114,12 @@ impl<'a> BodyCheck<'a> {
                     self.bind_pattern(body, *pattern, field_ty, span.clone())?;
                 }
                 Ok(())
+            }
+            Pat::Some(inner) => {
+                let payload = self.infer.new_var(&mut self.program.tys, span.clone());
+                let option = self.intern(TyKind::Option(payload));
+                self.unify(ty, option, span.clone());
+                self.bind_pattern(body, inner, payload, span)
             }
         }
     }

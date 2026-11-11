@@ -58,6 +58,25 @@ fn a_generic_call_records_its_solved_type_arguments() {
     assert_eq!(recorded_targs(&program, "run"), ["Int"]);
 }
 
+#[test]
+fn a_generic_instance_protocol_argument_follows_the_receiver() {
+    let mut program = program(
+        "use core.ops.*;\n\
+         pub type Span<T> {\n    lo: T,\n    hi: T,\n    impl Contains<T> {\n        fn contains(self, value: T): Bool = true;\n    }\n}\n\
+         pub fn has(s: Span<Int>, v: Int): Bool = v in s;\n\
+         pub fn has_method(s: Span<Int>, v: Int): Bool = s.contains(v);\n",
+    );
+    let summary = typeck(&mut program);
+    assert!(test_accepted(&program, &summary), "{summary:?}");
+    assert!(
+        program.modules[test_module(&program)]
+            .diagnostics
+            .is_empty()
+    );
+    assert_eq!(result(&program, "has"), "Bool");
+    assert_eq!(result(&program, "has_method"), "Bool");
+}
+
 /// The type arguments the root call of the named function records on its callee, printed.
 fn recorded_targs(program: &Program, name: &str) -> Vec<String> {
     let DefKind::Fn(function) = &program.defs[definition(program, name)].kind else {

@@ -197,6 +197,9 @@ fn lower_constructor(
     fields: &[orna_syntax::PatternField],
     span: &SyntaxSpan,
 ) -> PatId {
+    if super::option_pats::is_option_some(builder, state.module, path, arguments, fields) {
+        return super::option_pats::lower_option_some(builder, state, &path[0], &arguments[0]);
+    }
     let module = state.module;
     let error_ty = builder.program.tys.error();
     let segments = path

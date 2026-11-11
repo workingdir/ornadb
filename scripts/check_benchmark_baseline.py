@@ -30,8 +30,9 @@ from pathlib import Path
 
 COUNTERS = ("steps", "calls")
 # Counters gated only where a baseline entry records them, so a suite that does not
-# count allocations (the evaluator's) keeps its exact entries.
-OPTIONAL_COUNTERS = ("allocations",)
+# count them (the evaluator counts neither) keeps its exact entries. `allocations` is
+# the exec suite's heap count; `rows_read` is the rows a table store reported as read.
+OPTIONAL_COUNTERS = ("allocations", "rows_read")
 Benchmarks = dict[str, dict]
 
 

@@ -278,14 +278,13 @@ fn classify_member_path(
         crate::UseContext::Value,
         NameTarget::Def(base),
     );
-    if builder.def_is_table(base) {
-        if let Some(op) = super::classify::table_op(last.as_str()) {
-            return Some((Callee::TableOp { table: base, op }, None));
-        }
-        if let Some(op) = super::classify::rel_op(last.as_str()) {
-            return Some((Callee::Relational { op }, None));
-        }
+    if builder.def_is_table(base)
+        && let Some(op) = super::classify::table_op(last.as_str())
+    {
+        return Some((Callee::TableOp { table: base, op }, None));
     }
+    // A relation stage on a table path (`Note.take(0)`) is the member call `rows.take(0)` with the table as the
+    // receiver: typeck settles the stage and places the receiver at argument 0, as a pipe does.
     let base = lower_path_value(builder, state, &segments[..segments.len() - 1]);
     Some((Callee::Pending { base, name: last }, None))
 }

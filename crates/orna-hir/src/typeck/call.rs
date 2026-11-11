@@ -79,17 +79,12 @@ impl<'a> BodyCheck<'a> {
             };
             if matches!(settled, Callee::Source { .. }) {
                 // A protocol member takes the receiver as its first argument (D1: the receiver is not written out).
-                let arguments: Box<[crate::Arg]> = std::iter::once(crate::Arg {
-                    slot: crate::ParamIdx::new(0),
-                    value: crate::ArgValue::Expr(base),
-                })
-                .chain(call.args.iter().map(|argument| crate::Arg {
-                    slot: crate::ParamIdx::new(argument.slot.as_u32() + 1),
-                    value: argument.value,
-                }))
-                .collect();
-                call.args = arguments;
+                call.args = with_receiver(&call.args, base);
                 protocol_member = true;
+            } else if matches!(settled, Callee::Relational { .. }) {
+                // A relation stage takes its receiver as argument 0, as a pipe does: `rows.take(n)` is `rows | take(n)`.
+                call.args = with_receiver(&call.args, base);
+                call.piped = true;
             }
             call.callee = settled;
         }
@@ -1094,4 +1089,17 @@ impl<'a> BodyCheck<'a> {
                 .collect(),
         )
     }
+}
+
+/// The arguments with `receiver` in slot 0 and each written argument moved one slot right.
+fn with_receiver(arguments: &[Arg], receiver: ExprId) -> Box<[Arg]> {
+    std::iter::once(Arg {
+        slot: crate::ParamIdx::new(0),
+        value: ArgValue::Expr(receiver),
+    })
+    .chain(arguments.iter().map(|argument| Arg {
+        slot: crate::ParamIdx::new(argument.slot.as_u32() + 1),
+        value: argument.value,
+    }))
+    .collect()
 }

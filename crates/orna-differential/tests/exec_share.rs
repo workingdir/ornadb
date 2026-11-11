@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 
-use orna_differential::case::Corpus;
+use orna_differential::case::{Case, Corpus};
 use orna_differential::compare;
 use orna_differential::observe_exec::{self, ExecOutcome};
 use orna_differential::observe_old;
@@ -24,6 +24,9 @@ fn executor_agreement_with_the_old_pipeline_only_grows() {
     let mut mismatches = Vec::new();
     let mut step_differences: Vec<(String, u64, u64)> = Vec::new();
     let mut reasons: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let harness_allowances =
+        compare::load_harness_allowances().expect("the harness allowances parse");
+    let mut harness_used = vec![false; harness_allowances.len()];
     for case in &corpus.cases {
         match observe_exec::run_case(case) {
             ExecOutcome::NotYet(reason) => {
@@ -43,6 +46,14 @@ fn executor_agreement_with_the_old_pipeline_only_grows() {
                     }
                 };
                 if observation.outcome.as_ref() != Some(&outcome) {
+                    if harness_environment_allowed(
+                        case,
+                        observation.outcome.as_ref(),
+                        &harness_allowances,
+                        &mut harness_used,
+                    ) {
+                        continue;
+                    }
                     mismatches.push(format!(
                         "{}: executor {outcome:?}, old {:?}",
                         case.id, observation.outcome
@@ -58,6 +69,11 @@ fn executor_agreement_with_the_old_pipeline_only_grows() {
             }
         }
     }
+    mismatches.extend(harness_stale(&harness_allowances, &harness_used));
+    let old_harness_environment = harness_used.iter().filter(|used| **used).count();
+    println!(
+        "old-harness environment: {old_harness_environment} run cases differ only by the H0 observer's missing table store"
+    );
     let allowances = compare::load_step_allowances().expect("the step allowances parse");
     let mut used = vec![false; allowances.len()];
     for (id, old, executor) in step_differences {
@@ -103,6 +119,7 @@ fn executor_agreement_with_the_old_pipeline_only_grows() {
         agreed,
         evaluable,
         steps_exact,
+        old_harness_environment,
     };
     let failures = compare::exec_share_ratchet(recorded, observed);
     assert!(
@@ -110,4 +127,54 @@ fn executor_agreement_with_the_old_pipeline_only_grows() {
         "the exec-share ratchet failed:\n{}",
         failures.join("\n")
     );
+}
+
+/// Whether `case`'s disagreement is the H0 observer's missing table store: the old outcome is
+/// `ORNA-EVAL-NAME` for a module that declares a table, and the case has a harness allowance.
+fn harness_environment_allowed(
+    case: &Case,
+    old: Option<&Result<Vec<u8>, String>>,
+    allowances: &[compare::HarnessAllowance],
+    used: &mut [bool],
+) -> bool {
+    let missing_name = matches!(old, Some(Err(code)) if code == "ORNA-EVAL-NAME");
+    if !missing_name || !declares_table(case) {
+        return false;
+    }
+    match allowances
+        .iter()
+        .position(|allowance| allowance.case == case.id)
+    {
+        Some(index) => {
+            used[index] = true;
+            true
+        }
+        None => false,
+    }
+}
+
+/// Whether a source of `case` declares a table, the shape the H0 observer has no store for.
+fn declares_table(case: &Case) -> bool {
+    case.sources.iter().any(|source| {
+        source
+            .text
+            .lines()
+            .map(str::trim_start)
+            .any(|line| line.starts_with("table ") || line.starts_with("pub table "))
+    })
+}
+
+/// The harness allowances that no longer cover a run: each must be removed.
+fn harness_stale(allowances: &[compare::HarnessAllowance], used: &[bool]) -> Vec<String> {
+    allowances
+        .iter()
+        .zip(used)
+        .filter(|(_, used)| !**used)
+        .map(|(allowance, _)| {
+            format!(
+                "{}: harness allowance is stale; the case no longer differs, remove it",
+                allowance.case
+            )
+        })
+        .collect()
 }
