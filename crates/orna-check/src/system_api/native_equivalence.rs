@@ -13,6 +13,7 @@ use orna_syntax::{
 };
 
 const SYS_ORNA: &str = include_str!("../../../orna-hir/interface/sys.orna");
+const CATALOG_ORNA: &str = include_str!("../../../orna-hir/interface/sys/catalog.orna");
 const SYS_JSON: &str = include_str!("../../../orna-sys-id/catalogue/sys-1.1.0.json");
 
 /// Type names `scripts/gen_interface.py` leaves bare in the JSON (its `BUILTINS`). These are declared in
@@ -552,5 +553,51 @@ fn key_and_availability_clauses_match_json_catalogue() {
     assert_eq!(
         actual, expected,
         "the `key` and `availability` clauses in sys.orna must match the catalogue's relation fields"
+    );
+}
+
+/// The relation handles in `sys/catalog.orna` against the catalogue's `grouped_handle` fields: each `sys.catalog.<name>`
+/// must be a native static of type `Relation<T>`, where `T` is the catalogue relation's `name` without its `sys.`
+/// prefix. Both sides must name the same 32 handles.
+#[test]
+fn catalog_handles_match_json_grouped_handles() {
+    let catalogue: serde_json::Value =
+        serde_json::from_str(SYS_JSON).expect("the catalogue must be JSON");
+    let expected: BTreeMap<String, String> = catalogue["relations"]
+        .as_array()
+        .expect("catalogue `relations` must be an array")
+        .iter()
+        .map(|relation| {
+            let handle = relation["grouped_handle"]
+                .as_str()
+                .expect("catalogue `grouped_handle` must be a string");
+            let name = relation["name"]
+                .as_str()
+                .expect("catalogue `name` must be a string");
+            let row = name.strip_prefix("sys.").unwrap_or(name);
+            (handle.to_owned(), format!("Relation<{row}>"))
+        })
+        .filter(|(handle, _)| handle.starts_with("sys.catalog."))
+        .collect();
+    let parsed = parse_interface(CATALOG_ORNA);
+    let declared = declared_names(&parsed.value.items);
+    let mut actual = BTreeMap::new();
+    for item in &parsed.value.items {
+        let Declaration::NativeStatic {
+            name,
+            annotation: Some(annotation),
+            ..
+        } = &item.declaration
+        else {
+            continue;
+        };
+        actual.insert(
+            format!("sys.catalog.{name}"),
+            render_type(annotation, &declared),
+        );
+    }
+    assert_eq!(
+        actual, expected,
+        "the handles in sys/catalog.orna must match the catalogue's grouped_handle fields"
     );
 }

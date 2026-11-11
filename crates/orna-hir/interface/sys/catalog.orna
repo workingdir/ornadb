@@ -1,0 +1,41 @@
+// Engine-embedded module `sys.catalog`, hand-maintained (decision D19, sys-as-native section 2.2). It holds the 32
+// catalogue relation handles. Each handle is a `table_read` native static whose row type is declared in `sys.orna`;
+// its full path is `sys.catalog.<name>`. The structural equivalence test in orna-check compares these declarations
+// with the `grouped_handle` entries of the JSON catalogue.
+
+use sys.{Assertion, Column, Currency, Database, Definition, Dependency, Dimension, Effect, Extension, Field, File,
+    Function, Implementation, Import, Key, Module, Namespace, Object, Page, Parameter, Protocol, ProtocolMember,
+    Reference, Revision, Secret, SecretRequirement, Setting, Table, Type, TypeParameter, Unit, Variant};
+
+pub native static databases: Relation<Database> effect table_read;
+pub native static namespaces: Relation<Namespace> effect table_read;
+pub native static modules: Relation<Module> effect table_read;
+pub native static imports: Relation<Import> effect table_read;
+pub native static files: Relation<File> effect table_read;
+pub native static objects: Relation<Object> effect table_read;
+pub native static revisions: Relation<Revision> effect table_read;
+pub native static definitions: Relation<Definition> effect table_read;
+pub native static types: Relation<Type> effect table_read;
+pub native static type_parameters: Relation<TypeParameter> effect table_read;
+pub native static fields: Relation<Field> effect table_read;
+pub native static variants: Relation<Variant> effect table_read;
+pub native static protocols: Relation<Protocol> effect table_read;
+pub native static protocol_members: Relation<ProtocolMember> effect table_read;
+pub native static implementations: Relation<Implementation> effect table_read;
+pub native static functions: Relation<Function> effect table_read;
+pub native static parameters: Relation<Parameter> effect table_read;
+pub native static effects: Relation<Effect> effect table_read;
+pub native static tables: Relation<Table> effect table_read;
+pub native static columns: Relation<Column> effect table_read;
+pub native static keys: Relation<Key> effect table_read;
+pub native static assertions: Relation<Assertion> effect table_read;
+pub native static references: Relation<Reference> effect table_read;
+pub native static pages: Relation<Page> effect table_read;
+pub native static dimensions: Relation<Dimension> effect table_read;
+pub native static units: Relation<Unit> effect table_read;
+pub native static currencies: Relation<Currency> effect table_read;
+pub native static secret_requirements: Relation<SecretRequirement> effect table_read;
+pub native static extensions: Relation<Extension> effect table_read;
+pub native static dependencies: Relation<Dependency> effect table_read;
+pub native static secrets: Relation<Secret> effect table_read;
+pub native static settings: Relation<Setting> effect table_read;

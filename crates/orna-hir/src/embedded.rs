@@ -23,7 +23,7 @@ pub const ENGINE_NATIVE_ABI: NativeAbi = NativeAbi::new(1);
 pub(crate) const EMBEDDED_SOURCE_BASE: u32 = u32::MAX - 64;
 
 /// Every embedded interface file: its dotted module path and its text.
-const FILES: [(&str, &str); 18] = [
+const FILES: [(&str, &str); 19] = [
     ("core", include_str!("../interface/core.orna")),
     ("core.bits", include_str!("../interface/core/bits.orna")),
     ("core.ops", include_str!("../interface/core/ops.orna")),
@@ -63,6 +63,7 @@ const FILES: [(&str, &str); 18] = [
     ("core.time", include_str!("../interface/core/time.orna")),
     ("sys", include_str!("../interface/sys.orna")),
     ("sys.engine", include_str!("../interface/sys/engine.orna")),
+    ("sys.catalog", include_str!("../interface/sys/catalog.orna")),
 ];
 
 /// One parsed embedded module.
