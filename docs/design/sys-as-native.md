@@ -1,6 +1,6 @@
 # sys as native declarations: one source for the sys surface
 
-Status: design proposal for owner review. Changes no production code. Docs only.
+Status: decided on 2026-11-11 under the owner's delegation (D19, ADR 0123). Changes no production code. Docs only.
 
 Owner direction, quoted (2026-11-11):
 
@@ -22,12 +22,13 @@ Evidence base:
 * Generated-code sizes come from an existing build output of main (`target/mainhealth`, built 2026-11-10, after the last
   change to `orna-sys-id`). I ran no build for this document.
 * `[INFERENCE]` marks a claim that no command or test checked. `[PROPOSAL]` marks a form or rule that this document
-  suggests. `[OWNER]` marks a choice that only the owner can make (section 8). Appendix B lists the commands behind
-  the counts.
+  specifies and that a stage of section 5 implements. `[DECIDED]` marks a choice that the owner delegated and that is
+  recorded as decided (section 8). Appendix B lists the commands behind the counts.
 
 Reading rules: every section starts with its conclusion. Option analysis is neutral. It lists what each option buys and
-costs, and which assumption it depends on. A default that nobody has decided appears only as "What I do until told
-otherwise".
+costs, and which assumption it depends on. The owner delegated every choice on 2026-11-11, and each one is recorded as
+decided (section 8). The analysis stays as the record of what was weighed. A decided option carries `[DECIDED]` or
+"Decided (D19)".
 
 ---
 
@@ -62,13 +63,18 @@ still equals the frozen 1.1.0 file byte for byte, and to publish. Nothing else r
 * An engine author edits one file to add a `sys` member. The build and the link step name what is missing.
 * Spec conformance does not move. The frozen 1.1.0 file stays the oracle. The exporter must reproduce it.
 
-**Defaults.** Each row is what I do until told otherwise. Section 8 lists the choices that are the owner's.
+**Decided.** Each row was decided on 2026-11-11 under the owner's delegation. It is D19 in
+[DECIDED.md](../language/DECIDED.md) and [ADR 0123](../decisions/0123-sys-as-native-declarations.md). Section 8 lists
+all 15 choices.
 
-| Area | What I do until told otherwise | Section |
+| Area | Decided | Section |
 |---|---|---|
-| Source of truth | `sys.orna` and submodules, written by hand. No `engine.orna`. | 2.2, 2.3 |
-| JSON | Exporter output only: the frozen-file oracle and publication. | 2.5 |
+| Source of truth | `sys.orna` and submodules, written by hand, in `orna-sys-interface`. No `engine.orna`. | 2.2, 2.3 |
+| JSON | Exporter output only. CI pins profile 1.1.0 to the frozen file. | 2.5 |
 | New declaration forms | Clauses, `native type`, `native static`, doc comments. | 2.4 |
+| Effect classes | True classes plus a `class` clause. The checker's table goes at H3. | 2.4 |
+| Prose | Five fixed doc-comment sections. No clause per fact. | 2.4 |
+| Overload spellings | A deprecated spelling is an alias to one declaration, with a warning (D5). | 2.4 |
 | Typed ids and bindings | Option E: small generated ids, registration at link. | 3.5 |
 | Failure codes | An ordinary enum. `__` marks a segment break. | 3.4 |
 | Removal and versions | Clauses: `since`, `removed`, `formerly`, `deprecated`. | 4.3 |
@@ -282,7 +288,7 @@ branches on the fact, not that it only copies or shows it.
 |---|---|---|---|
 | Path and overload label | `name`: 82; 37 overload members, 10 paths | yes | module path, `spelling` (2.4) |
 | Signature | `functions[].signature`: 82 | yes | the declaration (exists) |
-| Effect class | `effect`: read 46, admin 25, invoke 11 | yes | `effect` clause (2.4, 8 item 7) |
+| Effect class | `effect`: read 46, admin 25, invoke 11 | yes | `class` clause, true `effect` clause (2.4) |
 | Per-callable failures | `failures =` on 77 of 84 `#[ornasys]` | yes | `fails` clause (2.4) |
 | Failure code table | `failure_codes` 67, engine 61 | yes | enum (3.4) |
 | Purpose text | functions 82, relations 78, value types 35 | shown | doc comment (2.4) |
@@ -348,17 +354,17 @@ so they need no declaration of their own. The two retired functions are spelled 
 would share one name. I avoid the clash: `info` is declared in `sys` as `rt_info` with `spelling "sys.rt.info"`
 `[PROPOSAL]`.
 
-Options for the layout. `[OWNER]` (section 8, item 4)
+Options for the layout. `[DECIDED]` layout 1 (section 8, item 4)
 
 * **Layout 1: a module per namespace, `spelling` for the 37 overload members and `rt_info`.** Buys: `sys.admin.commit`
   resolves by the ordinary module rule, so the resolver needs no sys table. Costs: seven more embedded files, and a
-  `spelling` index in lowering for the 38 names. This is the default.
+  `spelling` index in lowering for the 38 names. This is decided.
 * **Layout 2: one flat `sys` module as today, `spelling` on all 84 natives.** Buys: one file; no new module. Costs:
   84 clauses that repeat the module path, and reflection reports flat names.
 * **Layout 3: flat names, no `spelling`, and a path alias table in Rust.** Buys: no clause. Costs: a second table
   that this design exists to remove. Not chosen.
 
-Where the files live. Three places are possible. `[OWNER]` (section 8, item 3)
+Where the files live. Three places were possible. `[DECIDED]` L-c (section 8, item 3)
 
 * **L-a: stay in `crates/orna-hir/interface/`.** The identity build script reads them by relative path. Buys: no move,
   and an edit rebuilds `orna-hir` and its 4 dependents only (`orna-differential`, `orna-exec`, `orna-link`, `orna-lsp`;
@@ -367,12 +373,16 @@ Where the files live. Three places are possible. `[OWNER]` (section 8, item 3)
 * **L-b: move into `crates/orna-sys-id/interface/`.** `orna-hir` embeds the text through the identity crate. Buys: the
   generator reads inside its own package. Costs: `orna-hir` gains a same-layer edge (an `allowed` entry in
   `docs/design/layers.toml`). Any edit changes a constant in `orna-sys-id`, so its 16 dependents rebuild.
-* **L-c: a new layer-3 crate `orna-sys-interface` that holds only the files.** `orna-hir` depends on it. The identity
-  crate and the exporter take it as a build dependency. Buys: explicit edges, no path reads, and an edit reruns the
-  identity build script without rebuilding the identity crate unless the generated text changes (section 3.2). Costs:
-  one more crate and one more layer entry.
+* **L-c: a new crate `orna-sys-interface` that holds only the files.** `orna-hir`, `orna-sys-id` and `orna-check`
+  depend on it. Buys: explicit edges, no path reads, and an edit reruns the identity build script without rebuilding the
+  identity crate unless the generated text changes (section 3.2). Costs: one more crate and its layer entries.
 
-What I do until told otherwise: L-c.
+Decided (D19): L-c, at layer 2. `docs/design/layers.toml` puts `orna-hir` and `orna-sys-id` at layer 3, `orna-check` at
+layer 4, and `orna-syntax` and `orna-sys-codegen` at layer 2. A crate beside `orna-syntax` is low enough for all three
+users. It has no run-time dependency. Its test parses every file with `orna-syntax`, so it has one dev dependency, which
+is a same-layer edge and needs an `allowed` entry. The exporter in `orna-sys-codegen` needs one too. The crate exposes
+each file as an embedded string. The entries land in SN2, because the architecture check flags an `allowed` entry that
+no edge uses.
 
 ### 2.3 The engine catalogue
 
@@ -400,7 +410,7 @@ The language has no identity token on purpose ([native-declarations.md](native-d
 roles and providers are versioned names such as `host.std.io.fs.read@1.0`. They belong to provider negotiation
 ([sys-identity.md](sys-identity.md) section 1.3). Nothing outside the archive reads the sealed registry. If the owner
 revives `sys.inspect`, `sys.security` or `sys.state`, they become natives under `sys.engine` and the ids move to a Rust
-table. `[OWNER]` (section 8, item 11)
+table. `[DECIDED]` The sealed ids stay as data with the archive until the archive decision (section 8, item 11).
 
 ### 2.4 Declaration forms
 
@@ -421,6 +431,7 @@ diagnostic, in the manner of ORNA091-E-NATIVE-PLACE `[PROPOSAL]`.
 | Clause | On | Meaning | Count |
 |---|---|---|---|
 | `fails a, b` | `native fn` | the failure codes the call may raise, as enum names | 77 |
+| `class read` | `native fn` | the catalogue class of the call: `read`, `invoke` or `admin` | 84 |
 | `since "1.1.0"` | `native fn` | the first language version that has it | 18 |
 | `removed "1.1.0" [use p] [reason "t"]` | any | gone from this version; kept for historical readers | 2 + 3 |
 | `formerly "sys.runtime" [diagnostic "c"]` | `native fn`, `native static` | the name this one replaced | 2 |
@@ -431,7 +442,9 @@ diagnostic, in the manner of ORNA091-E-NATIVE-PLACE `[PROPOSAL]`.
 The `removed` count is 2 functions and 3 types: `StoragePreference` and `StorageRewriteTarget` (enums) and
 `StorageRewriteResult` (a value type), from `reference/Orna-1.1.0/api/retired.json`. The `deprecated` clause has no
 use in the frozen file. D5 needs it: "the 1.1 spellings stay as deprecated aliases in 1.2"
-([DECIDED.md](../language/DECIDED.md), row D5). How an alias resolves is not decided here.
+([DECIDED.md](../language/DECIDED.md), row D5). Decided (D19): a deprecated overload spelling resolves as an alias to
+the one declaration that its argument type selects, and tools warn. The `spelling` clause names the spelling and
+`deprecated` marks the declaration (section 8, item 15).
 
 A relation is a row `type` with `key` and `availability` clauses. The handle is a typed path to it. For 59 relations
 that path is a `native static` of type `Relation<Row>` in a namespace module. For the 19 `sys.rt` relations it is a
@@ -464,7 +477,7 @@ pub native static current: CurrentContext effect table_read;
 **Prose.** Eight relations of the frozen reference have a `docs` column
 (`reference/Orna-1.1.0/source/34-system-reference.md`, lines 663, 1048, 1151, 1201, 1217, 1231, 1284 and 1354). The
 language has no source for it. Purpose text is plain doc comment in every option below. The question is the five
-stored-only facts: contract, preconditions, ownership, snapshot rule and invariants. `[OWNER]` (section 8, item 6)
+stored-only facts: contract, preconditions, ownership, snapshot rule and invariants. `[DECIDED]` P1 (section 8, item 6)
 
 * **P1: fixed doc sections.** Doc comments keep exactly five section headings, legal in `sys` only. Buys: no new
   clause; reads like Rust documentation. Costs: a section is a tag inside a comment, and a typo loses data unless the
@@ -476,7 +489,9 @@ stored-only facts: contract, preconditions, ownership, snapshot rule and invaria
 * **P3: keep them out of `sys.orna`.** A frozen table in the exporter, keyed by qualified name. Buys: no grammar.
   Costs: a second hand-kept file keyed by name, which is the pattern this design removes. Reflection loses the text.
 
-What I do until told otherwise: P1. The lifecycle and identity facts never go in comments.
+Decided (D19): P1. The sections are contract, preconditions, ownership, snapshot rule and invariants. The lexer keeps
+them, and the exporter writes them to the docs. There is no clause per fact. The lifecycle and identity facts never go
+in comments.
 
 **Effect classes.** The JSON class (`read`, `invoke`, `admin`) and the twelve-valued `sys.EffectKind` are two axes.
 The generator maps one to the other with a fixed table (`scripts/gen_interface.py:30`), the owner's own decision at the
@@ -485,7 +500,7 @@ csenl.17 review. The mapping is imprecise, and the checker has a second, finer t
 `RuntimeAdmin` to the stream and failure natives, and `Filesystem` to `capture_file`. It gives `sys.invoke`,
 `sys.start`, `sys.await`, `sys.cancel` and the in-memory blob writer no host effect
 (`crates/orna-check/src/effects.rs:62-92`). By reading both tables, they agree on 3 of the 36 callables whose JSON class
-is not `read`. `[OWNER]` (section 8, item 7)
+is not `read`. `[DECIDED]` E1 (section 8, item 7)
 
 * **E2: keep the mapping.** Every `sys` native uses three of the twelve classes, and the JSON class follows from the
   clause. Buys: no behaviour change; the first proof is exact. Costs: the clause is less true than D2 intends.
@@ -493,7 +508,15 @@ is not `read`. `[OWNER]` (section 8, item 7)
   table is a ready source for 26 of the 36 callables. Costs: one more clause, a decision for the other ten, and a
   change in the effect pass for the 33 callables where the two tables differ.
 
-What I do until told otherwise: E2. It keeps the first proof exact. E1 can follow as its own stage.
+Decided (D19): E1. Declarations carry true effect classes, and every native has a `class read|invoke|admin` clause for
+the catalogue class. The declarations are the only authority. The checker's `host_effect` table is deleted when
+`orna check` moves to HIR (H3). It is a defect source: the two tables agree on 3 of 36. The 26 callables that the table
+gives a class take it: `git` for 14 (`commit`, `commit_reviewed`, six `checkout` and six `create_branch` overloads),
+`storage_admin` for 3 (`flush`, `compact`, `verify`), `runtime_admin` for 8 (the stream and failure natives) and
+`filesystem` for `capture_file`. Of the other ten, `invoke` and `start` (four overloads), `await` and `cancel` keep
+`runtime_admin`, and the four in-memory blob writer natives (`begin`, `append`, `finish`, `abort`) take `effect none`.
+The SN2 review confirms the ten. The effect pass changes for the 33 callables where the two tables differ. The oracle
+still proves the JSON class, because the exporter writes it from the `class` clause.
 
 ### 2.5 JSON after the change
 
@@ -633,7 +656,7 @@ holds the declared keys that no host registers.
 * Failure modes: an unwired parity test, which is the C failure again. Typos found late.
 * `sys.Function` metadata: from the HIR only.
 
-**Option E (my default): small generated ids and registration at link.** It is D's registration and link, plus a build
+**Option E (decided): small generated ids and registration at link.** It is D's registration and link, plus a build
 script that generates only the closed vocabularies that Rust names: `SysFailureCode` with its `Origin` (57,348 bytes
 today) and a key enum for the callables that hosts register (smaller than `functions.rs`, 43,147 bytes). Hosts register
 through the typed key. Everything else that the identity crate generates today goes as its consumers move: descriptors,
@@ -652,7 +675,7 @@ relation, enum and field tables, removed-name tables, provider links, the `SysFu
 
 ### 3.3 Comparison
 
-| Criterion | A script | B macro | C checked in | D registry | E default |
+| Criterion | A script | B macro | C checked in | D registry | E decided |
 |---|---|---|---|---|---|
 | Parser | `orna-syntax` | `orna-syntax` | `orna-syntax` | `orna-syntax`, in a test | `orna-syntax` |
 | Generated Rust | all you choose | none | as A, in git | none | codes and keys |
@@ -674,7 +697,7 @@ are judgement until SN3 measures them.
 ### 3.4 Failure codes
 
 Conclusion: failure codes are the one vocabulary that Rust must name everywhere, and the language has no form for a
-table of wire strings. I propose an ordinary enum whose variant names spell the wire code, with `__` for each dot.
+table of wire strings. Decided: an ordinary enum whose variant names spell the wire code, with `__` for each dot.
 
 Facts. There are 128 codes: 67 portable and 61 engine. Each matches `sys(.word)+` with lower-case words, and 27 have
 four segments (`sys.host.filesystem.not_found`). Replacing the dots after `sys` with `__` gives 128 distinct names,
@@ -691,7 +714,7 @@ enum FailureCode {
 }
 ```
 
-Options. `[OWNER]` (section 8, item 8)
+Options. `[DECIDED]` F1 (section 8, item 8)
 
 * **F1: an enum with `__` segment breaks.** Buys: no grammar. A `fails` clause resolves by the ordinary resolver, so a
   typo is a lowering diagnostic. Order is catalogue order, so the first 67 are `PORTABLE`. Costs: the names are
@@ -703,11 +726,11 @@ Options. `[OWNER]` (section 8, item 8)
 * **F3: a string table outside the language** (a Rust constant or an exporter table). Buys: no grammar. Costs: the typo
   problem returns, and it is a second source.
 
-What I do until told otherwise: F1. The 61 engine codes form a second enum under `sys.engine`.
+Decided (D19): F1. The 61 engine codes form a second enum under `sys.engine`.
 
-### 3.5 What I do until told otherwise
+### 3.5 Decided: option E, with these rules
 
-Option E, with these rules.
+These rules are decided with option E (D19).
 
 1. **One build script, strict.** It is in the identity crate. It reads the interface files through `orna-syntax` and
    rejects an unknown clause, a duplicate key and a `fails` name that is not a code. It writes a file only when the text
@@ -725,6 +748,7 @@ Option E, with these rules.
    attribute syntax is added.
 6. **`core` uses the same pieces.** `orna-exec` already binds `core` natives through a keyed lookup. It adopts the same
    build script for its key enum, so `core` and `sys` have one mechanism and one parity test shape.
+7. **No string lookup on a hot path.** Names are consulted at link. A call at run time uses the key that `link` bound.
 
 ### 3.6 What `sys.Function` needs
 
@@ -811,7 +835,7 @@ pub native fn rt_info(): RuntimeInfo effect table_read
 record: a typo drops the fact without a diagnostic, the lexer would carry machine data, and the language gets a second,
 untyped attribute system.
 
-What I do until told otherwise: L1. `[OWNER]` (section 8, item 10)
+Decided (D19): L1, with `formerly` for renames (section 8, item 10).
 
 ### 4.4 Versions and contexts
 
@@ -837,7 +861,8 @@ Conclusion: eight stages, each one PR or a short series, each mergeable alone. T
 ([hir.md](hir.md) section 6.1). The first proof is byte-equal JSON from `sys.orna` (SN2). The flip is SN3, and it
 changes the input of the identity generator and none of its output. Deletion belongs to the stage that makes the code
 dead. H5 is bead `ornadb-csenl.20`, the sys-identity epic is `ornadb-ouxeq` and the native declarations epic is
-`ornadb-yuzot`. No bead exists for SN1 to SN8 yet. They are filed on acceptance.
+`ornadb-yuzot`. No bead exists for SN1 to SN8 yet. They are filed when this PR merges. The checker's `host_effect`
+table is not a stage here. It goes at H3 (section 2.4).
 
 ```text
 SN1 forms --> SN2 lossless sys.orna + exporter --> SN3 flip --> SN4 old pipeline on derived JSON
@@ -874,11 +899,14 @@ SN1 forms --> SN2 lossless sys.orna + exporter --> SN3 flip --> SN4 old pipeline
 
 **SN2: a lossless `sys.orna` and the exporter. The first proof.**
 
-* Delivers: `scripts/gen_interface.py` is rewritten to write every JSON fact into the SN1 forms. This is its last run
-  against JSON. The module layout of section 2.2 lands. `export(profile, sources)` lands in `orna-sys-codegen`. The
-  three drift checks of section 2.5 join `just sys-artifact-ci` and a workflow job in the same PR.
+* Delivers: the crate `orna-sys-interface` lands at layer 2, with its entries in `docs/design/layers.toml` (section
+  2.2). `scripts/gen_interface.py` is rewritten to write every JSON fact into the SN1 forms, with a `class` clause on
+  each native and the true effects of section 2.4. This is its last run against JSON. The module layout of section 2.2
+  lands. `export(profile, sources)` lands in `orna-sys-codegen`. The three drift checks of section 2.5 join
+  `just sys-artifact-ci` and a workflow job in the same PR.
 * Proof: `export(1.1.0)` equals the frozen fixture bytes and the pinned sha256. The round trip JSON to `sys.orna` to
-  JSON is the identity. `sys.orna` lowers with no diagnostic. Every existing test passes without an edit.
+  JSON is the identity. `sys.orna` lowers with no diagnostic. Every existing test passes without an edit, except one
+  that pins an effect which E1 corrects. The PR names it.
 * Deletes: nothing. This stage is the acceptance sentence of [hir.md](hir.md) stage H5, "`api/sys.json` generated from
   `sys.orna` is byte-equal to the checked-in file". Risk: the four `signature`-first callables and enum order.
 
@@ -937,8 +965,9 @@ no `orna-evaluator` edge remains in `cargo metadata`, and the V1 entry is delete
 
 ### 5.3 What is superseded
 
-Nothing here is edited by this PR. On acceptance I record ADR 0123 (the next free number) and add a "superseded in
-part" note to each document below.
+This PR records [ADR 0123](../decisions/0123-sys-as-native-declarations.md) (the next free number). It marks ADR 0111,
+ADR 0112 and sys-identity.md (S1, S3, 4.3 and 4.5) as superseded in part. The PR of the stage that supersedes another
+row below marks that row.
 
 | Document | Part | Status |
 |---|---|---|
@@ -972,17 +1001,18 @@ test or a rule.
 | 1 | A hand-edited file of 2,000 lines or more drifts from the frozen spec | the oracle compares bytes in CI (2.5) |
 | 2 | Enum order is wire data (`object_identity.rs:41-43`); a hand edit can reorder | the oracle compares value order |
 | 3 | Grammar growth | principle 3; contextual words; "not a keyword" tests; engine-embedded modules only |
-| 4 | The 37 overload spellings meet D5 (no overloading) | `spelling` is the one place; aliases are left open |
+| 4 | The 37 overload spellings meet D5 (no overloading) | `spelling` is the one place; old spellings are aliases |
 | 5 | `sys.rt` is a singleton and a path prefix | `rt_info` with `spelling` (2.2) |
-| 6 | Effect classes disagree across three sources | E2 now, E1 as its own stage (2.4) |
+| 6 | Effect classes disagree across three sources | E1: declarations are the authority; `host_effect` goes at H3 |
 | 7 | A build script costs time and can regress | strict input, golden output, write-if-changed; SN3 measures it |
-| 8 | Layering: a new crate, a same-layer edge, a build edge | `layers.toml` entries per stage; SN8 deletes V1 |
+| 8 | Layering: a new crate, same-layer edges, a build edge | layer 2; `layers.toml` entries in SN2; SN8 deletes V1 |
 | 9 | The embedded text is parsed on every `lower` call and grows with prose | SN1 caches the parse |
 | 10 | A drift check is left unwired (the `gen_interface.py --check` case) | SN2 wires each check in its own PR |
 | 11 | Two mechanisms live during the strangler period | the exporter is the only JSON writer; SN4 removes one |
 | 12 | Frozen fixtures change by accident | this design edits none; `scripts/check_fixture_manifest.py` pins them |
 | 13 | Sealed ids leave with the archive | item 11 of section 8 records the choice |
 | 14 | `///` lines gain meaning for users who write them today | docs only; SN1 tests the formatter round trip |
+| 15 | E1 changes the effect of 33 callables | the SN2 review lists them; the oracle proves the `class` clause |
 
 ### 6.2 Rejected alternatives
 
@@ -1085,6 +1115,7 @@ pub native fn dependents(
     transitive: Bool = false,
     kinds: [DependencyKind]? = null
 ): Relation<Dependency> effect table_read
+    class read
     fails object__not_found, snapshot__not_found, snapshot__expired, snapshot__incomplete;
 ```
 
@@ -1096,10 +1127,10 @@ pub native static dependencies: Relation<Dependency> effect table_read;
 ```
 
 The exporter writes the JSON entry of 7.1 from the function. The name is the module path plus `dependents`. The
-`effect` is `read`, from `table_read` under option E2. The signature comes from the parameters, with `sys.` added to the
-names that `sys.orna` declares. The `purpose` is the first doc paragraph. `fails` is not exported. It feeds the provider
-ABI. The function has no `spelling`, because its path is its name and it has no overload. It has no `since`, so it is in
-every reader context.
+`effect` is `read`, from the `class read` clause. The declared `effect table_read` is a different axis: it is what the
+checker sees. The signature comes from the parameters, with `sys.` added to the names that `sys.orna` declares. The
+`purpose` is the first doc paragraph. `fails` is not exported. It feeds the provider ABI. The function has no
+`spelling`, because its path is its name and it has no overload. It has no `since`, so it is in every reader context.
 
 ### 7.3 After: the Rust side, option E
 
@@ -1160,35 +1191,46 @@ names `sys.dependents`.
 
 ---
 
-## 8. Decisions the owner must make
+## 8. Decided 2026-11-11 (owner delegation)
 
-Every item has a default that I follow until told otherwise. Each says what the choice changes.
+The owner delegated these choices on 2026-11-11 ("figure out a more robust way of doing this"). All 15 are decided.
+They are D19 in [DECIDED.md](../language/DECIDED.md) and [ADR 0123](../decisions/0123-sys-as-native-declarations.md).
+Each item says what it changes. The owner can reopen any of them, and D19 says what that costs.
 
-1. **Hand-written source of truth.** Make `sys.orna` the hand-edited source and JSON a generated output. Default: yes.
-   The alternative keeps JSON as the source, which your direction rules out.
-2. **The engine catalogue.** Default: no `engine.orna`. The engine-only functions and failure codes become declarations
-   under `sys.engine`. The rest keeps its owner (section 2.3). The alternative moves all of it into declarations.
-3. **Where the files live.** L-a, L-b or L-c (section 2.2). Default: L-c, a new crate `orna-sys-interface`.
-4. **Module layout.** Layout 1, 2 or 3 (section 2.2). Default: a module per namespace, `spelling` for 38 names.
-5. **New forms.** Accept `native static`, the clause list of section 2.4, doc comments in the lexer, and an amendment
-   document beside `docs/spec-extensions/NATIVE-1.md`. `native type` is already decided (D17). Default: accept.
-6. **Prose.** P1, P2 or P3 (section 2.4). Default: P1, five fixed doc sections for facts the engine only stores.
-7. **Effect classes.** E1 or E2 (section 2.4). Default: E2. The checker's table and `sys.orna` agree on 3 of 36
-   non-read callables, so E1 is real work.
-8. **Failure-code form.** F1, F2 or F3 (section 3.4). Default: F1, an enum with `__`, kept out of the user-visible
-   surface. The 61 engine codes get a second enum under `sys.engine`.
-9. **Typed ids and bindings.** A, B, C, D or E (section 3). Default: E. If you want zero generated Rust, D is the
-   credible choice, and the price is string keys.
-10. **Lifecycle form.** L1, L2, L3 or L4 (section 4.3). Default: L1, clauses, with `formerly` for renames. Your rule
-    excludes L4.
-11. **Sealed ids.** The 27 sealed functions and 4 engine types persist as 16-byte ids. Default: keep the data with the
-    archive. Alternatives: a Rust table keyed by declaration, or drop them when the archive goes.
-12. **Host operations.** Move the 21 into declarations at SN7 (default), or in the first cut.
-13. **Superseding.** On acceptance, record ADR 0123 and mark ADR 0111, ADR 0112 and sys-identity.md S1 and S3 as
-    superseded in part (section 5.3). Default: yes. This PR edits none of them.
-14. **The oracle.** Pin profile 1.1.0 to the frozen bytes for ever and run it in a CI job. Default: yes.
-15. **D5 aliases.** How a deprecated overload spelling resolves is a language question that this document leaves open.
-    The `spelling` and `deprecated` clauses are where it attaches.
+1. **Hand-written source of truth.** Decided: `sys.orna` is the hand-edited source, and JSON is generated output only.
+   Keeping JSON as the source would have gone against the owner's direction.
+2. **The engine catalogue.** Decided: no `engine.orna`. The catalogue is split by member. The engine-only functions and
+   failure codes become declarations under `sys.engine`. The rest keeps its owner (section 2.3).
+3. **Where the files live.** Decided: L-c (section 2.2). A new crate, `orna-sys-interface`, at layer 2 beside
+   `orna-syntax`. It has no run-time dependency and one dev dependency on `orna-syntax`, for its parse-checked test. It
+   exposes the files as embedded strings. `orna-hir`, `orna-sys-id` and `orna-check` depend on it. The `layers.toml`
+   entries, including one for the exporter, land in SN2.
+4. **Module layout.** Decided: layout 1 (section 2.2). A module per spec namespace, and `spelling` for the 38 names.
+5. **New forms.** Decided: accept `native static`, the clause list of section 2.4 and doc comments that the lexer keeps,
+   with an amendment document beside `docs/spec-extensions/NATIVE-1.md`. `native type` is already decided (D17).
+6. **Prose.** Decided: P1 (section 2.4). The five stored-only facts live in fixed doc-comment sections: contract,
+   preconditions, ownership, snapshot rule and invariants. The lexer keeps them and the exporter writes them to the
+   docs. There is no clause per fact.
+7. **Effect classes.** Decided: E1 (section 2.4). Declarations carry true effect classes and a `class` clause
+   (`read`, `invoke` or `admin`). They are the only authority, and the checker's `host_effect` table is deleted at H3.
+   The two tables agree on 3 of 36 non-read callables, so the table is a defect source. The SN2 review confirms the
+   classes of the ten callables that the table does not class.
+8. **Failure-code form.** Decided: F1 (section 3.4), an enum with `__` as the segment break, kept out of the
+   user-visible surface. The 61 engine codes get a second enum under `sys.engine`.
+9. **Typed ids and bindings.** Decided: option E (section 3). A small generated id set names what Rust names: failure
+   codes and callable keys. Hosts register by qualified name at link. A test checks that every declared callable is
+   implemented or on the pinned not-yet list. No hot path looks up a string, because names are consulted at link only.
+10. **Lifecycle form.** Decided: L1 (section 4.3). The clauses `since`, `removed`, `formerly` and `deprecated` sit on
+    the declaration, and doc tags are excluded.
+11. **Sealed ids.** Decided: the 27 sealed functions and 4 engine types stay as data with the archive, until the
+    archive decision is made.
+12. **Host operations.** Decided: the 21 move into declarations at SN7, not in the first cut.
+13. **Superseding.** Decided: ADR 0123 records the decision. ADR 0111, ADR 0112 and sys-identity.md (S1 and S3) are
+    marked superseded in part (section 5.3). This PR makes those edits.
+14. **The oracle.** Decided: profile 1.1.0 is pinned to the frozen bytes for ever, and a CI job runs the check.
+15. **D5 aliases.** Decided: a deprecated overload spelling resolves as an alias to the one declaration that its
+    argument type selects, with a deprecation warning (D5). The `spelling` and `deprecated` clauses are where it
+    attaches (section 2.4).
 
 ---
 

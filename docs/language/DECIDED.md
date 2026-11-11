@@ -1,4 +1,4 @@
-# Orna language decisions (D1 to D18): decided
+# Orna language decisions (D1 to D19): decided
 
 Status: decided by the owner's delegation on 2026-11-10 ("figure out everything else"), reasoned from the
 original plan (`reference/Orna-1.1.0/PLAN.md`, `source/01-scope.md`, `source/02-concepts.md`) and engineering
@@ -6,6 +6,8 @@ common sense. The option analysis behind D1 to D13 is in `DECISIONS.md`. D14 to 
 under the owner's delegation of the five open questions of `docs/design/kernel-and-library.md` ("i will let you figure
 out those decisions"); their option analysis is in that document, sections 4 and 5. Any decision can be reopened by
 the owner; each says what reopening would cost.
+D19 was decided on 2026-11-11 under the owner's delegation of the `sys` source questions; its option analysis is in
+`docs/design/sys-as-native.md`.
 
 ## Principles used
 
@@ -45,6 +47,7 @@ the owner; each says what reopening would cost.
 | D16 | Operator protocols use P1-A: the output type is a protocol parameter. Impl variables are implicit where the unit algebra needs them. Type-directed selection of an instance of one protocol member is within D5: D5 forbids a name that denotes several functions, and `a + b` names one protocol member while the types select the instance, as `From<Str>` and `From<X>` already do. Two applicable instances are an error. `==` and `!=` stay canonical equality. `Order` is derived by the engine where a canonical order exists. Scalar pairs keep the direct fast path. Step zero (protocol member calls resolve) is scheduled in H2. A private function whose numeric operand type stays unresolved is a diagnostic that asks for an annotation (D1 unchanged). |
 | D17 | Library types keep today's canonical bytes through a registry in Rust (P9-A), with `native type` declarations in `core` for `Instant` and the other kernel representation types. A format change (P9-C) is rejected for now and may be revisited only with a deliberate storage format version. The `core` paths that the registry names are part of the engine ABI: renaming one bumps the `NativeAbi` number, and the build guard checks it. |
 | D18 | A call to a loop-free pure `core` function costs one step (P8 R5 option ii), which keeps parity with the special cases. Rules R1 to R4 (static resolution, monomorphisation, inlining, constant folding) stand as written. Explicit per-function weights (option iii) are added only where a measured need appears. The one step re-baseline stays at H9. |
+| D19 | The `sys` surface is declared in Orna. `sys.orna` and submodules, held by the new crate `orna-sys-interface`, are the one hand-written source. JSON is exporter output only, and CI pins the 1.1.0 profile to the frozen file. Effect classes, lifecycle (`since`, `removed`, `formerly`, `deprecated`) and overload spellings are declaration clauses. Prose is fixed doc-comment sections. Failure codes are an enum with `__` as the segment break. Typed ids are a small generated set, and hosts register by qualified name at link. A deprecated overload spelling is an alias to the one declaration, with a warning (D5). Design: `docs/design/sys-as-native.md`; ADR 0123. |
 
 ## Answers to the owner questions
 
@@ -81,7 +84,7 @@ Two further resolutions:
 * A private function whose numeric operand type stays unresolved is a diagnostic that asks for an annotation (D1 is
   unchanged). There is no defaulting.
 
-## D14 to D18: reasoning and what reopening costs
+## D14 to D19: reasoning and what reopening costs
 
 ### D14. Compile-time evaluation
 
@@ -145,6 +148,30 @@ Reopening costs. Option (i), every node: a library operation costs several steps
 step-count test are re-baselined at H9, and programs that use `Money` or time hit quotas sooner. Option (iii), explicit
 weights: one annotation per `core` function that readers must trust.
 
+### D19. The `sys` surface is declared in Orna
+
+Why. The owner rejected a JSON schema as the definition of `sys` and asked for something native. Today nine files state
+the surface, four hand-written parsers read its signature strings, and the one check on the generated `sys.orna` has no
+caller (`docs/design/sys-as-native.md` section 1). Principle 1 (one authority per fact) and principle 5 (effects and
+failures are visible to the reader and the tools) point at one source that the front end reads. Effect classes in the
+declaration are the only authority: the checker's `host_effect` table and `sys.orna` agree on 3 of 36 non-read
+callables, so the table is a defect source, and it goes when the checker moves to HIR (H3). Prose is fixed doc-comment
+sections because no code acts on it, and a clause per fact would add grammar for no behaviour. Lifecycle facts are
+clauses because admission, diagnostics and the exporter profile act on them, and doc tags are excluded. A small
+generated id set keeps Rust naming identities through typed ids, and hosts register by qualified name at link, so no
+hot path looks up a string. A deprecated overload spelling is an alias to the one declaration with a warning, which is
+D5 applied to `sys`. The frozen 1.1.0 file stays the oracle, pinned in a CI job. Sealed engine ids stay as data with
+the archive until the archive decision, and host operations move at SN7.
+
+Reopening costs. To keep JSON as the source: the four signature parsers and the second copies stay, `sys.orna` stays a
+lossy projection, and the H5 acceptance sentence (byte-equal JSON from `sys.orna`) cannot be met. To declare the engine
+catalogue as `engine.orna`: the sealed 16-byte ids need an identity token in the language, which section 3.6 of
+`docs/design/native-declarations.md` rejects, or a second table. To keep the old three-class effect mapping: the
+declarations misstate 33 of 36 non-read callables and `host_effect` survives. To use per-fact clauses for prose: five
+more clauses for about 90 uses. To drop the generated ids: Rust names every `sys` function and failure code by string,
+which undoes the sys-identity invariant. To check generated Rust in: a drift check that must be wired, and a generated
+diff in every PR that touches `sys.orna`.
+
 ## What this unblocks
 
 - HIR stages H1 onward: D1, D3, D4, D5 give the type and call model; D2 the effect field; D6 to D8 the value model;
@@ -152,7 +179,8 @@ weights: one annotation per `core` function that readers must trust.
 - The native-declaration work resumes in a changed form: body-less `native fn` is parsed everywhere and is accepted in
   any module (amended 2026-11-10, see the amendment section). The binding is at link: the engine registry for `core`
   and `sys`, a project-named shared library for every other module. Design: `docs/design/native-libraries.md`.
-- Typed sys ids resume as the generated binding of `sys.orna`, not as a second source of truth.
+- Typed sys ids resume as the generated binding of `sys.orna`, not as a second source of truth. D19 records the source,
+  the exporter and the staging.
 - HIR stage H2 (typing): step zero, protocol member calls resolve, then operator protocols (D16) and the H2c units work:
   the P4-A unit-key kernel behind a four-item interface (D14), then the enum-shaped families (D15).
 - HIR stage H4 (executor): the step charge of D18. HIR stage H5 (host, link): the wire registry and `native type`

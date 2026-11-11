@@ -2,6 +2,9 @@
 
 **Epic:** `reform(sys-identity)` (bead `ornadb-ouxeq`)
 **Status:** design for orchestrator review. No production code changes in this PR.
+**Superseded in part (2026-11-11):** S1 and S3 are superseded by [sys-as-native.md](sys-as-native.md) and
+[ADR 0123](../decisions/0123-sys-as-native-declarations.md), and so are sections 4.3 and 4.5. S0, S2 and S4 to S9
+stand. S0 changes its input at SN3, and S2 stands until SN7. S10 stands, scoped to the identity crate and its key enum.
 **Authority:** `reference/Orna-1.1.0` (`api/sys.json`, `source/15-system.md`,
 `source/34-system-reference.md`, `source/33-diagnostics.md`, `profiles/coordinates.json`).
 **Scope:** the identity of `sys` functions, `sys` failure codes, `sys` relations and
@@ -976,6 +979,9 @@ cargo test -p orna-sys --locked --test system_registry_parity
 
 ### S1 - `orna-sys`: descriptors come from the typed table
 
+> **Superseded in part (2026-11-11).** Descriptors come from the lowered declarations of `sys.orna`, not from generated
+> tables. See [sys-as-native.md](sys-as-native.md), stages SN5 and SN6.
+
 *Files:* `crates/orna-sys/src/lib.rs` (`SystemFunctionDescriptor` gains
 `function: SysFunction`), `src/system_api.rs` (`SYSTEM_FUNCTION_DESCRIPTORS` built from
 `SysFunction::ALL`; `system_function_descriptor` delegates to `from_label`),
@@ -1031,6 +1037,9 @@ cargo test -p orna-sys --locked --test host_registry_parity --test system_provid
 ```
 
 ### S3 - exhaustive evaluator dispatch
+
+> **Superseded in part (2026-11-11).** Dispatch is by registration at link, with a pinned not-yet list. The generated
+> `SysFunctionHost` trait goes. See [sys-as-native.md](sys-as-native.md), stages SN5 and SN6.
 
 *Files:* `crates/orna-evaluator/src/sys_bindings.rs` (2,392 lines -> provider
 implementations plus `impl SysFunctionHost`), new
