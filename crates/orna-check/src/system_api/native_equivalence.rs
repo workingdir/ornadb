@@ -15,11 +15,26 @@ use orna_syntax::{
 const SYS_ORNA: &str = include_str!("../../../orna-hir/interface/sys.orna");
 /// The namespace modules that hold relation handles. Each file's handles are `sys.<module>.<name>`.
 const NAMESPACE_FILES: [(&str, &str); 5] = [
-    ("catalog", include_str!("../../../orna-hir/interface/sys/catalog.orna")),
-    ("git", include_str!("../../../orna-hir/interface/sys/git.orna")),
-    ("storage", include_str!("../../../orna-hir/interface/sys/storage.orna")),
-    ("history", include_str!("../../../orna-hir/interface/sys/history.orna")),
-    ("build", include_str!("../../../orna-hir/interface/sys/build.orna")),
+    (
+        "catalog",
+        include_str!("../../../orna-hir/interface/sys/catalog.orna"),
+    ),
+    (
+        "git",
+        include_str!("../../../orna-hir/interface/sys/git.orna"),
+    ),
+    (
+        "storage",
+        include_str!("../../../orna-hir/interface/sys/storage.orna"),
+    ),
+    (
+        "history",
+        include_str!("../../../orna-hir/interface/sys/history.orna"),
+    ),
+    (
+        "build",
+        include_str!("../../../orna-hir/interface/sys/build.orna"),
+    ),
 ];
 const SYS_JSON: &str = include_str!("../../../orna-sys-id/catalogue/sys-1.1.0.json");
 
