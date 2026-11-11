@@ -173,3 +173,62 @@ fn a_rekey_onto_an_existing_key_fails_as_a_duplicate() {
         Err(ExecError::Code("ORNA-EVAL-TABLE-DUPLICATE-KEY"))
     );
 }
+
+#[test]
+fn count_of_an_empty_table_is_zero() {
+    let source = format!("{NOTE}pub fn run() {{\n    Note.count()\n}}\n");
+    assert_eq!(run(&source), Ok(Value::Int(0.into())));
+}
+
+#[test]
+fn count_is_the_number_of_stored_rows() {
+    let source = format!(
+        "{NOTE}pub fn run() {{\n    Note.insert({{ id: 1, text: \"a\" }});\n    Note.insert({{ id: 2, text: \"b\" }});\n    Note.count()\n}}\n"
+    );
+    assert_eq!(run(&source), Ok(Value::Int(2.into())));
+}
+
+#[test]
+fn first_of_an_empty_table_is_none() {
+    let source = format!("{NOTE}pub fn run() {{\n    Note.first()\n}}\n");
+    assert_eq!(run(&source), Ok(Value::Option(None)));
+}
+
+#[test]
+fn first_is_the_row_with_the_least_key() {
+    let source = format!(
+        "{NOTE}pub fn run() {{\n    Note.insert({{ id: 2, text: \"b\" }});\n    Note.insert({{ id: 1, text: \"a\" }});\n    Note.first()\n}}\n"
+    );
+    assert_eq!(
+        run(&source),
+        Ok(Value::Option(Some(std::rc::Rc::new(note_row(1, "a")))))
+    );
+}
+
+#[test]
+fn one_of_an_empty_table_fails_as_zero_rows() {
+    let source = format!("{NOTE}pub fn run() {{\n    Note.one()\n}}\n");
+    assert_eq!(
+        run(&source),
+        Err(ExecError::Code("ORNA-EVAL-RELATION-ONE-ZERO"))
+    );
+}
+
+#[test]
+fn one_of_a_single_row_is_that_row() {
+    let source = format!(
+        "{NOTE}pub fn run() {{\n    Note.insert({{ id: 7, text: \"x\" }});\n    Note.one()\n}}\n"
+    );
+    assert_eq!(run(&source), Ok(note_row(7, "x")));
+}
+
+#[test]
+fn one_of_two_rows_fails_as_many_rows() {
+    let source = format!(
+        "{NOTE}pub fn run() {{\n    Note.insert({{ id: 1, text: \"a\" }});\n    Note.insert({{ id: 2, text: \"b\" }});\n    Note.one()\n}}\n"
+    );
+    assert_eq!(
+        run(&source),
+        Err(ExecError::Code("ORNA-EVAL-RELATION-ONE-MULTIPLE"))
+    );
+}

@@ -7,6 +7,7 @@
 //! Every write reaches the store through [`put_row`] or a delete in this
 //! module, so the rules for a row are stated once, here and in `write`.
 
+mod read;
 mod write;
 
 use orna_hir::{
@@ -58,9 +59,10 @@ impl<'p> Machine<'p> {
                 let [old_key, new_key]: [Value; 2] = self.table_arguments(body, frame, call)?;
                 write::rekey(self, table, schema, &old_key, &new_key)
             }
-            TableOp::Count | TableOp::First | TableOp::One | TableOp::AsOf => {
-                Err(Stop::NotYet("table read (H6 slice C)"))
-            }
+            TableOp::Count => read::count(self, table),
+            TableOp::First => read::first(self, table),
+            TableOp::One => read::one(self, table),
+            TableOp::AsOf => Err(Stop::NotYet("as_of needs the activation snapshot (H5)")),
         }
     }
 
@@ -155,10 +157,15 @@ fn read_row(
     else {
         return Ok(None);
     };
+    decode_row(&bytes).map(Some)
+}
+
+/// The fields of a stored row, from its canonical bytes.
+fn decode_row(bytes: &[u8]) -> Result<Vec<(Name, Value)>, Stop> {
     let stored =
-        CanonicalValue::decode(&bytes).map_err(|_| Stop::NotYet("stored row bytes (H6)"))?;
+        CanonicalValue::decode(bytes).map_err(|_| Stop::NotYet("stored row bytes (H6)"))?;
     match raw_value::from_raw(stored.raw())? {
-        Value::Record(fields) => Ok(Some(fields.to_vec())),
+        Value::Record(fields) => Ok(fields.to_vec()),
         _ => Err(Stop::NotYet("stored row that is not a record (H6)")),
     }
 }
