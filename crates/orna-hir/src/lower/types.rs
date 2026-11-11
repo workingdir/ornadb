@@ -135,10 +135,12 @@ fn lower_named(
         {
             return self_ty;
         }
-        if let Some(inner) = language_constructor(&name, &args) {
+        let target = builder.resolve_bare(module, &name);
+        if !matches!(target, NameTarget::Def(_))
+            && let Some(inner) = language_constructor(&name, &args)
+        {
             return builder.program.tys.intern(inner);
         }
-        let target = builder.resolve_bare(module, &name);
         super::record_use(
             &mut builder.program,
             module,
