@@ -1631,6 +1631,18 @@ name = "orna-intrinsics"
 version = "1.0.0"
 
 [[package]]
+name = "orna-link"
+version = "1.0.0"
+dependencies = [
+ "orna-base",
+ "orna-hir",
+ "orna-syntax",
+ "sha2 0.10.9",
+ "tempfile",
+ "toml_edit",
+]
+
+[[package]]
 name = "orna-live"
 version = "1.0.0"
 dependencies = [
@@ -1658,6 +1670,7 @@ dependencies = [
  "orna-base",
  "orna-check",
  "orna-hir",
+ "orna-link",
  "orna-project",
  "orna-repository",
  "orna-standard-sources",

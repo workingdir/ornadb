@@ -1,0 +1,21 @@
+[package]
+name = "orna-link"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.95"
+license.workspace = true
+description = "Link plan for Orna native declarations: project native-library manifest, digests and engine registry binding (Orna 1.1.0)"
+
+# Layer 4 (docs/design/layers.toml): above orna-hir, which it reads, and below
+# the shipped binary. Project-level manifest handling lives here, not in
+# orna-exec, because the manifest belongs to the project, not to an executor.
+
+[dependencies]
+orna-base = { path = "../orna-base" }
+orna-hir = { path = "../orna-hir" }
+orna-syntax = { path = "../orna-syntax" }
+sha2 = "0.10.9"
+toml_edit = { version = "0.25.17", default-features = false, features = ["parse"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
