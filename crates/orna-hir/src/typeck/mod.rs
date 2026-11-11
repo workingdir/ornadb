@@ -54,6 +54,8 @@ mod family;
 #[cfg(test)]
 mod generics_tests;
 mod nominal;
+#[cfg(test)]
+mod null_compare_tests;
 mod operator;
 mod protocol;
 mod quantity;
@@ -861,8 +863,8 @@ impl<'a> BodyCheck<'a> {
                 return Ok(self.error());
             }
         }
-        let left_resolved = self.resolved(left);
-        let right_resolved = self.resolved(right);
+        let left_resolved = self.zonk(left);
+        let right_resolved = self.zonk(right);
         if let Some(result) =
             crate::ops::binary(&mut self.program.tys, op, left_resolved, right_resolved)
         {
