@@ -1,0 +1,1281 @@
+# sys as native declarations: one source for the sys surface
+
+Status: design proposal for owner review. Changes no production code. Docs only.
+
+Owner direction, quoted (2026-11-11):
+
+> i dont want sys to be json schema. figure out a more robust way of doing this please. hell if its a native thing
+> for sys even better.
+
+Input documents: [hir.md](hir.md) (section 4 and stage H5), [sys-identity.md](sys-identity.md),
+[std-native.md](std-native.md), [native-declarations.md](native-declarations.md),
+[native-libraries.md](native-libraries.md), [kernel-and-library.md](kernel-and-library.md),
+[DECIDED.md](../language/DECIDED.md) and the ADRs [0111](../decisions/0111-sys-baked-module-abi.md) and
+[0112](../decisions/0112-sys-provider-protocol-phase-1.md).
+
+Evidence base:
+
+* Implementation evidence is `origin/main` = `cc24d270e` (PR #9885, 2026-11-11). Every `file:line` is a path from the
+  repository root at that commit.
+* Authority for the frozen 1.1.0 surface is `reference/Orna-1.1.0` (decision D13). Its `api/sys.json` is 168,272
+  bytes with sha256 `10ef7dab9665de4e065ee2b96797b2751c7c3f98f9886241011aee0cc8c0d40e`.
+* Generated-code sizes come from an existing build output of main (`target/mainhealth`, built 2026-11-10, after the last
+  change to `orna-sys-id`). I ran no build for this document.
+* `[INFERENCE]` marks a claim that no command or test checked. `[PROPOSAL]` marks a form or rule that this document
+  suggests. `[OWNER]` marks a choice that only the owner can make (section 8). Appendix B lists the commands behind
+  the counts.
+
+Reading rules: every section starts with its conclusion. Option analysis is neutral. It lists what each option buys and
+costs, and which assumption it depends on. A default that nobody has decided appears only as "What I do until told
+otherwise".
+
+---
+
+## 0. Conclusions
+
+**The answer.** The `sys` surface becomes ordinary Orna. `sys.orna` and a few submodules are written by hand. The front
+end that reads every other module (`orna-syntax`, then `orna-hir`) reads them. They are the only place that states a
+`sys` name, type, signature, effect, failure vocabulary, version or removal. No crate parses JSON to learn the surface.
+A small exporter writes JSON from the declarations for two jobs: to prove, in CI and for ever, that the portable part
+still equals the frozen 1.1.0 file byte for byte, and to publish. Nothing else reads it.
+
+**Why this is sturdier than the JSON.** All of these are measured (sections 1.1 to 1.4).
+
+* Four hand-written parsers read the signature strings of the catalogue. Three are Rust
+  (`crates/orna-check/src/system_api.rs:1184`, `crates/orna-sys-codegen/src/build_support.rs:1335`,
+  `crates/orna-sys/src/provider.rs:1091`). One is Python (`scripts/gen_interface.py:159-204`). The Orna parser reads
+  none of them.
+* Four derivation chains produce the surface (section 1.2). Chain A vendors the frozen file. Chain B regenerates it from
+  Rust attributes, and tests compare both with the frozen file. Chain C produces `sys.orna`. No CI job and no `just`
+  target checks that file.
+* Nine files in the repository carry catalogue facts: five byte-identical copies of the frozen file, the engine JSON,
+  the inventory JSON, its schema, and the generated `sys.orna` (section 1.1).
+* The checker decodes the JSON at run time. It guards against deep nesting and duplicate keys
+  (`crates/orna-check/src/system_api.rs:13`, `:1807-1970`) because a data file cannot say what it means.
+* Any edit to the catalogue recompiles `orna-sys-id` (617,183 bytes of generated Rust) and the 16 workspace crates
+  above it (section 3.2).
+
+**What changes for whom.**
+
+* A program author calls `sys.blob.from_bytes(..)` and `sys.dependents(..)` by their spec paths. Hover and
+  `sys.Function` reflection show the declared signature, effect, documentation and lifecycle.
+* An engine author edits one file to add a `sys` member. The build and the link step name what is missing.
+* Spec conformance does not move. The frozen 1.1.0 file stays the oracle. The exporter must reproduce it.
+
+**Defaults.** Each row is what I do until told otherwise. Section 8 lists the choices that are the owner's.
+
+| Area | What I do until told otherwise | Section |
+|---|---|---|
+| Source of truth | `sys.orna` and submodules, written by hand. No `engine.orna`. | 2.2, 2.3 |
+| JSON | Exporter output only: the frozen-file oracle and publication. | 2.5 |
+| New declaration forms | Clauses, `native type`, `native static`, doc comments. | 2.4 |
+| Typed ids and bindings | Option E: small generated ids, registration at link. | 3.5 |
+| Failure codes | An ordinary enum. `__` marks a segment break. | 3.4 |
+| Removal and versions | Clauses: `since`, `removed`, `formerly`, `deprecated`. | 4.3 |
+| Migration | Stages SN1 to SN8. The first proof is byte-equal JSON. | 5 |
+
+---
+
+## 1. What exists
+
+### 1.1 The data files
+
+Conclusion: nine files in the repository and one outside it state the surface. Five of them are the same 168,272
+bytes. Only one of the nine is Orna.
+
+| # | File | Bytes | Role |
+|---|---|---|---|
+| 0 | `reference/Orna-1.1.0/api/sys.json` | 168,272 | the frozen specification file (outside the repository) |
+| 1 | `crates/orna-sys-id/catalogue/sys-1.1.0.json` | 168,272 | byte copy; input of the identity generator |
+| 2 | `crates/orna-sys-id/catalogue/engine-1.1.0.json` | 19,346 | engine names, durable ids, host operations |
+| 3 | `crates/orna-check/generated/sys_api.json` | 168,272 | byte copy for `wasm32` (`system_api.rs:23`) |
+| 4 | `crates/orna-sys/src/system_api_inventory.json` | 138,274 | the type graph: all of the file except `functions` |
+| 5 | `crates/orna-sys/src/system_api_schema.json` | 7,149 | JSON Schema of the document |
+| 6 | `crates/orna-conformance/tests/fixtures/reference/api/sys.json` | 168,272 | frozen fixture |
+| 7 | `crates/orna-conformance/tests/fixtures/legacy-1.0.0/api/sys.json` | 168,272 | holds the 1.1.0 bytes |
+| 8 | `crates/orna-traceability/tests/fixtures/reference/api/sys.json` | 168,272 | frozen fixture |
+| 9 | `crates/orna-hir/interface/sys.orna` | 49,186 | generated and checked in |
+
+The reference also holds `api/retired.json` (1,149 bytes) and `api/additions-1.1.json` (8,606 bytes). Fixtures 6 and 8
+carry copies of both. The engine JSON is pinned by this sha256 (`crates/orna-sys-id/build/generator.rs:30-31`):
+`2d411975805e9a7fc3c8ec9edb0b02327903bdc89df5be22a34f5d358bbb2487`.
+
+The JSON document has these members (counts from `counts` and from the arrays): 4 singletons, 21 opaque identifiers, 78
+reference aliases, 35 value types, 42 enums with 251 values, 78 relations, 82 functions, 67 failure codes, 4 removed
+names, 4 value profiles, plus `title`, `language_version`, `sys_version`, `status`, `counts` and `source_of_truth`.
+
+### 1.2 Four chains
+
+Conclusion: four chains derive the surface from two sources, the frozen JSON and the Rust attributes. Tests join chains
+A and B. Nothing checks chain C against its input.
+
+```text
+A  typed ids
+   reference api/sys.json --copy--> orna-sys-id/catalogue/sys-1.1.0.json --+
+                                    orna-sys-id/catalogue/engine-1.1.0.json +--> build/generator.rs (4,676 lines)
+   --> 9 generated Rust files (617,183 bytes)
+   --> orna-sys, orna-application, orna-cli, orna-conformance, orna-live, orna-sys-codegen, orna-compat-v1
+
+B  published JSON, descriptors, provider ABI, Orna stubs
+   84 #[ornasys(..)] methods and doc-comment sections (orna-sys/src/system_api.rs)
+   + system_api_inventory.json + system_api_schema.json
+   --> orna-sys/build.rs --> orna-sys-codegen --> api_sys.json, system_provider_abi.json, system_bindings.orna, ...
+   --> orna_sys::system_api_json() --> orna-check parses it at run time
+
+C  HIR interface
+   sys-1.1.0.json --> scripts/gen_interface.py --> orna-hir/interface/sys.orna --> embedded.rs --> lowering
+
+D  wasm copy
+   chain B output --copy, checked in--> orna-check/generated/sys_api.json --> orna-check on wasm32
+```
+
+* Chain B is ADR 0111 and 0112 in code. The ADR says "Keep those annotated declarations as the only authored
+  inventory" (`docs/decisions/0111-sys-baked-module-abi.md:28-32`). The codegen states that the frozen file "is no
+  longer read at build time" (`crates/orna-sys-codegen/src/build_support.rs:20-22`).
+* `crates/orna-sys/tests/sys_api_generation.rs:26-83` proves that chain B equals the frozen file as JSON values.
+  `crates/orna-sys-id/tests/catalogue_bijection.rs` proves that chain A equals it as bytes.
+* Chain C has `scripts/gen_interface.py --check` (`:217-227`). No file under `.github/` and no `justfile` target calls
+  it. The script name appears only in the script, in an import in `scripts/gen_core_interface.py:24`, in
+  `crates/orna-hir/interface/README.md:16`, in a test comment and in the generated header.
+* Chain D has a test (`crates/orna-check/src/system_api.rs:2141`). It compares the committed copy with chain B.
+
+### 1.3 Who reads what
+
+Conclusion: readers fall into five groups. Only chain C reads Orna. The rest read JSON, Rust attributes, or hand copies
+of facts that the JSON also holds.
+
+**Generators and build scripts.**
+
+* **Identity build.** `crates/orna-sys-id/build.rs:15-32` and `build/generator.rs:116-151`. It reads both catalogues
+  and checks two sha256 pins. It writes 9 Rust files.
+* **`orna-sys` build.** `crates/orna-sys/build.rs:103-123`. It reads Rust text through `syn`, the inventory and the
+  schema. It writes the JSON, the provider ABI, the stubs and the host files.
+* **Collector and emitter.** `crates/orna-sys-codegen/src/build_support.rs:114,140,468,496`. It reads `#[ornasys]`
+  keys and doc sections. It writes the document in authored key order.
+* **Marker macros.** `crates/orna-sys-macros/src/lib.rs:5-19`. `ornasys` and `sys_host_operation` return their item
+  unchanged. The `orna-sys` build scans the annotated source text instead.
+* **Host vocabulary.** `crates/orna-sys-codegen/build.rs:15-47`. It reads the `orna_sys_id` enums and writes
+  `sys_host_vocabulary.rs`.
+* **Interface generator.** `scripts/gen_interface.py:19,113-204`. It reads `functions`, the types, the relations and
+  the enums. It writes `sys.orna`.
+* **Reference tool.** `reference/Orna-1.1.0/tools/generate_api_reference.py:9-11,28-34,87-88`. It reads every
+  top-level array and the additions file. It writes the reference chapter and rewrites `counts` in the JSON.
+
+The doc-comment sections that chain B reads are `# Contract`, `# Preconditions`, `# Ownership` and `# Snapshot rule`
+(`crates/orna-sys-codegen/src/build_support.rs:1083-1085`). An unknown section is a build error
+(`crates/orna-sys/tests/sys_api_generation.rs:327`). Comment text is data in chain B.
+
+**Run-time readers.**
+
+* **Checker loader.** `crates/orna-check/src/system_api.rs:15-24,239-247`. It loads the JSON at first use. On `wasm32`
+  it loads the committed copy.
+* **Checker decode.** The same file, `:1651-1806` and `:1807-1970`. Typed raw structs, and guards for duplicate
+  members and for depth.
+* **Checker signatures.** The same file, `:1037-1117,1184,1219`. It parses signature text and checks defaults, labels
+  and key paths.
+* **Checker metadata.** The same file, `:1094-1113`. It stores `since`, `contract`, `preconditions`, `ownership` and
+  `snapshot_rule`.
+* **Checker callers.** In `crates/orna-check/src/`: `calls.rs:416,441`, `inference.rs:135`, `item_checks.rs:302,335`,
+  `lib.rs:3032,3065,5061,5135,5162`. Typing, admission and `.as_of`.
+* **Schema check.** `crates/orna-sys/src/system_api.rs:27-63,94-101`. It compares schema keys with document keys.
+* **Provider ABI.** `crates/orna-sys/src/provider.rs:1091,1235`. It parses the same signatures again, into `AbiType`.
+* **Format selection.** `crates/orna-sys/src/format_api_selection.rs:15,130-143,341-346`. Per-callable `contexts` for
+  formats 1, 2 and 3.
+* **Evaluator seam.** `crates/orna-evaluator/src/sys_dispatch.rs:30-49`. It parses callable and operation labels into
+  the generated ids at the call boundary.
+
+The checker validates and stores five metadata fields (`:1094-1113`), and nothing outside that file reads them. In
+`orna-sys` they are copied from one descriptor type to another (`format_api_selection.rs:341-346`,
+`system_api.rs:78-85`). The provider ABI hands each precondition text to a caller-supplied check
+(`provider.rs:645-666`).
+
+**Rust consumers of the generated identities.** Counts are `grep -w` hits outside `crates/orna-sys-id`, tests included.
+Methods can be called without naming their type, so a zero means "never named", not "never used" `[INFERENCE]`.
+
+| Generated type | Files | Hits | Main users |
+|---|---|---|---|
+| `SysFailureCode` | 25 | 194 | runtime, evaluator, application, live, cli, `orna-sys` |
+| `SysFunction` | 16 | 145 | evaluator bindings, `orna-sys`, application |
+| `HostOperation` | 11 | 112 | `orna-sys` hosts, codegen, evaluator |
+| `HostProvider` | 10 | 42 | the same |
+| `SysRelation` | 8 | 37 | provider linkage, checker, conformance |
+| `SysGroupedHandle` | 7 | 22 | the same |
+| `SysSingleton` | 5 | 16 | the same |
+| `EngineFunction` | 2 | 39 | the archived `orna-compat-v1` and its test |
+| `SysType`, `SysEnum` | 3, 2 | 7, 3 | `orna-sys` |
+| `SysRemovedName`, `PortableRemoval` | 2, 2 | 4, 4 | `orna-sys`, conformance |
+| `SysEnumValue`, `SysField`, `SysMemberPath`, six descriptor structs | 0 | 0 | none by name |
+
+**Hand copies of catalogue facts.** Each fact below exists in the JSON and again in Rust, kept equal by care.
+
+* **`ObjectKind` ordinals.** `crates/orna-project/src/object_identity.rs:41-43,4292`. The position of a variant,
+  stored in sidecar version 2.
+* **Status words and row shape.** `crates/orna-value/src/contract.rs:436-452,1088-1110`. `InvocationStatus` and the 14
+  `Diagnostic` fields.
+* **Diagnostic fields.** `crates/orna-evaluator/src/explain_bindings.rs:36-51`. The same 14 names.
+* **Host effect.** `crates/orna-check/src/effects.rs:62-92`. Effect by path prefix, not by declaration.
+* **Failure code text.** `crates/orna-check/src/diagnostics.rs:92`. The string `sys.version.incompatible`, spelled
+  out again.
+* **Provider links.** `crates/orna-sys-id/build/generator.rs:4482-4520`. 4 host kinds, 15 callables, 3 relations and 2
+  handles.
+* **Precondition list.** `crates/orna-sys-codegen/src/build_support.rs:1286-1306`. 16 labels, "aligned" with the
+  checker by a comment.
+* **Classification.** `crates/orna-evaluator/src/sys_bindings.rs:158-405`. 82 methods: 15 `Implemented`, 67
+  `Unavailable`.
+* **Handle constants.** `crates/orna-check/src/system_api.rs:73-76`. `sys.catalog.tables` and `sys.catalog.columns`.
+
+Enum variant order is wire data. `object_identity.rs:41-43` stores the position of a variant in `sys.ObjectKind` and
+calls it "api/sys.json order". Any source of the enum must keep that order.
+
+**Tests, CI, tools, docs.**
+
+* Identity tests, `crates/orna-sys-id/tests/`: `catalogue_bijection`, `dispatch`, `exhaustive_match`,
+  `generator_mutation`, `removed_names`, `engine_functions`, `versioned_id`.
+* Surface tests, `crates/orna-sys/tests/`: `sys_api_generation`, `sys_api_export`, `sys_schema_regeneration`,
+  `system_registry_parity`, `host_registry_parity`, `system_provider_abi`, `system_binding_stubs`,
+  `sys_reflection_schema_conformance`.
+* Conformance. `sys_api_contract.rs` reads the member counts and the surface (`:192`), the removed names (`:21`) and
+  the identity sets (`:50`). `sys_api_drift_closure_tail.rs:12` compares the committed artefact with the registry
+  generation. `sys_api_compatibility.rs` reads the compatibility schema. All three are in
+  `crates/orna-conformance/tests/`. Also `crates/orna-evaluator/tests/sys_provider_linkage.rs` and
+  `crates/orna-syntax/tests/sys_interface.rs:8-56`.
+* CI: `justfile:14,72-77` and `.github/workflows/source-audits.yml:136`.
+* Tool: `crates/orna-sys/src/bin/sys-api-export.rs`, behind the `dev-sys-export` feature.
+* Archive: `crates/archive/orna-compat-v1/src/system.rs:17,34-35` and its `sealed_engine_registry.rs` test read the
+  sealed ids.
+* Editors and language server: none read the JSON. `crates/orna-lsp/src/analysis.rs:137` and `semantic.rs:230` treat
+  `sys` as a reserved root and nothing more.
+* Documents: ADRs 0111 to 0114, and `docs/design/` (`hir.md`, `sys-identity.md`, `std-native.md`,
+  `native-declarations.md`, `deletions.md`, `architecture.md`).
+
+### 1.4 What `sys.orna` says today
+
+Conclusion: `sys.orna` already holds the native signatures, and it loses most of the rest. It is a lossy projection of
+the JSON, written by a script, and the language cannot yet resolve the spec paths through it.
+
+* It is generated (`crates/orna-hir/interface/sys.orna:1-2`: "Do not edit by hand"). It has 21 empty nominal types for
+  the opaque identifiers, 42 enums, 35 value types, 78 relation row types, 78 reference aliases and 82 `native fn`.
+* One `// label` comment precedes each native and holds the catalogue label, for example `// sys.dependents` at `:1865`.
+  The label is the only link back to the catalogue, and it is a comment.
+* The effect clause maps the catalogue class `read` to `table_read`, `admin` to `storage_admin` and `invoke` to
+  `runtime_admin` (`scripts/gen_interface.py:29-30`). Three sources disagree about `sys.blob.capture_file`. The JSON
+  says `invoke`, `sys.orna` says `runtime_admin`, and `crates/orna-check/src/effects.rs:80` says `Filesystem`.
+* Overloads get new names (`scripts/gen_interface.py:59-70`), such as `snapshot_snapshot_ref` and
+  `admin_checkout_str`. A call spelled `sys.snapshot(ref)` has no declaration.
+* Names under `sys.admin` and `sys.blob` are flat (`admin_commit`, `blob_length`). A call spelled
+  `sys.blob.from_bytes(..)` has no declaration to resolve to. The differential harness records it for
+  `examples/valid/blob-range.orna`
+  (`crates/orna-differential/tests/differential/expected-differences.toml:22-37`). `sys.dependents` is top level and
+  not overloaded. The harness records no difference for `examples/valid/dependency-query.orna`, which calls it.
+* Six defaults read `current.snapshot` or `database.cwd` (for example `:1833`). The file declares no `current` and no
+  `database`.
+* `crates/orna-hir/src/lower/mod.rs:73` parses every embedded module again on each `lower` call. Prose and clauses will
+  make the file larger, so SN1 caches the parse `[INFERENCE: the cost is not measured]`.
+
+### 1.5 What the JSON carries that a declaration cannot say today
+
+Conclusion: of 22 kinds of fact, three fit the declarations that exist, and one fits in part. The other eighteen need a
+form, a clause, a table or a different owner. The last column says where each goes. "Engine acts" means that some code
+branches on the fact, not that it only copies or shows it.
+
+| Fact | Source and count | Engine acts | Home (section) |
+|---|---|---|---|
+| Path and overload label | `name`: 82; 37 overload members, 10 paths | yes | module path, `spelling` (2.4) |
+| Signature | `functions[].signature`: 82 | yes | the declaration (exists) |
+| Effect class | `effect`: read 46, admin 25, invoke 11 | yes | `effect` clause (2.4, 8 item 7) |
+| Per-callable failures | `failures =` on 77 of 84 `#[ornasys]` | yes | `fails` clause (2.4) |
+| Failure code table | `failure_codes` 67, engine 61 | yes | enum (3.4) |
+| Purpose text | functions 82, relations 78, value types 35 | shown | doc comment (2.4) |
+| Contract, preconditions, ownership, snapshot rule | 48, 16, 2, 4 | stored | doc sections (2.4) |
+| Invariants | 3 relations, 17 value types | stored | doc section (2.4) |
+| Since | 18 functions, all `1.1.0` | yes | `since` clause (4.3) |
+| Format contexts | 20 `contexts =` attributes | yes | derived from lifecycle (4.4) |
+| Retired functions | `retired.json` 2; engine JSON 2 | yes | `removed` clause (4.3) |
+| Renamed names | `removed_names` 2 of 4 | yes | `formerly` clause (4.3) |
+| Singletons | 4 | yes | `native static` (2.4) |
+| Relation key, handle, availability, writable | 78 each; all read-only | yes | row clauses, `native static` (2.4) |
+| Row and value types, aliases | 35 + 78 + 78 | yes | `type` (exists) |
+| Opaque identifiers and kinds | 21 + 4 + 2 | yes | `native type` (2.4) |
+| Enums and value order | 42 enums, 251 values | yes | `enum` (exists); order kept |
+| Typed Rust ids | 617,183 bytes generated | yes | section 3 |
+| Provider links | 15 + 3 + 2, hand-written | yes | derived at link (3) |
+| Role (lang item) | 11 `role =` attributes | yes | Rust table keyed by path (3.5) |
+| Sealed ids, host roles | engine JSON | partly | section 2.3 |
+| Profile coordinates, counts, profiles | header keys, `counts`, 4 profiles | no | exporter constants (2.5) |
+
+The rows marked "exists" are the three that fit: the signature, the row and value types with their aliases, and the
+enums. The path fits only for top-level names that have no overload.
+
+---
+
+## 2. The target
+
+### 2.1 Conclusion and principles
+
+Conclusion: `sys.orna` and its submodules become the one statement of the `sys` surface. Five principles decide what
+goes where.
+
+1. **One statement.** A fact lives in one file that the engine owns. A generated file is an output and says so.
+2. **One front end.** `orna-syntax` parses the files and `orna-hir` lowers them. No second parser reads any part.
+3. **Grammar follows action.** A form or clause exists only for a fact that some code branches on. A fact that the
+   engine only stores or shows is prose. A fact that only the frozen oracle needs is exporter data.
+4. **The frozen profile stays reproducible.** The exporter takes a language-version profile. An oracle test pins profile
+   1.1.0 to the frozen bytes for ever (section 2.5).
+5. **The old pipeline keeps working until H9.** Every stage before H9 is additive and mergeable alone
+   ([hir.md](hir.md) section 6.1).
+
+### 2.2 Files and modules
+
+Conclusion: one module per spec namespace and one file per module, all embedded in the engine. A call path such as
+`sys.blob.length` then names its declaration with no table in between. The one name that cannot take its module path
+uses a `spelling` clause.
+
+Facts. The 82 functions sit under four prefixes: 33 at `sys`, 32 at `sys.admin`, 16 at `sys.blob` and 1 at `sys.rt`.
+The 78 relation handles sit under six: `sys.catalog` 32, `sys.rt` 19, `sys.git` 10, `sys.storage` 10, `sys.history` 5
+and `sys.build` 2. All 19 `sys.rt` handles are fields of the `RuntimeView` singleton (checked against its field list),
+so they need no declaration of their own. The two retired functions are spelled under `sys.admin`.
+
+| Module | File | Holds |
+|---|---|---|
+| `sys` | `sys.orna` | every type and enum, 4 singletons, 34 natives (33, and `rt_info`) |
+| `sys.admin` | `sys/admin.orna` | 34 natives: 32 live and 2 retired |
+| `sys.blob` | `sys/blob.orna` | 16 natives |
+| `sys.catalog` | `sys/catalog.orna` | 32 relation handles |
+| `sys.git`, `sys.storage`, `sys.history`, `sys.build` | `sys/<name>.orna` | 10, 10, 5 and 2 handles |
+| `sys.engine.*` | `sys/engine/*.orna` | what 1.1.0 does not contain (section 2.3) |
+
+`sys.rt.info` is a function under a path that is also the singleton `sys.rt`. A module `sys.rt` and a value `sys.rt`
+would share one name. I avoid the clash: `info` is declared in `sys` as `rt_info` with `spelling "sys.rt.info"`
+`[PROPOSAL]`.
+
+Options for the layout. `[OWNER]` (section 8, item 4)
+
+* **Layout 1: a module per namespace, `spelling` for the 37 overload members and `rt_info`.** Buys: `sys.admin.commit`
+  resolves by the ordinary module rule, so the resolver needs no sys table. Costs: seven more embedded files, and a
+  `spelling` index in lowering for the 38 names. This is the default.
+* **Layout 2: one flat `sys` module as today, `spelling` on all 84 natives.** Buys: one file; no new module. Costs:
+  84 clauses that repeat the module path, and reflection reports flat names.
+* **Layout 3: flat names, no `spelling`, and a path alias table in Rust.** Buys: no clause. Costs: a second table
+  that this design exists to remove. Not chosen.
+
+Where the files live. Three places are possible. `[OWNER]` (section 8, item 3)
+
+* **L-a: stay in `crates/orna-hir/interface/`.** The identity build script reads them by relative path. Buys: no move,
+  and an edit rebuilds `orna-hir` and its 4 dependents only (`orna-differential`, `orna-exec`, `orna-link`, `orna-lsp`;
+  counted from the workspace manifests). Costs: a read outside the package that no Cargo edge shows. That is a hidden
+  coupling.
+* **L-b: move into `crates/orna-sys-id/interface/`.** `orna-hir` embeds the text through the identity crate. Buys: the
+  generator reads inside its own package. Costs: `orna-hir` gains a same-layer edge (an `allowed` entry in
+  `docs/design/layers.toml`). Any edit changes a constant in `orna-sys-id`, so its 16 dependents rebuild.
+* **L-c: a new layer-3 crate `orna-sys-interface` that holds only the files.** `orna-hir` depends on it. The identity
+  crate and the exporter take it as a build dependency. Buys: explicit edges, no path reads, and an edit reruns the
+  identity build script without rebuilding the identity crate unless the generated text changes (section 3.2). Costs:
+  one more crate and one more layer entry.
+
+What I do until told otherwise: L-c.
+
+### 2.3 The engine catalogue
+
+Conclusion: there is no `engine.orna`. `engine-1.1.0.json` holds seven different things. Only the engine-only
+functions and the engine failure codes are language surface, and they become declarations under `sys.engine`. The
+rest stay outside the language, each with an owner. Origin is then a file fact: anything under `sys.engine` is not in
+1.1.0, and the exporter skips it (ORNA-SYS-004 asks that a vendor name never change portable identity).
+
+| Member | Count | Read by | Disposition |
+|---|---|---|---|
+| `sealed_functions` | 27 | archived `orna-compat-v1` and its test | stays data with the archive |
+| `engine_only_types` | 4 | the same sealed registry | stays data with the archive |
+| `engine_only_functions` | 2 | `crates/orna-runtime/src/stream_admin.rs:200` | natives under `sys.engine` |
+| `retired_functions` | 2 | format selection, retired-name tests | `removed` clause in `sys.admin` (4.3) |
+| `failure_codes` | 61 | 25 files | engine code enum under `sys.engine` (3.4) |
+| `test_fixture_names` | 19 | tests only | move into the tests that use them |
+| `host_providers`, `host_operations` | 5, 21 | `orna-sys` host registry, evaluator | provider data in Rust (2.6) |
+
+The two engine-only functions are `sys.blob.annotate_all` and `sys.admin.pause_stream_with_reason`. The second runs in
+`orna-runtime`. The first appears in a checker test (`crates/orna-check/src/system_api.rs:2258`). Under `sys.engine`
+they keep their public paths through `spelling` clauses.
+
+Why the rest stays outside. The sealed ids are 16-byte function and type identities that old repositories persisted.
+The language has no identity token on purpose ([native-declarations.md](native-declarations.md) section 3.6). The host
+roles and providers are versioned names such as `host.std.io.fs.read@1.0`. They belong to provider negotiation
+([sys-identity.md](sys-identity.md) section 1.3). Nothing outside the archive reads the sealed registry. If the owner
+revives `sys.inspect`, `sys.security` or `sys.state`, they become natives under `sys.engine` and the ids move to a Rust
+table. `[OWNER]` (section 8, item 11)
+
+### 2.4 Declaration forms
+
+Conclusion: `sys.orna` needs one existing form, one decided form, one new form, doc comments, and a short list of
+clauses. Every clause word is contextual. None becomes a keyword, so ORNA-LEX-007 (the keyword set) is unchanged and
+`since` or `key` stay usable as names, as `native` and `effect` are ([native-declarations.md](native-declarations.md)
+section 3.3). The clauses are legal in engine-embedded modules only. A user module that writes one gets a parse
+diagnostic, in the manner of ORNA091-E-NATIVE-PLACE `[PROPOSAL]`.
+
+| Form | Carries | Precedent |
+|---|---|---|
+| `pub native fn name(..): T effect set <clauses>;` | 84 callables | exists (native-declarations N1); clauses are new |
+| `pub native type Name<T>;` | 21 identifiers, 6 opaque value types | decided, D17 (kernel-and-library.md 4.9) |
+| `pub native static name: T effect set;` | 4 singletons, 59 relation handles | new; `static` is a keyword in `impl` |
+| `///` doc comments | purpose text, five stored-only sections | the lexer drops comments (Appendix A) |
+| clauses after a declaration | the table below | the `effect` clause |
+
+| Clause | On | Meaning | Count |
+|---|---|---|---|
+| `fails a, b` | `native fn` | the failure codes the call may raise, as enum names | 77 |
+| `since "1.1.0"` | `native fn` | the first language version that has it | 18 |
+| `removed "1.1.0" [use p] [reason "t"]` | any | gone from this version; kept for historical readers | 2 + 3 |
+| `formerly "sys.runtime" [diagnostic "c"]` | `native fn`, `native static` | the name this one replaced | 2 |
+| `deprecated "1.2.0" [use p]` | any | still works; tools warn | 0 today |
+| `spelling "sys.snapshot(SnapshotRef)"` | `native fn` | the 1.1 label that the path cannot give | 38 |
+| `key a, b` and `availability w` | row `type` | key columns; one of five availability words | 78 |
+
+The `removed` count is 2 functions and 3 types: `StoragePreference` and `StorageRewriteTarget` (enums) and
+`StorageRewriteResult` (a value type), from `reference/Orna-1.1.0/api/retired.json`. The `deprecated` clause has no
+use in the frozen file. D5 needs it: "the 1.1 spellings stay as deprecated aliases in 1.2"
+([DECIDED.md](../language/DECIDED.md), row D5). How an alias resolves is not decided here.
+
+A relation is a row `type` with `key` and `availability` clauses. The handle is a typed path to it. For 59 relations
+that path is a `native static` of type `Relation<Row>` in a namespace module. For the 19 `sys.rt` relations it is a
+field of `RuntimeView`. The row type owns the facts, so both routes read one declaration of them.
+
+The shape of the file, for orientation. Section 7 shows a real member in full.
+
+```orna
+/// Snapshot/runtime-pinned reference to one canonical system-relation row.
+///
+/// # Invariants
+///
+/// - preserves the row natural key and resolution context
+/// - does not grant authority
+pub native type RowRef<T>;
+pub native type DatabaseId;
+pub type DatabaseRef = RowRef<Database>;
+
+/// Look up a stable object at a snapshot.
+pub native fn object(id: ObjectId, at: SnapshotRef = current.snapshot): ObjectRef effect table_read
+    fails object__not_found, snapshot__not_found, snapshot__expired, snapshot__incomplete;
+
+pub native fn snapshot_str(reference: Str): SnapshotRef effect table_read
+    fails snapshot__not_found, snapshot__incomplete
+    spelling "sys.snapshot(Str)";
+
+pub native static current: CurrentContext effect table_read;
+```
+
+**Prose.** Eight relations of the frozen reference have a `docs` column
+(`reference/Orna-1.1.0/source/34-system-reference.md`, lines 663, 1048, 1151, 1201, 1217, 1231, 1284 and 1354). The
+language has no source for it. Purpose text is plain doc comment in every option below. The question is the five
+stored-only facts: contract, preconditions, ownership, snapshot rule and invariants. `[OWNER]` (section 8, item 6)
+
+* **P1: fixed doc sections.** Doc comments keep exactly five section headings, legal in `sys` only. Buys: no new
+  clause; reads like Rust documentation. Costs: a section is a tag inside a comment, and a typo loses data unless the
+  build rejects unknown headings (today's collector does, `crates/orna-sys/tests/sys_api_generation.rs:327`). The lexer
+  must keep comments for every module, not for `sys` alone.
+* **P2: one clause per fact.** `contract "..."`, `requires "..."`, `owns "..."`, `pinned "..."`, `invariant "..."`.
+  Buys: each fact is a typed part of the declaration. Costs: five more clauses for 90 uses, and grammar for facts that
+  nothing acts on (principle 3).
+* **P3: keep them out of `sys.orna`.** A frozen table in the exporter, keyed by qualified name. Buys: no grammar.
+  Costs: a second hand-kept file keyed by name, which is the pattern this design removes. Reflection loses the text.
+
+What I do until told otherwise: P1. The lifecycle and identity facts never go in comments.
+
+**Effect classes.** The JSON class (`read`, `invoke`, `admin`) and the twelve-valued `sys.EffectKind` are two axes.
+The generator maps one to the other with a fixed table (`scripts/gen_interface.py:30`), the owner's own decision at the
+csenl.17 review. The mapping is imprecise, and the checker has a second, finer table. `host_effect` assigns `Git` to
+`commit`, `commit_reviewed`, `checkout` and `create_branch`, `StorageAdmin` to `flush`, `compact` and `verify`,
+`RuntimeAdmin` to the stream and failure natives, and `Filesystem` to `capture_file`. It gives `sys.invoke`,
+`sys.start`, `sys.await`, `sys.cancel` and the in-memory blob writer no host effect
+(`crates/orna-check/src/effects.rs:62-92`). By reading both tables, they agree on 3 of the 36 callables whose JSON class
+is not `read`. `[OWNER]` (section 8, item 7)
+
+* **E2: keep the mapping.** Every `sys` native uses three of the twelve classes, and the JSON class follows from the
+  clause. Buys: no behaviour change; the first proof is exact. Costs: the clause is less true than D2 intends.
+* **E1: write true classes and add a `class read|invoke|admin` clause.** Buys: both axes are true, and the checker's
+  table is a ready source for 26 of the 36 callables. Costs: one more clause, a decision for the other ten, and a
+  change in the effect pass for the 33 callables where the two tables differ.
+
+What I do until told otherwise: E2. It keeps the first proof exact. E1 can follow as its own stage.
+
+### 2.5 JSON after the change
+
+Conclusion: JSON survives as output in two places for ever and in two more until H9. Everything else that reads it
+moves to the declarations or is deleted.
+
+| Reader | Needs JSON | Why | Until |
+|---|---|---|---|
+| oracle test | yes | proves the portable surface equals the frozen file | for ever |
+| publication, `sys-api-export` | yes | the spec offers `api/sys.json` as the machine-readable form | for ever |
+| reference tools, frozen fixtures | yes | they read the frozen file, not ours; unchanged | for ever |
+| old checker (`system_api.rs`) | yes | the old pipeline stays authoritative | H9 |
+| `wasm32` checker | yes | a committed copy, with a drift test | H9 |
+| every other reader in section 1.3 | no | reads declarations, or is deleted | SN4 to SN8 |
+
+The exporter lives in `orna-sys-codegen`. It keeps `authored_pretty_json`, the document member order and the document
+validators of `crates/orna-sys-codegen/src/build_support.rs:468-575`, and loses the `syn` collector. It reads
+declarations through `orna-syntax`. Its interface is `export(profile, sources) -> String`. Profile 1.1.0 includes
+declarations outside `sys.engine`, with no `since` or one at most 1.1.0, and not removed at 1.1.0. It writes
+`removed_names` from the `removed` and `formerly` clauses. It owns the facts that no declaration should carry: `title`,
+`language_version`, `sys_version`, `status`, `source_of_truth` and the four `value_profiles`. It derives `counts`.
+
+The first proof is feasible. I checked the frozen file: it is ASCII, has no `\u` escapes, ends with one newline, and
+equals `json.dumps(value, indent=2)` plus that newline. The exporter needs no custom formatter beyond key order. Four
+callables (`sys.blob.media_type`, `suffix`, `annotate`, `same_content`) list `signature` before `effect`. The exporter
+keeps those four names as a constant. Chain B carries the same quirk in annotation order today.
+
+Three drift checks replace today's. All three run in `just sys-artifact-ci` and in a workflow job (SN2).
+
+1. `export(1.1.0)` equals the frozen fixture bytes, and its sha256 equals the pinned value.
+2. `crates/orna-check/generated/sys_api.json` equals `export(1.1.0)` until H9. This replaces `system_api.rs:2141`.
+3. `sys.orna` lowers with no diagnostic (`crates/orna-hir/tests/embedded_clean.rs`), and no accepted harness difference
+   waits for the `sys` declarations. Today 26 of 137 wait for the `core` and `sys` declarations together
+   (`crates/orna-differential/tests/differential/expected-differences.toml`).
+
+### 2.6 Host operations
+
+Conclusion: the mechanism covers the 21 host operations, and I leave them out of the first cut. They have their own
+attribute (`#[sys_host_operation]`, 21 uses in `crates/orna-sys/src/host_*.rs`), their own generator
+(`crates/orna-sys-codegen/src/build_host.rs`) and their own parity tests.
+
+[native-declarations.md](native-declarations.md) section 4 (N4) puts the `std.io` leaves in `sys.orna`, and
+`crates/orna-check/src/effects.rs:74-79` already classifies `sys.io`, `sys.net`, `sys.process` and `sys.clock` paths.
+The natives would be declared in those modules. Their `role` and `provider` names stay Rust-side provider data. The
+move is stage SN7 with its own proof (`host_registry_parity.rs`). This corrects [hir.md](hir.md) section 4.7 and stage
+H5, which say that `orna-sys-macros` and the codegen half of `orna-sys-codegen` go in H5 "because nothing else
+consumes them". `#[sys_host_operation]` and `build_host.rs` still consume them until SN7.
+
+---
+
+## 3. Typed ids and provider bindings
+
+### 3.1 Conclusion and criteria
+
+Conclusion: Rust needs typed names for the closed vocabularies that it branches on. Those are mainly the failure codes
+and the callable keys that hosts register. Rust does not need descriptor tables, one trait method per callable, relation
+field tables or provider link tables. The lowered declarations hold that metadata. I recommend that the build generates
+only the names, and that hosts bind by registration at link (option E).
+
+What the measurements say (section 1.3). `SysFailureCode` is named in 25 files. `SysFunction` is named in 16 files, and
+most of those hits are the 82 classification methods of one host, 67 of which return `Unavailable`. The relation,
+handle and singleton identities are named in 8, 7 and 5 files, all of them provider linkage. `SysEnumValue`, `SysField`,
+`SysMemberPath` and the six descriptor structs are never named outside the crate.
+
+Six criteria decide between the options.
+
+* **R1. Declared but unimplemented is legal.** ORNA-SYS-008 makes an unavailable member fail with
+  `sys.version.incompatible` before any write. 67 of 82 callables are unavailable in the evaluator today.
+* **R2. Implemented but undeclared never ships.**
+* **R3. A gap shows in review.** A callable that has no implementation is a line in a list that changes in the diff.
+  It is never a silent default.
+* **R4. One copy of the metadata.** `sys.Function` rows come from the lowered declaration (section 3.6).
+* **R5. `wasm32` builds work without `orna-sys`.** The committed JSON copy exists only for this
+  (`crates/orna-check/src/system_api.rs:21-24`).
+* **R6. Rust names a closed vocabulary only through a typed id.** [sys-identity.md](sys-identity.md) section 4.6
+  requires it. The guard test of its stage S10 (`sys_identity_literals.rs`) has not landed, so the rule holds by
+  convention.
+
+### 3.2 The options
+
+**Option A: a build script over `sys.orna`.** A script in the identity crate parses the files with `orna-syntax` and
+writes Rust into `OUT_DIR`: enums, label tables, descriptors, and optionally one trait method per callable (today's
+`SysFunctionHost`).
+
+* Buys: compile-time exhaustiveness wherever a trait or `match` is generated. No generated text in git. One parser.
+* Costs: a build script and an `orna-syntax` build edge (the layer table accepts a lower-layer build edge). The output
+  grows with what you generate: 617,183 bytes today. A total trait forces 67 `Unavailable` lines into every host.
+* Failure modes: a generator bug changes every id, so a golden test on the output is needed. An unknown clause is
+  ignored unless the generator rejects it. Build-script errors are panic text.
+* Incremental build: every edit to `sys.orna` reruns the script. If the output is rewritten, `orna-sys-id` and its 16
+  dependents rebuild (counted from the workspace manifests). A script that writes only when the text changes avoids
+  that for prose-only edits `[INFERENCE: depends on how cargo tracks included files]`.
+* `sys.Function` metadata: generated descriptors are a second copy of what the HIR holds. The generator alone keeps
+  them equal.
+* Depends on: the identity crate staying a leaf with no run-time dependency (`crates/orna-sys-id/src/lib.rs:8-10`).
+
+**Option B: a proc macro.** A macro, either `sys_native!(..)` or an attribute on the implementing function, reads
+`sys.orna` at expansion time and checks the key, and perhaps the Rust signature shape.
+
+* Buys: the implementation names the declaration it implements. A wrong key is a compile error at that site. No
+  generated files.
+* Costs: a proc-macro crate that depends on `orna-syntax`. Every implementing crate pays the expansion. The macro cannot
+  see other crates, so it cannot prove that every declaration has an implementation. That needs a link-time collection
+  such as the `inventory` crate, which adds a dependency and may not suit `wasm32` `[INFERENCE]`.
+* Failure modes: confusing expansion errors. Skew between the macro and the registry. Editor analysis cost.
+* Incremental build: only the crates that use the macro rebuild. Stable Rust has no file tracking for proc macros, so
+  the macro must emit `include_str!` to register the file `[INFERENCE]`.
+* `sys.Function` metadata: none generated. A run-time registry still has to exist, so B is a front door to D.
+* Note: today's `#[ornasys]` and `#[sys_host_operation]` are marker macros that do nothing. `build.rs` scans their
+  source text with `syn` and cannot see methods that macros emit (`crates/orna-sys/build.rs:99-102`). That is B's cost
+  without B's check.
+
+**Option C: checked-in generated Rust and a drift test.** A tool writes `crates/orna-sys-id/src/generated/*.rs` from
+`sys.orna`. A test regenerates and compares.
+
+* Buys: no build script. Generated code is readable in review and in `grep`. The fastest clean build.
+* Costs: generated diffs in every PR that touches `sys.orna`. Concurrent PRs conflict in generated files. The drift test
+  must run in CI. `scripts/gen_interface.py --check` is the in-tree precedent: it exists and nothing calls it (section
+  1.2). [sys-identity.md](sys-identity.md) section 7 rejected check-in generation for this drift.
+* Failure modes: a stale file passes review. The CI wiring is left out.
+* Incremental build: none for the build itself. Regenerating rebuilds the same crates as A.
+* `sys.Function` metadata: a second copy, as in A.
+
+**Option D: a registry bound by key at link, with no generated Rust ids.** Providers register `(key, function)` pairs
+in a `HostManifest`. `link` binds each `FnBody::Native` declaration by its `NativeKey` ([hir.md](hir.md) section 4.3).
+A test parses `sys.orna` with `orna-syntax` and compares its keys with the manifest in both directions. A pinned list
+holds the declared keys that no host registers.
+
+* Buys: nothing is generated. The HIR is the only metadata. `wasm32` needs nothing extra. An edit to `sys.orna`
+  rebuilds only `orna-hir` and its 4 dependents. It is the mechanism that `core` uses now:
+  `crates/orna-exec/src/natives/mod.rs:33-97` is a keyed `match`, and `registry_tests.rs` is its parity test.
+* Costs: no compile-time exhaustiveness. A mistyped key fails when the manifest is built (start-up or test), not at
+  compile time. Rust names every function and failure code by string unless a typed layer exists, which undoes the
+  1,650 `"sys.` literals fix of [sys-identity.md](sys-identity.md) section 0. The `core` parity test reads declarations
+  with `strip_prefix("pub native fn ")` (`crates/orna-exec/src/natives/registry_test.rs:29-36`), which misses a
+  declaration that spans lines. A `sys` parity test must use `orna-syntax`.
+* Failure modes: an unwired parity test, which is the C failure again. Typos found late.
+* `sys.Function` metadata: from the HIR only.
+
+**Option E (my default): small generated ids and registration at link.** It is D's registration and link, plus a build
+script that generates only the closed vocabularies that Rust names: `SysFailureCode` with its `Origin` (57,348 bytes
+today) and a key enum for the callables that hosts register (smaller than `functions.rs`, 43,147 bytes). Hosts register
+through the typed key. Everything else that the identity crate generates today goes as its consumers move: descriptors,
+relation, enum and field tables, removed-name tables, provider links, the `SysFunctionHost` trait and its dispatcher.
+
+* Buys: Rust still names identities only through typed ids, so the sys-identity invariant stays. A host cannot register
+  an undeclared function, because the variant does not exist: a compile error. The HIR is the only metadata. Generated
+  text falls from 617,183 bytes to a few tens of kilobytes `[INFERENCE]`.
+* Costs: a build script and an `orna-syntax` build edge. Two mechanisms: generated ids and run-time registration. The
+  identity crate still rebuilds with its dependents when the set of keys or codes changes. A declared callable with no
+  registration is not a compile error. It is a link error when a program uses it, and it must be a line in a pinned
+  list.
+* Failure modes: the pinned list drifts from the manifest (the test fails in both directions). A generator bug (a golden
+  test on the output).
+* `sys.Function` metadata: from the HIR only. The ids carry no descriptors.
+
+### 3.3 Comparison
+
+| Criterion | A script | B macro | C checked in | D registry | E default |
+|---|---|---|---|---|---|
+| Parser | `orna-syntax` | `orna-syntax` | `orna-syntax` | `orna-syntax`, in a test | `orna-syntax` |
+| Generated Rust | all you choose | none | as A, in git | none | codes and keys |
+| Undeclared impl | compile error | compile error | compile error | start-up or test | compile error |
+| Unimplemented decl | error if total | invisible across crates | as A | link error if used | link error if used |
+| Gap boilerplate | 67 lines per host | none | as A | 1 list line | 1 list line |
+| `sys.orna` edit rebuilds | id crate, 16 | macro users | nothing | `orna-hir`, 4 | `orna-hir`, 4; ids if names change |
+| Needs CI wiring | no | no | yes | yes | yes |
+| `wasm32` | yes | yes | yes | yes | yes |
+| Second metadata copy | if descriptors stay | no | yes | no | no |
+| Typed Rust identity | yes | per use | yes | no | yes |
+| Layer cost | build edge | macro crate edge | none | none | build edge |
+
+Assumptions. A and C assume that descriptors stay generated. If they are dropped, A becomes E with a trait added. D
+assumes that string keys in registration tables are acceptable under the sys-identity invariant. B assumes that
+cross-crate completeness can live in a test. The fan-out counts are facts from the manifests. The incremental claims
+are judgement until SN3 measures them.
+
+### 3.4 Failure codes
+
+Conclusion: failure codes are the one vocabulary that Rust must name everywhere, and the language has no form for a
+table of wire strings. I propose an ordinary enum whose variant names spell the wire code, with `__` for each dot.
+
+Facts. There are 128 codes: 67 portable and 61 engine. Each matches `sys(.word)+` with lower-case words, and 27 have
+four segments (`sys.host.filesystem.not_found`). Replacing the dots after `sys` with `__` gives 128 distinct names,
+and no code contains `__` already (checked with a script, Appendix B). So the spelling is invertible. The Rust name is
+the Pascal case of each `__` segment, which is what `variant_from_code` produces today
+(`crates/orna-sys-id/build/generator.rs:318-333`). No Rust name changes.
+
+```orna
+// sys/codes.orna: not part of the user-visible surface; the exporter writes it as `failure_codes`
+enum FailureCode {
+    version__incompatible,        // sys.version.incompatible
+    context__repl_unavailable,    // sys.context.repl_unavailable
+    object__not_found,            // sys.object.not_found
+}
+```
+
+Options. `[OWNER]` (section 8, item 8)
+
+* **F1: an enum with `__` segment breaks.** Buys: no grammar. A `fails` clause resolves by the ordinary resolver, so a
+  typo is a lowering diagnostic. Order is catalogue order, so the first 67 are `PORTABLE`. Costs: the names are
+  unlovely. The spelling rule is a convention that a test pins against the frozen list. The enum must stay out of the
+  user-visible surface, and the rule for naming it from `fails` clauses is for SN1 to settle.
+* **F2: a new top-level item, `failure "sys.object.not_found";`.** Buys: the wire text is the declaration, and no
+  spelling rule exists. Costs: a new item kind with lookahead, as `native` needed. A `fails` clause must name strings,
+  or the item needs a name as well.
+* **F3: a string table outside the language** (a Rust constant or an exporter table). Buys: no grammar. Costs: the typo
+  problem returns, and it is a second source.
+
+What I do until told otherwise: F1. The 61 engine codes form a second enum under `sys.engine`.
+
+### 3.5 What I do until told otherwise
+
+Option E, with these rules.
+
+1. **One build script, strict.** It is in the identity crate. It reads the interface files through `orna-syntax` and
+   rejects an unknown clause, a duplicate key and a `fails` name that is not a code. It writes a file only when the text
+   changed. A golden-output test pins the generated names.
+2. **Registration.** A host builds a `HostManifest` ([hir.md](hir.md) section 4.4) with typed keys. `link` binds each
+   declaration by `NativeKey`. A declaration that no host registers is a link error naming the declaration, when a
+   program uses it. The checker reads the same manifest, so an unavailable member is rejected at admission with
+   `sys.version.incompatible` (ORNA-SYS-008).
+3. **A pinned list per host.** One qualified name per line, for the declarations that the host does not register. It
+   follows the ratchet of `scripts/known-test-failures.toml`: a name that becomes registered fails the test until the
+   line is removed, and an unlisted gap fails it too. Today the list for the evaluator would hold 67 names.
+4. **The parity test parses `sys.orna` with `orna-syntax`.** It never scans lines of text.
+5. **Roles.** The 11 `role =` pairs (`langitem.sys.meta@1.0` and others) become a Rust table keyed by declaration path,
+   checked at build time. This is option P10-A of [kernel-and-library.md](kernel-and-library.md) section 4.10. No
+   attribute syntax is added.
+6. **`core` uses the same pieces.** `orna-exec` already binds `core` natives through a keyed lookup. It adopts the same
+   build script for its key enum, so `core` and `sys` have one mechanism and one parity test shape.
+
+### 3.6 What `sys.Function` needs
+
+Conclusion: every column of a `sys.Function` row has a source in the lowered declaration, except one that is open.
+Options A and C would store the same facts a second time.
+
+| `sys.Function` column | Source in the declaration (`crates/orna-hir/src/def.rs`) |
+|---|---|
+| `reference`, `object`, `definition` | the definition id and its module path |
+| `parameters` (name, position, type, default, explicit type) | `ParamDef` fields (`:211-223`) |
+| `return_type` | `FnDef.ret` |
+| `effects` | the `effect` clause, as `FnDef.effects` (`:107`) |
+| `reads`, `writes`, `calls` | empty for a native |
+| `inferred_signature` | false for a native |
+| `docs` | the doc comment; `Def` has no `docs` field today (`:23-34`), so SN1 adds one |
+| `failure_types` | open: the column holds `Relation<sys.Type>`, and a `fails` clause names codes, not types |
+
+The `failure_types` question belongs to D4 ("failure sets are tooling metadata"). This design records the `fails` codes
+and leaves the mapping to types open.
+
+---
+
+## 4. Removal, deprecation and versions
+
+### 4.1 Conclusion
+
+Conclusion: lifecycle is a fact the engine acts on. It decides admission by repository format, the removal diagnostics
+and the exporter profile. So it is declaration data, in clauses on the declaration. I do not use doc tags. The owner's
+rule excludes them, and the lexer drops comments today.
+
+### 4.2 Facts
+
+| Kind | Today | Stored today in | The engine acts on it by |
+|---|---|---|---|
+| `since` | 18 callables, all `"1.1.0"` | JSON `since`; `contexts = "format-3"` (same 18) | format admission |
+| retired | 2 callables, 3 types | `removed_names`, `retired.json`, engine JSON, 2 Rust stubs | historical readers |
+| renamed | 2 names | `removed_names`: replacement and rule `ORNA100-E-SYS-RUNTIME` | ORNA-SYS-005 diagnostics |
+| deprecated | none; 37 overload spellings under D5 in 1.2 | nowhere | nothing yet |
+
+* The two retired callables are `sys.admin.set_storage_preference` and `sys.admin.rewrite_storage`. In Rust they are
+  `#[allow(dead_code)]` methods whose bodies panic (`docs/design/deletions.md:233-242`,
+  `crates/orna-sys/src/system_api.rs:856-875`). They exist only so that the annotation collector registers them.
+* The two renames are `sys.runtime` to `sys.rt` and `sys.runtime_info` to `sys.rt.info`. They are names, not
+  declarations. ORNA-SYS-005 says the old name "is not an alias" and must produce `ORNA100-E-SYS-RUNTIME`.
+* `contexts` (20 attributes) is not an independent fact. I checked the generated selection output. The 18 callables with
+  `contexts = "format-3"` are exactly the 18 with `since`, and the 2 with `"format-1,format-2"` are exactly the retired
+  pair.
+
+### 4.3 Options
+
+**L1: clauses on the declaration.** `since`, `removed`, `formerly` and `deprecated` (grammar in section 2.4). A retired
+callable keeps its full declaration with `removed`. A rename is a `formerly` clause on the replacement.
+
+```orna
+// sys/admin.orna
+/// Set future automatic placement preference without rewriting existing rows.
+pub native fn set_storage_preference(table: TableRef, preference: StoragePreference): Storage
+    effect storage_admin
+    removed "1.1.0" reason "No new-format row placement mode; migrate source explicitly.";
+
+// sys.orna
+pub native fn rt_info(): RuntimeInfo effect table_read
+    spelling "sys.rt.info"
+    formerly "sys.runtime_info" diagnostic "ORNA100-E-SYS-RUNTIME";
+```
+
+* Buys: the fact sits on the declaration, and `git blame` shows when it changed. The HIR carries it, so hover,
+  `sys.Function` and the checker can show it. No tombstone item.
+* Costs: a clause on `type` and `enum` too (the three retired types). Lifecycle words enter the language, in
+  engine-embedded modules only.
+
+**L2: a companion Orna module of data.** A module such as `sys.lifecycle` holds list-of-record literals.
+
+* Buys: no clause. Costs: reading it needs constant evaluation, which arrives after H4 and H5 (D14). Until then a build
+  script reads the literals from the syntax tree, which is a generator again. The fact sits away from the declaration.
+  Names appear as strings, so a rename leaves a stale entry.
+
+**L3: top-level tombstone items.** For example `removed runtime use rt rule "ORNA100-E-SYS-RUNTIME";`.
+
+* Buys: one place for names that no longer have a declaration. Costs: a new item kind with lookahead. Two removal
+  forms exist, the item and the clause.
+
+**L4: doc tags.** `# Since`, `# Removed` sections in comments. Not acceptable under the owner's rule. Costs, for the
+record: a typo drops the fact without a diagnostic, the lexer would carry machine data, and the language gets a second,
+untyped attribute system.
+
+What I do until told otherwise: L1. `[OWNER]` (section 8, item 10)
+
+### 4.4 Versions and contexts
+
+* `since` and `removed` hold language versions as strings. They are neither the engine's `NativeAbi`
+  (`crates/orna-hir/src/embedded.rs:18`) nor a provider `AbiVersion`. `NativeAbi` changes when a native's behaviour or
+  signature changes in a way that breaks a captured program ([hir.md](hir.md) section 4.5).
+* [hir.md](hir.md) section 4.5 says that each declaration "carries `since` and optionally `until`". The grammar has
+  neither today. `since` and `removed` deliver that sentence, and `removed` plays `until`.
+* Format contexts follow from the clauses. No clause means every reader context. `since "1.1.0"` means the final format
+  only. `removed "1.1.0"` means the two historical formats only. The three contexts are an ordered list
+  (`crates/orna-sys/src/format_api_selection.rs:20-45`), so the rule is an interval test. The `contexts =` attributes
+  and the hand-kept `"format-3"` strings go.
+* The exporter takes the same interval for a profile. Profile 1.1.0 keeps a declaration when `since <= 1.1.0` and
+  `removed` is absent or later. A 1.2 addition has `since "1.2.0"` and never reaches the frozen oracle.
+
+---
+
+## 5. Migration plan
+
+### 5.1 Conclusion
+
+Conclusion: eight stages, each one PR or a short series, each mergeable alone. The old pipeline keeps working until H9
+([hir.md](hir.md) section 6.1). The first proof is byte-equal JSON from `sys.orna` (SN2). The flip is SN3, and it
+changes the input of the identity generator and none of its output. Deletion belongs to the stage that makes the code
+dead. H5 is bead `ornadb-csenl.20`, the sys-identity epic is `ornadb-ouxeq` and the native declarations epic is
+`ornadb-yuzot`. No bead exists for SN1 to SN8 yet. They are filed on acceptance.
+
+```text
+SN1 forms --> SN2 lossless sys.orna + exporter --> SN3 flip --> SN4 old pipeline on derived JSON
+                                                      |
+                                                      +--> SN5 registration and link (H5) --> SN6 shrink --> SN8 (H9)
+                                                      |
+                                                      +--> SN7 host operations (optional, after SN5)
+```
+
+| Stage | Delivers | Proof | Depends on |
+|---|---|---|---|
+| SN1 | doc comments, clauses, `native type`, `native static` | parser and lowering tests | none |
+| SN2 | lossless `sys.orna`, layout, exporter, drift checks | `export(1.1.0)` equals the frozen bytes | SN1 |
+| SN3 | flip: hand-edited source, generator reads it | 9 generated files byte-identical | SN2 |
+| SN4 | old pipeline reads derived JSON; `#[ornasys]` goes | JSON and ABI bytes unchanged | SN3 |
+| SN5 | key enum, codes, `HostManifest`, pinned lists | tests restated; harness `sys` entries gone | SN3, H4, H5 |
+| SN6 | delete descriptors, tables, trait, links | bytes recorded before and after | SN4, SN5 |
+| SN7 | host operations as natives (optional) | `host_registry_parity.rs` | SN5 |
+| SN8 | delete the old JSON readers (H9) | no `orna-evaluator` edge; V1 entry deleted | H9 |
+
+### 5.2 The stages
+
+**SN1: forms in the front end.**
+
+* Delivers: the lexer keeps `///` runs as the docs of the next item. The parser accepts the clauses of section 2.4,
+  `native type` and `native static`, in engine-embedded modules only. `orna-hir` lowers them: `Def` gains `docs`, the
+  lifecycle facts, the `spelling` index and the relation `key`. `embedded::parse_all` caches its result
+  (`crates/orna-hir/src/lower/mod.rs:73`). An amendment document beside `docs/spec-extensions/NATIVE-1.md` states the
+  grammar.
+* Proof: parser tests per form (accept, reject when malformed, reject in a user module). "Not a keyword" tests in the
+  manner of N1: `fn since()`, `x.key` and `{removed: 1}` still parse. A snapshot test shows that every `.orna` file in
+  the tree parses to the tree it did before. `embedded_clean.rs` passes. The differential harness is unchanged.
+* Deletes: nothing. Risk: comments become data for every module. A `///` line before a declaration gains meaning.
+
+**SN2: a lossless `sys.orna` and the exporter. The first proof.**
+
+* Delivers: `scripts/gen_interface.py` is rewritten to write every JSON fact into the SN1 forms. This is its last run
+  against JSON. The module layout of section 2.2 lands. `export(profile, sources)` lands in `orna-sys-codegen`. The
+  three drift checks of section 2.5 join `just sys-artifact-ci` and a workflow job in the same PR.
+* Proof: `export(1.1.0)` equals the frozen fixture bytes and the pinned sha256. The round trip JSON to `sys.orna` to
+  JSON is the identity. `sys.orna` lowers with no diagnostic. Every existing test passes without an edit.
+* Deletes: nothing. This stage is the acceptance sentence of [hir.md](hir.md) stage H5, "`api/sys.json` generated from
+  `sys.orna` is byte-equal to the checked-in file". Risk: the four `signature`-first callables and enum order.
+
+**SN3: the flip.**
+
+* Delivers: `sys.orna` is edited by hand from here. The script is deleted. The identity build script reads the interface
+  files through `orna-syntax` and no longer reads `sys-1.1.0.json`. The vendored copy leaves the crate. The byte pin on
+  the JSON moves to the oracle test. `engine-1.1.0.json` and its pin stay.
+* Proof: a `diff -r` of the `OUT_DIR` trees before and after shows 9 identical files, and the PR records it.
+  `catalogue_bijection.rs` passes with the frozen fixture as its oracle. No consumer changes.
+* Deletes: `scripts/gen_interface.py` (231 lines) and `crates/orna-sys-id/catalogue/sys-1.1.0.json` (168,272 bytes).
+  Risk: the first hand edit. The oracle runs in CI before merge.
+
+**SN4: the old pipeline reads derived artefacts.**
+
+* Delivers: `orna-sys/build.rs` writes `api_sys.json`, the selection file and the provider ABI from the exporter and the
+  clauses. The `contexts` follow from the lifecycle clauses, and the 11 `role` pairs move to a Rust table keyed by
+  declaration path. The 84 `#[ornasys]` blocks, the doc-section parser, `system_api_inventory.json` and the `ornasys`
+  marker go. `crates/orna-check/generated/sys_api.json` stays as a checked-in derived copy until H9.
+* Proof: `system_api_json()` bytes equal the pin at `crates/orna-sys/tests/sys_api_generation.rs:12`. The provider ABI
+  bytes are unchanged. `system_registry_parity`, `sys_schema_regeneration`, `system_provider_abi` and
+  `system_binding_stubs` pass.
+* Deletes: the `syn` collector half of `build_support.rs` (2,705 lines in the file), `system_api_inventory.json`
+  (138,274 bytes), and most of `crates/orna-sys/src/system_api.rs` (1,529 lines, mostly annotation) `[INFERENCE]`.
+  `#[sys_host_operation]` and `build_host.rs` stay until SN7.
+
+**SN5: registration and link for `sys`. The `sys` slice of H5.**
+
+* Delivers: the build script narrows to the key enum and `SysFailureCode` (option E). `HostManifest` registration by
+  typed key lands, and the evaluator registers its 15 served callables. A pinned list holds the other 67. A program that
+  uses an unregistered callable gets a link error. `sys.Function` rows come from the HIR. The checker reads the manifest
+  for admission.
+* Proof: `crates/orna-evaluator/tests/sys_provider_linkage.rs` is restated against the manifest: the served callables
+  equal the registered keys, and the pinned list equals declared minus registered, in both directions. The `sys` entries
+  leave the differential harness (26 entries name H5 for `core` and `sys` together). Step parity holds for the 15
+  served callables.
+* Deletes: the `SysFunctionHost` implementation (`crates/orna-evaluator/src/sys_bindings.rs:158-405`). The string
+  dispatch of the old evaluator goes at H9. Depends on [hir.md](hir.md) H4 and the `Host` and `link` part of H5.
+
+**SN6: shrink the generated code.**
+
+* Delivers: delete the descriptors, the relation, enum, field and type tables, the removed-name tables, the provider
+  links, the trait and the dispatcher, once nothing names them.
+* Proof: the workspace builds and its tests pass. The PR records generated bytes before (617,183) and after. The
+  architecture check passes.
+* Deletes: most of `crates/orna-sys-id/build/generator.rs` (4,676 lines) and of `crates/orna-sys-id/src` (973 lines).
+
+**SN7: host operations as natives (optional).** Section 2.6. The proof is `host_registry_parity.rs` over declarations
+instead of attributes.
+
+**SN8: delete the old JSON readers (H9).** With the old checker and evaluator gone, delete
+`crates/orna-check/src/system_api.rs`, the edge `orna-check` to `orna-sys` (known violation V1 in
+`docs/design/layers.toml`), the checked-in `generated/sys_api.json`, the run-time `system_api_json()` path and the API
+half of `orna-sys-codegen`. JSON remains as exporter output, oracle and publication. The proof is the H9 criterion that
+no `orna-evaluator` edge remains in `cargo metadata`, and the V1 entry is deleted in the same PR.
+
+### 5.3 What is superseded
+
+Nothing here is edited by this PR. On acceptance I record ADR 0123 (the next free number) and add a "superseded in
+part" note to each document below.
+
+| Document | Part | Status |
+|---|---|---|
+| ADR 0111 | "a single method-attribute registry is the source" (lines 10-13, 28-32) | superseded: Orna declarations |
+| ADR 0111 | provider protocol, role contract, phases 2 to 6, "JSON is not a second dispatch registry" | kept |
+| ADR 0112 | the `#[ornasys]` collector | superseded. The typed registry contents stay and come from `sys.orna` |
+| [sys-identity.md](sys-identity.md) | S0, S8, S9, S4 to S7 (typed codes) | kept; S0 changes its input at SN3 |
+| [sys-identity.md](sys-identity.md) | S1, S3, sections 4.3 and 4.5 | superseded by the HIR and by registration |
+| [sys-identity.md](sys-identity.md) | S2 (typed host-operation attributes) | kept until SN7 |
+| [sys-identity.md](sys-identity.md) | S10 (literal guard) | kept; scoped to the identity crate and its key enum |
+| [std-native.md](std-native.md) | section 3.10 (registry parity) | superseded by SN7 |
+| [native-declarations.md](native-declarations.md) | N4 (`std.io` leaves) | kept, as SN7; 3.15 gains clauses |
+| [hir.md](hir.md) | 4.2 ("`api/sys.json` is generated from `sys.orna`") | refined: `sys.orna` is written by hand |
+| [hir.md](hir.md) | 4.3 (build script in `orna-exec`) | kept for `core`; `sys` ids live in the identity crate |
+| [hir.md](hir.md) | 4.4 (`sys_call(SysFnId, ..)`) | becomes registration by key |
+| [hir.md](hir.md) | 4.5 (`since`, `until`) | delivered by clauses |
+| [hir.md](hir.md) | 4.7 and H5 ("nothing else consumes" the macros) | corrected: host-operation macros stay to SN7 |
+| [DECIDED.md](../language/DECIDED.md) | "Typed sys ids resume as the generated binding of `sys.orna`" | followed |
+
+---
+
+## 6. Risks and rejected alternatives
+
+### 6.1 Risks
+
+Conclusion: the main risks are drift in a file that people now edit, grammar growth, and the one name clash. Each has a
+test or a rule.
+
+| # | Risk | Mitigation |
+|---|---|---|
+| 1 | A hand-edited file of 2,000 lines or more drifts from the frozen spec | the oracle compares bytes in CI (2.5) |
+| 2 | Enum order is wire data (`object_identity.rs:41-43`); a hand edit can reorder | the oracle compares value order |
+| 3 | Grammar growth | principle 3; contextual words; "not a keyword" tests; engine-embedded modules only |
+| 4 | The 37 overload spellings meet D5 (no overloading) | `spelling` is the one place; aliases are left open |
+| 5 | `sys.rt` is a singleton and a path prefix | `rt_info` with `spelling` (2.2) |
+| 6 | Effect classes disagree across three sources | E2 now, E1 as its own stage (2.4) |
+| 7 | A build script costs time and can regress | strict input, golden output, write-if-changed; SN3 measures it |
+| 8 | Layering: a new crate, a same-layer edge, a build edge | `layers.toml` entries per stage; SN8 deletes V1 |
+| 9 | The embedded text is parsed on every `lower` call and grows with prose | SN1 caches the parse |
+| 10 | A drift check is left unwired (the `gen_interface.py --check` case) | SN2 wires each check in its own PR |
+| 11 | Two mechanisms live during the strangler period | the exporter is the only JSON writer; SN4 removes one |
+| 12 | Frozen fixtures change by accident | this design edits none; `scripts/check_fixture_manifest.py` pins them |
+| 13 | Sealed ids leave with the archive | item 11 of section 8 records the choice |
+| 14 | `///` lines gain meaning for users who write them today | docs only; SN1 tests the formatter round trip |
+
+### 6.2 Rejected alternatives
+
+* **Keep JSON as the source and improve the generator.** This is what chain C does today. The four signature parsers and
+  the second copy remain. It is against the owner's direction.
+* **Rust attributes as the source (ADR 0111 as built).** The signature is Orna text inside a Rust string, so it is a
+  third copy. Comments carry data. Methods that macros emit are invisible to the collector
+  (`crates/orna-sys/build.rs:99-102`). The retired functions need panicking stubs to be collected
+  (`docs/design/deletions.md:233-242`).
+* **Another data format** (TOML, YAML, RON, a protobuf-style IDL). It has the defect of JSON: a second language for a
+  surface that the language can state.
+* **WIT as the declaration.** ADR 0111 names WIT for third-party components. WIT has its own type language, and the
+  built-in surface needs Orna types such as `Relation<T>`, `T?` and defaults. WIT stays for extension components.
+* **Orna data modules for everything, with no new form.** It needs constant evaluation at build time. That arrives after
+  H4 and H5 (D14, P4-B).
+* **A generic `with key value` clause list.** It is an attribute in disguise.
+  [native-declarations.md](native-declarations.md) section 3.1 rejected attributes for `native` (form D).
+* **Link-time registration by a crate such as `inventory`.** A hidden global, and possibly not portable to `wasm32`
+  `[INFERENCE]`.
+* **A `native table` for relations (R-A).** It would reuse `TableDef.key` (`crates/orna-hir/src/def.rs:227-234`). A
+  `table` declares key columns in its header and other columns in its body, while the frozen field order puts
+  `reference` before the key (`sys.Database`: `reference`, `id`, `name`, ...). Field order is reflection data, so the
+  row would change shape `[INFERENCE: header-then-body column order]`. The row `type` with clauses keeps the frozen
+  order.
+
+---
+
+## 7. Worked example: `sys.dependents`
+
+Conclusion: one member shows the whole change. Today six places state it. After the change one does, and the Rust side
+is one registration plus two generated names. The caller does not change.
+
+The caller is the reference example `examples/valid/dependency-query.orna`
+(`crates/orna-conformance/tests/fixtures/reference/examples/valid/dependency-query.orna`):
+
+```orna
+pub fn impact(object: sys.Object) =
+    sys.dependents(object.reference);
+```
+
+### 7.1 Today
+
+**In the JSON** (`crates/orna-sys-id/catalogue/sys-1.1.0.json:6118-6122`). The signature is one line in the file. It is
+wrapped here for width.
+
+```json
+{
+  "name": "sys.dependents",
+  "effect": "read",
+  "signature": "fn sys.dependents(object: sys.ObjectRef, transitive: Bool = false,
+      kinds: [sys.DependencyKind]? = null): Relation<sys.Dependency>",
+  "purpose": "Traverse incoming dependency edges."
+}
+```
+
+The row type is a relation entry at `:3411`. The kinds are an enum at `:1893` and the confidence is an enum at `:1888`.
+
+**In five more places.**
+
+* `crates/orna-sys/src/system_api.rs:278-288`: the doc comment and `#[ornasys]` block. It repeats the signature and adds
+  `failures = "sys.object.not_found, sys.snapshot.not_found, sys.snapshot.expired, sys.snapshot.incomplete"`.
+* The generated `SysFunction::Dependents` (discriminant 12), its descriptor row (`functions.rs` and `tables.rs` in
+  `OUT_DIR`) and a method `fn dependents(&self) -> SysFunctionBinding` on the generated trait.
+* `crates/orna-evaluator/src/sys_bindings.rs:195-197`: that method, which returns `Unavailable(Origin::Portable)`.
+* `crates/orna-hir/interface/sys.orna:1865-1866`: the generated native, with the label `// sys.dependents` as a comment.
+* `crates/orna-sys/src/introspection.rs:385`: `DependencyGraph::dependents`, the implementation that no host calls yet.
+
+Two parsers read the signature string at run time: the checker (`system_api.rs:1184`) and the provider ABI
+(`provider.rs:1091`).
+
+### 7.2 After: the declaration
+
+Module `sys` (`sys.orna`). Names inside the module are unqualified. The exporter adds the `sys.` prefix.
+
+```orna
+pub enum DependencyConfidence { exact, conservative, possible }
+
+pub enum DependencyKind {
+    import, type_reference, call, table_read, table_write, assertion, implementation,
+    page_entry, renderer_requirement, extension_import, storage_projection,
+}
+
+/// Typed semantic dependency edge.
+pub type Dependency {
+    pub reference: DependencyRef,
+    pub from: ObjectRef,
+    pub to: ObjectRef,
+    pub kind: DependencyKind,
+    pub definition: DefinitionRef?,
+    pub span: SourceSpan?,
+    pub confidence: DependencyConfidence,
+    pub conditional: Bool,
+} key from, to, kind, span availability catalogue;
+
+pub type DependencyRef = RowRef<Dependency>;
+
+/// Traverse incoming dependency edges.
+pub native fn dependents(
+    object: ObjectRef,
+    transitive: Bool = false,
+    kinds: [DependencyKind]? = null
+): Relation<Dependency> effect table_read
+    fails object__not_found, snapshot__not_found, snapshot__expired, snapshot__incomplete;
+```
+
+Module `sys.catalog` (`sys/catalog.orna`) holds the handle, so `sys.catalog.dependencies` is the same rows as
+`sys.Dependency` (ORNA-SYS-009):
+
+```orna
+pub native static dependencies: Relation<Dependency> effect table_read;
+```
+
+The exporter writes the JSON entry of 7.1 from the function. The name is the module path plus `dependents`. The
+`effect` is `read`, from `table_read` under option E2. The signature comes from the parameters, with `sys.` added to the
+names that `sys.orna` declares. The `purpose` is the first doc paragraph. `fails` is not exported. It feeds the provider
+ABI. The function has no `spelling`, because its path is its name and it has no overload. It has no `since`, so it is in
+every reader context.
+
+### 7.3 After: the Rust side, option E
+
+Everything below is a proposal. `HostManifest`, `HostCx` and `Step` are the types of [hir.md](hir.md) sections 4.3 and
+4.4, which are not in code yet. `DependencyGraph` exists (`crates/orna-sys/src/introspection.rs:236`).
+
+Generated by the identity build script from `sys.orna`. It writes names and nothing else:
+
+```rust
+// OUT_DIR/sys_fn.rs
+pub enum SysFn { Meta, Object, /* ... */ Dependencies, Dependents, /* ... */ }
+impl SysFn {
+    pub const ALL: [SysFn; SYS_FN_COUNT] = [/* declaration order */];
+    pub const fn module(self) -> &'static str { /* "sys" */ }
+    pub const fn name(self) -> &'static str { /* "dependents" */ }
+}
+
+// OUT_DIR/sys_failure_code.rs: 128 variants, with Origin; only these four are used here
+pub enum SysFailureCode { /* ... */ ObjectNotFound, SnapshotNotFound, SnapshotExpired, SnapshotIncomplete }
+```
+
+Registered by the provider that owns the implementation:
+
+```rust
+// crates/orna-sys/src/host_introspection.rs (new)
+pub fn register(manifest: &mut HostManifest) {
+    manifest.sys(SysFn::Dependencies, |cx, args| edges(cx, args, Direction::Outgoing));
+    manifest.sys(SysFn::Dependents, |cx, args| edges(cx, args, Direction::Incoming));
+}
+
+fn edges(cx: &mut HostCx<'_>, args: &[Value], direction: Direction) -> Step {
+    // The one binder (hir.md 2.7) has ordered the arguments and applied the declared defaults.
+    let object = args.object(0)?;
+    let transitive = args.boolean(1)?;
+    let kinds = args.optional_set::<DependencyKind>(2)?;
+    let graph = cx.dependency_graph()?;
+    let rows = match direction {
+        Direction::Outgoing => graph.dependencies(&object, transitive, kinds.as_ref()),
+        Direction::Incoming => graph.dependents(&object, transitive, kinds.as_ref()),
+    };
+    cx.relation(rows.map_err(code_of)?)   // DependencyGraphError to SysFailureCode
+}
+```
+
+Until a host wires it, the pinned list of the evaluator holds the line `sys.dependents`. The parity test fails when
+that line and the manifest disagree, in either direction.
+
+What goes away for this one member: the JSON entry, the `#[ornasys]` block, the generated variant, descriptor row and
+trait method, the `Unavailable` method in the evaluator, the `// sys.dependents` comment, the checker's decode of the
+entry, and the provider ABI's second parse.
+
+### 7.4 What a program sees
+
+`sys.dependents(object.reference)` resolves by the module rule. Hover shows the doc, the signature and the effect
+`table_read`. A `sys.Function` row for it has its parameters, return type, effects and docs from the declaration. If the
+host does not register it, admission rejects the call with `sys.version.incompatible` (ORNA-SYS-008), and a link error
+names `sys.dependents`.
+
+---
+
+## 8. Decisions the owner must make
+
+Every item has a default that I follow until told otherwise. Each says what the choice changes.
+
+1. **Hand-written source of truth.** Make `sys.orna` the hand-edited source and JSON a generated output. Default: yes.
+   The alternative keeps JSON as the source, which your direction rules out.
+2. **The engine catalogue.** Default: no `engine.orna`. The engine-only functions and failure codes become declarations
+   under `sys.engine`. The rest keeps its owner (section 2.3). The alternative moves all of it into declarations.
+3. **Where the files live.** L-a, L-b or L-c (section 2.2). Default: L-c, a new crate `orna-sys-interface`.
+4. **Module layout.** Layout 1, 2 or 3 (section 2.2). Default: a module per namespace, `spelling` for 38 names.
+5. **New forms.** Accept `native static`, the clause list of section 2.4, doc comments in the lexer, and an amendment
+   document beside `docs/spec-extensions/NATIVE-1.md`. `native type` is already decided (D17). Default: accept.
+6. **Prose.** P1, P2 or P3 (section 2.4). Default: P1, five fixed doc sections for facts the engine only stores.
+7. **Effect classes.** E1 or E2 (section 2.4). Default: E2. The checker's table and `sys.orna` agree on 3 of 36
+   non-read callables, so E1 is real work.
+8. **Failure-code form.** F1, F2 or F3 (section 3.4). Default: F1, an enum with `__`, kept out of the user-visible
+   surface. The 61 engine codes get a second enum under `sys.engine`.
+9. **Typed ids and bindings.** A, B, C, D or E (section 3). Default: E. If you want zero generated Rust, D is the
+   credible choice, and the price is string keys.
+10. **Lifecycle form.** L1, L2, L3 or L4 (section 4.3). Default: L1, clauses, with `formerly` for renames. Your rule
+    excludes L4.
+11. **Sealed ids.** The 27 sealed functions and 4 engine types persist as 16-byte ids. Default: keep the data with the
+    archive. Alternatives: a Rust table keyed by declaration, or drop them when the archive goes.
+12. **Host operations.** Move the 21 into declarations at SN7 (default), or in the first cut.
+13. **Superseding.** On acceptance, record ADR 0123 and mark ADR 0111, ADR 0112 and sys-identity.md S1 and S3 as
+    superseded in part (section 5.3). Default: yes. This PR edits none of them.
+14. **The oracle.** Pin profile 1.1.0 to the frozen bytes for ever and run it in a CI job. Default: yes.
+15. **D5 aliases.** How a deprecated overload spelling resolves is a language question that this document leaves open.
+    The `spelling` and `deprecated` clauses are where it attaches.
+
+---
+
+## Appendix A: evidence index
+
+All paths are from the repository root at `cc24d270e`, unless they start with `reference/`.
+
+```text
+Frozen reference
+  reference/Orna-1.1.0/api/sys.json                                  168,272 bytes, sha256 10ef7dab...
+  reference/Orna-1.1.0/api/retired.json, additions-1.1.json          1,149 and 8,606 bytes
+  reference/Orna-1.1.0/tools/generate_api_reference.py:9-11,28-34,87-88
+  reference/Orna-1.1.0/source/34-system-reference.md:3,663,1048,1151,1201,1217,1231,1284,1354
+Chain A (typed ids)
+  crates/orna-sys-id/build.rs:15-32
+  crates/orna-sys-id/build/generator.rs:23-31,116-151,318-333,4482-4520
+  crates/orna-sys-id/tests/catalogue_bijection.rs:65-75
+Chain B (published JSON, provider ABI)
+  crates/orna-sys/build.rs:99-123
+  crates/orna-sys/src/system_api.rs:27-63,94-101,278-288,856-875
+  crates/orna-sys-codegen/src/build_support.rs:20-22,114,140,468,496,1083-1085,1286-1306,1335
+  crates/orna-sys/tests/sys_api_generation.rs:12,26-83,327
+Chain C (HIR interface)
+  scripts/gen_interface.py:29-30,59-70,113-204,217-227
+  crates/orna-hir/interface/sys.orna:1-2,1833,1865-1866
+  crates/orna-hir/src/embedded.rs:18,55 and crates/orna-hir/src/lower/mod.rs:73
+  crates/orna-syntax/tests/sys_interface.rs:8-56
+Front end
+  crates/orna-syntax/src/lexer.rs:162,311
+  crates/orna-hir/src/def.rs:23-34,107,211-223,227-234
+Checker and effects
+  crates/orna-check/src/system_api.rs:13,15-24,239-247,1037-1117,1184,1219,1807-1970,2141,2258
+  crates/orna-check/src/effects.rs:62-92
+Evaluator, providers, format selection
+  crates/orna-evaluator/src/sys_bindings.rs:158-405
+  crates/orna-sys/src/provider.rs:645-666,1091,1235
+  crates/orna-sys/src/introspection.rs:236,385
+  crates/orna-sys/src/format_api_selection.rs:20-45,130-143,341-346
+Core registry (H5 slice 1)
+  crates/orna-exec/src/natives/mod.rs:33-97,120-132 and crates/orna-exec/src/link.rs:38
+  crates/orna-exec/src/natives/registry_test.rs:29-36 and registry_tests.rs:15
+Hand copies
+  crates/orna-project/src/object_identity.rs:41-43,4292
+  crates/orna-value/src/contract.rs:436-452,1088-1110
+  crates/orna-evaluator/src/explain_bindings.rs:36-51
+Harness and layers
+  crates/orna-differential/tests/differential/expected-differences.toml:22-37
+  docs/design/layers.toml (V1: layer:orna-check->orna-sys)
+CI
+  justfile:14,72-77 and .github/workflows/source-audits.yml:136
+Decisions and designs
+  docs/language/DECIDED.md: D5, D12, D13, D17 and the line on typed sys ids
+  docs/decisions/0111-sys-baked-module-abi.md:10-13,28-32,171-173 and 0112
+  docs/design/hir.md: 4.2 to 4.7, 6.1, 6.3 (H5, H9), 10.2
+  docs/design/sys-identity.md: 4.4 to 4.6, 5, 7, 8
+  docs/design/native-declarations.md: 3.1, 3.3, 3.6, 3.8, 3.15, 4 (N4)
+  docs/design/kernel-and-library.md: 4.9, 4.10
+```
+
+---
+
+## Appendix B: commands behind the counts
+
+Run from the repository root at `cc24d270e`. Python snippets read the JSON with `json.load` and count with
+`collections.Counter`.
+
+* File bytes and digests: `wc -c` and `sha256sum` over the nine files of section 1.1 and the reference file.
+* JSON members, effects, overloads, `since`, `contract`, `preconditions`, `ownership`, `snapshot_rule`, relation
+  availability, handle prefixes: a script over `crates/orna-sys-id/catalogue/sys-1.1.0.json`. The overload test splits
+  each label at `(` or `<`. The 19 `sys.rt` handles are compared with the field names of `sys.RuntimeView`.
+* Failure-code spelling: a script over both catalogues. It checks `sys(.[a-z0-9]+(_[a-z0-9]+)*)+`, the absence of `__`,
+  the distinct count after `.` becomes `__` (128), and the four-segment count (27).
+* Frozen-file formatting: `json.dumps(value, indent=2, ensure_ascii=False) + "\n"` equals the file text.
+* Annotation counts: `grep -c '#\[ornasys(' crates/orna-sys/src/system_api.rs` (84), `'        failures = '` (77),
+  `'contexts = '` (20), `'        role = '` (11); `grep -c '#\[sys_host_operation('` over `host_*.rs` (21 in total).
+* Contexts against `since`: a script that compares `system_api_selection.json` from the build output with the
+  `since` members of the catalogue (`target/hir-core-units-2/.../out/system_api_selection.json`).
+* Identity consumers: `grep -rlw <Type> crates --include=*.rs` and `grep -rw` for hits, excluding
+  `crates/orna-sys-id/`.
+* Recompile fan-out: a script over the workspace `Cargo.toml` files. It builds the reverse dependency closure over
+  normal and build edges (16 for `orna-sys-id`, 4 for `orna-hir`, 18 for `orna-syntax`).
+* Generated sizes: `ls -l target/mainhealth/debug/build/orna-sys-id-27c1819b16dca4da/out` (9 files, 617,183 bytes).
+* Evaluator classification: `grep -c 'SysFunctionBinding::Implemented'` and `Unavailable` over lines 158-405 of
+  `crates/orna-evaluator/src/sys_bindings.rs` (15 and 67).
+* Checker and `sys.orna` effects: a manual comparison of `crates/orna-check/src/effects.rs:62-92` with the effect
+  clauses of the 36 non-read natives. The two agree on `flush`, `compact` and `verify`.
+* Harness: `grep -c 'declare those surfaces'` (26) and `grep -c '^\[\['` (137) over `expected-differences.toml`.
+* Stage status of sys-identity: `git log --grep='reform(sys-identity)'`. S1 to S9 landed on 2026-11-09. The S10 test
+  file `sys_identity_literals.rs` does not exist.
+* Checks for this document: `python3 scripts/check_doc_links.py` and `python3 scripts/check_fixture_manifest.py`.
