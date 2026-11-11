@@ -41,8 +41,8 @@ pub(super) const NAMESPACE_FILES: [(&str, &str); 5] = [
     ),
 ];
 
-/// Type names `scripts/gen_interface.py` leaves bare in the JSON (its `BUILTINS`). These are declared in
-/// `sys.orna` but the catalogue never qualifies them, so the renderer must not either.
+/// Type names the retired `scripts/gen_interface.py` left bare in its JSON (its `BUILTINS`). These are declared in
+/// `sys.orna` and the renderer must not qualify them.
 const GENERATOR_BUILTINS: [&str; 2] = ["Unit", "Query"];
 
 /// `declared` with the generator builtins added back for type positions outside signatures: the JSON qualifies them
@@ -184,7 +184,7 @@ pub(super) fn render_native(
 }
 
 /// The catalogue class a native effect set stands for: `table_read` is `read`, `storage_admin` is `admin`,
-/// `runtime_admin` is `invoke`. This is the only mapping, the same one `gen_interface.py` used.
+/// `runtime_admin` is `invoke`. This is the only mapping the retired `gen_interface.py` used.
 pub(super) fn catalogue_class(effects: Option<&NativeEffectSet>) -> String {
     let Some(NativeEffectSet::Classes { classes, .. }) = effects else {
         return "<unrendered-effect>".to_owned();
