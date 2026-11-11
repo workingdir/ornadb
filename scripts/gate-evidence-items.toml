@@ -38,6 +38,7 @@ expected = [
   "claims-client-drafts",
   "claims-retired-row-writers",
   "gate-c-million-rows",
+  "committed-table-scan-100k",
   "gate-h-browser-wasm",
   "workspace-cli-aggregate-quota",
 ]

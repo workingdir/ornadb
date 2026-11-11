@@ -49,6 +49,7 @@ mod case;
 mod case_tests;
 #[cfg(test)]
 mod diagnostics_tests;
+mod display;
 mod expr;
 mod family;
 #[cfg(test)]
@@ -791,25 +792,6 @@ impl<'a> BodyCheck<'a> {
             }
         };
         Ok(self.intern(kind))
-    }
-
-    fn displayable(&self, ty: Ty) -> bool {
-        matches!(
-            self.kind_of(self.resolved(ty)),
-            Some(
-                TyKind::Bool
-                    | TyKind::Int
-                    | TyKind::Decimal
-                    | TyKind::Float
-                    | TyKind::Str
-                    | TyKind::Uuid
-                    | TyKind::Date
-                    | TyKind::Instant
-                    | TyKind::Duration
-                    | TyKind::Period
-                    | TyKind::Digest
-            )
-        )
     }
 
     fn unary_ty(

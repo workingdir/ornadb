@@ -371,8 +371,45 @@ jobs:
           path: ${{ runner.temp }}/gate-evidence
           if-no-files-found: error
 
+  committed-table-scan-100k:
+    needs: revision
+    runs-on: ubuntu-latest
+    timeout-minutes: 200
+    steps:
+      - name: Check out the tested revision
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.revision.outputs.sha }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.95.0
+
+      - name: Run the 100,001-row committed table scan
+        # The committed table store scans a table above the retired 100,000-row
+        # cap with bounded peak memory. The fixture seeds in 2,000-row runs, so
+        # the case takes about two hours. The recorder stops it 20 minutes before
+        # the job cap and still writes its record.
+        run: >-
+          python3 scripts/gate_evidence.py run
+          --record committed-table-scan-100k
+          --title "H6: committed table scan above the retired 100,000-row cap"
+          --out "$RUNNER_TEMP/gate-evidence"
+          --timeout-minutes 170
+          -- cargo test --locked -p orna-cli --test committed_table_store_contract
+          -- --ignored --test-threads=1 scan_of_a_table_above_the_retired_cap
+
+      - name: Upload the evidence record and log
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: evidence-committed-table-scan-100k
+          path: ${{ runner.temp }}/gate-evidence
+          if-no-files-found: error
+
   evidence:
-    needs: [revision, workspace, gate-d-crash-matrix, claims, gate-c-million, gate-h-browser-wasm, gate-e-aggregate-quota]
+    needs: [revision, workspace, gate-d-crash-matrix, claims, gate-c-million, committed-table-scan-100k, gate-h-browser-wasm, gate-e-aggregate-quota]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:

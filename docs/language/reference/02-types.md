@@ -271,7 +271,7 @@ pub enum Rounding {
     half_even,
 
     impl Display {
-        fn display(self, context): Str = "rounding";
+        fn display(self): Str = "rounding";
     }
 }
 ```

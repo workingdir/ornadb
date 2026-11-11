@@ -1,0 +1,10 @@
+// Hand-written Orna source, not generated. See README.md in this directory.
+//
+// core.display: the `Display` protocol that a string interpolation `"{x}"` calls (kernel-and-library.md 4.5, P5).
+// The engine supplies instances for the scalar kernel types Bool, Int, Decimal and Str (engine_display.rs); every other
+// type needs an `impl Display` block in its own module.
+
+// core.display.Display: the text an interpolation shows for `self`.
+pub protocol Display {
+    fn display(self): Str;
+}

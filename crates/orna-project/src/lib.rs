@@ -39,10 +39,13 @@ use orna_value::{
 use unicode_normalization::UnicodeNormalization;
 
 mod attachments;
+mod committed_store;
 mod object_identity;
 mod table_storage;
 mod typed_row;
 mod unicode16;
+
+pub use committed_store::CommittedTableStore;
 
 pub use object_identity::{
     OBJECT_IDENTITY_MANIFEST_PATH, ObjectIdentity, ObjectIdentityError, ObjectIdentityManifest,

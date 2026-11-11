@@ -4,6 +4,11 @@
 
 Accepted for the first implementation slice of [ADR 0111](0111-sys-baked-module-abi.md).
 
+Superseded in part by [ADR 0123](0123-sys-as-native-declarations.md) (2026-11-11): the `#[ornasys]` collector is
+replaced by Orna declarations, and the build no longer emits `api/sys.json` or any other JSON. The typed provider
+registry (signatures, effects, preconditions, failure vocabularies, ABI versions and role contracts) stands. It is
+produced from `sys.orna` and a role table.
+
 ## Decision
 
 The `orna-sys` build collects operation declarations and semantic-role claims

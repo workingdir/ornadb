@@ -160,21 +160,7 @@ impl<'a> BodyCheck<'a> {
                 self.check_construct(body, def, &fields, None, span)
             }
             ExprKind::Lambda { body: child, .. } => self.check_lambda(child, None, body),
-            ExprKind::Interp(parts) => {
-                for part in parts.iter() {
-                    if let crate::InterpPart::Expr(value) = part {
-                        let ty = self.infer_expr(body, *value, None)?;
-                        if !self.displayable(ty) {
-                            return Err(NotYetReason::Unsupported(
-                                "interpolation of this type needs a protocol member that H2a \
-                                 does not resolve"
-                                    .into(),
-                            ));
-                        }
-                    }
-                }
-                Ok(self.intern(TyKind::Str))
-            }
+            ExprKind::Interp(parts) => self.interpolation_ty(body, id, &parts, span),
             _ => unreachable!("the dispatcher selected the value group"),
         }
     }
