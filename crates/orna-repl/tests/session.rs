@@ -35,9 +35,15 @@ fn function_defined_then_called() {
 #[test]
 fn generic_function_is_accepted_and_instantiated_per_call() {
     let mut session = Session::new();
-    assert_eq!(code(&mut session, "fn identity<T>(value: T): T = value;"), "ok");
+    assert_eq!(
+        code(&mut session, "fn identity<T>(value: T): T = value;"),
+        "ok"
+    );
     assert_eq!(run(&mut session, "identity(1)"), Some(Value::from(1_i64)));
-    assert_eq!(run(&mut session, "identity(\"text\")"), Some(Value::Text("text".into())));
+    assert_eq!(
+        run(&mut session, "identity(\"text\")"),
+        Some(Value::Text("text".into()))
+    );
 }
 
 #[test]
