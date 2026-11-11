@@ -70,6 +70,11 @@ impl<'p> Machine<'p> {
                 handler,
                 arm,
             } => self.recover(body, frame, *attempt, *handler, *arm),
+            ExprKind::Construct { def, fields }
+                if matches!(self.program.defs[*def].kind, DefKind::Type(_)) =>
+            {
+                self.nominal(body, frame, fields)
+            }
             _ => Err(Stop::NotYet(kind_name(&body.exprs[id].kind))),
         }
     }
@@ -108,7 +113,8 @@ impl<'p> Machine<'p> {
                 seconds: ops::checked(seconds.clone(), &self.limits)?,
                 nanosecond: *nanoseconds,
             }),
-            Lit::None | Lit::Date(_) | Lit::Period(_) => Err(Stop::NotYet("literal kind (H4)")),
+            Lit::None => Ok(Value::Null),
+            Lit::Date(_) | Lit::Period(_) => Err(Stop::NotYet("literal kind (H4)")),
         }
     }
 
@@ -135,7 +141,7 @@ impl<'p> Machine<'p> {
         let short_circuit = match op {
             LogicOp::And => false,
             LogicOp::Or => true,
-            LogicOp::Coalesce => return Err(Stop::NotYet("coalesce operator (H4)")),
+            LogicOp::Coalesce => return self.coalesce(body, frame, lhs, rhs),
         };
         match self.eval(body, frame, lhs)? {
             Value::Bool(value) if value == short_circuit => Ok(Value::Bool(value)),
@@ -560,6 +566,36 @@ impl<'p> Machine<'p> {
         }
     }
 
+    /// A nominal struct value: its fields by name, in name order like a structural record.
+    fn nominal(
+        &mut self,
+        body: &'p Body,
+        frame: &mut Frame,
+        fields: &[(DefId, ExprId)],
+    ) -> Result<Value, Stop> {
+        let mut values = Vec::with_capacity(fields.len());
+        for (field, value) in fields {
+            let name = self.program.defs[*field].name.clone();
+            values.push((name, self.eval(body, frame, *value)?));
+        }
+        values.sort_by(|(left, _), (right, _)| left.cmp(right));
+        Ok(Value::Record(values.into()))
+    }
+
+    /// `lhs ?? rhs`: `lhs` unless it is absent, then `rhs`.
+    fn coalesce(
+        &mut self,
+        body: &'p Body,
+        frame: &mut Frame,
+        lhs: ExprId,
+        rhs: ExprId,
+    ) -> Result<Value, Stop> {
+        match self.eval(body, frame, lhs)? {
+            Value::Null => self.eval(body, frame, rhs),
+            value => Ok(value),
+        }
+    }
+
     fn field(
         &mut self,
         body: &'p Body,
@@ -578,7 +614,13 @@ impl<'p> Machine<'p> {
                 .iter()
                 .find(|(key, _)| key == name)
                 .map(|(_, value)| value),
-            FieldRef::Def(_) => return Err(Stop::NotYet("field access by definition")),
+            FieldRef::Def(def) => {
+                let name = &self.program.defs[*def].name;
+                fields
+                    .iter()
+                    .find(|(key, _)| key == name)
+                    .map(|(_, value)| value)
+            }
         };
         found.cloned().ok_or(Stop::Error("ORNA-EVAL-FIELD"))
     }
