@@ -20,8 +20,8 @@ use std::fmt;
 use num_bigint::BigInt;
 use orna_check::{ModuleHeader, SymbolKind, TableSchema, Type};
 use orna_repository::{
-    AdmittedRow, GitCommitRef, KeyRange, NativeGraphContext, PrivateCommit, Repository, RepositoryFormatContext,
-    RepositoryReadScope,
+    AdmittedRow, GitCommitRef, KeyRange, NativeGraphContext, PrivateCommit, Repository,
+    RepositoryFormatContext, RepositoryReadScope,
 };
 use orna_runtime::TableObjectId;
 use orna_value::{
@@ -193,7 +193,8 @@ fn read_tables(
             }
             let next_lower = page.last().map(|row| row.key().clone());
             for row in page.into_iter().skip(usize::from(lower.is_some())) {
-                let runtime_key = runtime_key_of_row(&row, opened.key_count, opened.text_primary_key)?;
+                let runtime_key =
+                    runtime_key_of_row(&row, opened.key_count, opened.text_primary_key)?;
                 // The row slot is checked before the stored tuple is decoded, so the row
                 // past the per-table row limit is never decoded or retained.
                 budget.check_row_slot(committed.len())?;
@@ -279,7 +280,10 @@ pub(crate) fn runtime_key_of_row(
 
 /// The stored tuple of one admitted row, as the committed descriptor canonicalises
 /// it, after its fields are checked against the table's storage order.
-pub(crate) fn stored_tuple_of_row(opened: &OpenedTable, row: &AdmittedRow) -> Result<Vec<u8>, TableStorageError> {
+pub(crate) fn stored_tuple_of_row(
+    opened: &OpenedTable,
+    row: &AdmittedRow,
+) -> Result<Vec<u8>, TableStorageError> {
     let decoded = opened
         .graph
         .decode_admitted_row_fields(row, opened.resolved.binding(), &opened.read_scope)
