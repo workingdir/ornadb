@@ -20,6 +20,21 @@ use crate::error::{LinkError, LinkErrorCode};
 /// The manifest file name at the project root.
 pub const MANIFEST_FILE: &str = "orna.toml";
 
+/// The target triple of the host this build runs on: the `[native_library.target.<triple>]`
+/// table the engine selects for its own build. A host with no triple in this table names
+/// no entry, so every library native on it fails to link with a target error.
+#[must_use]
+pub fn host_target() -> &'static str {
+    match (std::env::consts::ARCH, std::env::consts::OS) {
+        ("x86_64", "linux") => "x86_64-unknown-linux-gnu",
+        ("aarch64", "linux") => "aarch64-unknown-linux-gnu",
+        ("x86_64", "macos") => "x86_64-apple-darwin",
+        ("aarch64", "macos") => "aarch64-apple-darwin",
+        ("x86_64", "windows") => "x86_64-pc-windows-msvc",
+        _ => "unsupported-host",
+    }
+}
+
 /// The engine-embedded modules. Their natives bind from the engine registry, so
 /// a library may not list them.
 const ENGINE_MODULES: [&str; 2] = ["core", "sys"];

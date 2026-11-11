@@ -13,7 +13,7 @@ mod manifest;
 mod plan;
 
 pub use error::{DeclSite, LinkError, LinkErrorCode};
-pub use manifest::{LibraryTarget, MANIFEST_FILE, NativeLibrary, ProjectManifest};
+pub use manifest::{LibraryTarget, MANIFEST_FILE, NativeLibrary, ProjectManifest, host_target};
 pub use plan::{
     Binding, EngineRegistry, LIBRARY_NATIVE_ABI, LinkPlan, LinkProfile, PlannedLibrary, plan,
 };

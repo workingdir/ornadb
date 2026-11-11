@@ -1670,6 +1670,7 @@ dependencies = [
  "orna-base",
  "orna-check",
  "orna-hir",
+ "orna-link",
  "orna-project",
  "orna-repository",
  "orna-standard-sources",
