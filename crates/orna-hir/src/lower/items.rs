@@ -230,24 +230,36 @@ impl Builder<'_> {
                     self_ty: None,
                 });
             }
-            DeclAst::NativeType(generics) => {
-                let names = generic_names(&generics);
-                let params = self.build_generics(module, &names, &generics);
-                self.pending[def.index()].kind =
-                    PendingKind::Built(DefKind::NativeType(NativeTypeDef { params }));
-            }
-            DeclAst::NativeStatic(annotation, clause) => {
-                let ty = match &annotation {
-                    Some(annotation) => super::types::lower_type(self, module, &[], annotation),
-                    None => self.program.tys.intern(TyKind::Error),
-                };
-                self.pending[def.index()].kind =
-                    PendingKind::Built(DefKind::NativeStatic(NativeStaticDef {
-                        ty,
-                        effects: declared_effects(clause.as_ref()),
-                    }));
-            }
+            DeclAst::NativeType(generics) => self.build_native_type(def, module, &generics),
+            DeclAst::NativeStatic(ty, clause) => self.build_native_static(def, module, ty, clause),
         }
+    }
+
+    /// Builds a native type's generic parameters. Its representation is host-owned.
+    fn build_native_type(&mut self, def: DefId, module: ModuleId, generics: &[GenericParameter]) {
+        let names = generic_names(generics);
+        let params = self.build_generics(module, &names, generics);
+        self.pending[def.index()].kind =
+            PendingKind::Built(DefKind::NativeType(NativeTypeDef { params }));
+    }
+
+    /// Builds a native static from its declared type and effect clause.
+    fn build_native_static(
+        &mut self,
+        def: DefId,
+        module: ModuleId,
+        annotation: Option<TypeExpr>,
+        clause: Option<NativeEffectSet>,
+    ) {
+        let ty = match &annotation {
+            Some(annotation) => super::types::lower_type(self, module, &[], annotation),
+            None => self.program.tys.intern(TyKind::Error),
+        };
+        self.pending[def.index()].kind =
+            PendingKind::Built(DefKind::NativeStatic(NativeStaticDef {
+                ty,
+                effects: declared_effects(clause.as_ref()),
+            }));
     }
 
     /// Builds a table's fields, keys, assertions and implementations.

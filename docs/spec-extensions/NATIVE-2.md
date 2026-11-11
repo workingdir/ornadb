@@ -2,8 +2,8 @@
 
 Amendment to the Orna 1.1.0 specification (`final-2026-10-05`), following
 [NATIVE-1](NATIVE-1.md).
-Status: proposed. Design rationale: `docs/design/sys-as-native.md` (sections 2.4 and 5, stage SN1,
-on PR #9888 branch `docs/sys-as-native`), and [`docs/design/native-declarations.md`](../design/native-declarations.md).
+Status: proposed. Design rationale: sys-as-native.md (sections 2.4 and 5, stage SN1, on PR #9888
+branch docs/sys-as-native), and [`docs/design/native-declarations.md`](../design/native-declarations.md).
 Decision record: D19 and ADR 0123.
 
 This document adds two declaration forms, doc comments and a set of interface clauses.

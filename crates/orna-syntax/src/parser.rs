@@ -1216,6 +1216,7 @@ fn annotate_item(item: &mut Item, source: &SourceLines<'_>, file: &str) {
     if let Visibility::Public { span } = &mut item.visibility {
         annotate_span(span, source, file);
     }
+    annotate_native_declaration(&mut item.declaration, source, file);
     match &mut item.declaration {
         Declaration::Function { signature, body } => {
             annotate_signature(signature, source, file);
@@ -1345,32 +1346,9 @@ fn annotate_item(item: &mut Item, source: &SourceLines<'_>, file: &str) {
             }
         }
         Declaration::Assertion { value } => annotate_expr(value, source, file),
-        Declaration::Native { signature, effects } => {
-            annotate_signature(signature, source, file);
-            if let Some(effects) = effects {
-                annotate_native_effect_set(effects, source, file);
-            }
-        }
-        Declaration::NativeType { generics, span, .. } => {
-            for parameter in generics {
-                annotate_generic(parameter, source, file);
-            }
-            annotate_span(span, source, file)
-        }
-        Declaration::NativeStatic {
-            annotation,
-            effects,
-            span,
-            ..
-        } => {
-            if let Some(annotation) = annotation {
-                annotate_type(annotation, source, file);
-            }
-            if let Some(effects) = effects {
-                annotate_native_effect_set(effects, source, file);
-            }
-            annotate_span(span, source, file)
-        }
+        Declaration::Native { .. }
+        | Declaration::NativeType { .. }
+        | Declaration::NativeStatic { .. } => {}
         Declaration::Let {
             pattern,
             annotation,
@@ -1400,6 +1378,42 @@ fn annotate_item(item: &mut Item, source: &SourceLines<'_>, file: &str) {
         }
     }
     annotate_span(&mut item.span, source, file)
+}
+/// Annotates the native declaration forms, which have no bodies: `native fn`, `native type`, `native static`.
+fn annotate_native_declaration(
+    declaration: &mut Declaration,
+    source: &SourceLines<'_>,
+    file: &str,
+) {
+    match declaration {
+        Declaration::Native { signature, effects } => {
+            annotate_signature(signature, source, file);
+            if let Some(effects) = effects {
+                annotate_native_effect_set(effects, source, file);
+            }
+        }
+        Declaration::NativeType { generics, span, .. } => {
+            for parameter in generics {
+                annotate_generic(parameter, source, file);
+            }
+            annotate_span(span, source, file)
+        }
+        Declaration::NativeStatic {
+            annotation,
+            effects,
+            span,
+            ..
+        } => {
+            if let Some(annotation) = annotation {
+                annotate_type(annotation, source, file);
+            }
+            if let Some(effects) = effects {
+                annotate_native_effect_set(effects, source, file);
+            }
+            annotate_span(span, source, file)
+        }
+        _ => {}
+    }
 }
 fn annotate_pattern(pattern: &mut Pattern, source: &SourceLines<'_>, file: &str) {
     match pattern {
