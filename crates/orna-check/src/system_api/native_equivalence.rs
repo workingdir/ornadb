@@ -7,181 +7,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use orna_syntax::{
-    Declaration, Expr, GenericParameter, LiteralKind, NativeEffectSet, Pattern, TypeExpr,
-    TypeMember, TypeRepresentation, parse_interface,
+use orna_syntax::{Declaration, TypeMember, TypeRepresentation, parse_interface};
+
+use super::native_raw::{
+    NAMESPACE_FILES, SYS_ORNA, catalogue_class, declared_names, native_label, render_generics,
+    render_native, render_type,
 };
 
-const SYS_ORNA: &str = include_str!("../../../orna-hir/interface/sys.orna");
-/// The namespace modules that hold relation handles. Each file's handles are `sys.<module>.<name>`.
-const NAMESPACE_FILES: [(&str, &str); 5] = [
-    (
-        "catalog",
-        include_str!("../../../orna-hir/interface/sys/catalog.orna"),
-    ),
-    (
-        "git",
-        include_str!("../../../orna-hir/interface/sys/git.orna"),
-    ),
-    (
-        "storage",
-        include_str!("../../../orna-hir/interface/sys/storage.orna"),
-    ),
-    (
-        "history",
-        include_str!("../../../orna-hir/interface/sys/history.orna"),
-    ),
-    (
-        "build",
-        include_str!("../../../orna-hir/interface/sys/build.orna"),
-    ),
-];
 const SYS_JSON: &str = include_str!("../../../orna-sys-id/catalogue/sys-1.1.0.json");
-
-/// Type names `scripts/gen_interface.py` leaves bare in the JSON (its `BUILTINS`). These are declared in
-/// `sys.orna` but the catalogue never qualifies them, so the renderer must not either.
-const GENERATOR_BUILTINS: [&str; 2] = ["Unit", "Query"];
-
-/// Names declared at the top level of `sys.orna` that the JSON spells with a `sys.` prefix.
-fn declared_names(items: &[orna_syntax::Item]) -> BTreeSet<String> {
-    items
-        .iter()
-        .filter_map(|item| match &item.declaration {
-            Declaration::Enum { name, .. }
-            | Declaration::Type { name, .. }
-            | Declaration::NativeType { name, .. }
-            | Declaration::Protocol { name, .. }
-            | Declaration::Dimension { name, .. }
-            | Declaration::Unit { name, .. } => Some(name.clone()),
-            _ => None,
-        })
-        .filter(|name| !GENERATOR_BUILTINS.contains(&name.as_str()))
-        .collect()
-}
-
-fn render_generics(generics: &[GenericParameter]) -> String {
-    if generics.is_empty() {
-        return String::new();
-    }
-    let names: Vec<&str> = generics
-        .iter()
-        .map(|generic| generic.name.as_str())
-        .collect();
-    format!("<{}>", names.join(", "))
-}
-
-fn render_type(ty: &TypeExpr, declared: &BTreeSet<String>) -> String {
-    match ty {
-        TypeExpr::Name {
-            path, arguments, ..
-        } => {
-            let head = path.join(".");
-            let qualified = if declared.contains(&head) {
-                format!("sys.{head}")
-            } else {
-                head
-            };
-            if arguments.is_empty() {
-                qualified
-            } else {
-                let rendered: Vec<String> = arguments
-                    .iter()
-                    .map(|arg| render_type(arg, declared))
-                    .collect();
-                format!("{qualified}<{}>", rendered.join(", "))
-            }
-        }
-        TypeExpr::Optional { inner, .. } => format!("{}?", render_type(inner, declared)),
-        TypeExpr::List { inner, .. } => format!("[{}]", render_type(inner, declared)),
-        _ => "<unrendered-type>".to_owned(),
-    }
-}
-
-/// The dotted path of a name or field chain, e.g. `current.snapshot`.
-fn render_path(expr: &Expr) -> Option<String> {
-    match expr {
-        Expr::Name { text, .. } => Some(text.clone()),
-        Expr::Field { base, name, .. } => Some(format!("{}.{name}", render_path(base)?)),
-        _ => None,
-    }
-}
-
-fn render_default(expr: &Expr) -> String {
-    match expr {
-        Expr::Name { text, .. } if text == "null" || text == "true" || text == "false" => {
-            text.clone()
-        }
-        Expr::Literal { text, kind, .. } => match kind {
-            LiteralKind::Null | LiteralKind::Boolean | LiteralKind::Integer => text.clone(),
-            _ => "<unrendered-default>".to_owned(),
-        },
-        other => render_path(other).map_or_else(
-            || "<unrendered-default>".to_owned(),
-            |path| format!("sys.{path}"),
-        ),
-    }
-}
-
-/// The JSON head of a label without its overload or generic part: `sys.snapshot(BranchRef)` -> `sys.snapshot`.
-fn label_head(label: &str) -> &str {
-    label
-        .find(['(', '<'])
-        .map_or(label, |index| &label[..index])
-}
-
-/// Renders a `pub native fn` into the JSON `signature` grammar under the JSON head of its label.
-fn render_native(
-    label: &str,
-    signature: &orna_syntax::FunctionSignature,
-    declared: &BTreeSet<String>,
-) -> String {
-    let parameters: Vec<String> = signature
-        .parameters
-        .iter()
-        .map(|parameter| {
-            let name = match &parameter.pattern {
-                Pattern::Name(name, _) => name.as_str(),
-                _ => "<unrendered-pattern>",
-            };
-            let annotation = parameter
-                .annotation
-                .as_ref()
-                .map_or_else(|| "<missing>".to_owned(), |ty| render_type(ty, declared));
-            match &parameter.default {
-                Some(default) => format!("{name}: {annotation} = {}", render_default(default)),
-                None => format!("{name}: {annotation}"),
-            }
-        })
-        .collect();
-    let result = signature
-        .result
-        .as_ref()
-        .map_or_else(|| "()".to_owned(), |ty| render_type(ty, declared));
-    format!(
-        "fn {}{}({}): {result}",
-        label_head(label),
-        render_generics(&signature.generics),
-        parameters.join(", ")
-    )
-}
-
-/// The catalogue class a native effect set stands for: `table_read` is `read`, `storage_admin` is `admin`,
-/// `runtime_admin` is `invoke`. This is the only mapping, the same one `gen_interface.py` used.
-fn catalogue_class(effects: Option<&NativeEffectSet>) -> String {
-    let Some(NativeEffectSet::Classes { classes, .. }) = effects else {
-        return "<unrendered-effect>".to_owned();
-    };
-    classes
-        .iter()
-        .map(|class| match class.text.as_str() {
-            "table_read" => "read",
-            "storage_admin" => "admin",
-            "runtime_admin" => "invoke",
-            _ => "<unknown-effect>",
-        })
-        .collect::<Vec<_>>()
-        .join("|")
-}
 
 /// Native callables from `sys.orna`, keyed by label. With `retired` false these are the active callables; with
 /// `retired` true they are the ones carrying a `removed` clause. Each value is the rendered signature followed by
@@ -250,14 +83,6 @@ fn native_callable_signatures_match_json_catalogue() {
 }
 
 const RETIRED_JSON: &str = include_str!("../../tests/fixtures/reference/api/retired.json");
-
-/// The label of a `pub native fn`: its `spelling` clause, or `sys.<name>` without one.
-fn native_label(item: &orna_syntax::Item, name: &str) -> String {
-    item.clauses
-        .spelling
-        .as_ref()
-        .map_or_else(|| format!("sys.{name}"), |spelling| spelling.text.clone())
-}
 
 /// Fails with every key whose two renderings differ; `what` completes the message's count.
 fn assert_same_entries(
