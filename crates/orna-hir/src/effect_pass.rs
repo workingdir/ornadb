@@ -33,6 +33,12 @@ pub(crate) fn run(program: &mut Program) {
     for body in program.bodies.iter() {
         let owner = body.owner.index();
         for expr in body.exprs.iter() {
+            if let ExprKind::Def(def) = &expr.kind
+                && matches!(program.defs[*def].kind, DefKind::Table(_))
+            {
+                direct[owner] = direct[owner].join(table_scan());
+                continue;
+            }
             let ExprKind::Call(call) = &expr.kind else {
                 continue;
             };
@@ -97,6 +103,12 @@ pub(crate) fn direct_effects(program: &Program, callee: &Callee) -> EffectSet {
         | Callee::Intrinsic(_)
         | Callee::Ctor { .. } => EffectSet::empty(),
     }
+}
+
+/// What reading a table by name performs: a bare table reference is a scan of that table, which may fail (the
+/// checker's qualified table path, `inference.rs`). A relation stage or pipe over the table takes it as its receiver.
+fn table_scan() -> EffectSet {
+    EffectSet::single(EffectKind::TableRead).join(EffectSet::failing())
 }
 
 /// What a call through a first-class value contributes: a named source function

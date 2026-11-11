@@ -11,11 +11,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use orna_differential::case::{Case, CaseKind, Corpus};
 use orna_differential::{compare, observe_checker, observe_new};
-use orna_hir::ModuleOrigin;
+use orna_hir::{Idx, ModuleOrigin};
 
 /// Cases whose diagnostic code sets differ, measured when this test landed.
 /// The count may only go down.
-const RECORDED_CODE_DIFFERENCES: usize = 154;
+const RECORDED_CODE_DIFFERENCES: usize = 153;
 
 /// The old checker's diagnostic codes for a case.
 fn checker_codes(case: &Case) -> Option<BTreeSet<String>> {
@@ -34,10 +34,12 @@ fn hir_codes(case: &Case) -> Option<BTreeSet<String>> {
     let mut lowered = observe_new::lower_case(case).ok()?;
     orna_hir::typeck(&mut lowered.program);
     let program = &lowered.program;
+    let owned = &lowered.owned;
     Some(
         program
             .diagnostics()
             .filter(|(module, _)| program.modules[*module].origin == ModuleOrigin::Project)
+            .filter(|(module, _)| owned.get(module.index()).copied().unwrap_or(false))
             .map(|(_, diagnostic)| diagnostic.code.to_owned())
             .collect(),
     )
@@ -77,9 +79,10 @@ fn recorded_reason(code: &str) -> Option<&'static str> {
         "ORNA-S020-ANNOTATION" => {
             Some("public annotation: HIR and checker disagree on which bodies they reach")
         }
-        "ORNA-S022-UNSUPPORTED" => {
-            Some("HIR reports forms the H2a subset does not type; unclassified")
-        }
+        "ORNA-S022-UNSUPPORTED" => Some(
+            "HIR reports forms the H2a subset does not type, and top-level offset or affine units (units.md C6, \
+                 user modules; valid/affine-unit); otherwise unclassified",
+        ),
         "ORNA-EVAL-ARGUMENT" => {
             Some("HIR call-binding arity error; the checker maps it only in rules.rs")
         }

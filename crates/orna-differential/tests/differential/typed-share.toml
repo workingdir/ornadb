@@ -23,6 +23,8 @@
 # - New definition, measured on origin/main 3aa41cd44: 33 of 104 old-checker
 #   accepted cases typed; 108 old-checker rejected cases excluded; 14 cases not
 #   lowered. The ratchet is measured from this baseline and only grows.
+# - Re-measured at cc24d270e (the core.units base): 35 of 104 typed. The recorded
+#   33 was stale; the ratchet is raised to the measured value.
 #
 # The typed count may only grow: update it in the commit that types more of the
 # corpus. A change to `lowered` is a corpus change or a lowering change, and the
@@ -36,5 +38,5 @@
 # and the checker's special cases (H3).
 
 [[typed-share]]
-typed = 33
+typed = 35
 lowered = 104

@@ -22,7 +22,7 @@ use crate::value::Value;
 pub(super) type Sink<'a, 'p> = dyn FnMut(&mut Machine<'p>, Value) -> Result<bool, Stop> + 'a;
 
 /// Whether `op` is a stage a pipeline carries, rather than a terminal or a constructor.
-pub(super) fn is_stage(op: RelOp) -> bool {
+pub(crate) fn is_stage(op: RelOp) -> bool {
     matches!(op, RelOp::Filter | RelOp::Map | RelOp::Take | RelOp::Drop)
 }
 

@@ -1,0 +1,19 @@
+// Hand-written Orna source, not generated. See README.md in this directory.
+//
+// core.units: the built-in data-size family (units.md section 8.2). Ordinary unit declarations with no natives. The
+// time family (units.md section 8.1) is not declared here yet: its names are the built-in postfix table of
+// lower/literals.rs, and declaring them would retype `1.hour` before the kernel maps a time-keyed quantity to
+// TyKind::Duration (see the gap list in the change that added this file).
+
+// core.units: data size. Embedded; ordinary Orna.
+pub enum Data {
+    byte,
+    bit = 0.125 byte,
+    kB = 1000 byte,
+    MB = 1000000 byte,
+    GB = 1000000000 byte,
+    KiB = 1024 byte,
+    MiB = 1048576 byte,
+    GiB = 1073741824 byte,
+    impl Unit {}
+}
