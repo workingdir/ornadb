@@ -1061,6 +1061,11 @@ pub fn parse_interface(source: &str) -> Parse<SyntaxTree> {
     parse_items(source, true)
 }
 
+/// Parses an engine-embedded interface file, locating its diagnostics and spans in `file`.
+pub fn parse_interface_with_file(source: &str, file: impl Into<String>) -> Parse<SyntaxTree> {
+    located(parse_interface(source), source, &file.into(), annotate_tree)
+}
+
 fn parse_items(source: &str, interface: bool) -> Parse<SyntaxTree> {
     let mut p = Parser::build(source, interface);
     p.validate_token_grammar();

@@ -32,7 +32,7 @@ pub use parser::{
     ProtocolMember, RecordField, ReplInput, SourcePosition, SourceSpan as SyntaxSpan, SpanLocation,
     Statement, StringSegment, SyntaxTree, TableMember, TypeExpr, TypeMember, TypeRepresentation,
     UnitDefinition, UnitExpr, UnitTerm, UseTail, Visibility, parse_expression,
-    parse_expression_with_file, parse_interface, parse_module, parse_module_with_file, parse_repl,
-    parse_repl_with_file, parse_row, parse_row_with_file,
+    parse_expression_with_file, parse_interface, parse_interface_with_file, parse_module,
+    parse_module_with_file, parse_repl, parse_repl_with_file, parse_row, parse_row_with_file,
 };
 pub use parser::{ClauseString, DeprecatedClause, FormerlyClause, InterfaceClauses, RemovedClause};

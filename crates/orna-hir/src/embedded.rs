@@ -8,7 +8,7 @@
 //! loads them ahead of every caller's sources, so a native call always has a
 //! signature to type against.
 
-use orna_syntax::{SyntaxTree, parse_module_with_file};
+use orna_syntax::{SyntaxTree, parse_interface_with_file};
 
 use crate::{ModulePath, Name, NativeAbi, SourceId};
 
@@ -72,7 +72,7 @@ pub(crate) fn parse_all() -> Vec<EmbeddedModule> {
         .iter()
         .map(|(dotted, text)| {
             let path = ModulePath::new(dotted.split('.').map(Name::new));
-            let tree = parse_module_with_file(text, format!("interface/{dotted}.orna")).value;
+            let tree = parse_interface_with_file(text, format!("interface/{dotted}.orna")).value;
             EmbeddedModule { path, tree }
         })
         .collect()
@@ -97,7 +97,7 @@ mod tests {
     #[test]
     fn embedded_interfaces_parse_cleanly() {
         for (dotted, text) in FILES {
-            let parsed = parse_module_with_file(text, dotted);
+            let parsed = parse_interface_with_file(text, dotted);
             assert!(
                 parsed.diagnostics.is_empty(),
                 "{dotted} has parse diagnostics: {:?}",
