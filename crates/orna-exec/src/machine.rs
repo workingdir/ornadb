@@ -2,12 +2,14 @@
 
 use std::cell::OnceCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use orna_hir::{Body, BodyId, DefId, DefKind, FnBody, Program};
+use orna_hir::{Body, BodyId, DefId, DefKind, FnBody, Program, Ty};
 
 use crate::error::{ExecError, Stop};
+use crate::dispatch::ProtocolMembers;
 use crate::frame::Frame;
 use crate::link;
 use crate::natives::NativeFn;
@@ -54,6 +56,12 @@ pub(crate) struct Machine<'p> {
     cancel: Option<Arc<AtomicBool>>,
     /// The engine natives this program's declarations bind to, built on the first native call.
     pub(crate) natives: OnceCell<HashMap<DefId, NativeFn>>,
+    /// The empty type environment, shared by every call that binds no type parameters.
+    pub(crate) empty_env: Rc<[Ty]>,
+    /// The protocol each protocol member belongs to, built on first dispatch.
+    pub(crate) protocols: ProtocolMembers,
+    /// The ids of `core.Ordering`'s variants, built on first engine comparison.
+    pub(crate) ordering: OnceCell<[VariantIds; 3]>,
     steps: u64,
     calls: u64,
     depth: usize,
@@ -67,6 +75,9 @@ impl<'p> Machine<'p> {
             variants: OnceCell::new(),
             cancel,
             natives: OnceCell::new(),
+            empty_env: Rc::from(Vec::new()),
+            protocols: OnceCell::new(),
+            ordering: OnceCell::new(),
             steps: 0,
             calls: 0,
             depth: 0,
@@ -109,6 +120,7 @@ impl<'p> Machine<'p> {
         body_id: BodyId,
         arguments: Vec<(usize, Value)>,
         captured: &[Cell],
+        env: Rc<[Ty]>,
     ) -> Result<Value, Stop> {
         if self.depth >= self.limits.max_depth {
             return Err(Stop::Error("ORNA-EVAL-LIMIT"));
@@ -116,7 +128,7 @@ impl<'p> Machine<'p> {
         self.calls += 1;
         let program = self.program;
         let body: &'p Body = &program.bodies[body_id];
-        let mut frame = Frame::new(body.locals.len());
+        let mut frame = Frame::new(body.locals.len(), env);
         for (index, value) in arguments {
             let Some(&local) = body.params.get(index) else {
                 return Err(Stop::Error("ORNA-EVAL-ARGUMENT"));
@@ -199,7 +211,7 @@ fn start(machine: &mut Machine<'_>, program: &Program, entry: DefId) -> Result<V
         return Err(ExecError::NotYet("entry has no source body"));
     };
     machine
-        .invoke(body_id, Vec::new(), &[])
+        .invoke(body_id, Vec::new(), &[], Rc::clone(&machine.empty_env))
         .map_err(ExecError::from)
 }
 
@@ -230,7 +242,7 @@ pub fn measure_entry(
     let arguments = arguments.into_iter().enumerate().collect();
     let mut machine = Machine::new(program, limits, None);
     let value = machine
-        .invoke(body_id, arguments, &[])
+        .invoke(body_id, arguments, &[], Rc::clone(&machine.empty_env))
         .map_err(ExecError::from)?;
     Ok(Measured {
         value,

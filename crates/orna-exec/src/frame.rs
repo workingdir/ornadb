@@ -10,7 +10,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use orna_hir::{Idx, LocalId};
+use orna_hir::{Idx, LocalId, Ty};
 
 use crate::error::Stop;
 use crate::value::{Cell, Value};
@@ -28,14 +28,22 @@ enum Variable {
 #[derive(Debug)]
 pub(crate) struct Frame {
     slots: Vec<Option<Variable>>,
+    /// The concrete types of the type parameters this call runs with, indexed by parameter.
+    env: Rc<[Ty]>,
 }
 
 impl Frame {
-    /// A frame with `count` empty slots.
-    pub(crate) fn new(count: usize) -> Self {
+    /// A frame with `count` empty slots, running with the type environment `env`.
+    pub(crate) fn new(count: usize, env: Rc<[Ty]>) -> Self {
         Self {
             slots: std::iter::repeat_with(|| None).take(count).collect(),
+            env,
         }
+    }
+
+    /// The type environment this call runs with.
+    pub(crate) fn env(&self) -> Rc<[Ty]> {
+        Rc::clone(&self.env)
     }
 
     /// Reads a bound slot.

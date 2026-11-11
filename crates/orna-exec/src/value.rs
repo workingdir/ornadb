@@ -10,7 +10,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use num_bigint::BigInt;
-use orna_hir::{BodyId, Name};
+use orna_hir::{BodyId, Name, Ty};
 use orna_value::{CanonicalValue, DURATION_TAG, INSTANT_TAG, OPTION_TAG, Raw, TUPLE_TAG, UNIT_TAG};
 
 use crate::decimal::Decimal;
@@ -92,6 +92,8 @@ pub struct Closure {
     pub body: BodyId,
     /// The captured variables, in the order of the body's captures.
     pub captured: Box<[Cell]>,
+    /// The type environment the lambda was created in, which its body runs with.
+    pub env: Rc<[Ty]>,
 }
 
 impl Value {

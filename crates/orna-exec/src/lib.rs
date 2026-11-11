@@ -9,6 +9,8 @@
 
 mod binders;
 mod decimal;
+mod dispatch;
+mod engine_order;
 mod error;
 mod eval;
 mod float;
