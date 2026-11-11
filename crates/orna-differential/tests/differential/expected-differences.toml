@@ -1041,7 +1041,7 @@ bead = "ornadb-csenl.15"
 
 [[environment]]
 category = "fixture-tables-and-modules"
-count = 47
+count = 46
 reason = "fixture tables and modules (Contact, Message, Order, Account, and the like) come from the old checker's Rust Type objects, not from source. Lowering them is not done: the reference environment is carried by name only until real declarations exist, so each use is an H0 environment blocker that shrinks as declarations land"
 bead = "ornadb-csenl.15"
 
