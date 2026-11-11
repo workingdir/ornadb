@@ -56,9 +56,9 @@ pub use body::{
 };
 pub use call::{Arg, ArgValue, Call, Callee, IntrinsicForm, RelOp, TableOp};
 pub use def::{
-    AssertionDef, Bound, Def, DefKind, DimensionDef, EnumDef, FieldDef, FnBody, FnDef,
-    GenericParam, ImplDef, LetDef, NativeAbi, NativeBinding, NativeDecl, NativeKey, ParamDef,
-    ProtocolDef, TableDef, TypeDef, UnitDef, UnitFactor, VariantDef, Visibility,
+    AssertionDef, Bound, Def, DefKind, DimensionDef, EnumDef, FieldDef, FieldInitializer, FnBody,
+    FnDef, GenericParam, ImplDef, LetDef, NativeAbi, NativeBinding, NativeDecl, NativeKey,
+    ParamDef, ProtocolDef, TableDef, TypeDef, UnitDef, UnitFactor, VariantDef, Visibility,
 };
 pub use diag::HirDiagnostic;
 pub use effects::{EffectKind, EffectRow, EffectSet, EffectVar};

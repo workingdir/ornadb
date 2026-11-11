@@ -338,4 +338,26 @@ pub struct AssertionDef {
 pub struct FieldDef {
     /// The declared type.
     pub ty: Ty,
+    /// How a table field gets its value when a row omits it. Only table fields
+    /// carry one; other fields are always written by the caller.
+    pub initializer: Option<FieldInitializer>,
+}
+
+/// The body that supplies a table field's value, and whether it is stored.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FieldInitializer {
+    /// `= expr`: the value is written once, when the row is inserted. Later writes may change it.
+    Default(BodyId),
+    /// `=> expr`: the value is recomputed from the row, is read-only, and is never stored.
+    Computed(BodyId),
+}
+
+impl FieldInitializer {
+    /// The body that computes the field's value.
+    #[must_use]
+    pub fn body(self) -> BodyId {
+        match self {
+            Self::Default(body) | Self::Computed(body) => body,
+        }
+    }
 }
