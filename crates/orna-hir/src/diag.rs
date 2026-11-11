@@ -37,8 +37,6 @@ pub const UNIT_LIMIT: &str = "ORNA-UNIT-LIMIT";
 pub const UNIT_INEXACT: &str = "ORNA-UNIT-INEXACT";
 /// A power whose exponent is not a literal `Int` (units.md ORNA-UNIT-013).
 pub const UNIT_POW: &str = "ORNA-UNIT-POW";
-/// A `native fn` outside the engine-embedded `core` and `sys` modules (D12).
-pub const NATIVE_ADMISSION: &str = "ORNA-NATIVE-004";
 /// A call whose arguments do not bind to its parameters.
 ///
 /// The classifier keeps the evaluator's code so a consumer sees one

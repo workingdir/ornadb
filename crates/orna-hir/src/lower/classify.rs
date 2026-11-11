@@ -128,11 +128,11 @@ impl Builder<'_> {
         match &self.pending[def.index()].kind {
             PendingKind::Function(function) => Classified::Declared {
                 callee: match (origin, function.native.is_some()) {
-                    (ModuleOrigin::Core, true) => Callee::Native {
+                    (ModuleOrigin::Sys, true) => Callee::Sys {
                         def,
                         targs: Box::new([]),
                     },
-                    (ModuleOrigin::Sys, true) => Callee::Sys {
+                    (_, true) => Callee::Native {
                         def,
                         targs: Box::new([]),
                     },

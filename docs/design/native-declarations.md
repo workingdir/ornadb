@@ -35,8 +35,8 @@ handful of names, nothing at all. Which of those is in force depends on which
 spelling an internal table happens to record, and the evaluator decides per
 call whether a *name* is native.
 
-This design adds one declaration form to the language, admitted only in the
-pinned standard dependency:
+This design adds one declaration form to the language, admitted in any module unit
+(amended 2026-11-10; the earlier pinned-`std`-only rule is withdrawn):
 
 ```orna
 pub native fn trim(value: Str): Str effect none;
@@ -471,8 +471,8 @@ extension" is "admit a different pinned snapshot".
   set, and the spec already fixes its vocabulary (`api/sys.json`,
   `sys.EffectKind`).
 * A compiler-owned namespace (rustc, Swift): `std` is replaceable
-  (ORNA-NS-007), so a native declaration binds only inside an admitted
-  pinned dependency.
+  (ORNA-NS-007), so a native declaration binds by module path and name at link, not
+  by a compiler-owned identity.
 
 --------------------------------------------------------------------------
 
@@ -639,7 +639,7 @@ substance is:
 | 001 | Form: no body; result type and every parameter type required; no `self`. | parser + admission |
 | 002 | Recognition: two-token lookahead at top level; no new keyword; ORNA-LEX-007 unchanged. | parser tests |
 | 003 | Placement: module-unit top level only; not in `repl_input`, `impl`, `protocol`, `table`, `type`, row units. | parser tests |
-| 004 | Authority: only a module of the admitted pinned `std` dependency may declare one. | loader |
+| 004 | Admission: any module unit may declare one. A key in `core` or `sys` binds to the engine; any other key binds at link (amended 2026-11-10). | loader |
 | 005 | Binding key: declaring module namespace path and declared name; duplicates rejected; two spellings of one identity must carry structurally equal signatures. | loader + parity test |
 | 006 | Implementation required: absent implementation is a load error naming module path, name and pin, before evaluation; no placeholder and no deferred failure. | loader |
 | 007 | Implementation must be declared: at a pin whose catalogue admits declaration binding, every bound implementation has exactly one declaration; a missing one is a load error. | loader + parity test |
@@ -647,7 +647,7 @@ substance is:
 | 009 | Effect clause: mandatory; a set from the closed `sys.EffectKind` vocabulary or `none`; container/plan aspects are carried by `Stream<T>`/`Relation<T>`. | parser + checker |
 | 010 | Effect checking: the clause is the only admissible source of a native's effect set, because a body-less declaration has no call graph. | checker |
 | 011 | Historical pins: what a pin does is decided by its captured text, never by a version number; a pin without the declaration keeps the mechanism its text supports. | loader |
-| 012 | User programs: a native declaration is not admitted outside the pinned dependency; a replaced `std` that declares one is rejected, one that does not is ordinary source. | loader |
+| 012 | User programs: a native declaration is admitted in user modules; its code comes only from the root project's shared library, never from a package. A declaration with no binding fails at link. | loader |
 | 013 | No name-based dispatch: an implementation is reached by the identity bound to a resolved declaration, not by a spelling matching a table (restates ORNA-LIB-002 for the evaluator). | evaluator + grep guard |
 | 014 | Introspection: a native declaration is a public declaration for resolution, imports, documentation, hover, completion and go-to-definition; `sys` reports its declared signature and effect set; no new `sys` member. | LSP + docs |
 | 015 | ABI: a pin's native ABI is its set of `(module path, name, lowered signature, effect set)`; a change in a published pin is a new pin; a mismatch is a load error, never adaptation. | loader + `signature_digest` |
