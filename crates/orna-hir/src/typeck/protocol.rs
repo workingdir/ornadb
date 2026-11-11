@@ -145,7 +145,7 @@ impl BodyCheck<'_> {
     }
 
     /// The bounds a generic parameter of the body's definition declares.
-    fn bounds_of(&self, index: ParamIdx) -> Vec<Bound> {
+    pub(super) fn bounds_of(&self, index: ParamIdx) -> Vec<Bound> {
         match &self.program.defs[self.owner].kind {
             DefKind::Fn(function) => function
                 .generics
@@ -157,7 +157,7 @@ impl BodyCheck<'_> {
     }
 
     /// The member of `protocol` called `name`, when the protocol takes `arguments` type arguments.
-    fn protocol_member(&self, protocol: DefId, arguments: usize, name: &Name) -> Option<DefId> {
+    pub(super) fn protocol_member(&self, protocol: DefId, arguments: usize, name: &Name) -> Option<DefId> {
         let DefKind::Protocol(declared) = &self.program.defs[protocol].kind else {
             return None;
         };
@@ -175,7 +175,7 @@ impl BodyCheck<'_> {
     ///
     /// `targs` holds the protocol's arguments then the `Self` type; the member's own generics
     /// are solved by unification at the call.
-    fn protocol_callee(
+    pub(super) fn protocol_callee(
         &mut self,
         member: DefId,
         mut targs: Vec<Ty>,

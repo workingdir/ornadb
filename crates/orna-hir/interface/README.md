@@ -22,6 +22,7 @@ Regenerate with `scripts/gen_core_interface.py`; `--check` exits 1 when a genera
 Ordinary Orna source with bodies, dogfooded in the engine-embedded `core`. The generator never writes these: it
 lists them in `HAND_WRITTEN` and fails if one of them would be emitted. Edit them directly.
 
+- `core/display.orna`: the `Display` protocol that a string interpolation `"{x}"` calls (kernel-and-library.md 4.5, P5).
 - `core/range.orna`: the `Range<T>` type of kernel-and-library.md listing 5, with `contains` and the `above`/`below`
   helpers.
 
