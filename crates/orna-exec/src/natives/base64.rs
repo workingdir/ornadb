@@ -3,12 +3,18 @@
 
 use std::rc::Rc;
 
+use orna_hir::Ty;
+
 use crate::error::Stop;
 use crate::machine::Machine;
 use crate::value::Value;
 
 /// `encode(Blob): Str`. The byte count is bounded by the collection limit and the text by the string limit.
-pub(super) fn encode(machine: &mut Machine<'_>, arguments: Vec<Value>) -> Result<Value, Stop> {
+pub(super) fn encode(
+    machine: &mut Machine<'_>,
+    _targs: &[Ty],
+    arguments: Vec<Value>,
+) -> Result<Value, Stop> {
     machine.tick(1)?;
     let input = blob(one(arguments)?)?;
     if input.len() > machine.limits.max_collection_items {
@@ -23,7 +29,11 @@ pub(super) fn encode(machine: &mut Machine<'_>, arguments: Vec<Value>) -> Result
 
 /// `decode(Str): Blob`. The text is bounded by the string limit, and the decoded bytes by the collection limit. Text
 /// that is not strict standard Base64 is a value error.
-pub(super) fn decode(machine: &mut Machine<'_>, arguments: Vec<Value>) -> Result<Value, Stop> {
+pub(super) fn decode(
+    machine: &mut Machine<'_>,
+    _targs: &[Ty],
+    arguments: Vec<Value>,
+) -> Result<Value, Stop> {
     machine.tick(1)?;
     let input = text(one(arguments)?)?;
     if input.len() > machine.limits.max_string_bytes {

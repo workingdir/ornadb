@@ -12,7 +12,7 @@ mod text;
 mod unicode_16_case_properties;
 mod unicode_case;
 
-use orna_hir::{DefId, NativeKey};
+use orna_hir::{DefId, NativeKey, Ty};
 
 use crate::error::Stop;
 use crate::link;
@@ -20,7 +20,7 @@ use crate::machine::Machine;
 use crate::value::Value;
 
 /// One engine native. It runs on the machine, which holds the limits and the step counter it charges.
-pub(crate) type NativeFn = fn(&mut Machine<'_>, Vec<Value>) -> Result<Value, Stop>;
+pub(crate) type NativeFn = fn(&mut Machine<'_>, &[Ty], Vec<Value>) -> Result<Value, Stop>;
 
 /// The engine native implementing the declaration `key`, if the registry has one.
 pub(crate) fn lookup(key: &NativeKey) -> Option<NativeFn> {
@@ -75,13 +75,18 @@ pub(crate) fn in_parameter_order(
 }
 
 impl Machine<'_> {
-    /// Runs the engine native bound to `def` on `arguments`, which are in parameter order. A declaration the registry
-    /// does not implement stops the run as not yet ported.
-    pub(crate) fn native(&mut self, def: DefId, arguments: Vec<Value>) -> Result<Value, Stop> {
+    /// Runs the engine native bound to `def` on `arguments`, which are in parameter order. `targs` are the call's
+    /// generic arguments. A declaration the registry does not implement stops the run as not yet ported.
+    pub(crate) fn native(
+        &mut self,
+        def: DefId,
+        targs: &[Ty],
+        arguments: Vec<Value>,
+    ) -> Result<Value, Stop> {
         let natives = self.natives.get_or_init(|| link::bind(self.program));
         let Some(native) = natives.get(&def).copied() else {
             return Err(Stop::NotYet("engine native not ported yet (H5)"));
         };
-        native(self, arguments)
+        native(self, targs, arguments)
     }
 }
