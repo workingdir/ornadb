@@ -41,10 +41,14 @@ impl<'p> Machine<'p> {
             return env
                 .get(index.as_u32() as usize)
                 .copied()
-                .ok_or(Stop::NotYet("type argument outside the caller's environment (H5)"));
+                .ok_or(Stop::NotYet(
+                    "type argument outside the caller's environment (H5)",
+                ));
         }
         if self.mentions_param(ty) {
-            return Err(Stop::NotYet("type argument with a nested type parameter (H5)"));
+            return Err(Stop::NotYet(
+                "type argument with a nested type parameter (H5)",
+            ));
         }
         Ok(ty)
     }
@@ -53,7 +57,9 @@ impl<'p> Machine<'p> {
     fn mentions_param(&self, ty: Ty) -> bool {
         match self.program.tys.kind(ty) {
             Some(TyKind::Param(_)) => true,
-            Some(TyKind::Adt(_, args) | TyKind::Tuple(args)) => args.iter().any(|arg| self.mentions_param(*arg)),
+            Some(TyKind::Adt(_, args) | TyKind::Tuple(args)) => {
+                args.iter().any(|arg| self.mentions_param(*arg))
+            }
             Some(
                 TyKind::Option(item)
                 | TyKind::List(item)
@@ -63,10 +69,18 @@ impl<'p> Machine<'p> {
                 | TyKind::Stream(item)
                 | TyKind::Quantity(item, _),
             ) => self.mentions_param(*item),
-            Some(TyKind::Map(key, value)) => self.mentions_param(*key) || self.mentions_param(*value),
-            Some(TyKind::Record(fields)) => fields.iter().any(|(_, field)| self.mentions_param(*field)),
+            Some(TyKind::Map(key, value)) => {
+                self.mentions_param(*key) || self.mentions_param(*value)
+            }
+            Some(TyKind::Record(fields)) => {
+                fields.iter().any(|(_, field)| self.mentions_param(*field))
+            }
             Some(TyKind::Fn(function)) => {
-                self.mentions_param(function.ret) || function.params.iter().any(|param| self.mentions_param(*param))
+                self.mentions_param(function.ret)
+                    || function
+                        .params
+                        .iter()
+                        .any(|param| self.mentions_param(*param))
             }
             _ => false,
         }
@@ -90,7 +104,10 @@ impl<'p> Machine<'p> {
             return Err(Stop::NotYet("protocol call without its Self argument (H5)"));
         };
         let name = program.defs[member].name.as_str();
-        if name == "compare" && is_order(program, protocol) && orna_hir::engine_order::derives_order(program, self_ty) {
+        if name == "compare"
+            && is_order(program, protocol)
+            && orna_hir::engine_order::derives_order(program, self_ty)
+        {
             let values = natives::in_parameter_order(arguments, 2)?;
             let ordering = engine_order::compare(&values[0], &values[1])?;
             return self.ordering_value(ordering);
@@ -123,7 +140,13 @@ impl<'p> Machine<'p> {
 
     /// The implementation of `protocol` (with `protocol_args`) for the nominal type `self_ty` that declares a member
     /// named `name`. Only a nominal type can have a source instance.
-    fn find_instance(&self, protocol: DefId, protocol_args: &[Ty], self_ty: Ty, name: &str) -> Option<DefId> {
+    fn find_instance(
+        &self,
+        protocol: DefId,
+        protocol_args: &[Ty],
+        self_ty: Ty,
+        name: &str,
+    ) -> Option<DefId> {
         let program = self.program;
         let Some(TyKind::Adt(owner, _)) = program.tys.kind(self_ty) else {
             return None;
@@ -132,7 +155,9 @@ impl<'p> Machine<'p> {
             let DefKind::Impl(instance) = &program.defs[implementation].kind else {
                 continue;
             };
-            if instance.protocol != Some(protocol) || instance.protocol_args.as_ref() != protocol_args {
+            if instance.protocol != Some(protocol)
+                || instance.protocol_args.as_ref() != protocol_args
+            {
                 continue;
             }
             if let Some(&member) = instance
@@ -172,7 +197,8 @@ impl<'p> Machine<'p> {
 /// Whether `protocol` is the `core.ops` protocol `Order`.
 fn is_order(program: &Program, protocol: DefId) -> bool {
     let definition = &program.defs[protocol];
-    definition.name.as_str() == "Order" && program.modules[definition.module].path.to_string() == "core.ops"
+    definition.name.as_str() == "Order"
+        && program.modules[definition.module].path.to_string() == "core.ops"
 }
 
 /// Every protocol member, keyed to the protocol that declares it.
@@ -195,7 +221,9 @@ fn find_ordering(program: &Program) -> Result<[VariantIds; 3], Stop> {
         let DefKind::Enum(enum_def) = &definition.kind else {
             continue;
         };
-        if definition.name.as_str() != "Ordering" || program.modules[definition.module].path.to_string() != "core" {
+        if definition.name.as_str() != "Ordering"
+            || program.modules[definition.module].path.to_string() != "core"
+        {
             continue;
         }
         let find = |wanted: &str| {
@@ -205,7 +233,9 @@ fn find_ordering(program: &Program) -> Result<[VariantIds; 3], Stop> {
                 .find(|variant| program.defs[**variant].name.as_str() == wanted)
                 .and_then(|variant| variants.get(variant).copied())
         };
-        if let (Some(less), Some(equal), Some(greater)) = (find("less"), find("equal"), find("greater")) {
+        if let (Some(less), Some(equal), Some(greater)) =
+            (find("less"), find("equal"), find("greater"))
+        {
             return Ok([less, equal, greater]);
         }
     }

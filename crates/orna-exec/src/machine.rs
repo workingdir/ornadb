@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use orna_hir::{Body, BodyId, DefId, DefKind, FnBody, Program, Ty};
 
-use crate::error::{ExecError, Stop};
 use crate::dispatch::ProtocolMembers;
+use crate::error::{ExecError, Stop};
 use crate::frame::Frame;
 use crate::link;
 use crate::natives::NativeFn;
