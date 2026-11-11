@@ -1,0 +1,12 @@
+[package]
+name = "orna-repl"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.95"
+license.workspace = true
+description = "Incremental REPL session over the Orna HIR and executor"
+
+[dependencies]
+orna-exec = { path = "../orna-exec" }
+orna-hir = { path = "../orna-hir" }
+orna-syntax = { path = "../orna-syntax" }

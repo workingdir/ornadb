@@ -1736,6 +1736,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "orna-repl"
+version = "1.0.0"
+dependencies = [
+ "orna-exec",
+ "orna-hir",
+ "orna-syntax",
+]
+
+[[package]]
 name = "orna-repository"
 version = "1.0.0"
 dependencies = [

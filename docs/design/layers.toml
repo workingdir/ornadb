@@ -94,6 +94,10 @@ name = "orna-exec"
 layer = 4
 
 [[crate]]
+name = "orna-repl"
+layer = 5
+
+[[crate]]
 name = "orna-evaluator"
 layer = 5
 
