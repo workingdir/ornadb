@@ -44,6 +44,9 @@ use crate::{
 };
 
 mod call;
+mod case;
+#[cfg(test)]
+mod case_tests;
 #[cfg(test)]
 mod diagnostics_tests;
 mod expr;
@@ -505,6 +508,8 @@ struct BodyCheck<'a> {
     /// The expected result type of the function whose body is being checked,
     /// innermost last.
     returns: Vec<Option<Ty>>,
+    /// The `case` expressions recorded while the body is typed, for coverage.
+    cases: Vec<case::CaseSite>,
 }
 
 impl<'a> BodyCheck<'a> {
@@ -522,6 +527,7 @@ impl<'a> BodyCheck<'a> {
             conflicts: 0,
             working: BTreeMap::new(),
             returns: Vec::new(),
+            cases: Vec::new(),
         }
     }
 
@@ -644,6 +650,7 @@ impl<'a> BodyCheck<'a> {
                 span,
             ));
         }
+        self.check_cases();
         let bodies = self.working.into_iter().collect::<Vec<_>>();
         (bodies, self.diagnostics, self.conflicts)
     }

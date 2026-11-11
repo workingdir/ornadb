@@ -15,7 +15,7 @@ use orna_hir::ModuleOrigin;
 
 /// Cases whose diagnostic code sets differ, measured when this test landed.
 /// The count may only go down.
-const RECORDED_CODE_DIFFERENCES: usize = 156;
+const RECORDED_CODE_DIFFERENCES: usize = 154;
 
 /// The old checker's diagnostic codes for a case.
 fn checker_codes(case: &Case) -> Option<BTreeSet<String>> {

@@ -57,6 +57,13 @@ pub const INFER_AMBIGUOUS: &str = "ORNA-INFER-007";
 /// diagnostic so the two agree on the same mistake.
 pub const PUBLIC_ANNOTATION: &str = "ORNA-S020-ANNOTATION";
 
+/// A `case` expression does not cover its scrutinee type: an enum variant is
+/// duplicated or missing, or a boolean value is duplicated or uncovered.
+///
+/// The code is the checker's type-error class (ORNA-S021-TYPE), so the parity
+/// report compares the same mistake under the same code.
+pub const CASE_COVERAGE: &str = "ORNA-S021-TYPE";
+
 /// Two protocol implementations of one type supply the same member call.
 ///
 /// Overlap is a static error whatever the source order (ORNA-GENERIC-014), so

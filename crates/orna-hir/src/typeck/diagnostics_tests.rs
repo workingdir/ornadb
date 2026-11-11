@@ -7,7 +7,7 @@ use crate::diag::{GENERIC_OVERLAP, INFER_AMBIGUOUS, INFER_CONFLICT, PUBLIC_ANNOT
 use crate::{HirDiagnostic, ModulePath, Name, Program, SourceId, SourceUnit, lower};
 use orna_syntax::parse_module_with_file;
 
-fn lower_source(source: &str) -> Program {
+pub(super) fn lower_source(source: &str) -> Program {
     let tree = parse_module_with_file(source, "test.orna").value;
     lower(&[SourceUnit {
         source: SourceId::new(0),
@@ -17,12 +17,12 @@ fn lower_source(source: &str) -> Program {
 }
 
 /// The source text a diagnostic's span covers.
-fn spanned<'a>(source: &'a str, diagnostic: &HirDiagnostic) -> &'a str {
+pub(super) fn spanned<'a>(source: &'a str, diagnostic: &HirDiagnostic) -> &'a str {
     &source[diagnostic.span.start..diagnostic.span.end]
 }
 
 /// Every diagnostic of one code the program holds, with its module's path.
-fn with_code<'a>(program: &'a Program, code: &str) -> Vec<(String, &'a HirDiagnostic)> {
+pub(super) fn with_code<'a>(program: &'a Program, code: &str) -> Vec<(String, &'a HirDiagnostic)> {
     program
         .diagnostics()
         .filter(|(_, diagnostic)| diagnostic.code == code)
