@@ -90,7 +90,7 @@ impl<'p> Machine<'p> {
             return Err(Stop::NotYet("protocol call without its Self argument (H5)"));
         };
         let name = program.defs[member].name.as_str();
-        if name == "compare" && is_order(program, protocol) && engine_order::derives_order(program, self_ty) {
+        if name == "compare" && is_order(program, protocol) && orna_hir::engine_order::derives_order(program, self_ty) {
             let values = natives::in_parameter_order(arguments, 2)?;
             let ordering = engine_order::compare(&values[0], &values[1])?;
             return self.ordering_value(ordering);

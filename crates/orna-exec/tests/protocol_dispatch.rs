@@ -46,7 +46,6 @@ fn run(body: &str) -> Result<Value, ExecError> {
 }
 
 #[test]
-#[ignore = "blocked: user-code `Ordering.less` fails typeck (H2); see step 3"]
 fn a_scalar_compare_resolves_to_the_engine_order_instance() {
     assert_eq!(
         run("pub fn run(): Bool = 1.compare(2) == Ordering.less;\n"),
@@ -63,7 +62,6 @@ fn a_scalar_compare_resolves_to_the_engine_order_instance() {
 }
 
 #[test]
-#[ignore = "blocked: user-code `Ordering.less` fails typeck (H2); see step 3"]
 fn a_text_compare_orders_by_code_point() {
     assert_eq!(
         run("pub fn run(): Bool = \"apple\".compare(\"banana\") == Ordering.less;\n"),

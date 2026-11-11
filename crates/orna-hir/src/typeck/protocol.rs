@@ -31,11 +31,32 @@ impl BodyCheck<'_> {
         name: &Name,
         span: SyntaxSpan,
     ) -> Result<Option<Callee>, NotYetReason> {
+        if name.as_str() == "compare" && crate::engine_order::derives_order(self.program, receiver)
+        {
+            return self.settle_engine_order(receiver, span);
+        }
         match self.kind_of(receiver) {
             Some(TyKind::Adt(owner, _)) => self.settle_instance_call(receiver, owner, name, span),
             Some(TyKind::Param(index)) => self.settle_bound_call(receiver, index, name, span),
             _ => Err(not_yet(name)),
         }
+    }
+
+    /// Settles `compare` on a type with the engine-derived order (D16) to the `Order` protocol member, which the
+    /// executor runs natively for such a type.
+    fn settle_engine_order(
+        &mut self,
+        receiver: Ty,
+        span: SyntaxSpan,
+    ) -> Result<Option<Callee>, NotYetReason> {
+        let name = Name::new("compare");
+        let protocol = self
+            .core_ops_protocol("Order")
+            .ok_or_else(|| not_yet(&name))?;
+        let member = self
+            .protocol_member(protocol, 0, &name)
+            .ok_or_else(|| not_yet(&name))?;
+        self.protocol_callee(member, vec![receiver], span).map(Some)
     }
 
     /// Selects among the protocol implementations a nominal type declares.

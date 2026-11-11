@@ -58,6 +58,16 @@ pub(crate) fn classify_callee(
     if flatten_path(callee, &mut segments) {
         return classify_path(builder, state, &segments, span);
     }
+    if let AstExpr::Field { base, name, .. } = callee {
+        let base = lower_expr(builder, state, base);
+        return Some((
+            Callee::Pending {
+                base,
+                name: Name::new(name),
+            },
+            None,
+        ));
+    }
     let value = lower_expr(builder, state, callee);
     Some((Callee::Value { callee: value }, None))
 }

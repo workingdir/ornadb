@@ -1,28 +1,17 @@
 //! The engine-derived `Order` (D16): the canonical total order of the kernel types.
 //!
-//! A type derives `Order` when [`derives_order`] accepts it. The executor compares values of such a type natively,
-//! without a source instance. `Float` has no canonical order here (the design excludes every type that contains a
-//! `Float`), so a `Float` never reaches [`compare`] through a checked program.
+//! A type derives `Order` when `orna_hir::engine_order::derives_order` accepts it. The executor compares values of such
+//! a type natively, without a source instance. `Float` has no canonical order here (the design excludes every type that
+//! contains a `Float`), so a `Float` never reaches [`compare`] through a checked program.
 
 use std::cmp::Ordering;
-
-use orna_hir::{Program, Ty, TyKind};
 
 use crate::error::Stop;
 use crate::value::Value;
 
-/// Whether the static type `ty` has the engine-derived order: the scalar kernel types, and tuples of them.
-pub(crate) fn derives_order(program: &Program, ty: Ty) -> bool {
-    match program.tys.kind(ty) {
-        Some(TyKind::Bool | TyKind::Int | TyKind::Decimal | TyKind::Str | TyKind::Blob) => true,
-        Some(TyKind::Instant | TyKind::Duration) => true,
-        Some(TyKind::Tuple(items)) => items.iter().all(|item| derives_order(program, *item)),
-        _ => false,
-    }
-}
-
-/// Orders two values of a type that [`derives_order`] accepts. Text compares by its code points, which is the byte
-/// order of its UTF-8 form. Blobs compare as unsigned bytes, and tuples lexically, then by length.
+/// Orders two values of a type that `orna_hir::engine_order::derives_order` accepts. Text compares by its code
+/// points, which is the byte order of its UTF-8 form. Blobs compare as unsigned bytes, and tuples lexically,
+/// then by length.
 ///
 /// # Errors
 ///
