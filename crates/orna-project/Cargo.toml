@@ -14,6 +14,7 @@ orna-syntax = { path = "../orna-syntax" }
 orna-value = { path = "../orna-value" }
 num-bigint = "0.4.6"
 orna-runtime = { path = "../orna-runtime" }
+orna-exec = { path = "../orna-exec" }
 unicode-normalization = "=0.1.24"
 
 [dev-dependencies]

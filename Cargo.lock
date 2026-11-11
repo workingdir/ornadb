@@ -1700,6 +1700,7 @@ dependencies = [
  "num-bigint 0.4.8",
  "orna-base",
  "orna-check",
+ "orna-exec",
  "orna-repository",
  "orna-runtime",
  "orna-syntax",

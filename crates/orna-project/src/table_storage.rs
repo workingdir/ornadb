@@ -737,7 +737,7 @@ pub fn runtime_key_from_evaluator(
 }
 
 /// Maps a runtime key back to its canonical evaluator key.
-fn evaluator_key_from_runtime(
+pub(crate) fn evaluator_key_from_runtime(
     key: &[u8],
     text_primary_key: bool,
 ) -> Result<Vec<u8>, TableStorageError> {
