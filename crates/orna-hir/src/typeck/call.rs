@@ -93,6 +93,7 @@ impl<'a> BodyCheck<'a> {
             }
             call.callee = settled;
         }
+        self.record_inferred_targs(call, span.clone());
         match &call.callee {
             Callee::Source { def, targs } => {
                 self.source_call_ty(body, call, *def, targs, span, protocol_member)
@@ -146,6 +147,42 @@ impl<'a> BodyCheck<'a> {
         }
     }
 
+    /// D1/D5: a generic call that omits its type arguments gets one inference variable per generic parameter. The
+    /// variables are recorded in the callee, so the finishing pass replaces them with the solved types.
+    fn record_inferred_targs(&mut self, call: &mut crate::Call, span: SyntaxSpan) {
+        let (def, targs) = match &mut call.callee {
+            Callee::Source { def, targs }
+            | Callee::Native { def, targs }
+            | Callee::Sys { def, targs } => (*def, targs),
+            _ => return,
+        };
+        if !targs.is_empty() {
+            return;
+        }
+        let count = match self.program.defs.get(def).map(|d| &d.kind) {
+            Some(DefKind::Fn(function)) => function.generics.len(),
+            _ => return,
+        };
+        if count == 0 {
+            return;
+        }
+        *targs = (0..count)
+            .map(|_| self.infer.new_var(&mut self.program.tys, span.clone()))
+            .collect();
+    }
+
+    /// Replaces solved inference variables in the type arguments of a generic callee.
+    pub(super) fn zonk_callee_targs(&mut self, callee: &mut Callee) {
+        if let Callee::Source { targs, .. }
+        | Callee::Native { targs, .. }
+        | Callee::Sys { targs, .. } = callee
+        {
+            for targ in targs.iter_mut() {
+                *targ = self.zonk(*targ);
+            }
+        }
+    }
+
     /// Settles a member call whose meaning the receiver's type decides.
     ///
     /// `Ok(None)` means the selection was ambiguous and the conflict is recorded.
@@ -193,17 +230,6 @@ impl<'a> BodyCheck<'a> {
                 "calling a function declared without a body is not on HIR yet".into(),
             ));
         }
-        let inferred: Vec<Ty>;
-        let targs = if function.generics.is_empty() || !targs.is_empty() {
-            targs
-        } else {
-            // D1/D5: type arguments that the call omits are solved by unification from the value arguments
-            // and the expected type; an unsolved one is reported by the zonk pass as an ambiguity.
-            inferred = (0..function.generics.len())
-                .map(|_| self.infer.new_var(&mut self.program.tys, span.clone()))
-                .collect();
-            inferred.as_slice()
-        };
         if !function.generics.is_empty() && targs.len() != function.generics.len() {
             self.conflict(
                 "the call supplies the wrong number of type arguments",

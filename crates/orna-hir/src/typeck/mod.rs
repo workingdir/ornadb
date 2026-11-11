@@ -631,6 +631,9 @@ impl<'a> BodyCheck<'a> {
             for expr in exprs {
                 let ty = body.exprs[expr].ty;
                 body.exprs[expr].ty = self.zonk(ty);
+                if let ExprKind::Call(call) = &mut body.exprs[expr].kind {
+                    self.zonk_callee_targs(&mut call.callee);
+                }
             }
             let locals = body
                 .locals
