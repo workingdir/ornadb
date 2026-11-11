@@ -1739,10 +1739,12 @@ dependencies = [
 name = "orna-repl"
 version = "1.0.0"
 dependencies = [
+ "orna-evaluator",
  "orna-exec",
  "orna-hir",
  "orna-standard-sources",
  "orna-syntax",
+ "orna-value",
 ]
 
 [[package]]
