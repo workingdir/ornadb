@@ -199,10 +199,11 @@ impl Builder<'_> {
             }
             DeclAst::Let(annotation, value) => {
                 let body = self.allocate_body(def);
-                if let Some(annotation) = annotation {
-                    let _ = super::types::lower_type(self, module, &[], &annotation);
-                }
-                self.pending[def.index()].kind = PendingKind::Built(DefKind::Let(LetDef { body }));
+                let declared = annotation
+                    .as_ref()
+                    .map(|annotation| super::types::lower_type(self, module, &[], annotation));
+                self.pending[def.index()].kind =
+                    PendingKind::Built(DefKind::Let(LetDef { body, declared }));
                 self.body_jobs.push(BodyJob::Expression {
                     def,
                     body,
@@ -666,11 +667,11 @@ impl Builder<'_> {
                         DefKind::Unit(UnitDef::default()),
                     );
                     let body = self.allocate_body(member_def);
-                    if let Some(ty) = ty {
-                        let _ = super::types::lower_type(self, module, &names, ty);
-                    }
+                    let declared = ty
+                        .as_ref()
+                        .map(|ty| super::types::lower_type(self, module, &names, ty));
                     self.pending[member_def.index()].kind =
-                        PendingKind::Built(DefKind::Let(LetDef { body }));
+                        PendingKind::Built(DefKind::Let(LetDef { body, declared }));
                     self.body_jobs.push(BodyJob::Expression {
                         def: member_def,
                         body,

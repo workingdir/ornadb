@@ -382,7 +382,11 @@ impl TypeChecker<'_> {
                     ));
                 }
             }
-            DefKind::Let(_) | DefKind::Assertion(_) => (None, None, Vec::new()),
+            DefKind::Let(binding) => {
+                let declared = binding.declared.filter(|ty| !self.is_error(*ty));
+                (declared, None, Vec::new())
+            }
+            DefKind::Assertion(_) => (None, None, Vec::new()),
             _ => {
                 return Attempt::NotYet(NotYetReason::Unsupported(
                     "this definition's body is outside the H2a subset".into(),
