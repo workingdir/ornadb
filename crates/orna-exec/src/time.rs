@@ -343,6 +343,7 @@ mod tests {
     const LIMITS: ExecLimits = ExecLimits {
         max_steps: 1_000,
         max_depth: 8,
+        max_collection_items: 2_048,
         max_string_bytes: 64,
         max_integer_digits: 40,
     };
