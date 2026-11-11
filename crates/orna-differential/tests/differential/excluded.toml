@@ -14,9 +14,9 @@
 # families whose driving is already data-driven: the published reference corpus
 # (169 cases), the evaluator's expression fixtures (42), the REPL admission
 # fixtures (14) and the pinned standard modules (77). 5,399 programs were excluded
-# at H0; the embedded interface tree (14, including the hand-written core.range), the native parser fixtures (27) and the
-# unit-family parser fixtures (12) were added later, so 5,452 programs are excluded here. The follow-up PRs move them
-# across family by family.
+# at H0; the embedded interface tree (15, including the hand-written core.range and core.units), the native parser
+# fixtures (27) and the unit-family parser fixtures (12) were added later, so 5,453 programs are excluded here. The
+# follow-up PRs move them across family by family.
 
 [[excluded]]
 scope = "crates/archive/orna-compat-v1/tests/fixtures"
@@ -85,8 +85,8 @@ reason = "an editor example page, not a program the pipeline admits"
 
 [[excluded]]
 scope = "crates/orna-hir/interface"
-files = 14
-reason = "the engine-embedded core and sys interface modules (body-less native declarations and the source-only core.ops operator protocols, generated from the catalogue, plus the hand-written core.range, see crates/orna-hir/interface/README.md) are loaded into every HIR program by the engine, not corpus programs; the typed-share measure reads their outcomes through the case's owned modules only"
+files = 15
+reason = "the engine-embedded core and sys interface modules (body-less native declarations and the source-only core.ops operator protocols, generated from the catalogue, plus the hand-written core.range and core.units, see crates/orna-hir/interface/README.md) are loaded into every HIR program by the engine, not corpus programs; the typed-share measure reads their outcomes through the case's owned modules only"
 
 [[excluded]]
 scope = "crates/orna-lsp/tests/fixtures"
