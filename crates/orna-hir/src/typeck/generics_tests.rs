@@ -21,3 +21,21 @@ fn a_generic_constructor_result_carries_its_arguments() {
     assert_eq!(result(&program, "make"), "Box<Int>");
     assert_eq!(result(&program, "read"), "Int");
 }
+
+#[test]
+fn a_user_declared_range_is_the_nominal_range_type() {
+    let mut program = program(
+        "pub type Range<T> {\n    lo: T,\n    hi: T,\n}\n\
+         pub fn make(): Range<Int> = Range { lo: 1, hi: 2 };\n\
+         pub fn low(r: Range<Int>): Int = r.lo;\n",
+    );
+    let summary = typeck(&mut program);
+    assert!(test_accepted(&program, &summary), "{summary:?}");
+    assert!(
+        program.modules[test_module(&program)]
+            .diagnostics
+            .is_empty()
+    );
+    assert_eq!(result(&program, "make"), "Range<Int>");
+    assert_eq!(result(&program, "low"), "Int");
+}
