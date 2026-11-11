@@ -23,7 +23,8 @@ impl<'a> BodyCheck<'a> {
             | ExprKind::Unary { .. }
             | ExprKind::Binary { .. }
             | ExprKind::Logic { .. }
-            | ExprKind::Range { .. } => 0u8,
+            | ExprKind::Range { .. }
+            | ExprKind::UnitConvert { .. } => 0u8,
             ExprKind::Call(_)
             | ExprKind::Recover { .. }
             | ExprKind::Field { .. }
@@ -63,6 +64,7 @@ impl<'a> BodyCheck<'a> {
             ExprKind::Def(def) => self.def_value_ty(def, span),
             ExprKind::Unary { op, operand } => self.unary_ty(body, id, op, operand, span),
             ExprKind::Binary { op, lhs, rhs } => self.binary_ty(body, id, op, lhs, rhs, span),
+            ExprKind::UnitConvert { .. } => Ok(body.exprs[id].ty),
             ExprKind::Logic { op, lhs, rhs } => self.logic_ty(body, op, lhs, rhs, span),
             ExprKind::Range {
                 lo,

@@ -1,6 +1,8 @@
 use super::{TypeCheckSummary, typeck};
+use crate::units::Rational;
 use crate::{
-    DefId, DefKind, ModuleId, ModulePath, Name, Program, SourceId, SourceUnit, lower, print_type,
+    DefId, DefKind, ExprKind, ModuleId, ModulePath, Name, Program, SourceId, SourceUnit, lower,
+    print_type,
 };
 use orna_syntax::parse_module_with_file;
 
@@ -463,4 +465,81 @@ fn missing_order_instance_names_the_ordering_operator_and_protocol() {
         .unwrap_or_default();
     assert!(message.contains("`<`"), "{message}");
     assert!(message.contains("`Order`"), "{message}");
+}
+
+const TIME: &str = "pub enum Time {\n    second,\n    minute = 60 second,\n    hour = 3600 second,\n    impl Unit {}\n}\n";
+const SPEED: &str =
+    "pub enum Speed {\n    kmh = Length.kilometre / Time.hour,\n    impl Unit {}\n}\n";
+
+/// Checks `LENGTH`, `TIME` and `SPEED` followed by `body`, returning the program and the checker's verdict.
+fn typed_families(body: &str) -> (Program, TypeCheckSummary) {
+    let mut program = program(&format!("{LENGTH}{TIME}{SPEED}{body}"));
+    let summary = typeck(&mut program);
+    (program, summary)
+}
+
+/// The factors of every unit conversion recorded in the bodies the named function owns.
+fn conversion_factors(program: &Program, name: &str) -> Vec<Rational> {
+    let owner = definition(program, name);
+    program
+        .bodies
+        .iter()
+        .filter(|body| body.owner == owner)
+        .flat_map(|body| body.exprs.iter())
+        .filter_map(|expr| match &expr.kind {
+            ExprKind::UnitConvert { factor, .. } => Some(factor.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_family_annotation_converts_a_member_unit_to_the_base_unit() {
+    let (program, summary) = typed_families("pub fn run(): Time = 1.hour;\n");
+    assert!(test_accepted(&program, &summary), "{summary:?}");
+    assert_eq!(result(&program, "run"), "Time");
+    assert_eq!(
+        conversion_factors(&program, "run"),
+        vec![Rational::from_int(3600)]
+    );
+}
+
+#[test]
+fn the_base_unit_of_a_family_enters_without_a_conversion() {
+    let (program, summary) = typed_families("pub fn run(): Time = 2.second;\n");
+    assert!(test_accepted(&program, &summary), "{summary:?}");
+    assert!(conversion_factors(&program, "run").is_empty());
+}
+
+#[test]
+fn a_let_annotation_converts_a_member_unit_to_the_base_unit() {
+    let (program, summary) =
+        typed_families("pub fn run(): Time {\n    let d: Time = 1.minute;\n    d\n}\n");
+    assert!(test_accepted(&program, &summary), "{summary:?}");
+    assert_eq!(
+        conversion_factors(&program, "run"),
+        vec![Rational::from_int(60)]
+    );
+}
+
+#[test]
+fn a_bare_number_is_not_a_value_of_a_unit_family() {
+    let (program, summary) = typed_families("pub fn run(): Time = 5;\n");
+    assert!(!test_accepted(&program, &summary), "{summary:?}");
+    assert!(module_codes(&program).contains(&crate::diag::UNIT_ANNOT));
+}
+
+#[test]
+fn a_quantity_outside_the_family_is_rejected() {
+    let (program, summary) = typed_families("pub fn run(): Time = 5.kilometre;\n");
+    assert!(!test_accepted(&program, &summary), "{summary:?}");
+    assert!(module_codes(&program).contains(&crate::diag::UNIT_ANNOT));
+}
+
+#[test]
+fn a_derived_family_accepts_its_own_quotient_unit_as_written() {
+    let (program, summary) = typed_families("pub fn run(): Speed = 10.kilometre / 2.hour;\n");
+    assert!(test_accepted(&program, &summary), "{summary:?}");
+    assert_eq!(result(&program, "run"), "Speed");
+    assert!(conversion_factors(&program, "run").is_empty());
 }

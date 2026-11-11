@@ -562,7 +562,8 @@ impl Program {
             | ExprKind::Record(_)
             | ExprKind::Construct { .. }
             | ExprKind::Lambda { .. }
-            | ExprKind::Interp(_) => {
+            | ExprKind::Interp(_)
+            | ExprKind::UnitConvert { .. } => {
                 self.validate_value_expr(body_id, body, expr_id, &expr.kind, errors);
             }
             ExprKind::Recover { .. }
@@ -617,6 +618,9 @@ impl Program {
             ExprKind::Index { base, index } => {
                 self.validate_expr_ref(body_id, body, *base, errors);
                 self.validate_expr_ref(body_id, body, *index, errors);
+            }
+            ExprKind::UnitConvert { operand, .. } => {
+                self.validate_expr_ref(body_id, body, *operand, errors);
             }
             ExprKind::Tuple(items) | ExprKind::List(items) => {
                 for item in items.iter() {

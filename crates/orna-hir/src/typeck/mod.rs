@@ -50,6 +50,7 @@ mod case_tests;
 #[cfg(test)]
 mod diagnostics_tests;
 mod expr;
+mod family;
 mod operator;
 mod protocol;
 mod quantity;
@@ -753,7 +754,7 @@ impl<'a> BodyCheck<'a> {
             (kind, expected) => {
                 let ty = self.infer_shallow(body, id, kind, span.clone())?;
                 match expected {
-                    Some(expected) => self.coerce(ty, expected, span.clone()),
+                    Some(expected) => self.coerce_at(body, id, ty, expected, span.clone()),
                     None => ty,
                 }
             }

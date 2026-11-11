@@ -103,6 +103,14 @@ pub enum ExprKind {
         /// The right operand.
         rhs: ExprId,
     },
+    /// A quantity converted to the base unit of the family its position names (units.md ORNA-UNIT-020). `factor` is
+    /// the exact scale from the operand's unit to that base unit.
+    UnitConvert {
+        /// The converted quantity.
+        operand: ExprId,
+        /// The scale from the operand's unit to the base unit.
+        factor: crate::units::Rational,
+    },
     /// `&&`, `||` and `??`, which short-circuit.
     Logic {
         /// The operator.
