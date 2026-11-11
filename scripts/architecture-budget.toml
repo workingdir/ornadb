@@ -393,7 +393,7 @@ name = "orna-check"
 "src/lib.rs::infer_node" = 127
 "src/semantic_payload.rs::declaration" = 310
 "src/semantic_payload.rs::expr" = 204
-"src/system_api.rs::from_json" = 354
+"src/system_api.rs::from_raw" = 353
 "src/system_api.rs::function_metadata_is_required_by_applicable_contract" = 174
 "src/system_api.rs::parsed_descriptor_retains_declared_members" = 374
 

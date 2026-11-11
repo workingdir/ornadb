@@ -6,7 +6,12 @@ use crate::parser::{Parse, SyntaxTree, annotate_tree, located, parse_items};
 /// Parses one session module: definitions plus top-level `let` bindings, located in `file`.
 pub fn parse_session_module_with_file(source: &str, file: impl Into<String>) -> Parse<SyntaxTree> {
     let file = file.into();
-    located(parse_items(source, false), source, &file, annotate_tree)
+    located(
+        parse_items(source, false, false),
+        source,
+        &file,
+        annotate_tree,
+    )
 }
 
 #[cfg(test)]

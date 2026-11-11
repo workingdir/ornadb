@@ -7,8 +7,12 @@ use std::rc::Rc;
 
 use num_bigint::BigInt;
 use orna_hir::Name;
-use orna_value::{OPTION_TAG, Raw, TUPLE_TAG, UNIT_TAG};
+use orna_value::{
+    DATE_TAG, DECIMAL_TAG, DIGEST_TAG, MONEY_TAG, OPTION_TAG, Raw, TUPLE_TAG, UNIT_TAG, UUID_TAG,
+};
 
+use crate::calendar;
+use crate::decimal::Decimal;
 use crate::error::Stop;
 use crate::value::Value;
 
@@ -35,6 +39,11 @@ pub(crate) fn from_raw(raw: &Raw) -> Result<Value, Stop> {
                 .map(|items| Value::Tuple(items.into())),
             _ => Err(Stop::NotYet("stored tuple shape (H6)")),
         },
+        Raw::Tag(DATE_TAG, body) => date_from(body),
+        Raw::Tag(UUID_TAG, body) => uuid_from(body),
+        Raw::Tag(DIGEST_TAG, body) => digest_from(body),
+        Raw::Tag(DECIMAL_TAG, body) => decimal_from(body),
+        Raw::Tag(MONEY_TAG, body) => money_from(body),
         Raw::Null | Raw::Float(_) | Raw::Tag(..) => Err(Stop::NotYet("stored value shape (H6)")),
     }
 }
@@ -72,4 +81,80 @@ fn option_from(body: &Raw) -> Result<Value, Stop> {
         }
         _ => Err(Stop::NotYet("stored option shape (H6)")),
     }
+}
+
+/// A Date body: the `YYYY-MM-DD` text of a real date.
+fn date_from(body: &Raw) -> Result<Value, Stop> {
+    let Raw::Text(text) = body else {
+        return Err(value_error());
+    };
+    calendar::parse_date_text(text)
+        .map(Value::Date)
+        .ok_or_else(value_error)
+}
+
+/// A Uuid body: its 16 bytes.
+fn uuid_from(body: &Raw) -> Result<Value, Stop> {
+    object_id(body).map(Value::Uuid).ok_or_else(value_error)
+}
+
+/// A Digest body: the `sha256` algorithm name over its 32 bytes.
+fn digest_from(body: &Raw) -> Result<Value, Stop> {
+    let Raw::Array(parts) = body else {
+        return Err(value_error());
+    };
+    match parts.as_slice() {
+        [Raw::Text(algorithm), Raw::Bytes(bytes)] if algorithm == "sha256" => {
+            <[u8; 32]>::try_from(bytes.as_slice())
+                .map(Value::Digest)
+                .map_err(|_| value_error())
+        }
+        _ => Err(value_error()),
+    }
+}
+
+/// A Decimal body: a coefficient and an exponent, normalised as the executor's decimals are.
+fn decimal_from(body: &Raw) -> Result<Value, Stop> {
+    let Raw::Array(parts) = body else {
+        return Err(value_error());
+    };
+    match parts.as_slice() {
+        [Raw::Int(coefficient), Raw::Int(exponent)] => {
+            Decimal::new(coefficient.clone(), exponent.clone()).map(Value::Decimal)
+        }
+        _ => Err(value_error()),
+    }
+}
+
+/// A Money body: a decimal amount in canonical form, then the currency's object id.
+fn money_from(body: &Raw) -> Result<Value, Stop> {
+    let Raw::Array(parts) = body else {
+        return Err(value_error());
+    };
+    let [Raw::Tag(DECIMAL_TAG, amount_body), currency] = parts.as_slice() else {
+        return Err(value_error());
+    };
+    let Value::Decimal(amount) = decimal_from(amount_body)? else {
+        return Err(value_error());
+    };
+    if amount.to_raw() != Raw::Tag(DECIMAL_TAG, amount_body.clone()) {
+        return Err(value_error());
+    }
+    let Raw::Tag(UUID_TAG, currency_body) = currency else {
+        return Err(value_error());
+    };
+    let currency = object_id(currency_body).ok_or_else(value_error)?;
+    Ok(Value::Money { amount, currency })
+}
+
+/// The 16 bytes of an object id body.
+fn object_id(body: &Raw) -> Option<[u8; 16]> {
+    let Raw::Bytes(bytes) = body else {
+        return None;
+    };
+    <[u8; 16]>::try_from(bytes.as_slice()).ok()
+}
+
+fn value_error() -> Stop {
+    Stop::Error("ORNA-EVAL-VALUE")
 }

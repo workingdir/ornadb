@@ -1439,6 +1439,7 @@ version = "1.0.0"
 dependencies = [
  "num-bigint 0.4.8",
  "num-traits",
+ "orna-hir",
  "orna-intrinsics",
  "orna-syntax",
  "orna-sys",
@@ -1897,6 +1898,7 @@ name = "orna-sys-id"
 version = "1.0.0"
 dependencies = [
  "orna-base",
+ "orna-syntax",
  "serde_json",
 ]
 

@@ -44,12 +44,22 @@ pub fn analyze_with_catalogue_located(
     inputs: &[ModuleInput],
     catalogue: &Catalogue,
 ) -> LocatedAnalysis {
+    analyze_with_providers_located(inputs, catalogue, crate::SystemProviders::DeclaredSurface)
+}
+
+/// Runs [`crate::analyze_with_providers`] and records the origin of every
+/// diagnostic, admitting `sys` members against `providers`.
+pub fn analyze_with_providers_located(
+    inputs: &[ModuleInput],
+    catalogue: &Catalogue,
+    providers: crate::SystemProviders,
+) -> LocatedAnalysis {
     let mut recorder = OriginRecorder::enabled();
     let (analysis, _) = crate::analyze_recording_origins(
         inputs,
         catalogue,
         false,
-        crate::SystemProviders::DeclaredSurface,
+        providers,
         crate::SourceAdmission::Project,
         &mut recorder,
     );

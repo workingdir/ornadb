@@ -886,7 +886,9 @@ pub(crate) fn item_bodies(item: &Item) -> Vec<&Expr> {
     match &item.declaration {
         Declaration::Function { body, .. } => bodies.push(body),
         // A native declaration has no body (ORNA-NATIVE-001).
-        Declaration::Native { .. } => {}
+        Declaration::Native { .. }
+        | Declaration::NativeType { .. }
+        | Declaration::NativeStatic { .. } => {}
         Declaration::Let { value, .. } | Declaration::Assertion { value } => bodies.push(value),
         Declaration::Table { members, .. } => {
             for member in members {

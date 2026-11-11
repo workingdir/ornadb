@@ -8107,7 +8107,9 @@ fn admitted_transaction_module(
             // seam retains executable source, so it rejects the declaration
             // rather than reading it as a function. ORNA-NATIVE-004 admits one
             // in any module; the link step binds it (library document, stage N2).
-            Declaration::Native { .. } => {
+            Declaration::Native { .. }
+            | Declaration::NativeType { .. }
+            | Declaration::NativeStatic { .. } => {
                 return Err("transactional source seam does not bind native declarations".into());
             }
         }

@@ -186,6 +186,23 @@ pub fn walk_declaration<V: Visit + ?Sized>(visitor: &mut V, declaration: &Declar
                 visitor.visit_native_effect_set(effects);
             }
         }
+        Declaration::NativeType { generics, .. } => {
+            for generic in generics {
+                visitor.visit_generic_parameter(generic);
+            }
+        }
+        Declaration::NativeStatic {
+            annotation,
+            effects,
+            ..
+        } => {
+            if let Some(annotation) = annotation {
+                visitor.visit_type(annotation);
+            }
+            if let Some(effects) = effects {
+                visitor.visit_native_effect_set(effects);
+            }
+        }
         Declaration::Protocol {
             generics, members, ..
         } => {

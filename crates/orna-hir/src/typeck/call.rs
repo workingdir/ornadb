@@ -969,10 +969,11 @@ impl<'a> BodyCheck<'a> {
                 Ok(self.intern(TyKind::Relation(row)))
             }
             Some(DefKind::Enum(_)) => Ok(self.intern(TyKind::Adt(def, Box::new([])))),
-            Some(DefKind::Type(_)) => {
+            Some(DefKind::Type(_) | DefKind::NativeType(_)) => {
                 let args = self.fresh_nominal_args(def, &span);
                 Ok(self.intern(TyKind::Adt(def, args)))
             }
+            Some(DefKind::NativeStatic(native)) => Ok(native.ty),
             Some(DefKind::Variant(variant)) => {
                 let result = self.ctor_result_ty(def, span.clone())?;
                 if variant.fields.is_empty() {

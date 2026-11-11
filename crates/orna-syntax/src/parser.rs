@@ -1,9 +1,14 @@
 use crate::budget::NestingBudget;
-use crate::lexer::{Keyword, LexError, Token, TokenKind, lex};
+use crate::lexer::{DocLine, Keyword, LexError, Token, TokenKind, lex_documented};
 use crate::semicolon::MissingSemicolon;
 
+mod clauses;
 mod lookahead;
 mod units;
+use clauses::ClauseTarget;
+pub use clauses::{
+    ClauseString, DeprecatedClause, FormerlyClause, InterfaceClauses, RemovedClause,
+};
 use lookahead::TokenLookahead;
 use units::annotate_unit_expr;
 pub use units::{UnitExpr, UnitTerm};
@@ -240,6 +245,10 @@ pub struct Item {
     pub kind: ItemKind,
     pub visibility: Visibility,
     pub span: SourceSpan,
+    /// The `///` doc comment lines written directly above the item, without the marker.
+    pub docs: Vec<String>,
+    /// Interface clauses (`since`, `removed`, ...). Empty for every module outside the engine's interface.
+    pub clauses: InterfaceClauses,
     pub declaration: Declaration,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -273,6 +282,19 @@ pub enum Declaration {
         /// The mandatory effect clause. `None` is a recovered parse: the clause
         /// was absent or malformed and ORNA091-E-NATIVE-EFFECT was reported.
         effects: Option<NativeEffectSet>,
+    },
+    /// `pub native type Name<T>;` declares an opaque nominal type that the host supplies (SN1).
+    NativeType {
+        name: String,
+        generics: Vec<GenericParameter>,
+        span: SourceSpan,
+    },
+    /// `pub native static name: T effect set;` declares a host-supplied singleton value (SN1).
+    NativeStatic {
+        name: String,
+        annotation: Option<TypeExpr>,
+        effects: Option<NativeEffectSet>,
+        span: SourceSpan,
     },
     Protocol {
         name: String,
@@ -1030,11 +1052,24 @@ impl Expr {
 }
 
 pub fn parse_module(source: &str) -> Parse<SyntaxTree> {
-    parse_items(source, true)
+    parse_items(source, false, true)
 }
-/// Parses a module's items. `module` false admits a top-level `let`, as the REPL session does.
-pub(crate) fn parse_items(source: &str, module: bool) -> Parse<SyntaxTree> {
-    let mut p = Parser::new(source);
+
+/// Parses an engine-embedded interface module: the `sys` declarations and the other modules the engine embeds.
+/// Only these modules admit `native type`, `native static` and interface clauses (SN1).
+pub fn parse_interface(source: &str) -> Parse<SyntaxTree> {
+    parse_items(source, true, true)
+}
+
+/// Parses an engine-embedded interface file, locating its diagnostics and spans in `file`.
+pub fn parse_interface_with_file(source: &str, file: impl Into<String>) -> Parse<SyntaxTree> {
+    located(parse_interface(source), source, &file.into(), annotate_tree)
+}
+
+/// Parses a module's items. `interface` admits the interface grammar; `module` false admits a
+/// top-level `let`, as the REPL session does.
+pub(crate) fn parse_items(source: &str, interface: bool, module: bool) -> Parse<SyntaxTree> {
+    let mut p = Parser::build(source, interface);
     p.validate_token_grammar();
     let mut items = Vec::new();
     while !p.eof() {
@@ -1188,6 +1223,7 @@ fn annotate_item(item: &mut Item, source: &SourceLines<'_>, file: &str) {
     if let Visibility::Public { span } = &mut item.visibility {
         annotate_span(span, source, file);
     }
+    annotate_native_declaration(&mut item.declaration, source, file);
     match &mut item.declaration {
         Declaration::Function { signature, body } => {
             annotate_signature(signature, source, file);
@@ -1317,12 +1353,9 @@ fn annotate_item(item: &mut Item, source: &SourceLines<'_>, file: &str) {
             }
         }
         Declaration::Assertion { value } => annotate_expr(value, source, file),
-        Declaration::Native { signature, effects } => {
-            annotate_signature(signature, source, file);
-            if let Some(effects) = effects {
-                annotate_native_effect_set(effects, source, file);
-            }
-        }
+        Declaration::Native { .. }
+        | Declaration::NativeType { .. }
+        | Declaration::NativeStatic { .. } => {}
         Declaration::Let {
             pattern,
             annotation,
@@ -1352,6 +1385,42 @@ fn annotate_item(item: &mut Item, source: &SourceLines<'_>, file: &str) {
         }
     }
     annotate_span(&mut item.span, source, file)
+}
+/// Annotates the native declaration forms, which have no bodies: `native fn`, `native type`, `native static`.
+fn annotate_native_declaration(
+    declaration: &mut Declaration,
+    source: &SourceLines<'_>,
+    file: &str,
+) {
+    match declaration {
+        Declaration::Native { signature, effects } => {
+            annotate_signature(signature, source, file);
+            if let Some(effects) = effects {
+                annotate_native_effect_set(effects, source, file);
+            }
+        }
+        Declaration::NativeType { generics, span, .. } => {
+            for parameter in generics {
+                annotate_generic(parameter, source, file);
+            }
+            annotate_span(span, source, file)
+        }
+        Declaration::NativeStatic {
+            annotation,
+            effects,
+            span,
+            ..
+        } => {
+            if let Some(annotation) = annotation {
+                annotate_type(annotation, source, file);
+            }
+            if let Some(effects) = effects {
+                annotate_native_effect_set(effects, source, file);
+            }
+            annotate_span(span, source, file)
+        }
+        _ => {}
+    }
 }
 fn annotate_pattern(pattern: &mut Pattern, source: &SourceLines<'_>, file: &str) {
     match pattern {
@@ -1900,19 +1969,32 @@ struct Parser {
     incomplete_errors: usize,
     budget: NestingBudget,
     lookahead: TokenLookahead,
+    /// The `///` doc lines of the source, in order.
+    docs: Vec<DocLine>,
+    /// Whether this is an engine-embedded interface module.
+    interface: bool,
+    /// The interface clauses of the declaration being parsed, taken by `item` once the declaration is complete (SN1).
+    pending_clauses: InterfaceClauses,
 }
 impl Parser {
     fn new(source: &str) -> Self {
-        let (tokens, errors) = match lex(source) {
-            Ok(tokens) => (tokens, Vec::new()),
-            Err(errors) => {
-                let eof = Token {
-                    kind: TokenKind::Eof,
-                    text: String::new(),
-                    span: SourceSpan::new(source.len(), source.len()),
-                };
-                (vec![eof], errors.into_iter().map(from_lex).collect())
-            }
+        Self::build(source, false)
+    }
+    fn build(source: &str, interface: bool) -> Self {
+        let (tokens, errors, docs) = lex_documented(source);
+        let (tokens, errors, docs) = if errors.is_empty() {
+            (tokens, Vec::new(), docs)
+        } else {
+            let eof = Token {
+                kind: TokenKind::Eof,
+                text: String::new(),
+                span: SourceSpan::new(source.len(), source.len()),
+            };
+            (
+                vec![eof],
+                errors.into_iter().map(from_lex).collect(),
+                Vec::new(),
+            )
         };
         Self {
             lookahead: TokenLookahead::new(&tokens),
@@ -1921,6 +2003,9 @@ impl Parser {
             errors,
             incomplete_errors: 0,
             budget: NestingBudget::new(MAX_PARSE_NESTING),
+            docs,
+            interface,
+            pending_clauses: InterfaceClauses::default(),
         }
     }
     fn mark(&self) -> Mark {
@@ -2670,6 +2755,7 @@ impl Parser {
     }
     fn item(&mut self, module: bool) -> Option<Item> {
         let start = self.current().span.start;
+        let docs = self.take_docs_before(start);
         let mut visibility = Visibility::Private;
         if self.keyword() == Some(Keyword::Pub) {
             visibility = Visibility::Public {
@@ -2721,9 +2807,30 @@ impl Parser {
             ItemKind::Use => self.use_declaration(),
             ItemKind::Function => self.function_declaration(start),
             ItemKind::Native => {
-                // `at_native_declaration` proved the keyword before `native`.
-                self.bump();
-                self.native_declaration(start)
+                // The outer `bump` consumed `native`; the form keyword is read here and consumed by its arm.
+                let form = self.keyword();
+                if matches!(form, Some(Keyword::Type | Keyword::Static)) && !self.interface {
+                    self.error_here(
+                        "ORNA091-E-NATIVE-PLACE",
+                        "native types and statics are permitted only in engine-embedded modules",
+                    );
+                    self.skip_native_declaration();
+                    return None;
+                }
+                match form {
+                    Some(Keyword::Type) => {
+                        self.bump();
+                        self.native_type_declaration(start)
+                    }
+                    Some(Keyword::Static) => {
+                        self.bump();
+                        self.native_static_declaration(start)
+                    }
+                    _ => {
+                        self.bump();
+                        self.native_declaration(start)
+                    }
+                }
             }
             ItemKind::Table | ItemKind::Protocol => self.table_or_protocol_declaration(kind),
             ItemKind::Dimension => self.dimension_declaration(),
@@ -2734,10 +2841,13 @@ impl Parser {
             ItemKind::Expression => unreachable!(),
         };
         let end = self.previous().span.end;
+        let clauses = std::mem::take(&mut self.pending_clauses);
         Some(Item {
             kind,
             visibility,
             span: SourceSpan::new(start, end),
+            docs,
+            clauses,
             declaration,
         })
     }
@@ -2768,8 +2878,26 @@ impl Parser {
                 self.tokens
                     .get(self.at + offset + 1)
                     .map(|token| &token.kind),
-                Some(TokenKind::Keyword(Keyword::Fn))
+                Some(TokenKind::Keyword(
+                    Keyword::Fn | Keyword::Type | Keyword::Static
+                ))
             )
+    }
+
+    /// Takes the `///` lines that sit in the gap directly above the item starting at `start`, that is after the
+    /// previous token and before `start`. Lines in any other gap belong to no item and are dropped (SN1).
+    fn take_docs_before(&mut self, start: usize) -> Vec<String> {
+        let floor = if self.at == 0 {
+            0
+        } else {
+            self.previous().span.end
+        };
+        let split = self.docs.partition_point(|doc| doc.span.end <= start);
+        self.docs
+            .drain(..split)
+            .filter(|doc| doc.span.start >= floor)
+            .map(|doc| doc.text)
+            .collect()
     }
 
     /// Reports a native declaration written outside a module unit's top level
@@ -2853,6 +2981,7 @@ impl Parser {
             None
         };
         let effects = self.parse_native_effect_set();
+        self.pending_clauses = self.parse_interface_clauses(ClauseTarget::NativeFn);
         if self.is_punct("=") {
             self.error_here("ORNA091-E-NATIVE-BODY", "a native declaration has no body");
             self.bump();
@@ -2873,6 +3002,49 @@ impl Parser {
                 span: SourceSpan::new(start, self.previous().span.end),
             },
             effects,
+        }
+    }
+
+    /// `native type Name<T> <clauses>;`. The caller has consumed `native` and `type`. A native type is an opaque
+    /// nominal type that the host supplies, so it has no body (SN1).
+    fn native_type_declaration(&mut self, start: usize) -> Declaration {
+        let name = self.require_name_text();
+        let generics = if self.is_punct("<") {
+            self.parse_generic_parameters()
+        } else {
+            Vec::new()
+        };
+        self.pending_clauses = self.parse_interface_clauses(ClauseTarget::NativeType);
+        self.require_semicolon(MissingSemicolon::NativeDeclaration);
+        Declaration::NativeType {
+            name,
+            generics,
+            span: SourceSpan::new(start, self.previous().span.end),
+        }
+    }
+
+    /// `native static name: T effect set <clauses>;`. The caller has consumed `native` and `static`. A native
+    /// static is a host-supplied singleton value with an annotated type and a mandatory effect set (SN1).
+    fn native_static_declaration(&mut self, start: usize) -> Declaration {
+        let name = self.require_name_text();
+        let annotation = if self.is_punct(":") {
+            self.bump();
+            self.parse_type_expr()
+        } else {
+            self.error_here(
+                "ORNA091-E-NATIVE-TYPE",
+                "a native static requires a type annotation",
+            );
+            None
+        };
+        let effects = self.parse_native_effect_set();
+        self.pending_clauses = self.parse_interface_clauses(ClauseTarget::NativeStatic);
+        self.require_semicolon(MissingSemicolon::NativeDeclaration);
+        Declaration::NativeStatic {
+            name,
+            annotation,
+            effects,
+            span: SourceSpan::new(start, self.previous().span.end),
         }
     }
 
@@ -3157,6 +3329,12 @@ impl Parser {
         } else {
             Vec::new()
         };
+        let target = if kind == ItemKind::Type {
+            ClauseTarget::Type
+        } else {
+            ClauseTarget::Enum
+        };
+        self.pending_clauses = self.parse_interface_clauses(target);
         if kind == ItemKind::Enum && self.is_punct("{") {
             self.enum_declaration(name, generics)
         } else if kind == ItemKind::Type && self.is_punct("{") {

@@ -176,7 +176,7 @@ fn items(machine: &Machine<'_>, count: usize) -> Result<(), Stop> {
 }
 
 /// Wraps a produced string, refusing one longer than the string limit.
-fn bounded(machine: &Machine<'_>, value: String) -> Result<Value, Stop> {
+pub(super) fn bounded(machine: &Machine<'_>, value: String) -> Result<Value, Stop> {
     if value.len() > machine.limits.max_string_bytes {
         Err(Stop::Error("ORNA-EVAL-LIMIT"))
     } else {

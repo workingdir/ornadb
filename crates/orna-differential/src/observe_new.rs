@@ -274,6 +274,8 @@ fn lower_expression_case(case: &Case) -> Result<LoweredProgram, String> {
                 },
                 body: parsed.value,
             },
+            docs: Vec::new(),
+            clauses: orna_syntax::InterfaceClauses::default(),
         }],
         span,
     };
