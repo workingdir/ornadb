@@ -2,6 +2,7 @@
 
 use std::rc::Rc;
 
+use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 use orna_hir::{
     Arg, ArgValue, Arm, AssignOp, BinOp, Body, BodyId, Call, Callee, DefId, DefKind, ExprId,
@@ -48,6 +49,11 @@ impl<'p> Machine<'p> {
                 cond,
                 body: loop_body,
             } => self.while_loop(body, frame, *cond, *loop_body),
+            ExprKind::For {
+                pat,
+                iter,
+                body: loop_body,
+            } => self.for_loop(body, frame, *pat, *iter, *loop_body),
             ExprKind::Return(value) => {
                 let value = self.optional(body, frame, *value)?;
                 Err(Stop::Return(value))
@@ -345,12 +351,15 @@ impl<'p> Machine<'p> {
         then: ExprId,
         els: Option<ExprId>,
     ) -> Result<Value, Stop> {
-        let Some(els) = els else {
-            return Err(Stop::NotYet("if without else (H4)"));
-        };
         match self.eval(body, frame, cond)? {
-            Value::Bool(true) => self.eval(body, frame, then),
-            Value::Bool(false) => self.eval(body, frame, els),
+            Value::Bool(true) => {
+                let value = self.eval(body, frame, then)?;
+                Ok(if els.is_some() { value } else { Value::Unit })
+            }
+            Value::Bool(false) => match els {
+                Some(els) => self.eval(body, frame, els),
+                None => Ok(Value::Unit),
+            },
             _ => Err(Stop::Error("ORNA-EVAL-TYPE")),
         }
     }
@@ -374,6 +383,45 @@ impl<'p> Machine<'p> {
                 Err(stop) => return Err(stop),
             }
         }
+    }
+
+    /// `for` over an integer range literal (`lo..hi` or `lo..=hi`); other
+    /// iterables are not yet evaluated.
+    fn for_loop(
+        &mut self,
+        body: &'p Body,
+        frame: &mut Frame,
+        pat: PatId,
+        iter: ExprId,
+        loop_body: ExprId,
+    ) -> Result<Value, Stop> {
+        let ExprKind::Range {
+            lo: Some(lo),
+            hi: Some(hi),
+            inclusive,
+        } = &body.exprs[iter].kind
+        else {
+            return Err(Stop::NotYet("for over a non-range iterable (H4)"));
+        };
+        let Value::Int(start) = self.eval(body, frame, *lo)? else {
+            return Err(Stop::Error("ORNA-EVAL-TYPE"));
+        };
+        let Value::Int(end) = self.eval(body, frame, *hi)? else {
+            return Err(Stop::Error("ORNA-EVAL-TYPE"));
+        };
+        let mut next = start;
+        while next < end || (*inclusive && next == end) {
+            if !self.matches(body, frame, pat, Value::Int(next.clone()))? {
+                return Err(Stop::Error("ORNA-EVAL-TYPE"));
+            }
+            match self.eval(body, frame, loop_body) {
+                Ok(_) | Err(Stop::Continue) => {}
+                Err(Stop::Break) => return Ok(Value::Unit),
+                Err(stop) => return Err(stop),
+            }
+            next += BigInt::from(1);
+        }
+        Ok(Value::Unit)
     }
 
     fn assign(
