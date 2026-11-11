@@ -13,6 +13,7 @@ use orna_hir::{BinOp, UnOp};
 
 use crate::decimal;
 use crate::error::Stop;
+use crate::float;
 use crate::machine::ExecLimits;
 use crate::value::Value;
 
@@ -20,6 +21,7 @@ pub(crate) fn unary(op: UnOp, operand: Value) -> Result<Value, Stop> {
     match (op, operand) {
         (UnOp::Neg, Value::Int(value)) => Ok(Value::Int(-value)),
         (UnOp::Neg, Value::Decimal(value)) => value.negate().map(Value::Decimal),
+        (UnOp::Neg, Value::Float(bits)) => Ok(float::negate(bits)),
         (UnOp::Not, Value::Bool(value)) => Ok(Value::Bool(!value)),
         _ => Err(Stop::Error("ORNA-EVAL-TYPE")),
     }
@@ -37,6 +39,7 @@ pub(crate) fn binary(
     match (lhs, rhs) {
         (Value::Int(lhs), Value::Int(rhs)) => int_binary(op, &lhs, &rhs, limits),
         (Value::Decimal(lhs), Value::Decimal(rhs)) => decimal::binary(op, &lhs, &rhs),
+        (Value::Float(lhs), Value::Float(rhs)) => float::binary(op, lhs, rhs),
         (Value::Bool(lhs), Value::Bool(rhs)) => match op {
             BinOp::Eq => Ok(Value::Bool(lhs == rhs)),
             BinOp::Ne => Ok(Value::Bool(lhs != rhs)),

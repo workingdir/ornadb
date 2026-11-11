@@ -17,6 +17,8 @@ pub(crate) fn lower_literal(text: &str, kind: LiteralKind) -> Option<Lit> {
         LiteralKind::Integer => parse_int(text).map(Lit::Int),
         LiteralKind::Decimal => parse_decimal(text),
         LiteralKind::Float => text
+            .strip_suffix('f')?
+            .replace('_', "")
             .parse::<f64>()
             .ok()
             .map(|value| Lit::Float(value.to_bits())),
@@ -262,6 +264,19 @@ mod tests {
     use super::{days_from_civil, lower_literal};
     use crate::Lit;
     use orna_syntax::LiteralKind;
+
+    #[test]
+    fn float_literals_lower_with_their_suffix_and_bits() {
+        assert_eq!(
+            lower_literal("1.5f", LiteralKind::Float),
+            Some(Lit::Float(1.5f64.to_bits()))
+        );
+        assert_eq!(
+            lower_literal("1_000.25f", LiteralKind::Float),
+            Some(Lit::Float(1000.25f64.to_bits()))
+        );
+        assert_eq!(lower_literal("1.5", LiteralKind::Float), None);
+    }
 
     #[test]
     fn integers_and_decimals_keep_exact_payloads() {

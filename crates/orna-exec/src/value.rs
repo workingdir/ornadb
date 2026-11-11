@@ -26,6 +26,8 @@ pub enum Value {
     Int(BigInt),
     /// An exact decimal.
     Decimal(Decimal),
+    /// A binary64 float, held as its bit pattern. Every NaN is the canonical NaN.
+    Float(u64),
     /// A string, already unescaped.
     Text(String),
     /// A byte string: the blob a digest or a hash input is.
@@ -89,6 +91,7 @@ impl Value {
             Self::Bool(value) => Ok(Raw::Bool(*value)),
             Self::Int(value) => Ok(Raw::Int(value.clone())),
             Self::Decimal(value) => Ok(value.to_raw()),
+            Self::Float(bits) => Ok(Raw::Float(*bits)),
             Self::Text(value) => Ok(Raw::Text(value.clone())),
             Self::Blob(bytes) => Ok(Raw::Bytes(bytes.to_vec())),
             Self::Option(value) => option_raw(value.as_deref()),

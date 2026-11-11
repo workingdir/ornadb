@@ -11,6 +11,7 @@ mod binders;
 mod decimal;
 mod error;
 mod eval;
+mod float;
 mod frame;
 mod link;
 mod machine;

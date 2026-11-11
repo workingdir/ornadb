@@ -93,8 +93,8 @@ impl<'p> Machine<'p> {
                 coefficient,
                 exponent,
             } => Decimal::new(coefficient.clone(), exponent.clone()).map(Value::Decimal),
-            Lit::Float(_)
-            | Lit::None
+            Lit::Float(bits) => Ok(crate::float::canonical(f64::from_bits(*bits))),
+            Lit::None
             | Lit::Date(_)
             | Lit::Instant { .. }
             | Lit::Period(_)
