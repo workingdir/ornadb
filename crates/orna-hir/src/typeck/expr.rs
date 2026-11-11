@@ -402,6 +402,7 @@ impl<'a> BodyCheck<'a> {
         span: SyntaxSpan,
     ) -> Result<Ty, NotYetReason> {
         let scrutinee_ty = self.infer_expr(body, scrutinee, None)?;
+        self.record_case(body, scrutinee_ty, arms, span.clone());
         let mut result = None;
         for arm in arms {
             self.bind_pattern(body, arm.pat, scrutinee_ty, span.clone())?;
