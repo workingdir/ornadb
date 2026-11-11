@@ -16,3 +16,12 @@
 agreed = 43
 evaluable = 110
 steps-exact = 43
+old-harness-environment = 1
+
+# Cases the executor runs against a declared table that the old pipeline answers `ORNA-EVAL-NAME`
+# only because the H0 observer supplies no table store for a module with no rows. The count is a
+# ratchet that may only shrink; each case needs a `[[harness-allowance]]`.
+[[harness-allowance]]
+case = "valid/minimal-root.orna"
+reason = "the H0 observer supplies no table store for a module with no rows; the executor result is the spec result (example cases run on empty tables, so `count()` is 0)"
+bead = "ornadb-csenl.21"

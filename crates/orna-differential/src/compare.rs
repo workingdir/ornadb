@@ -382,6 +382,9 @@ pub struct ExecShare {
     pub evaluable: usize,
     /// Agreeing runs whose executor step count equals the old pipeline's exactly.
     pub steps_exact: usize,
+    /// Executor runs against a declared table that the old pipeline answers `ORNA-EVAL-NAME`
+    /// because the H0 observer supplies no table store; each is covered by a `[[harness-allowance]]`.
+    pub old_harness_environment: usize,
 }
 
 /// Reads `tests/differential/exec-share.toml`.
@@ -403,11 +406,54 @@ pub fn parse_exec_share(source: &str) -> Result<ExecShare, String> {
         .map_err(|_| "exec-share.toml: `evaluable` must be non-negative".to_owned())?;
     let steps_exact = usize::try_from(table.integer("steps-exact")?)
         .map_err(|_| "exec-share.toml: `steps-exact` must be non-negative".to_owned())?;
+    let old_harness_environment = usize::try_from(table.integer("old-harness-environment")?)
+        .map_err(|_| {
+            "exec-share.toml: `old-harness-environment` must be non-negative".to_owned()
+        })?;
     Ok(ExecShare {
         agreed,
         evaluable,
         steps_exact,
+        old_harness_environment,
     })
+}
+
+/// One accepted old-harness environment difference: the executor ran `case`, which declares a
+/// table, and the old pipeline answers `ORNA-EVAL-NAME` because the H0 observer supplies no table
+/// store for a module with no rows. The executor's result is the spec result (example cases run
+/// on empty tables), so the old side is the environment, not the executor.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HarnessAllowance {
+    /// The case.
+    pub case: String,
+    /// Why the old pipeline's outcome is the harness environment.
+    pub reason: String,
+    /// The bead that closes the difference.
+    pub bead: String,
+}
+
+/// Reads the `[[harness-allowance]]` tables of `tests/differential/exec-share.toml`.
+pub fn load_harness_allowances() -> Result<Vec<HarnessAllowance>, String> {
+    let path = differential_dir().join("exec-share.toml");
+    parse_harness_allowances(&read_file(&path)?)
+}
+
+/// Parses the harness allowances. A missing reason or bead is a load error.
+pub fn parse_harness_allowances(source: &str) -> Result<Vec<HarnessAllowance>, String> {
+    let document = toml_lite::parse(source)?;
+    let mut allowances = Vec::new();
+    for table in document.tables_named("harness-allowance") {
+        let case = table.string("case")?.to_owned();
+        let reason = table.string("reason")?.to_owned();
+        let bead = table.string("bead")?.to_owned();
+        if reason.trim().is_empty() || bead.trim().is_empty() {
+            return Err(format!(
+                "{case}: a harness allowance needs a reason and a bead"
+            ));
+        }
+        allowances.push(HarnessAllowance { case, reason, bead });
+    }
+    Ok(allowances)
 }
 
 /// One accepted step-count disagreement: the executor charges `executor` steps for a case the
@@ -500,6 +546,20 @@ pub fn exec_share_ratchet(recorded: ExecShare, observed: ExecShare) -> Vec<Strin
         failures.push(format!(
             "exact step parity rose from {} to {}; record {} in exec-share.toml",
             recorded.steps_exact, observed.steps_exact, observed.steps_exact
+        ));
+    }
+    if observed.old_harness_environment > recorded.old_harness_environment {
+        failures.push(format!(
+            "old-harness environment differences rose from {} to {}; the ratchet only shrinks",
+            recorded.old_harness_environment, observed.old_harness_environment
+        ));
+    }
+    if observed.old_harness_environment < recorded.old_harness_environment {
+        failures.push(format!(
+            "old-harness environment differences fell from {} to {}; record {} in exec-share.toml",
+            recorded.old_harness_environment,
+            observed.old_harness_environment,
+            observed.old_harness_environment
         ));
     }
     failures
