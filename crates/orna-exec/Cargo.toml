@@ -18,8 +18,6 @@ unicode-normalization = "=0.1.24"
 num-bigint = "0.4.6"
 orna-hir = { path = "../orna-hir" }
 orna-value = { path = "../orna-value" }
-
-[dev-dependencies]
 orna-syntax = { path = "../orna-syntax" }
 
 [features]

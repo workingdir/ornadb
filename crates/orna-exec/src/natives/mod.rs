@@ -8,15 +8,19 @@ mod bits;
 mod call;
 mod collection;
 mod hash;
+mod json;
 mod order;
+mod orna;
 mod ovb;
 #[cfg(test)]
 mod registry_test;
 #[cfg(test)]
 mod registry_tests;
+mod schema;
 mod stats;
 mod stats_decimal;
 mod stats_histogram;
+mod stats_mean;
 mod stats_median;
 mod stats_percentile;
 mod stats_round;
@@ -24,6 +28,8 @@ mod stats_series;
 mod stats_stddev;
 mod stats_variance;
 mod text;
+mod time;
+mod time_format;
 mod unicode_16_case_properties;
 mod unicode_case;
 mod values;
@@ -44,8 +50,13 @@ pub(crate) fn lookup(key: &NativeKey) -> Option<NativeFn> {
     Some(match (module.as_str(), key.name.as_str()) {
         ("core.encoding.base64", "encode") => base64::encode,
         ("core.encoding.base64", "decode") => base64::decode,
+        ("core.encoding.json", "encode") => json::encode,
+        ("core.encoding.orna", "encode") => orna::encode,
+        ("core.encoding.orna", "decode") => orna::decode,
+        ("core.encoding.json", "decode") => json::decode,
         ("core.encoding.ovb", "encode") => ovb::encode,
         ("core.encoding.ovb", "decode") => ovb::decode,
+        ("core.encoding.json", "decode_with_options") => json::decode_with_options,
         ("core.bits", "bit_or") => bits::bit_or,
         ("core.bits", "bit_and") => bits::bit_and,
         ("core.bits", "bit_xor") => bits::bit_xor,
@@ -99,6 +110,7 @@ pub(crate) fn lookup(key: &NativeKey) -> Option<NativeFn> {
         ("core.stats", "max") => stats::max,
         ("core.stats", "range") => stats::range,
         ("core.stats", "mode") => stats::mode,
+        ("core.stats", "mean") => stats_mean::mean,
         ("core.stats", "histogram") => stats_histogram::histogram,
         ("core.text", "trim") => text::trim,
         ("core.text", "split") => text::split,
@@ -110,6 +122,12 @@ pub(crate) fn lookup(key: &NativeKey) -> Option<NativeFn> {
         ("core.text", "normalise") => text::normalise,
         ("core.text", "lower") => text::lower,
         ("core.text", "upper") => text::upper,
+        ("core.time", "offset_at") => time::offset_at,
+        ("core.time", "resolve_local") => time::resolve_local,
+        ("core.time", "duration_compact_format") => time_format::duration_compact_format,
+        ("core.time", "duration_clock_format") => time_format::duration_clock_format,
+        ("core.time", "duration_words_format") => time_format::duration_words_format,
+        ("core.time", "duration_iso_format") => time_format::duration_iso_format,
         _ => return None,
     })
 }
