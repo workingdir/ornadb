@@ -344,8 +344,8 @@ pub struct AssertionDef {
 pub struct FieldDef {
     /// The declared type.
     pub ty: Ty,
-    /// How a table field gets its value when a row omits it. Only table fields
-    /// carry one; other fields are always written by the caller.
+    /// How the field gets its value when a row or record omits it. A table field's default reads its row
+    /// as `self`; a nominal default is a closed expression. Other fields are always written by the caller.
     pub initializer: Option<FieldInitializer>,
 }
 
