@@ -69,7 +69,11 @@ fn insertion_sort(machine: &mut Machine<'_>, sorted: &mut [Value]) -> Result<(),
 
 /// The total order over median rows. Integers compare by value, floats by the IEEE total order, and decimals exactly
 /// after aligning their exponents. An exponent gap beyond the integer digit limit is a limit error.
-fn compare_rows(limits: &ExecLimits, left: &Value, right: &Value) -> Result<Ordering, Stop> {
+pub(super) fn compare_rows(
+    limits: &ExecLimits,
+    left: &Value,
+    right: &Value,
+) -> Result<Ordering, Stop> {
     match (left, right) {
         (Value::Int(left), Value::Int(right)) => Ok(left.cmp(right)),
         (Value::Float(left), Value::Float(right)) => Ok(orna_value::float_total_cmp(*left, *right)),
@@ -100,7 +104,7 @@ fn compare_decimals(
 
 /// The average of two middle elements: exact for integers and decimals (rounded to the scale when one is given), and
 /// the canonical float mean for floats.
-fn average_values(
+pub(super) fn average_values(
     limits: &ExecLimits,
     left: &Value,
     right: &Value,

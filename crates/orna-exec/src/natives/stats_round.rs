@@ -93,3 +93,46 @@ pub(super) fn divide_rounded(
     }
     Decimal::new(quotient, -BigInt::from(scale))
 }
+
+/// The decimal split into the index of its floor and the fraction in `[0, 1)` above it, the fraction kept with the
+/// original exponent. A negative value is a value error; an index too large to count is a limit error.
+pub(super) fn decimal_floor_fraction(
+    limits: &ExecLimits,
+    value: &Decimal,
+) -> Result<(usize, Decimal), Stop> {
+    if value.coefficient().is_negative() {
+        return Err(Stop::Error("ORNA-EVAL-VALUE"));
+    }
+    if !value.exponent10().is_negative() {
+        let power = count(value.exponent10())?;
+        let index = value.coefficient() * ten_pow(power, limits)?;
+        return Ok((
+            count(&index)?,
+            Decimal::new(BigInt::zero(), BigInt::zero())?,
+        ));
+    }
+    let divisor = ten_pow(count(&-value.exponent10())?, limits)?;
+    let (index, remainder) = value.coefficient().div_rem(&divisor);
+    Ok((
+        count(&index)?,
+        Decimal::new(remainder, value.exponent10().clone())?,
+    ))
+}
+
+/// The decimal as a float. A value the float cannot hold finitely is a value error.
+pub(super) fn decimal_to_f64(value: &Decimal) -> Result<f64, Stop> {
+    let coefficient = value
+        .coefficient()
+        .to_f64()
+        .ok_or(Stop::Error("ORNA-EVAL-VALUE"))?;
+    let exponent = value
+        .exponent10()
+        .to_i32()
+        .ok_or(Stop::Error("ORNA-EVAL-LIMIT"))?;
+    let scaled = coefficient * 10f64.powi(exponent);
+    if scaled.is_finite() {
+        Ok(scaled)
+    } else {
+        Err(Stop::Error("ORNA-EVAL-VALUE"))
+    }
+}
