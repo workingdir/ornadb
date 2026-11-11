@@ -6,7 +6,7 @@ use num_traits::ToPrimitive;
 use orna_hir::{
     Arg, ArgValue, Arm, AssignOp, BinOp, Body, BodyId, Call, Callee, DefId, DefKind, ExprId,
     ExprKind, FieldRef, FnBody, IntrinsicForm, Lit, LocalId, LogicOp, Name, ParamDef, Pat, PatId,
-    Place, Stmt,
+    InterpPart, Place, Stmt,
 };
 
 use crate::binders;
@@ -77,8 +77,28 @@ impl<'p> Machine<'p> {
             {
                 self.nominal(body, frame, fields)
             }
+            ExprKind::Interp(parts) => self.interpolate(body, frame, parts),
             _ => Err(Stop::NotYet(kind_name(&body.exprs[id].kind))),
         }
+    }
+
+    /// Runs an interpolation: each expression part is a `Display` call yielding its text, and the parts concatenate
+    /// in order, bounded by the string limit.
+    fn interpolate(&mut self, body: &'p Body, frame: &mut Frame, parts: &'p [InterpPart]) -> Result<Value, Stop> {
+        let mut text = String::new();
+        for part in parts {
+            match part {
+                InterpPart::Text(literal) => text.push_str(literal),
+                InterpPart::Expr(value) => match self.eval(body, frame, *value)? {
+                    Value::Text(piece) => text.push_str(&piece),
+                    _ => return Err(Stop::Error("ORNA-EVAL-TYPE")),
+                },
+            }
+            if text.len() > self.limits.max_string_bytes {
+                return Err(Stop::Error("ORNA-EVAL-LIMIT"));
+            }
+        }
+        Ok(Value::Text(text))
     }
 
     fn literal(&self, lit: &Lit) -> Result<Value, Stop> {

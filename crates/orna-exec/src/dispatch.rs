@@ -12,6 +12,7 @@ use std::rc::Rc;
 
 use orna_hir::{DefId, DefKind, FnBody, Program, Ty, TyKind};
 
+use crate::engine_display;
 use crate::engine_order;
 use crate::error::Stop;
 use crate::frame::TypeEnv;
@@ -113,6 +114,13 @@ impl<'p> Machine<'p> {
             let ordering = engine_order::compare(&values[0], &values[1])?;
             return self.ordering_value(ordering);
         }
+        if name == "display"
+            && is_display(program, protocol)
+            && orna_hir::engine_display::derives_display(program, self_ty)
+        {
+            let values = natives::in_parameter_order(arguments, 1)?;
+            return Ok(Value::Text(engine_display::text(&values[0])?));
+        }
         let Some(instance) = self.find_instance(protocol, &env[..arity], self_ty, name) else {
             return Err(Stop::Error("ORNA-EVAL-NAME"));
         };
@@ -200,6 +208,13 @@ fn is_order(program: &Program, protocol: DefId) -> bool {
     let definition = &program.defs[protocol];
     definition.name.as_str() == "Order"
         && program.modules[definition.module].path.to_string() == "core.ops"
+}
+
+/// Whether `protocol` is the `core.display` protocol `Display`.
+fn is_display(program: &Program, protocol: DefId) -> bool {
+    let definition = &program.defs[protocol];
+    definition.name.as_str() == "Display"
+        && program.modules[definition.module].path.to_string() == "core.display"
 }
 
 /// Every protocol member, keyed to the protocol that declares it.
