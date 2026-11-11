@@ -9,11 +9,20 @@ mod call;
 mod collection;
 mod hash;
 mod order;
+mod ovb;
 #[cfg(test)]
 mod registry_test;
 #[cfg(test)]
 mod registry_tests;
 mod stats;
+mod stats_decimal;
+mod stats_histogram;
+mod stats_median;
+mod stats_percentile;
+mod stats_round;
+mod stats_series;
+mod stats_stddev;
+mod stats_variance;
 mod text;
 mod unicode_16_case_properties;
 mod unicode_case;
@@ -35,6 +44,8 @@ pub(crate) fn lookup(key: &NativeKey) -> Option<NativeFn> {
     Some(match (module.as_str(), key.name.as_str()) {
         ("core.encoding.base64", "encode") => base64::encode,
         ("core.encoding.base64", "decode") => base64::decode,
+        ("core.encoding.ovb", "encode") => ovb::encode,
+        ("core.encoding.ovb", "decode") => ovb::decode,
         ("core.bits", "bit_or") => bits::bit_or,
         ("core.bits", "bit_and") => bits::bit_and,
         ("core.bits", "bit_xor") => bits::bit_xor,
@@ -77,10 +88,18 @@ pub(crate) fn lookup(key: &NativeKey) -> Option<NativeFn> {
         ("core.collection", "group_by") => collection::keyed::group_by,
         ("core.collection", "asof_join") => collection::keyed::asof_join,
         ("core.stats", "sum") => collection::basic::sum,
+        ("core.stats", "median") => stats_median::median,
+        ("core.stats", "percentile") => stats_percentile::percentile,
+        ("core.stats", "rate") => stats_series::rate,
+        ("core.stats", "derivative") => stats_series::derivative,
+        ("core.stats", "integrate") => stats_series::integrate,
+        ("core.stats", "variance") => stats_variance::variance,
+        ("core.stats", "standard_deviation") => stats_stddev::standard_deviation,
         ("core.stats", "min") => stats::min,
         ("core.stats", "max") => stats::max,
         ("core.stats", "range") => stats::range,
         ("core.stats", "mode") => stats::mode,
+        ("core.stats", "histogram") => stats_histogram::histogram,
         ("core.text", "trim") => text::trim,
         ("core.text", "split") => text::split,
         ("core.text", "join") => text::join,
