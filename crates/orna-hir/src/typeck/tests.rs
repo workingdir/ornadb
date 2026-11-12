@@ -141,6 +141,19 @@ fn a_constraint_conflict_names_both_sides() {
 }
 
 #[test]
+fn a_range_membership_is_typed_by_the_element_type() {
+    let mut program = program("pub fn f(value: Int): Bool = value in 1..=5;\n");
+    let summary = typeck(&mut program);
+    assert!(test_accepted(&program, &summary), "{summary:?}");
+}
+
+#[test]
+fn a_range_membership_with_a_mismatched_element_is_a_conflict() {
+    let mut program = program("pub fn f(value: Str): Bool = value in 1..=5;\n");
+    let summary = typeck(&mut program);
+    assert!(!test_accepted(&program, &summary), "{summary:?}");
+}
+#[test]
 fn an_enum_constructor_and_case_are_typed() {
     let mut program = program(
         "pub enum Status { draft, published }\n\

@@ -187,6 +187,25 @@ impl BodyCheck<'_> {
             .find(|variant| self.program.defs[*variant].name == name)
     }
 
+    /// Types `value in range` as membership (ORNA-RANGE-006): the value has the
+    /// range's element type and the result is Bool.
+    pub(super) fn range_membership_ty(
+        &mut self,
+        op: BinOp,
+        value: Ty,
+        range: Ty,
+        span: SyntaxSpan,
+    ) -> Option<Ty> {
+        if !matches!(op, BinOp::In) {
+            return None;
+        }
+        let Some(TyKind::Range(element)) = self.kind_of(self.resolved(range)) else {
+            return None;
+        };
+        self.unify(value, element, span);
+        Some(self.intern(TyKind::Bool))
+    }
+
     /// Types `value in container` through the `Contains` instance of a nominal container.
     ///
     /// The container is the receiver, so the operator becomes `container.contains(value)`.

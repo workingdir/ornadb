@@ -890,6 +890,9 @@ impl<'a> BodyCheck<'a> {
         if let Some(result) = self.quantity_binary(body, op, left, right, rhs, span.clone()) {
             return Ok(result);
         }
+        if let Some(result) = self.range_membership_ty(op, left, right, span.clone()) {
+            return Ok(result);
+        }
         let comparison = matches!(
             op,
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge

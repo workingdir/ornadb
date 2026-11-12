@@ -100,9 +100,11 @@ fn recorded_reason(code: &str) -> Option<&'static str> {
         "ORNA-S021-TYPE" => {
             Some("checker call-site type mismatch; HIR reports the conflict as ORNA-INFER-011")
         }
-        "ORNA-INFER-011" => {
-            Some("HIR constraint conflict; the checker reports the same site as ORNA-S021-TYPE")
-        }
+        "ORNA-INFER-011" => Some(
+            "HIR constraint conflict. Range membership (`value in range`, ORNA-RANGE-006) is typed; the \
+             residual conflict is a legacy fixture passing `0..10` where the spec's `take(rows, count: Int)` \
+             takes an Int (09-standard-library.md:31); the checker reports the same site as ORNA-S021-TYPE",
+        ),
         "ORNA-INFER-007" => {
             Some("HIR unsolved-variable diagnostic; the checker has no code for it")
         }
@@ -112,8 +114,9 @@ fn recorded_reason(code: &str) -> Option<&'static str> {
              not a spec-required error",
         ),
         "ORNA-S022-UNSUPPORTED" => Some(
-            "HIR reports forms the H2a subset does not type, and top-level offset or affine units (units.md C6, \
-                 user modules; valid/affine-unit); otherwise unclassified",
+            "HIR reports `sys` as a module rather than a value and does not represent sys declarations or \
+             module calls (stage H5, sys.orna lowering, docs/design/hir.md); also top-level offset or affine \
+             units (H2c, valid/affine-unit) and one unary-operator table artifact",
         ),
         "ORNA-EVAL-ARGUMENT" => Some(
             "HIR binds named arguments only against statically known parameter labels; member, std and \
