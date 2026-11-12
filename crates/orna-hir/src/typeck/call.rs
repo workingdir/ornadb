@@ -118,6 +118,9 @@ impl<'a> BodyCheck<'a> {
             }
             Callee::Value { callee } => {
                 let callee = *callee;
+                if let ExprKind::Lambda { body: child, .. } = body.exprs[callee].kind {
+                    return self.applied_lambda_ty(body, callee, child, &call.args, span);
+                }
                 let callee_ty = self.infer_expr(body, callee, None)?;
                 let resolved = self.resolved(callee_ty);
                 let Some(TyKind::Fn(function)) = self.kind_of(resolved) else {
@@ -344,6 +347,61 @@ impl<'a> BodyCheck<'a> {
             self.infer_expr(body, id, Some(expected))?;
         }
         Ok(())
+    }
+
+    /// Types a lambda applied at once (`(x => e)(a)`, or a piped `a | (x => e)`). Each parameter is checked
+    /// against its declared type or, when unannotated, against the argument it receives, so the body sees the
+    /// argument's type before it is checked. The lambda's own return type is the call's type.
+    fn applied_lambda_ty(
+        &mut self,
+        body: &mut Body,
+        callee: ExprId,
+        child: BodyId,
+        arguments: &[Arg],
+        span: SyntaxSpan,
+    ) -> Result<Ty, NotYetReason> {
+        let params = self.lambda_param_tys(child);
+        if arguments.len() > params.len() {
+            self.conflict(
+                "the call supplies more arguments than parameters",
+                span.clone(),
+            );
+        }
+        for (argument, param) in arguments.iter().zip(params.iter()) {
+            self.check_argument(body, argument, *param, span.clone())?;
+        }
+        let ret = self.infer.new_var(&mut self.program.tys, span.clone());
+        let function = self.intern(TyKind::Fn(FnTy {
+            params: params.into_boxed_slice(),
+            ret,
+            effects: crate::EffectRow::Hidden,
+        }));
+        let lambda_ty = self.infer_expr(body, callee, Some(function))?;
+        let resolved = self.resolved(lambda_ty);
+        match self.kind_of(resolved) {
+            Some(TyKind::Fn(lambda)) => Ok(lambda.ret),
+            _ => Ok(self.error()),
+        }
+    }
+
+    /// The parameter types of a lambda body: its annotation, or a fresh variable where it omits one.
+    fn lambda_param_tys(&mut self, child: BodyId) -> Vec<Ty> {
+        let lambda = &self.program.bodies[child];
+        let declared: Vec<(Ty, SyntaxSpan)> = lambda
+            .params
+            .iter()
+            .map(|local| (lambda.locals[*local].ty, lambda.locals[*local].span.clone()))
+            .collect();
+        declared
+            .into_iter()
+            .map(|(ty, span)| {
+                if matches!(self.program.tys.kind(ty), Some(TyKind::Error)) {
+                    self.infer.new_var(&mut self.program.tys, span)
+                } else {
+                    ty
+                }
+            })
+            .collect()
     }
 
     /// Types one table operation result and its arguments.

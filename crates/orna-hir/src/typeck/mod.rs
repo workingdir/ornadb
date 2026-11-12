@@ -637,7 +637,14 @@ impl<'a> BodyCheck<'a> {
             }
             self.working.insert(id, body);
         }
-        for (var, span) in self.infer.unsolved() {
+        // An earlier error explains the open variables: a body that already carries one, or a module whose
+        // declarations failed to resolve, leaves the failed expression's type unbound.
+        let unsolved = if self.explained_by_error() {
+            Vec::new()
+        } else {
+            self.infer.unsolved()
+        };
+        for (var, span) in unsolved {
             self.conflicts += 1;
             self.diagnostics.push(HirDiagnostic::new(
                 INFER_AMBIGUOUS,
@@ -665,9 +672,22 @@ impl<'a> BodyCheck<'a> {
         self.diagnostics.push(diagnostic);
     }
 
+    /// Whether an earlier error already explains an open type: a body or module that reported one.
+    /// Only an open type with no earlier error is under-constrained (ORNA-INFER-007).
+    fn explained_by_error(&self) -> bool {
+        let module = self.program.defs[self.owner].module;
+        self.diagnostics
+            .iter()
+            .chain(self.program.modules[module].diagnostics.iter())
+            .any(|d| d.code != INFER_AMBIGUOUS)
+    }
+
     /// Reports an operand whose type stays open at the point it is used
-    /// (ORNA-INFER-007), naming the operand as the annotation site.
+    /// (ORNA-INFER-007), naming the operand as the annotation site. An earlier error explains it.
     fn ambiguous(&mut self, span: SyntaxSpan) {
+        if self.explained_by_error() {
+            return;
+        }
         let diagnostic = HirDiagnostic::new(
             INFER_AMBIGUOUS,
             Box::<str>::from(
@@ -764,6 +784,20 @@ impl<'a> BodyCheck<'a> {
             }
             (ExprKind::Case { scrutinee, arms }, expected) => {
                 self.check_case(body, scrutinee, &arms, expected, span.clone())?
+            }
+            (
+                ExprKind::Lit(crate::Lit::Decimal {
+                    coefficient,
+                    exponent,
+                }),
+                Some(expected),
+            ) if matches!(self.kind_of(self.resolved(expected)), Some(TyKind::Float)) => {
+                // ORNA-LIT-002: an unsuffixed numeral checked against Float is correctly rounded to binary64.
+                // The decimal text is exact, and Rust's float parser rounds to nearest, ties to even.
+                let text = format!("{coefficient}e{exponent}");
+                let value = text.parse::<f64>().unwrap_or(f64::NAN);
+                body.exprs[id].kind = ExprKind::Lit(crate::Lit::Float(value.to_bits()));
+                expected
             }
             (kind, expected) => {
                 let ty = self.infer_shallow(body, id, kind, span.clone())?;
