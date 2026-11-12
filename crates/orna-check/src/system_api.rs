@@ -10,20 +10,15 @@ use std::{
     sync::OnceLock,
 };
 
-#[cfg(test)]
+use orna_sys_interface::{RawField, RawFunction, RawSystemApi, RawValueType};
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
 const MAX_JSON_NESTING_DEPTH: usize = 128;
 
-#[cfg(test)]
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 fn generated_system_api_json() -> &'static str {
     static GENERATED: OnceLock<String> = OnceLock::new();
     GENERATED.get_or_init(orna_sys::system_api_json).as_str()
-}
-
-#[cfg(test)]
-#[cfg(target_arch = "wasm32")]
-fn generated_system_api_json() -> &'static str {
-    include_str!("../generated/sys_api.json")
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -241,7 +236,9 @@ pub(crate) enum SystemApiError {
 
 impl SystemApi {
     pub(crate) fn embedded() -> Result<Self, SystemApiError> {
-        let api = Self::from_raw(native_raw::native_raw_document()?)?;
+        let descriptor =
+            orna_sys_interface::native_raw_document().map_err(|_| SystemApiError::InvalidJson)?;
+        let api = Self::from_raw(descriptor)?;
         #[cfg(not(target_arch = "wasm32"))]
         api.validate_dispatch_table(orna_sys::system_dispatch_table())?;
         #[cfg(not(target_arch = "wasm32"))]
@@ -346,7 +343,7 @@ impl SystemApi {
         Ok(())
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) fn from_json(source: &str) -> Result<Self, SystemApiError> {
         Self::from_raw(raw_document(source)?)
     }
@@ -1657,101 +1654,10 @@ fn split_top_level(source: &str, separator: char) -> Vec<&str> {
     pieces
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod json_guard;
-mod native_raw;
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 use json_guard::raw_document;
-
-#[derive(Debug, PartialEq)]
-struct RawSystemApi {
-    counts: RawCounts,
-    singletons: Vec<RawSingleton>,
-    opaque_identifiers: Vec<String>,
-    reference_aliases: Vec<RawReferenceAlias>,
-    value_types: Vec<RawValueType>,
-    enums: BTreeMap<String, Vec<String>>,
-    relations: Vec<RawRelation>,
-    functions: Vec<RawFunction>,
-    failure_codes: Vec<String>,
-    removed_names: BTreeMap<String, RawRemovedName>,
-}
-
-#[derive(Debug, PartialEq)]
-struct RawCounts {
-    singletons: usize,
-    opaque_identifiers: usize,
-    reference_aliases: usize,
-    value_types: usize,
-    enums: usize,
-    relations: usize,
-    functions: usize,
-    failure_codes: usize,
-}
-
-#[derive(Debug, PartialEq)]
-struct RawSingleton {
-    name: String,
-    ty: String,
-    availability: String,
-}
-
-#[derive(Debug, PartialEq)]
-struct RawReferenceAlias {
-    name: String,
-    target: String,
-    definition: String,
-}
-
-#[derive(Debug, PartialEq)]
-struct RawValueType {
-    name: String,
-    kind: String,
-    purpose: String,
-    type_parameters: Vec<String>,
-    fields: Vec<RawField>,
-    invariants: Vec<String>,
-}
-
-#[derive(Debug, PartialEq)]
-struct RawRelation {
-    name: String,
-    grouped_handle: String,
-    kind: String,
-    availability: String,
-    key: String,
-    purpose: String,
-    key_fields: Vec<String>,
-    invariants: Vec<String>,
-    fields: Vec<RawField>,
-    writable: bool,
-    reference_type: String,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-struct RawField {
-    name: String,
-    ty: String,
-}
-
-#[derive(Debug, PartialEq)]
-struct RawFunction {
-    name: String,
-    signature: String,
-    effect: String,
-    purpose: String,
-    since: Option<String>,
-    contract: Option<String>,
-    preconditions: Option<String>,
-    ownership: Option<String>,
-    snapshot_rule: Option<String>,
-}
-
-#[derive(Debug, PartialEq)]
-struct RawRemovedName {
-    replacement: Option<String>,
-    diagnostic: String,
-}
 
 fn validate_value_type_metadata(value: &RawValueType) -> Result<(), SystemApiError> {
     if !matches!(
@@ -1768,24 +1674,12 @@ fn validate_value_type_metadata(value: &RawValueType) -> Result<(), SystemApiErr
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
 
     fn document() -> serde_json::Value {
         serde_json::from_str(generated_system_api_json()).unwrap()
-    }
-
-    // Wasm builds read the committed copy; native builds read the generator.
-    // This pins them together so the copy cannot drift silently.
-    #[cfg(not(target_arch = "wasm32"))]
-    #[test]
-    fn committed_wasm_copy_matches_generated_system_api() {
-        assert_eq!(
-            include_str!("../generated/sys_api.json"),
-            orna_sys::system_api_json(),
-            "generated/sys_api.json is stale; regenerate it from orna-sys"
-        );
     }
 
     fn value_type(document: &mut serde_json::Value) -> &mut serde_json::Value {
@@ -3185,5 +3079,5 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod native_equivalence;

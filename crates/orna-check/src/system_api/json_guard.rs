@@ -1,9 +1,10 @@
-//! Test-only oracle for the `sys` descriptor: the retired JSON decoder.
+//! Test-only decoder for the `sys` descriptor JSON document that `orna-sys` builds in memory.
 //!
-//! `sys.orna` is the authority. The generated JSON artifact is still decoded here, so the guard test can prove the
-//! native declarations reproduce it field by field.
+//! Tests decode that document here, so the checker's JSON path is covered without a committed copy.
+//! `sys.orna` remains the authority.
 
 use super::*;
+use orna_sys_interface::{RawCounts, RawReferenceAlias, RawRelation, RawRemovedName, RawSingleton};
 
 pub(super) fn raw_document(source: &str) -> Result<RawSystemApi, SystemApiError> {
     reject_duplicate_json_members(source)?;
@@ -55,6 +56,11 @@ pub(super) fn raw_document(source: &str) -> Result<RawSystemApi, SystemApiError>
                         value => Some(text(value)?.to_owned()),
                     },
                     diagnostic: text(value_at(value, "diagnostic")?)?.to_owned(),
+                    reason: match value.get("reason") {
+                        None => None,
+                        Some(value) if value.is_null() => None,
+                        Some(value) => Some(text(value)?.to_owned()),
+                    },
                 },
             ))
         })
@@ -386,44 +392,9 @@ fn optional_text(value: Option<&serde_json::Value>) -> Result<Option<String>, Sy
         .map(|value| value.map(str::to_owned))
 }
 
-/// Asserts two descriptor sequences agree row by row, naming the first row that differs.
-fn assert_rows_match<T: PartialEq + std::fmt::Debug>(what: &str, native: &[T], json: &[T]) {
-    for (index, (native_row, json_row)) in native.iter().zip(json).enumerate() {
-        assert_eq!(native_row, json_row, "{what} row {index} differs");
-    }
-    assert_eq!(native.len(), json.len(), "{what} row count differs");
-}
-
-#[test]
-fn native_declarations_reproduce_the_json_descriptor_field_by_field() {
-    let json = raw_document(include_str!(
-        "../../../orna-sys-id/catalogue/sys-1.1.0.json"
-    ))
-    .expect("the generated JSON descriptor decodes");
-    let native = super::native_raw::native_raw_document().expect("sys.orna decodes");
-    assert_eq!(native.counts, json.counts);
-    assert_rows_match("singletons", &native.singletons, &json.singletons);
-    assert_rows_match(
-        "opaque identifiers",
-        &native.opaque_identifiers,
-        &json.opaque_identifiers,
-    );
-    assert_rows_match(
-        "reference aliases",
-        &native.reference_aliases,
-        &json.reference_aliases,
-    );
-    assert_rows_match("value types", &native.value_types, &json.value_types);
-    assert_eq!(native.enums, json.enums);
-    assert_rows_match("relations", &native.relations, &json.relations);
-    assert_rows_match("functions", &native.functions, &json.functions);
-    assert_eq!(native.failure_codes, json.failure_codes);
-    assert_eq!(native.removed_names, json.removed_names);
-}
-
 #[test]
 fn native_relations_are_read_only() {
-    let native = super::native_raw::native_raw_document().expect("sys.orna decodes");
+    let native = orna_sys_interface::native_raw_document().expect("sys.orna decodes");
     assert!(!native.relations.is_empty());
     for relation in &native.relations {
         assert!(

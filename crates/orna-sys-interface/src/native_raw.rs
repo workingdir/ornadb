@@ -10,39 +10,36 @@ use orna_syntax::{
     TypeMember, TypeRepresentation, parse_interface,
 };
 
-use super::{
-    RawCounts, RawField, RawFunction, RawReferenceAlias, RawRelation, RawRemovedName, RawSingleton,
-    RawSystemApi, RawValueType, SystemApiError,
+use crate::{
+    InvalidSysInterface, RawCounts, RawField, RawFunction, RawReferenceAlias, RawRelation,
+    RawRemovedName, RawSingleton, RawSystemApi, RawValueType,
 };
 
-pub(super) const SYS_ORNA: &str = include_str!("../../../orna-hir/interface/sys.orna");
+pub const SYS_ORNA: &str = include_str!("../../orna-hir/interface/sys.orna");
 
 /// The namespace modules that hold relation handles. Each file's handles are `sys.<module>.<name>`.
-pub(super) const NAMESPACE_FILES: [(&str, &str); 5] = [
+pub const NAMESPACE_FILES: [(&str, &str); 5] = [
     (
         "catalog",
-        include_str!("../../../orna-hir/interface/sys/catalog.orna"),
+        include_str!("../../orna-hir/interface/sys/catalog.orna"),
     ),
-    (
-        "git",
-        include_str!("../../../orna-hir/interface/sys/git.orna"),
-    ),
+    ("git", include_str!("../../orna-hir/interface/sys/git.orna")),
     (
         "storage",
-        include_str!("../../../orna-hir/interface/sys/storage.orna"),
+        include_str!("../../orna-hir/interface/sys/storage.orna"),
     ),
     (
         "history",
-        include_str!("../../../orna-hir/interface/sys/history.orna"),
+        include_str!("../../orna-hir/interface/sys/history.orna"),
     ),
     (
         "build",
-        include_str!("../../../orna-hir/interface/sys/build.orna"),
+        include_str!("../../orna-hir/interface/sys/build.orna"),
     ),
 ];
 
-/// Type names `scripts/gen_interface.py` leaves bare in the JSON (its `BUILTINS`). These are declared in
-/// `sys.orna` but the catalogue never qualifies them, so the renderer must not either.
+/// Type names the retired `scripts/gen_interface.py` left bare in its JSON (its `BUILTINS`). These are declared in
+/// `sys.orna` and the renderer must not qualify them.
 const GENERATOR_BUILTINS: [&str; 2] = ["Unit", "Query"];
 
 /// `declared` with the generator builtins added back for type positions outside signatures: the JSON qualifies them
@@ -61,7 +58,7 @@ fn declared_for_types(declared: &BTreeSet<String>) -> BTreeSet<String> {
 const REMOVED_DIAGNOSTIC: &str = "sys.version.incompatible";
 
 /// Names declared at the top level of `sys.orna` that the JSON spells with a `sys.` prefix.
-pub(super) fn declared_names(items: &[Item]) -> BTreeSet<String> {
+pub fn declared_names(items: &[Item]) -> BTreeSet<String> {
     items
         .iter()
         .filter_map(|item| match &item.declaration {
@@ -77,7 +74,7 @@ pub(super) fn declared_names(items: &[Item]) -> BTreeSet<String> {
         .collect()
 }
 
-pub(super) fn render_generics(generics: &[GenericParameter]) -> String {
+pub fn render_generics(generics: &[GenericParameter]) -> String {
     if generics.is_empty() {
         return String::new();
     }
@@ -88,7 +85,7 @@ pub(super) fn render_generics(generics: &[GenericParameter]) -> String {
     format!("<{}>", names.join(", "))
 }
 
-pub(super) fn render_type(ty: &TypeExpr, declared: &BTreeSet<String>) -> String {
+pub fn render_type(ty: &TypeExpr, declared: &BTreeSet<String>) -> String {
     match ty {
         TypeExpr::Name {
             path, arguments, ..
@@ -148,7 +145,7 @@ fn label_head(label: &str) -> &str {
 }
 
 /// Renders a `pub native fn` into the JSON `signature` grammar under the JSON head of its label.
-pub(super) fn render_native(
+pub fn render_native(
     label: &str,
     signature: &orna_syntax::FunctionSignature,
     declared: &BTreeSet<String>,
@@ -184,8 +181,8 @@ pub(super) fn render_native(
 }
 
 /// The catalogue class a native effect set stands for: `table_read` is `read`, `storage_admin` is `admin`,
-/// `runtime_admin` is `invoke`. This is the only mapping, the same one `gen_interface.py` used.
-pub(super) fn catalogue_class(effects: Option<&NativeEffectSet>) -> String {
+/// `runtime_admin` is `invoke`. This is the only mapping the retired `gen_interface.py` used.
+pub fn catalogue_class(effects: Option<&NativeEffectSet>) -> String {
     let Some(NativeEffectSet::Classes { classes, .. }) = effects else {
         return "<unrendered-effect>".to_owned();
     };
@@ -202,7 +199,7 @@ pub(super) fn catalogue_class(effects: Option<&NativeEffectSet>) -> String {
 }
 
 /// The label of a `pub native fn`: its `spelling` clause, or `sys.<name>` without one.
-pub(super) fn native_label(item: &Item, name: &str) -> String {
+pub fn native_label(item: &Item, name: &str) -> String {
     item.clauses
         .spelling
         .as_ref()
@@ -316,10 +313,10 @@ fn is_relation(item: &Item) -> bool {
 }
 
 /// The raw descriptor document derived from `sys.orna` and its namespace modules.
-pub(super) fn native_raw_document() -> Result<RawSystemApi, SystemApiError> {
+pub fn native_raw_document() -> Result<RawSystemApi, InvalidSysInterface> {
     let parsed = parse_interface(SYS_ORNA);
     if !parsed.diagnostics.is_empty() {
-        return Err(SystemApiError::InvalidJson);
+        return Err(InvalidSysInterface);
     }
     let items = parsed.value.items;
     let declared = declared_names(&items);
@@ -537,13 +534,13 @@ fn relation(
 fn grouped_handles(
     items: &[Item],
     declared: &BTreeSet<String>,
-) -> Result<BTreeMap<String, String>, SystemApiError> {
+) -> Result<BTreeMap<String, String>, InvalidSysInterface> {
     let types = declared_for_types(declared);
     let mut handles = BTreeMap::new();
     for (module, text) in NAMESPACE_FILES {
         let parsed = parse_interface(text);
         if !parsed.diagnostics.is_empty() {
-            return Err(SystemApiError::InvalidJson);
+            return Err(InvalidSysInterface);
         }
         for item in &parsed.value.items {
             if let Declaration::NativeStatic {
@@ -614,6 +611,7 @@ fn collect_removed(item: &Item, removed: &mut BTreeMap<String, RawRemovedName>) 
                     || REMOVED_DIAGNOSTIC.to_owned(),
                     |diagnostic| diagnostic.text.clone(),
                 ),
+                reason: None,
             },
         );
     }
@@ -628,6 +626,7 @@ fn collect_removed(item: &Item, removed: &mut BTreeMap<String, RawRemovedName>) 
                     .as_ref()
                     .map(|replacement| replacement.text.clone()),
                 diagnostic: REMOVED_DIAGNOSTIC.to_owned(),
+                reason: retired.reason.as_ref().map(|reason| reason.text.clone()),
             },
         );
     }
