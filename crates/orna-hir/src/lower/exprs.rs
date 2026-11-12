@@ -204,6 +204,11 @@ fn lower_field(
         state.exprs[literal].weight = 2;
         return literal;
     }
+    if let Some(path) = sys_field_path(state, base, name)
+        && super::admission::reject_unlinked(builder, state.module, &path, span.clone())
+    {
+        return error_expr(builder, state, span.clone());
+    }
     if let Some((path, def)) = namespace_member(builder, state, base, name) {
         // `database.Table` and `namespace.export` name the export itself; the module base is not a value.
         let name_span = SyntaxSpan::new(span.end.saturating_sub(name.len()), span.end);
@@ -701,6 +706,22 @@ pub(crate) fn flatten_path<'a>(expr: &'a AstExpr, out: &mut Vec<(&'a str, Syntax
         AstExpr::Group { inner, .. } => flatten_path(inner, out),
         _ => false,
     }
+}
+
+/// The full `sys`-rooted path of `base.name`, when `base` is a dotted path whose
+/// root is the `sys` module and no local shadows it.
+fn sys_field_path<'a>(state: &BodyState, base: &'a AstExpr, name: &'a str) -> Option<Vec<&'a str>> {
+    let mut segments = Vec::new();
+    if !flatten_path(base, &mut segments) {
+        return None;
+    }
+    let (root, _) = segments.first()?;
+    if *root != "sys" || state.local(&Name::new(root)).is_some() {
+        return None;
+    }
+    let mut path: Vec<&'a str> = segments.iter().map(|(text, _)| *text).collect();
+    path.push(name);
+    Some(path)
 }
 
 /// Lowers one argument of a concurrent call. A lambda there, or a lambda in a

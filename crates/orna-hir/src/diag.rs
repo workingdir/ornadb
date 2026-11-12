@@ -25,6 +25,8 @@ pub const IMPORT: &str = "ORNA-S010-IMPORT";
 pub const DUPLICATE: &str = "ORNA-S013-DUPLICATE";
 /// A construct the HIR does not represent yet.
 pub const UNSUPPORTED: &str = "ORNA-S022-UNSUPPORTED";
+/// A `sys` member the host has not linked a production provider for (ORNA-SYS-008).
+pub const SYS_VERSION_INCOMPATIBLE: &str = "sys.version.incompatible";
 /// A unit name that names no unit of a family or unit declaration in scope (units.md ORNA-UNIT-UNRESOLVED).
 pub const UNIT_UNRESOLVED: &str = "ORNA-UNIT-UNRESOLVED";
 /// A unit family whose variants do not share the family's dimension (units.md ORNA-UNIT-010).

@@ -89,6 +89,12 @@ fn expected_differences() -> BTreeSet<String> {
 /// call-site mismatch under `ORNA-S021-TYPE`; the pairing is unproven per message.
 fn recorded_reason(code: &str) -> Option<&'static str> {
     match code {
+        "sys.version.incompatible" => Some(
+            "HIR applies the production sys admission (ORNA-SYS-008): a catalogued member with no \
+             linked provider is rejected at lowering, as the executor requires; the checker compared \
+             here analyses on the declared surface (SystemProviders::DeclaredSurface) and does not gate \
+             providers",
+        ),
         "ORNA-S010-IMPORT" => {
             Some("HIR import diagnostic the checker does not report under this code; unclassified")
         }

@@ -28,6 +28,17 @@ impl Lowering {
     /// whose path is `database`.
     #[must_use]
     pub fn new_attached(prelude: &PreludeExports, attached: &[crate::Name]) -> Self {
+        Self::new_admitted(prelude, attached, super::admission::all_linked())
+    }
+
+    /// Starts a lowering whose `sys` references are checked against the host's
+    /// admission (lower/admission.rs). `new_attached` admits every member.
+    #[must_use]
+    pub fn new_admitted(
+        prelude: &PreludeExports,
+        attached: &[crate::Name],
+        admission: super::admission::SharedAdmission,
+    ) -> Self {
         let embedded: Vec<SourceUnit<'_>> = crate::embedded::parsed()
             .iter()
             .enumerate()
@@ -37,7 +48,7 @@ impl Lowering {
                 path: module.path.clone(),
             })
             .collect();
-        let mut builder = Builder::new(prelude, attached);
+        let mut builder = Builder::new(prelude, attached, admission);
         builder.declare_units(&embedded);
         Self { builder }
     }
