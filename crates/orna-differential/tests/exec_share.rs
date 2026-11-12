@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 
-use orna_differential::case::{Case, Corpus};
+use orna_differential::case::{Case, Corpus, Family};
 use orna_differential::compare;
 use orna_differential::observe_exec::{self, ExecOutcome};
 use orna_differential::observe_old;
@@ -163,8 +163,9 @@ fn executor_agreement_with_the_old_pipeline_only_grows() {
 }
 
 /// Whether `case`'s disagreement is the H0 observer's missing table store. Either the old outcome
-/// is `ORNA-EVAL-NAME` for a module that declares a table, or the executor reports
-/// `ORNA-EVAL-TABLE-ROW` for a case the old pipeline rejects. Both need a harness allowance.
+/// is `ORNA-EVAL-NAME` for a case that reaches a table (declared in its source, or an attached
+/// fixture table: the reference family imports `fixture.attached.*` at load time), or the executor
+/// reports `ORNA-EVAL-TABLE-ROW` for a case the old pipeline rejects. Both need a harness allowance.
 fn harness_environment_allowed(
     case: &Case,
     executor: &Result<Vec<u8>, String>,
@@ -172,8 +173,8 @@ fn harness_environment_allowed(
     allowances: &[compare::HarnessAllowance],
     used: &mut [bool],
 ) -> bool {
-    let missing_name =
-        matches!(old, Some(Err(code)) if code == "ORNA-EVAL-NAME") && declares_table(case);
+    let reaches_table = declares_table(case) || case.family == Family::Reference;
+    let missing_name = matches!(old, Some(Err(code)) if code == "ORNA-EVAL-NAME") && reaches_table;
     let missing_store = matches!(executor, Err(code) if code == "ORNA-EVAL-TABLE-ROW")
         && matches!(old, Some(Err(_)));
     if !missing_name && !missing_store {

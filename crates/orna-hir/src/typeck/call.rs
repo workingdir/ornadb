@@ -1047,6 +1047,7 @@ impl<'a> BodyCheck<'a> {
         span: SyntaxSpan,
     ) -> Result<Ty, NotYetReason> {
         let resolved = self.resolved(expected);
+        let computed = self.table_computed_fields(resolved);
         let (declared, required) = match self.kind_of(resolved) {
             Some(TyKind::Adt(def, _)) => (
                 self.nominal_fields_of(resolved).ok_or_else(|| {
@@ -1077,18 +1078,21 @@ impl<'a> BodyCheck<'a> {
                 );
                 continue;
             };
+            if computed.contains(name) {
+                self.conflict(
+                    format!(
+                        "the field `{}` is computed from the row and is read-only",
+                        name.as_str()
+                    ),
+                    span.clone(),
+                );
+            }
             self.infer_expr(body, *value, Some(*field_ty))?;
         }
-        // A table row's declared fields may have a default, be computed from
-        // other fields, or be owner-bound, and the HIR field definition does
-        // not carry which: only the key is known to be required. A nominal
-        // type's fields are its representation, so all of them are required.
-        let required = required.unwrap_or_else(|| {
-            declared
-                .iter()
-                .map(|(name, _)| name.clone())
-                .collect::<Vec<_>>()
-        });
+        // A table row requires its defaultless fields (`table_required_fields`).
+        // A nominal type's fields are its representation, so all of them are required.
+        let required =
+            required.unwrap_or_else(|| declared.iter().map(|(name, _)| name.clone()).collect());
         for name in required {
             if !fields.iter().any(|(field, _)| *field == name) {
                 self.conflict(
@@ -1098,20 +1102,6 @@ impl<'a> BodyCheck<'a> {
             }
         }
         Ok(resolved)
-    }
-
-    /// The key fields of a table row type, when the nominal is a table.
-    fn table_required_fields(&self, def: DefId) -> Option<Vec<Name>> {
-        let DefKind::Table(table) = &self.program.defs.get(def)?.kind else {
-            return None;
-        };
-        Some(
-            table
-                .key
-                .iter()
-                .map(|field| self.program.defs[*field].name.clone())
-                .collect(),
-        )
     }
 }
 

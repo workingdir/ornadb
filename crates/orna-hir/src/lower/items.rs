@@ -325,6 +325,10 @@ impl Builder<'_> {
             );
             fields.push(field);
             key.push(field);
+            if let Some(value) = &parameter.default {
+                let initializer = SyntaxFieldInitializer::Default(value.clone());
+                self.attach_initializer(field, ty, Some(def), &initializer);
+            }
         }
         let mut assertions = Vec::new();
         for member in members {
