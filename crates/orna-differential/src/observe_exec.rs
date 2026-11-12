@@ -72,6 +72,12 @@ fn run_with(case: &Case, cancel: Option<Arc<AtomicBool>>) -> ExecOutcome {
         Ok(lowered) => lowered,
         Err(error) => return ExecOutcome::NotYet(error),
     };
+    if let Some(code) = admission_rejection(&lowered) {
+        return ExecOutcome::Ran {
+            outcome: Err(code.to_owned()),
+            steps: 0,
+        };
+    }
     if owned_diagnostics(&lowered) {
         return ExecOutcome::NotYet("the owned modules lower with a diagnostic".to_owned());
     }
@@ -123,6 +129,27 @@ fn entry_name(case: &Case) -> Option<&str> {
         CaseKind::Module | CaseKind::StandardBundle => case.entry.as_deref(),
         CaseKind::Repl => None,
     }
+}
+
+/// The code of an owned-module lowering rejection the old pipeline also
+/// reports before evaluation: an unlinked `sys` member
+/// (`sys.version.incompatible`, ORNA-SYS-008). The old observer reports the
+/// first sorted code, which equals this code only when it is the sole code, so
+/// a mixed set has no shared outcome and is left to `owned_diagnostics`.
+fn admission_rejection(lowered: &LoweredProgram) -> Option<&'static str> {
+    let mut rejection = None;
+    for (module, found) in lowered.program.modules.iter_enumerated() {
+        if !lowered.owned[module.index()] {
+            continue;
+        }
+        for diagnostic in &found.diagnostics {
+            if diagnostic.code != orna_hir::diag::SYS_VERSION_INCOMPATIBLE {
+                return None;
+            }
+            rejection = Some(orna_hir::diag::SYS_VERSION_INCOMPATIBLE);
+        }
+    }
+    rejection
 }
 
 /// Whether any owned module carries a lowering diagnostic.

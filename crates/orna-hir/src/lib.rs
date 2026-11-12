@@ -71,7 +71,8 @@ pub use ids::{
 };
 pub use infer::{Conflict, InferCtxt};
 pub use lower::{
-    Lowering, PreludeExports, SourceUnit, lower, lower_with_attached, lower_with_prelude,
+    Lowering, PreludeExports, SharedAdmission, SourceUnit, SysAdmission, SysMemberStatus, lower,
+    lower_with_admission, lower_with_attached, lower_with_prelude,
 };
 pub use name_use::{NameTarget, NameUse, UseContext};
 pub use pat::Pat;

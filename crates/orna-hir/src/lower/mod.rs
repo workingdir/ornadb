@@ -20,6 +20,7 @@
 //! it resolves, so the language server and the H1 resolution comparison read one
 //! table.
 
+mod admission;
 mod blocks;
 mod calls;
 mod classify;
@@ -50,6 +51,7 @@ use crate::{
     Name, NameUse, Pat, PatId, Program, SourceId, Ty,
 };
 
+pub use admission::{SharedAdmission, SysAdmission, SysMemberStatus};
 pub(crate) use classify::{rel_op as relation_operation, table_op as table_operation};
 pub use incremental::Lowering;
 pub use prelude::PreludeExports;
@@ -100,6 +102,20 @@ pub fn lower_with_attached(
     attached: &[Name],
 ) -> Program {
     let mut lowering = Lowering::new_attached(prelude, attached);
+    lowering.extend(sources);
+    lowering.into_program()
+}
+
+/// Lowers every source into one program, as [`lower_with_attached`], with the
+/// host's `sys` admission checked on every `sys` reference (lower/admission.rs).
+#[must_use]
+pub fn lower_with_admission(
+    sources: &[SourceUnit<'_>],
+    prelude: &PreludeExports,
+    attached: &[Name],
+    admission: SharedAdmission,
+) -> Program {
+    let mut lowering = Lowering::new_admitted(prelude, attached, admission);
     lowering.extend(sources);
     lowering.into_program()
 }

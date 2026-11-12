@@ -238,12 +238,15 @@ fn classify_path(
                 NameTarget::Unresolved,
             );
             if builder.program.modules[target].origin == crate::ModuleOrigin::Sys {
-                builder.diagnose(
-                    module,
-                    crate::diag::UNSUPPORTED,
-                    "the `sys` declarations are not represented yet",
-                    last_span,
-                );
+                let path = segments.iter().map(|(text, _)| *text).collect::<Vec<_>>();
+                if !super::admission::reject_unlinked(builder, module, &path, last_span.clone()) {
+                    builder.diagnose(
+                        module,
+                        crate::diag::UNSUPPORTED,
+                        "the `sys` declarations are not represented yet",
+                        last_span,
+                    );
+                }
             } else {
                 builder.diagnose(
                     module,

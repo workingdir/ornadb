@@ -223,11 +223,17 @@ pub(crate) struct Builder {
     pub(crate) prelude: super::prelude::PreludeExports,
     /// The attached databases whose root namespaces every scope binds (ORNA-ATTACH-001).
     pub(crate) attached: Vec<Name>,
+    /// The host's admission of the portable `sys` surface (lower/admission.rs).
+    pub(crate) admission: super::admission::SharedAdmission,
 }
 
 impl Builder {
     /// Creates an empty builder; [`Builder::declare_units`] registers modules.
-    pub(crate) fn new(prelude: &super::prelude::PreludeExports, attached: &[Name]) -> Self {
+    pub(crate) fn new(
+        prelude: &super::prelude::PreludeExports,
+        attached: &[Name],
+        admission: super::admission::SharedAdmission,
+    ) -> Self {
         Self {
             prelude: prelude.clone(),
             attached: attached.to_vec(),
@@ -244,6 +250,7 @@ impl Builder {
             body_jobs: Vec::new(),
             unit_jobs: Vec::new(),
             self_ty: None,
+            admission,
         }
     }
 
