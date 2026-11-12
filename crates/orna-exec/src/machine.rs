@@ -11,9 +11,10 @@ use crate::dispatch::ProtocolMembers;
 use crate::error::{ExecError, Stop};
 use crate::frame::{Frame, TypeEnv};
 use crate::globals::Globals;
+use crate::host::{Host, StoreHost};
 use crate::link;
 use crate::natives::NativeFn;
-use crate::store::{MemoryStore, TableStore};
+use crate::store::TableStore;
 use crate::table::store_invariant;
 use crate::value::{Cell, Value};
 use crate::variants::{VariantIds, variant_ids};
@@ -64,8 +65,9 @@ pub(crate) struct Machine<'p> {
     pub(crate) protocols: ProtocolMembers,
     /// The ids of `core.Ordering`'s variants, built on first engine comparison.
     pub(crate) ordering: OnceCell<[VariantIds; 3]>,
-    /// The table store. Each entry-point activation opens one store activation, committed or rolled back.
-    pub(crate) store: Box<dyn TableStore>,
+    /// The host the run reads its tables, clock, entropy and `sys` members from. Each entry-point activation opens
+    /// one store activation on its store, committed or rolled back.
+    pub(crate) host: &'p mut dyn Host,
     /// The session's evaluated top-level `let`s. Taken from the caller for the run and handed back after it.
     pub(crate) globals: Globals,
     /// Whether this run's store starts empty and no other writer shares it, so a row absent from the store is
@@ -81,7 +83,7 @@ impl<'p> Machine<'p> {
         program: &'p Program,
         limits: ExecLimits,
         cancel: Option<Arc<AtomicBool>>,
-        store: Box<dyn TableStore>,
+        host: &'p mut dyn Host,
     ) -> Self {
         Self {
             program,
@@ -91,18 +93,13 @@ impl<'p> Machine<'p> {
             natives: OnceCell::new(),
             protocols: OnceCell::new(),
             ordering: OnceCell::new(),
-            store,
+            host,
             globals: Globals::new(),
             empty_snapshot: false,
             steps: 0,
             calls: 0,
             depth: 0,
         }
-    }
-
-    /// Gives the store back once the run is over, with the activation's writes applied or rolled back.
-    pub(crate) fn into_store(self) -> Box<dyn TableStore> {
-        self.store
     }
 
     /// The ids of the source enum variant `variant`. The map is built on first
@@ -179,18 +176,21 @@ impl<'p> Machine<'p> {
         body_id: BodyId,
         arguments: Vec<(usize, Value)>,
     ) -> Result<Value, Stop> {
-        self.store
+        self.host
+            .store()
             .begin()
             .map_err(|error| store_invariant(&error))?;
         match self.invoke(body_id, arguments, &[], None) {
             Ok(value) => {
-                self.store
+                self.host
+                    .store()
                     .commit()
                     .map_err(|error| store_invariant(&error))?;
                 Ok(value)
             }
             Err(stop) => {
-                self.store
+                self.host
+                    .store()
                     .rollback()
                     .map_err(|error| store_invariant(&error))?;
                 Err(stop)
@@ -206,7 +206,7 @@ impl<'p> Machine<'p> {
 /// [`ExecError::Code`] when the program ends with a language error, and
 /// [`ExecError::NotYet`] when it reaches a construct this stage does not run.
 pub fn run_entry(program: &Program, entry: DefId, limits: ExecLimits) -> Run {
-    run(program, entry, limits, None)
+    run(program, entry, limits, None, &mut StoreHost::empty(), true)
 }
 
 /// Runs the zero-parameter function `entry` to its value, ending the run with
@@ -224,7 +224,14 @@ pub fn run_entry_cancellable(
     limits: ExecLimits,
     cancel: Arc<AtomicBool>,
 ) -> Run {
-    run(program, entry, limits, Some(cancel))
+    run(
+        program,
+        entry,
+        limits,
+        Some(cancel),
+        &mut StoreHost::empty(),
+        true,
+    )
 }
 
 /// The outcome of one run and the steps it charged.
@@ -241,14 +248,31 @@ fn run(
     entry: DefId,
     limits: ExecLimits,
     cancel: Option<Arc<AtomicBool>>,
+    host: &mut dyn Host,
+    empty_snapshot: bool,
 ) -> Run {
-    let mut machine = Machine::new(program, limits, cancel, Box::new(MemoryStore::new()));
-    machine.empty_snapshot = true;
+    let mut machine = Machine::new(program, limits, cancel, host);
+    machine.empty_snapshot = empty_snapshot;
     let result = start(&mut machine, program, entry);
     Run {
         result,
         steps: machine.steps,
     }
+}
+
+/// Runs the zero-parameter function `entry` to its value, reading and writing through `host`: its store, clock,
+/// entropy and `sys` members.
+///
+/// # Errors
+///
+/// As [`run_entry`].
+pub fn run_entry_with_host(
+    program: &Program,
+    entry: DefId,
+    limits: ExecLimits,
+    host: &mut dyn Host,
+) -> Run {
+    run(program, entry, limits, None, host, false)
 }
 
 fn start(machine: &mut Machine<'_>, program: &Program, entry: DefId) -> Result<Value, ExecError> {
@@ -281,8 +305,25 @@ pub fn measure_entry(
     arguments: Vec<Value>,
     limits: ExecLimits,
 ) -> Result<Measured, ExecError> {
-    let mut machine = Machine::new(program, limits, None, Box::new(MemoryStore::new()));
+    let mut host = StoreHost::empty();
+    let mut machine = Machine::new(program, limits, None, &mut host);
     machine.empty_snapshot = true;
+    measure(&mut machine, program, entry, arguments)
+}
+
+/// As [`measure_entry`], but the run reads and writes through `host`: its store, clock, entropy and `sys` members.
+///
+/// # Errors
+///
+/// As [`measure_entry`].
+pub fn measure_entry_with_host(
+    program: &Program,
+    entry: DefId,
+    arguments: Vec<Value>,
+    limits: ExecLimits,
+    host: &mut dyn Host,
+) -> Result<Measured, ExecError> {
+    let mut machine = Machine::new(program, limits, None, host);
     measure(&mut machine, program, entry, arguments)
 }
 
@@ -295,9 +336,12 @@ pub fn measure_entry_with_store(
     limits: ExecLimits,
     store: Box<dyn TableStore>,
 ) -> (Result<Measured, ExecError>, Box<dyn TableStore>) {
-    let mut machine = Machine::new(program, limits, None, store);
-    let result = measure(&mut machine, program, entry, arguments);
-    (result, machine.into_store())
+    let mut host = StoreHost::new(store);
+    let result = {
+        let mut machine = Machine::new(program, limits, None, &mut host);
+        measure(&mut machine, program, entry, arguments)
+    };
+    (result, host.into_store())
 }
 
 /// As [`measure_entry_with_store`], but the run also reads and extends the session `globals`: a top-level `let` already
@@ -314,11 +358,15 @@ pub fn measure_entry_in(
     store: Box<dyn TableStore>,
     globals: &mut Globals,
 ) -> (Result<Measured, ExecError>, Box<dyn TableStore>) {
-    let mut machine = Machine::new(program, limits, None, store);
-    machine.globals = std::mem::take(globals);
-    let result = measure(&mut machine, program, entry, arguments);
-    *globals = std::mem::take(&mut machine.globals);
-    (result, machine.into_store())
+    let mut host = StoreHost::new(store);
+    let result = {
+        let mut machine = Machine::new(program, limits, None, &mut host);
+        machine.globals = std::mem::take(globals);
+        let result = measure(&mut machine, program, entry, arguments);
+        *globals = std::mem::take(&mut machine.globals);
+        result
+    };
+    (result, host.into_store())
 }
 
 fn measure(
@@ -338,7 +386,7 @@ fn measure(
         return Err(ExecError::Code("ORNA-EVAL-ARGUMENT"));
     }
     let arguments = arguments.into_iter().enumerate().collect();
-    let rows_before = machine.store.rows_read();
+    let rows_before = machine.host.store().rows_read();
     let value = machine
         .run_activation(body_id, arguments)
         .map_err(ExecError::from)?;
@@ -346,6 +394,6 @@ fn measure(
         value,
         steps: machine.steps,
         calls: machine.calls,
-        rows_read: machine.store.rows_read() - rows_before,
+        rows_read: machine.host.store().rows_read() - rows_before,
     })
 }

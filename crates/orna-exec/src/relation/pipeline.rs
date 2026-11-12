@@ -274,11 +274,12 @@ fn scan_table<'p>(
     sink: &mut Sink<'_, 'p>,
 ) -> Result<(), Stop> {
     let cursor = machine
-        .store
+        .host
+        .store()
         .scan(table, KeyBounds::all(), Direction::Forward)
         .map_err(|error| store_invariant(&error))?;
     let outcome = walk_table(machine, cursor, stages, counts, sink);
-    machine.store.close(cursor);
+    machine.host.store().close(cursor);
     outcome
 }
 
@@ -293,7 +294,8 @@ fn walk_table<'p>(
     loop {
         machine.tick(1)?;
         let row = match machine
-            .store
+            .host
+            .store()
             .next(cursor)
             .map_err(|error| store_invariant(&error))?
         {
