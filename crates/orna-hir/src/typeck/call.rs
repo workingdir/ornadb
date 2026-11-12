@@ -366,22 +366,18 @@ impl<'a> BodyCheck<'a> {
         };
         match op {
             TableOp::Insert | TableOp::Upsert => {
-                self.check_slot(body, call, 0, Some(row), span.clone())?;
+                self.check_table_row(body, call, 0, table, row, op)?;
             }
             TableOp::Update => {
                 let key = self.table_key_ty(table)?;
                 self.check_slot(body, call, 0, Some(key), span.clone())?;
-                self.check_patch_slot(body, call, 1, row)?;
+                self.check_table_row(body, call, 1, table, row, op)?;
             }
             TableOp::Delete => {
                 let key = self.table_key_ty(table)?;
                 self.check_slot(body, call, 0, Some(key), span.clone())?;
             }
-            TableOp::Rekey => {
-                return Err(NotYetReason::Unsupported(
-                    "`rekey` is not on HIR yet".into(),
-                ));
-            }
+            TableOp::Rekey => self.check_rekey(body, call, table, span.clone())?,
             TableOp::Count | TableOp::First | TableOp::One => {}
             TableOp::AsOf => {
                 self.check_slot(body, call, 0, None, span.clone())?;
@@ -425,30 +421,6 @@ impl<'a> BodyCheck<'a> {
         if let ArgValue::Expr(id) = argument.value {
             self.infer_expr(body, id, expected)?;
         }
-        Ok(())
-    }
-
-    /// Types a table update's patch argument. A record literal is a patch, so
-    /// it need not supply the row's key; any other value is an ordinary row.
-    fn check_patch_slot(
-        &mut self,
-        body: &mut Body,
-        call: &crate::Call,
-        slot: usize,
-        row: Ty,
-    ) -> Result<(), NotYetReason> {
-        let Some(argument) = call.args.get(slot) else {
-            return Ok(());
-        };
-        let ArgValue::Expr(id) = argument.value else {
-            return Ok(());
-        };
-        let span = body.exprs[id].span.clone();
-        let ty = match body.exprs[id].kind.clone() {
-            ExprKind::Record(fields) => self.check_record(body, &fields, row, span, false)?,
-            _ => self.infer_expr(body, id, Some(row))?,
-        };
-        body.exprs[id].ty = ty;
         Ok(())
     }
 
@@ -1067,15 +1039,12 @@ impl<'a> BodyCheck<'a> {
     }
 
     /// Types a record literal against a nominal or structural record type.
-    /// `complete` is false for a table update's patch, which need not supply
-    /// the row's key.
     pub(super) fn check_record(
         &mut self,
         body: &mut Body,
         fields: &[(Name, ExprId)],
         expected: Ty,
         span: SyntaxSpan,
-        complete: bool,
     ) -> Result<Ty, NotYetReason> {
         let resolved = self.resolved(expected);
         let computed = self.table_computed_fields(resolved);
@@ -1120,14 +1089,10 @@ impl<'a> BodyCheck<'a> {
             }
             self.infer_expr(body, *value, Some(*field_ty))?;
         }
-        // A table row requires its defaultless fields (`table_required_fields`);
-        // a table update's record is a patch and requires none. A nominal
-        // type's fields are its representation, so all of them are required.
-        let required = match required {
-            _ if !complete => Vec::new(),
-            Some(required) => required,
-            None => declared.iter().map(|(name, _)| name.clone()).collect(),
-        };
+        // A table row requires its defaultless fields (`table_required_fields`).
+        // A nominal type's fields are its representation, so all of them are required.
+        let required =
+            required.unwrap_or_else(|| declared.iter().map(|(name, _)| name.clone()).collect());
         for name in required {
             if !fields.iter().any(|(field, _)| *field == name) {
                 self.conflict(
