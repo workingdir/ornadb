@@ -509,7 +509,7 @@ fn activate_prepared(
         repository,
         destination,
         candidate,
-        crate::invocation_owner_id(),
+        orna_runtime::process_owner_id(),
         &store_for,
     )
     .map_err(|error| {

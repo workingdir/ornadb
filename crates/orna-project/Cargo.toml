@@ -13,6 +13,7 @@ orna-check = { path = "../orna-check" }
 orna-syntax = { path = "../orna-syntax" }
 orna-syntax-ast = { path = "../orna-syntax-ast" }
 orna-value = { path = "../orna-value" }
+orna-unicode = { path = "../orna-unicode" }
 num-bigint = "0.4.6"
 orna-runtime = { path = "../orna-runtime" }
 orna-exec = { path = "../orna-exec" }

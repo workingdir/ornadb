@@ -20,12 +20,12 @@ use super::{
     evaluate_over_committed_tables, legacy_bare_module_candidates, legacy_bare_module_table,
     runtime_identity, unavailable_response,
 };
-use crate::encoding::percent_decode;
 use crate::media_range::{MediaMethod, MediaReply, media_reply, plan_media_response};
 use orna_application::{
     AdmittedApplication, ApplicationAuthority, ApplicationError, StagedActivation,
 };
 use orna_check::TableSchema;
+use orna_cli_support::encoding::percent_decode;
 use orna_evaluator::Environment;
 use orna_project_repl::AdmittedReplSession;
 use orna_repository::{GitHashAlgorithm, KeyRange, NativeOid, RepositoryFormatContext};

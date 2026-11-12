@@ -19,6 +19,9 @@ runtime. The workspace is layered so that a change to the CLI, the LSP or the
 conformance harness cannot reach the format codecs or the evaluator through an
 undocumented edge.
 
+The planned split of the largest crates into smaller shared crates, with measured
+sizes and slice order, is in [design/crate-split-plan.md](design/crate-split-plan.md).
+
 ## 2. The layer table
 
 A crate may depend only on a crate in a lower layer. A same-layer dependency is
@@ -30,7 +33,7 @@ the unit tests assert the two agree.
 | layer | name | crates |
 |---|---|---|
 | 0 | primitives | orna-base |
-| 1 | value | orna-value, orna-sys-model |
+| 1 | value | orna-value, orna-sys-model, orna-unicode |
 | 2 | syntax | orna-syntax, orna-intrinsics, orna-sys-codegen |
 | 3 | identity and IR | orna-hir, orna-sys-id, orna-sys-interface, orna-standard-sources, orna-sys-macros |
 | 4 | analysis | orna-check |

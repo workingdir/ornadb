@@ -24,10 +24,8 @@ mod cli_publish;
 mod cli_query;
 mod cli_row_key;
 mod cli_serve;
-mod cli_source_edit;
 mod cli_stage;
 mod cli_status;
-mod encoding;
 #[cfg(test)]
 #[path = "../tests/support/format3.rs"]
 mod format3;
@@ -35,19 +33,16 @@ mod format3;
 mod fuse_mount;
 #[cfg(test)]
 #[path = "../tests/support/media_commit.rs"]
-// The shared capture fixture loads `table_schema` from `src` itself, so the
-// binary's own copy and this one coexist during tests and never interact.
 #[allow(clippy::duplicate_mod)]
 mod media_commit;
 mod media_range;
 mod repl;
 mod sys_host;
-mod table_schema;
 mod ui_render;
 
 use cli_args::{Command, Invocation, Parsed, StatusFormat, parse_cli_reporting};
 use cli_dispatch::execute;
-use encoding::hex_digit;
+use orna_base::hex_digit;
 use repl::{AnsiColor, write_rendered_error, write_styled, write_styled_display};
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -57,8 +52,6 @@ use std::io::{self, BufReader, IsTerminal, Write as _};
 use std::process::ExitCode;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use orna_application::{
     AdmittedApplication, ApplicationAuthority, ApplicationError, CommittedTableIdentity,
@@ -84,17 +77,7 @@ use orna_sys::{
 use orna_value::{CanonicalValue, OvbRaw, Value};
 use sha2::{Digest, Sha256};
 
-static CLI_REQUEST_NONCE: AtomicU64 = AtomicU64::new(1);
-
-fn cli_request_nonce() -> u128 {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    (now << 32)
-        ^ (u128::from(std::process::id()) << 16)
-        ^ u128::from(CLI_REQUEST_NONCE.fetch_add(1, AtomicOrdering::Relaxed))
-}
+use orna_cli_support::request_nonce;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum ColorMode {
@@ -1503,7 +1486,7 @@ fn pure_execution_project(project: &orna_project::LoadedProject) -> ProjectUnit 
 fn runtime_identity(
     repository: &orna_repository::Repository,
 ) -> Result<(RuntimeIdentity, [u8; 32]), Diagnostic> {
-    orna_runtime::repository_runtime_identity(repository).map_err(|error| match error {
+    orna_cli_support::runtime_identity::repository_runtime_identity(repository).map_err(|refusal| match refusal.0 {
         orna_runtime::RuntimeError::UnknownHeadFormat(
             refusal @ orna_repository::FormatContextError::MixedFormats { .. },
         ) => cli_commit::mixed_formats_at_head(&refusal),
@@ -1518,12 +1501,6 @@ fn runtime_identity(
             "initialize the Orna repository before running a durable project invocation",
         ),
     })
-}
-
-/// The writer owner for this process. A later process has a different owner, so
-/// it takes the lease over (bumping the epoch) and fences a killed writer's token.
-fn invocation_owner_id() -> [u8; 16] {
-    orna_runtime::process_owner_id()
 }
 
 fn run_project_invocation(
@@ -1670,7 +1647,7 @@ fn run_project_invocation_with_arguments(
         initial_digest,
         root_entry,
         arguments,
-        cli_request_nonce(),
+        request_nonce(),
     )
     .map_err(|_| {
         Diagnostic::target(
@@ -1692,7 +1669,7 @@ fn run_project_invocation_with_arguments(
         _ => project.clone(),
     };
     let project = execution_project(&loaded_project);
-    let owner_id = invocation_owner_id();
+    let owner_id = orna_runtime::process_owner_id();
     let outcome = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -1811,7 +1788,7 @@ fn run_project_stream_invocation_with_project(
             )
         })?;
     let (identity, initial_digest) = runtime_identity(&repository)?;
-    let owner_id = invocation_owner_id();
+    let owner_id = orna_runtime::process_owner_id();
     let outcome = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -2841,7 +2818,7 @@ fn repl_transactions(
     repository: &orna_repository::Repository,
     workspace_project: &orna_project::LoadedProject,
 ) -> Option<ReplTransactions> {
-    let session_id = cli_request_nonce().to_be_bytes();
+    let session_id = request_nonce().to_be_bytes();
     let (commit, format_context) = repository
         .open_pinned_format_context_with_commit("HEAD")
         .ok()?;
@@ -3239,7 +3216,7 @@ fn ensure_writer<'a>(
         ensure_host_bindings(inputs, &state)?;
         let lease = inputs
             .runtime
-            .block_on(state.acquire_lease(invocation_owner_id()))
+            .block_on(state.acquire_lease(orna_runtime::process_owner_id()))
             .map_err(|error| repl_lease_failure(&error, &state))?;
         *writer = Some(ReplWriter { state, lease });
     }
@@ -3601,7 +3578,7 @@ fn run_repl_input(
             state.begin_admitted_table_activation_over_committed(&transactions.tables, committed),
         )
         .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
-    let query_id = cli_request_nonce().to_be_bytes();
+    let query_id = request_nonce().to_be_bytes();
     let expression =
         (source.len() <= 16 * 1024 && !source.is_empty() && !source.as_bytes().contains(&0))
             .then(|| source.to_owned());

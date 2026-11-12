@@ -60,7 +60,6 @@ mod sys_bindings;
 mod sys_dispatch;
 mod timezone;
 mod ui;
-mod unicode_16_case_properties;
 
 #[cfg(feature = "route-trace")]
 pub mod route_trace;
@@ -200,13 +199,13 @@ fn unicode_16_is_final_sigma(scalars: &[char], index: usize) -> bool {
         .iter()
         .rev()
         .copied()
-        .find(|scalar| !unicode_16_case_properties::is_case_ignorable(*scalar))
-        .is_some_and(unicode_16_case_properties::is_cased);
+        .find(|scalar| !orna_unicode::case_properties::is_case_ignorable(*scalar))
+        .is_some_and(orna_unicode::case_properties::is_cased);
     let following_cased = scalars[index + 1..]
         .iter()
         .copied()
-        .find(|scalar| !unicode_16_case_properties::is_case_ignorable(*scalar))
-        .is_some_and(unicode_16_case_properties::is_cased);
+        .find(|scalar| !orna_unicode::case_properties::is_case_ignorable(*scalar))
+        .is_some_and(orna_unicode::case_properties::is_cased);
     preceding_cased && !following_cased
 }
 

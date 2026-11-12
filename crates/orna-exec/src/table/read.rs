@@ -58,11 +58,12 @@ fn scan(
     mut visit: impl FnMut(&[u8]) -> Result<bool, Stop>,
 ) -> Result<(), Stop> {
     let cursor = machine
-        .store
+        .host
+        .store()
         .scan(table, KeyBounds::all(), Direction::Forward)
         .map_err(|error| store_invariant(&error))?;
     let outcome = walk(machine, cursor, &mut visit);
-    machine.store.close(cursor);
+    machine.host.store().close(cursor);
     outcome
 }
 
@@ -75,7 +76,8 @@ fn walk(
     loop {
         machine.tick(1)?;
         let Some(row) = machine
-            .store
+            .host
+            .store()
             .next(cursor)
             .map_err(|error| store_invariant(&error))?
         else {

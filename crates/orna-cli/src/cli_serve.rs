@@ -17,9 +17,9 @@
 mod cli_serve_app;
 
 use super::*;
-use crate::encoding::percent_decode;
 use crate::media_range::{MediaMethod, media_reply};
 use orna_application::ApplicationLiveAdapter;
+use orna_cli_support::encoding::percent_decode;
 use orna_live::{
     LiveHost, LiveSessionAuthority, LiveTransport, SessionMetadata, SystemCredentialIssuer,
     TransportLimits, WebSocketApplicationPreparation, WebSocketOutput, WebSocketState,
@@ -614,7 +614,7 @@ fn open_served_clone(endpoint: &Endpoint) -> Result<ServedClone, Diagnostic> {
     // lease over with a bumped epoch once it holds the runtime owner lock, so a
     // killed predecessor's token is fenced. Test
     // `served_runtime_holds_the_process_owner_lease` pins the holder's lease.
-    let owner_id = invocation_owner_id();
+    let owner_id = orna_runtime::process_owner_id();
     let executor = current_thread_executor().map_err(|_| {
         Diagnostic::target(
             "E2200",
@@ -831,7 +831,7 @@ fn new_serve_state(
         runtime,
         // The served runtime was opened with this same process owner (see
         // `open_served_clone`), so the live host's `acquire_lease` re-acquires it.
-        invocation_owner_id(),
+        orna_runtime::process_owner_id(),
     )
     .map_err(|_| {
         Diagnostic::target(
