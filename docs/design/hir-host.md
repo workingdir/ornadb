@@ -1,10 +1,10 @@
 # HIR host and Money design (stage H5 and the H4 money rules)
 
 Status: design, not implemented. Bead `ornadb-csenl.20` (H5: Host trait, natives, link) and the H4 money rules of
-`ornadb-csenl.19` / `.17`. Written by agent `HirHostDesign` against `origin/main` `30ef8fbe8`. The slice beads are
+`ornadb-csenl.19` / `.17`. Written by agent `HirHostDesign`; measured at `origin/main` `491e275b4` (PR #9918 merged). The slice beads are
 filed under epic `ornadb-csenl`; their ids are in section 3.
 
-Two questions block executor agreement (`exec-share.toml`: `agreed = 48` of `evaluable = 110`):
+Two questions block executor agreement (`exec-share.toml` at `491e275b4`: `agreed = 49` of `evaluable = 110`; it was 48 before PR #9918):
 
 1. **Part A.** `orna-exec` has no `Host` trait, so a `sys.*` read has nowhere to get data.
 2. **Part B.** `Money<C>` is not declared anywhere in HIR, so `Money<GBP>`, `12.34.GBP`, `E5001`, `E5002` and `E5003`
@@ -16,7 +16,7 @@ sketch it; [sys-as-native.md](sys-as-native.md) section 3.5 decides how hosts re
 does not reopen those decisions. It turns them into slices small enough for one implementer each.
 
 Numbers below come from running `cargo test -p orna-differential --test exec_share` with `EXEC_SHARE_IDS=1` and a
-scratch probe over the named cases at `30ef8fbe8`, and from reading the named files. Anything not measured is marked
+scratch probe over the named cases (first at `30ef8fbe8`, the per-case table of section 0.2 re-measured at `491e275b4`), and from reading the named files. Anything not measured is marked
 `[INFERENCE]`.
 
 ## 0. Measured state, and two corrections to the brief
@@ -32,7 +32,7 @@ scratch probe over the named cases at `30ef8fbe8`, and from reading the named fi
 | `Callee::Sys { def, targs }` | executed exactly like `Callee::Native`: registry lookup by `(module, name)`; only `sys.blob_*` are registered | `eval.rs:237`, `natives/mod.rs` |
 | Relation pipeline | `Source::{Table(DefId), Rows(list)}`; stages `Filter/Map/Take/Drop`; terminals `count/first/one/every/exists`; other `RelOp` is `NotYet (H7)` | `relation/pipeline.rs` |
 | `TableOp::AsOf` | `Stop::NotYet("as_of needs the activation snapshot (H5)")` | `table.rs:68` |
-| `SysAdmission` (lowering-time view of linked `sys` members) | in PR #9918 (open): `orna-hir/src/lower/admission.rs`; `CatalogueAdmission` in `orna-check` reads `orna_sys::system_provider_linkage()` | PR #9918 |
+| `SysAdmission` (lowering-time view of linked `sys` members) | merged in PR #9918: `orna-hir/src/lower/admission.rs`; `CatalogueAdmission` in `orna-check` reads `orna_sys::system_provider_linkage()` | PR #9918 |
 | Production provider linkage | 15 callables, 3 relations, 2 grouped handles linked; everything else `None` | `orna-sys-id/build/generator.rs:4482-4520`, `orna-sys/src/provider_linkage.rs` |
 | `Value::Money { amount, currency }` | decode and encode only; no construction, no arithmetic | `orna-exec/src/value.rs:62`, `raw_value.rs:130` |
 | `Money`, `Currency`, `Rate` declarations | **none** in `crates/orna-hir/interface` | `core/` has `temperature.orna`, `units.orna`, `range.orna`, `display.orna`, `ops.orna` |
@@ -47,8 +47,8 @@ same_content}` (Evaluator), `sys.blob.capture_file` (HostOperationRegistry), `sy
 ### 0.2 Correction 1: the sys cases are mostly not Host cases
 
 The brief says the `sys.*` cases "hit NotYet 'value use of a definition'". Measured, one case does
-(`invalid/relation-equality.orna`, and it is not a `sys` case). Of the 48 evaluable cases the executor does not run
-(measured breakdown: 14 bind rows/arguments, 22 lower with a diagnostic, 3 `relation operator (H7)`, 2 `money or type
+(`invalid/relation-equality.orna`, and it is not a `sys` case). Of the 47 evaluable cases the executor does not run at `491e275b4` (48 at `30ef8fbe8`, before #9918)
+(measured breakdown at `30ef8fbe8`: 14 bind rows/arguments, 22 lower with a diagnostic (21 after #9918), 3 `relation operator (H7)`, 2 `money or type
 constructor`, 1 each `as_of`, `engine native not ported`, `field access ... (H2)`, `intrinsic form`, `member call (H2)`,
 `value use of a definition`, `no entry function`), the `sys` ones are:
 
@@ -57,7 +57,7 @@ constructor`, 1 each `as_of`, `engine native not ported`, `field access ... (H2)
 | `valid/sys-checkpoint` (`sys.Checkpoint.as_of(HEAD)`) | `sys.version.incompatible` | `` `sys` is a module, not a value `` | HA1 (lowering of `sys` value paths) + admission |
 | `valid/sys-run-history` (`sys.Run.as_of(HEAD) \| sort_by(..)`) | `sys.version.incompatible` | same | HA1 |
 | `valid/sys-table-query` (`sys.catalog.objects \| filter(.. sys.ObjectKind.table ..)`) | `sys.version.incompatible` | same, twice | HA1 |
-| `valid/historical-query` (`contacts.Contact.as_of(sys.snapshot("HEAD~3"))`) | `sys.version.incompatible` | `the sys declarations are not represented yet` | HA1 (PR #9918 already rewrites this diagnostic for an unlinked member) |
+| `valid/historical-query` (`contacts.Contact.as_of(sys.snapshot("HEAD~3"))`) | `sys.version.incompatible` | **done by PR #9918**: it now runs and agrees (the measured +1; step parity is 48 of 49 since) | none |
 | `valid/historical-program` | `sys.version.incompatible` | four diagnostics, one is `energy.daily` unresolved | HA1, plus an `energy.daily` fixture function (harness, not Host) |
 | `valid/presentation-watch` (`std.ui.Table(sys.rt.streams)`) | `sys.version.incompatible` | `Page` not exported, `sys` not a value | HA1, plus `std.ui` (separate native family, not in this document) |
 | `valid/sys-storage` (`sys.Storage \| filter(..)`) | `ORNA-EVAL-UNSUPPORTED` | `sys` not a value | HA1, HA2, then HA5 (linked relation with no data) |
@@ -453,9 +453,9 @@ pub native fn format<C impl Currency>(amount: Money<C>, rounding: Rounding, loca
 - `valid/currency`: the old outcome is `ORNA-EVAL-TYPE` (measured), the spec result is a `Money<GBP>` value. The
   executor will run it and disagree. It needs an allowance entry with a reason and bead; it cannot raise `agreed`.
 - Expected movement, each verified by the slice's measured ratchet and not assumed: HA1 may add `valid/sys-checkpoint`,
-  `valid/sys-run-history`, `valid/sys-table-query`, `valid/historical-query` to `agreed`; HA5 may add `valid/sys-storage`;
-  HB8 may add `invalid/currency-addition`, `invalid/affine-addition`, `invalid/incompatible-dimensions`. That is up to 8
-  of the 48 cases the executor does not run today (measured baseline: `agreed = 48`, `evaluable = 110`).
+  `valid/sys-run-history`, `valid/sys-table-query` to `agreed` (`valid/historical-query` already agrees since #9918); HA5 may add `valid/sys-storage`;
+  HB8 may add `invalid/currency-addition`, `invalid/affine-addition`, `invalid/incompatible-dimensions`. That is up to 7
+  of the 47 cases the executor does not run today (measured baseline: `agreed = 49` of 63 run, `evaluable = 110`).
 
 --------------------------------------------------------------------------
 
@@ -469,7 +469,7 @@ independent except HB7 (needs HA3). Within a part the order is the dependency or
 
 | Slice | Bead | Depends on | Files | Tests | Acceptance |
 |---|---|---|---|---|---|
-| HA1 lower `sys` value paths | `ornadb-csenl.25` | none | `orna-hir` `lower/namespace.rs`, `lower/exprs.rs`, `lower/calls.rs` | unit tests with a test `SysAdmission` over `sys.Run`, `sys.rt.runs`, `sys.catalog.objects`, `sys.ObjectKind.table`, `sys.snapshot("x")` | `valid/sys-checkpoint`, `sys-run-history`, `sys-table-query`, `historical-query` lower with only `sys.version.incompatible`; measured `agreed` recorded (baseline 48) |
+| HA1 lower `sys` value paths | `ornadb-csenl.25` | none | `orna-hir` `lower/namespace.rs`, `lower/exprs.rs`, `lower/calls.rs` | unit tests with a test `SysAdmission` over `sys.Run`, `sys.rt.runs`, `sys.catalog.objects`, `sys.ObjectKind.table`, `sys.snapshot("x")` | `valid/sys-checkpoint`, `sys-run-history`, `sys-table-query` lower with only `sys.version.incompatible`; measured `agreed` recorded (baseline 49) |
 | HA2 typeck sys relation values | `ornadb-csenl.26` | HA1 | `typeck/call.rs`, `typeck/expr.rs` | `sys.Storage \| filter(..)` is `Relation<Storage>`; `sys.rt.runs \| count` is `Int` | tests pass; typed-share ratchet recorded |
 | HA3 `Host`, `HostManifest`, `StoreHost` | `ornadb-csenl.27` | none | `orna-exec` `host.rs`, `machine.rs`, `lib.rs` | existing tests unchanged; host unit tests; manifest parity test vs `CatalogueAdmission` | `check_architecture.py` passes; no behaviour change |
 | HA4 clock and entropy natives | `ornadb-csenl.28` | HA3 | `natives/time.rs` (or `clock.rs`), `natives/mod.rs` | `now` equal within one activation; `uuid7` deterministic under `FixtureHost` | `core.now`, `core.uuid7` bound |
