@@ -16,6 +16,7 @@ test-support = ["first-party-effect-trust"]
 first-party-effect-trust = []
 
 [dependencies]
+orna-live-lease = { path = "../orna-live-lease" }
 orna-sys-id = { path = "../orna-sys-id" }
 orna-base = { path = "../orna-base" }
 futures = "0.3.31"

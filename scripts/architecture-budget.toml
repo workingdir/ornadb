@@ -65,7 +65,7 @@ name = "orna-cli"
 "src/cli_query.rs" = 1252
 "src/cli_serve.rs" = 2354
 "src/cli_serve_app.rs" = 1270
-"src/main.rs" = 4358
+"src/main.rs" = 4340
 "src/repl.rs" = 1674
 [crate.functions]
 "src/cli_serve_app.rs::stage_at_head" = 128
@@ -116,7 +116,7 @@ name = "orna-compat-v1"
 "src/security.rs" = 2483
 "src/security/tests.rs" = 2515
 "src/state.rs" = 1651
-"src/system.rs" = 2180
+"src/system.rs" = 2093
 "src/value.rs" = 2220
 "src/value/opaque_codec.rs" = 1732
 "src/value/tests/constructed.rs" = 3431
@@ -155,7 +155,7 @@ name = "orna-compat-v1"
 [[crate]]
 name = "orna-evaluator"
 [crate.files]
-"src/lib.rs" = 15928
+"src/lib.rs" = 15792
 "src/relation.rs" = 1375
 "src/repl.rs" = 1766
 "src/sys_bindings.rs" = 2392
@@ -168,7 +168,7 @@ name = "orna-evolution"
 [[crate]]
 name = "orna-live"
 [crate.files]
-"src/lib.rs" = 12208
+"src/lib.rs" = 11714
 "src/live_presentation.rs" = 1623
 [crate.functions]
 "src/lib.rs::complete_application" = 232
@@ -244,11 +244,11 @@ name = "orna-protocol"
 [[crate]]
 name = "orna-repository"
 [crate.files]
-"src/compact.rs" = 6282
+"src/compact.rs" = 5921
 "src/compact/legacy_reader_tests.rs" = 3185
 "src/complete_copy.rs" = 2934
 "src/format_context.rs" = 6287
-"src/lib.rs" = 4697
+"src/lib.rs" = 4694
 "src/migration_copy.rs" = 3025
 "src/native_graph.rs" = 14142
 "src/object_reader.rs" = 1496
@@ -382,7 +382,7 @@ name = "orna-check"
 [crate.files]
 "src/lib.rs" = 5760
 "src/semantic_payload.rs" = 1831
-"src/system_api.rs" = 3521
+"src/system_api.rs" = 3083
 "src/tests.rs" = 1866
 [crate.functions]
 "src/lib.rs::admit_row_unit_with_key_spelling" = 222
