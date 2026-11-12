@@ -6,10 +6,14 @@
 //! those findings to the diagnostics and origins the old `Analysis` reports,
 //! so a caller can compare the two checkers code by code.
 
-use orna_hir::{Idx, ModuleOrigin, ModulePath, Name, Program, SourceId, SourceUnit, lower, typeck};
+use orna_hir::{
+    Idx, ModuleOrigin, ModulePath, Name, PreludeExports, Program, SourceId, SourceUnit,
+    lower_with_prelude, typeck,
+};
 use orna_syntax::{SyntaxSpan, SyntaxTree, parse_module_with_file};
 use orna_value::Diagnostic;
 
+use crate::StandardDependencyProfile;
 use crate::located::DiagnosticOrigin;
 use crate::{DIAG_PARSE, ModuleInput, diag};
 
@@ -41,10 +45,16 @@ pub struct HirFinding {
 /// Lowers `inputs` with `standard` and type-checks the result on HIR.
 ///
 /// `inputs` are the project's modules; `standard` are the pinned standard
-/// sources the project may import. Every source goes through the frozen syntax
-/// parser. Only the project's own modules contribute findings.
+/// sources the project may import; `prelude` gives the names each standard module
+/// exports through `use module as _;` (see [`prelude_of_profile`]). Every source
+/// goes through the frozen syntax parser. Only the project's own modules
+/// contribute findings.
 #[must_use]
-pub fn check(inputs: &[ModuleInput], standard: &[StandardSource]) -> Checked {
+pub fn check(
+    inputs: &[ModuleInput],
+    standard: &[StandardSource],
+    prelude: &PreludeExports,
+) -> Checked {
     let (trees, parse_findings) = parse_all(inputs, standard);
     let units: Vec<SourceUnit<'_>> = trees
         .iter()
@@ -55,11 +65,25 @@ pub fn check(inputs: &[ModuleInput], standard: &[StandardSource]) -> Checked {
             path: module_path_of(logical),
         })
         .collect();
-    let mut program = lower(&units);
+    let mut program = lower_with_prelude(&units, prelude);
     typeck(&mut program);
     let mut findings = parse_findings;
     findings.extend(project_findings(&program, &trees));
     Checked { program, findings }
+}
+
+/// The `use module as _;` exports of a pinned standard profile (ORNA-IMPORT-005).
+///
+/// The profile's logical paths, such as `std/prelude.orna`, map to the module
+/// paths the lowering keys on, such as `std.prelude`.
+#[must_use]
+pub fn prelude_of_profile(profile: &StandardDependencyProfile) -> PreludeExports {
+    profile
+        .module_prelude_exports()
+        .iter()
+        .fold(PreludeExports::default(), |prelude, (logical, names)| {
+            prelude.with_module(module_path_of(logical), names)
+        })
 }
 
 /// The explanation the old checker gives every syntax diagnostic of a project module.

@@ -32,6 +32,7 @@ mod items;
 mod literals;
 mod option_pats;
 mod pats;
+mod prelude;
 mod row;
 mod types;
 mod units;
@@ -47,6 +48,7 @@ use crate::{
 
 pub(crate) use classify::{rel_op as relation_operation, table_op as table_operation};
 pub(crate) use declare::Builder;
+pub use prelude::PreludeExports;
 
 /// One parsed source and the module path its spans belong to.
 #[derive(Clone, Debug)]
@@ -62,14 +64,23 @@ pub struct SourceUnit<'a> {
     pub path: ModulePath,
 }
 
-/// Lowers every source into one program.
+/// Lowers every source into one program, with no prelude exports.
+///
+/// A `use module as _;` binds nothing here (ORNA-IMPORT-005). Callers that
+/// lower a pinned standard module use [`lower_with_prelude`].
+#[must_use]
+pub fn lower(sources: &[SourceUnit<'_>]) -> Program {
+    lower_with_prelude(sources, &PreludeExports::default())
+}
+
+/// Lowers every source into one program; `prelude` gives each module's `as _` names.
 ///
 /// The engine-embedded `core` and `sys` modules (D12) are lowered first, so
 /// every caller's sources resolve against them. The result satisfies
 /// [`Program::validate`]: lowering represents a malformed input rather than
 /// rejecting it, so validation failures are lowering bugs.
 #[must_use]
-pub fn lower(sources: &[SourceUnit<'_>]) -> Program {
+pub fn lower_with_prelude(sources: &[SourceUnit<'_>], prelude: &PreludeExports) -> Program {
     let embedded = crate::embedded::parsed();
     let mut units: Vec<SourceUnit<'_>> = embedded
         .iter()
@@ -81,7 +92,7 @@ pub fn lower(sources: &[SourceUnit<'_>]) -> Program {
         })
         .collect();
     units.extend(sources.iter().cloned());
-    let mut builder = Builder::new(&units);
+    let mut builder = Builder::new(&units, prelude);
     builder.resolve_imports();
     builder.lower_items();
     let mut program = builder.finish();

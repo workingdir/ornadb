@@ -32,7 +32,7 @@ use std::sync::LazyLock;
 
 use orna_hir::{
     Callee, ExprKind, Idx, ModulePath, Name, NameTarget, Program, RelOp, SourceId, SourceUnit,
-    lower,
+    lower, lower_with_prelude,
 };
 use orna_standard_sources::reference_standard_sources_v1;
 use orna_syntax::{
@@ -219,7 +219,9 @@ fn lower_module_case(case: &Case) -> Result<LoweredProgram, String> {
         logical_paths.push(Some(module.logical.clone()));
         owned.push(false);
     }
-    let program = lower(&units);
+    let prelude =
+        orna_check::hir_check::prelude_of_profile(&orna_evaluator::reference_standard_profile());
+    let program = lower_with_prelude(&units, &prelude);
     let (logical_paths, owned) = bookkeeping(&program, &logical_paths, &owned);
     Ok(LoweredProgram {
         program,

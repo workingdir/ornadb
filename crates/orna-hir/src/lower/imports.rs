@@ -75,17 +75,7 @@ impl Builder<'_> {
                 self.bind_root(importer, root, target, pending.span.clone());
             }
             UseTail::Alias { name, span } if name == "_" => {
-                // `use module as _;` imports the module's declared prelude
-                // exports. The pinned std declares them in `std.prelude`; the
-                // HIR model has no prelude surface until stage H8, so the
-                // import binds no names and says so rather than dropping it.
-                self.diagnose(
-                    importer,
-                    crate::diag::UNSUPPORTED,
-                    "prelude imports are not represented yet",
-                    span.clone(),
-                );
-                self.record_import(importer, target_path, ImportTarget::Module(target));
+                self.import_prelude(importer, target_path, target, span.clone());
             }
             UseTail::Alias { name, span } => {
                 if name == "sys" {
@@ -328,6 +318,36 @@ impl Builder<'_> {
         self.program.modules[importer]
             .imports
             .push(Import { path, target });
+    }
+
+    /// `use module as _;` binds the prelude names recorded for `module` (ORNA-IMPORT-005).
+    ///
+    /// A module with no recorded prelude imports nothing; this is never a wildcard import.
+    fn import_prelude(
+        &mut self,
+        importer: ModuleId,
+        target_path: ModulePath,
+        target: ModuleId,
+        span: orna_syntax::SyntaxSpan,
+    ) {
+        self.record_import(importer, target_path.clone(), ImportTarget::Module(target));
+        let Some(names) = self.prelude.names(&target_path).cloned() else {
+            return;
+        };
+        for name in names {
+            match self.program.modules[target].exports.get(&name).copied() {
+                Some(def) => {
+                    self.bind_explicit(importer, name.clone(), def, span.clone());
+                    self.record_import(importer, target_path.clone(), ImportTarget::Def(def));
+                }
+                None => self.diagnose(
+                    importer,
+                    crate::diag::IMPORT,
+                    format!("prelude export `{name}` is not public"),
+                    span.clone(),
+                ),
+            }
+        }
     }
 
     /// What a bare name denotes at module scope, ignoring locals.
