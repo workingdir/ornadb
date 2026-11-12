@@ -55,7 +55,7 @@ const CORE_FILES: &[(&str, &str)] = &[
 const EXPECTED_NATIVES: &[(&str, usize)] = &[
     ("core.orna", 4),
     ("core/bits.orna", 6),
-    ("core/collection.orna", 27),
+    ("core/collection.orna", 32),
     ("core/hash.orna", 5),
     ("core/stats.orna", 14),
     ("core/text.orna", 10),
