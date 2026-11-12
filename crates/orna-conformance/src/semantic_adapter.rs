@@ -9947,13 +9947,16 @@ impl<R: RuntimeEvaluator> ConformanceAdapter for RuntimeAdapter<R> {
 #[cfg(test)]
 mod transaction_admission_tests {
     use super::{
-        Catalogue, SourceUnit, StageOutcome, TRANSACTION_CURSOR_PREFIX,
-        TRANSACTION_INT_CURSOR_PREFIX, TableEffectHandler, TransactionDatabase, TransactionKey,
-        TransactionKeyType, TransactionTableKey, TransactionalEvaluator, admit_transaction_project,
-        encoded_table_key, record_field, transaction_continuation_cursor, transaction_cursor_key,
+        Catalogue, SourceUnit, StageOutcome, TableEffectHandler, TransactionDatabase,
+        TransactionalEvaluator, admit_transaction_project,
     };
     use crate::{ProjectEnvironment, ProjectExpectations, ProjectUnit};
     use num_bigint::BigInt;
+    use orna_cursor::{
+        TRANSACTION_CURSOR_PREFIX, TRANSACTION_INT_CURSOR_PREFIX, TransactionKey,
+        TransactionKeyType, TransactionTableKey, encoded_table_key, record_field,
+        table_key_components, transaction_continuation_cursor, transaction_cursor_key,
+    };
     use orna_evaluator::{EffectHandler, Limits, StepBudget};
     use orna_value::{OvbRaw, Value};
     use std::collections::BTreeMap;
@@ -10453,10 +10456,10 @@ mod transaction_admission_tests {
             .expect("encoded typed tuple");
 
         assert!(
-            super::table_key_components(&tagged, 1).is_err(),
+            table_key_components(&tagged, 1).is_err(),
             "a two-component tagged tuple cannot satisfy a one-component key"
         );
-        let decoded = super::table_key_components(&tagged, 2).expect("valid tagged tuple");
+        let decoded = table_key_components(&tagged, 2).expect("valid tagged tuple");
         assert!(matches!(decoded[0].raw(), OvbRaw::Text(value) if value == "north"));
         assert!(matches!(decoded[1].raw(), OvbRaw::Text(value) if value == "pencil"));
 
@@ -10464,7 +10467,7 @@ mod transaction_admission_tests {
             .expect("plain composite key")
             .encode()
             .expect("encoded plain composite key");
-        let decoded = super::table_key_components(&plain, 2).expect("valid plain array key");
+        let decoded = table_key_components(&plain, 2).expect("valid plain array key");
         assert!(matches!(decoded[0].raw(), OvbRaw::Text(value) if value == "north"));
         assert!(matches!(decoded[1].raw(), OvbRaw::Text(value) if value == "pencil"));
     }
