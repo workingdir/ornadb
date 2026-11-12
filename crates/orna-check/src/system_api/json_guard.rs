@@ -56,6 +56,11 @@ pub(super) fn raw_document(source: &str) -> Result<RawSystemApi, SystemApiError>
                         value => Some(text(value)?.to_owned()),
                     },
                     diagnostic: text(value_at(value, "diagnostic")?)?.to_owned(),
+                    reason: match value.get("reason") {
+                        None => None,
+                        Some(value) if value.is_null() => None,
+                        Some(value) => Some(text(value)?.to_owned()),
+                    },
                 },
             ))
         })

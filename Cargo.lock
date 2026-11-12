@@ -1888,6 +1888,7 @@ version = "1.0.0"
 dependencies = [
  "orna-base",
  "orna-syntax",
+ "orna-sys-interface",
  "serde_json",
 ]
 
@@ -1896,6 +1897,7 @@ name = "orna-sys-interface"
 version = "1.0.0"
 dependencies = [
  "orna-syntax",
+ "serde_json",
 ]
 
 [[package]]

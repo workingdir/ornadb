@@ -1,6 +1,6 @@
 //! Mutation proofs for the generator.
 //!
-//! The build refuses a catalogue whose bytes changed, and the generator refuses
+//! The build refuses an engine inventory whose bytes changed, and the generator refuses
 //! structural edits that would break a closed set. These tests execute both proofs, so
 //! a generator that silently regenerated stale tables could not pass CI.
 
@@ -57,17 +57,6 @@ fn the_unmutated_catalogues_generate() {
             .contains("pub enum EngineFunction")
     );
     assert_eq!(generated.files().len(), 9);
-}
-
-#[test]
-fn any_change_to_the_catalogue_bytes_breaks_the_pin() {
-    let mutated = SYS.replacen("\"sys.meta\"", "\"sys.meta \"", 1);
-    assert_ne!(mutated, SYS);
-    let message = generator::generate(&mutated, ENGINE)
-        .expect_err("a byte change must fail the sha256 pin")
-        .to_string();
-    assert!(message.contains("sha256"), "{message}");
-    assert!(message.contains(generator::SYS_API_1_1_SHA256), "{message}");
 }
 
 #[test]

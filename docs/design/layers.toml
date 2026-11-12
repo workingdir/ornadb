@@ -79,7 +79,7 @@ layer = 3
 
 [[crate]]
 name = "orna-sys-interface"
-layer = 3
+layer = 2
 
 [[crate]]
 name = "orna-standard-sources"

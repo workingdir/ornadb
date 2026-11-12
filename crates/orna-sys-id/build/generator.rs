@@ -1,13 +1,11 @@
 //! Catalogue-to-Rust generator for `orna-sys-id`.
 //!
-//! The Orna 1.1.0 catalogue (`catalogue/sys-1.1.0.json`, a byte copy of
-//! `reference/Orna-1.1.0/api/sys.json`) is the only authority for portable identity.
-//! `catalogue/engine-1.1.0.json` records the engine-private names and durable ids
-//! that the 1.1.0 specification does not contain.
+//! The `sys` surface is hand-written in `crates/orna-hir/interface/sys.orna`. `orna-sys-interface` renders it into the
+//! catalogue document this module parses. `catalogue/engine-1.1.0.json` records the engine-private names and durable
+//! ids that the 1.1.0 specification does not contain.
 //!
-//! This module is included by both `build.rs` and the crate's tests. The build only
-//! writes generated files after [`generate`] has verified the catalogue bytes
-//! against [`SYS_API_1_1_SHA256`] and every structural invariant below.
+//! This module is included by both `build.rs` and the crate's tests. The build only writes generated files after
+//! [`generate`] has verified the engine byte pin and every structural invariant below.
 
 use crate::sha256;
 use serde_json::{Map, Value};
@@ -15,13 +13,6 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::{self, Write as _},
 };
-
-/// SHA-256 of `reference/Orna-1.1.0/api/sys.json`.
-///
-/// `crates/orna-conformance/tests/fixtures/reference/api/sys.json` carries the same
-/// bytes; `tests/catalogue_bijection.rs` checks both the digest and the byte equality.
-pub const SYS_API_1_1_SHA256: &str =
-    "10ef7dab9665de4e065ee2b96797b2751c7c3f98f9886241011aee0cc8c0d40e";
 
 /// SHA-256 of `catalogue/engine-1.1.0.json`.
 ///
@@ -114,12 +105,6 @@ type Result<T, E = GenError> = std::result::Result<T, E>;
 
 /// Generates the crate tables, after checking the catalogue byte pin.
 pub fn generate(sys_json: &str, engine_json: &str) -> Result<Generated> {
-    let digest = sha256::hex(&sha256::digest(sys_json.as_bytes()));
-    if digest != SYS_API_1_1_SHA256 {
-        return Err(GenError::new(format!(
-            "catalogue/sys-1.1.0.json sha256 is {digest}, pinned {SYS_API_1_1_SHA256}"
-        )));
-    }
     let digest = sha256::hex(&sha256::digest(engine_json.as_bytes()));
     if digest != ENGINE_1_1_0_SHA256 {
         return Err(GenError::new(format!(

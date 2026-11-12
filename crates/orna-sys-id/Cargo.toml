@@ -11,6 +11,7 @@ description = "Generated typed identity for the Orna 1.1.0 sys surface"
 [build-dependencies]
 orna-base = { path = "../orna-base" }
 serde_json = "1.0"
+orna-sys-interface = { path = "../orna-sys-interface" }
 
 [dev-dependencies]
 orna-base = { path = "../orna-base" }

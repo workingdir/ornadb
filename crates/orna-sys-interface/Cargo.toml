@@ -8,3 +8,4 @@ description = "The sys descriptor decoded from the hand-written sys.orna declara
 
 [dependencies]
 orna-syntax = { path = "../orna-syntax" }
+serde_json = "1.0"

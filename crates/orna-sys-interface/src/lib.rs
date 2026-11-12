@@ -4,7 +4,10 @@
 //! [`RawSystemApi`] descriptor that the checker validates. The descriptor types are plain data with public fields,
 //! so the checker's JSON guard can construct them from the retired catalogue for field-by-field comparison.
 
+mod catalogue_json;
 mod native_raw;
+
+pub use catalogue_json::catalogue_json;
 
 pub use native_raw::{
     NAMESPACE_FILES, SYS_ORNA, catalogue_class, declared_names, native_label, native_raw_document,
@@ -103,4 +106,5 @@ pub struct RawFunction {
 pub struct RawRemovedName {
     pub replacement: Option<String>,
     pub diagnostic: String,
+    pub reason: Option<String>,
 }

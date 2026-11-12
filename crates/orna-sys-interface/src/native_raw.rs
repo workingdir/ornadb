@@ -611,6 +611,7 @@ fn collect_removed(item: &Item, removed: &mut BTreeMap<String, RawRemovedName>) 
                     || REMOVED_DIAGNOSTIC.to_owned(),
                     |diagnostic| diagnostic.text.clone(),
                 ),
+                reason: None,
             },
         );
     }
@@ -625,6 +626,7 @@ fn collect_removed(item: &Item, removed: &mut BTreeMap<String, RawRemovedName>) 
                     .as_ref()
                     .map(|replacement| replacement.text.clone()),
                 diagnostic: REMOVED_DIAGNOSTIC.to_owned(),
+                reason: retired.reason.as_ref().map(|reason| reason.text.clone()),
             },
         );
     }
