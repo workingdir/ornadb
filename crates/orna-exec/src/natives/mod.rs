@@ -34,6 +34,7 @@ mod time_format;
 mod unicode_16_case_properties;
 mod unicode_case;
 mod values;
+mod window;
 
 use orna_hir::{DefId, NativeKey, Ty};
 
@@ -89,6 +90,13 @@ pub(crate) fn lookup(key: &NativeKey) -> Option<NativeFn> {
         ("core.collection", "max") | ("core.collection", "__maximum") => {
             collection::basic::max_value
         }
+        ("core.collection", "__strictly_ordered_time_series") => {
+            window::strictly_ordered_time_series
+        }
+        ("core.collection", "__window_rate") => window::window_rate,
+        ("core.collection", "__window_rate_integrate") => window::window_rate_integrate,
+        ("core.collection", "__window_derivative") => window::window_derivative,
+        ("core.collection", "__window_integrate") => window::window_integrate,
         ("core.collection", "take") => collection::basic::take_rows,
         ("core.collection", "drop") => collection::basic::drop_rows,
         ("core.collection", "distinct") => collection::basic::distinct,
