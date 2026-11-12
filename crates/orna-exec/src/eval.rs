@@ -249,6 +249,7 @@ impl<'p> Machine<'p> {
             Callee::TableOp { table, op } => self.table_op(body, frame, call, *table, *op),
             Callee::Relational { op } => relation::relational(self, body, frame, call, *op),
             Callee::Intrinsic(IntrinsicForm::Fail) => self.fail(body, frame, call),
+            Callee::Intrinsic(IntrinsicForm::OptionSome) => self.option_some(body, frame, call),
             Callee::Intrinsic(_) => Err(Stop::NotYet("intrinsic form (H4)")),
             Callee::Pending { .. } => Err(Stop::NotYet("member call awaiting the type pass (H2)")),
             Callee::Ctor { def } => self.construct(body, frame, call, *def),
@@ -807,6 +808,30 @@ impl<'p> Machine<'p> {
     /// argument is the only input; a defaulted or missing argument is an
     /// argument error.
     fn fail(&mut self, body: &'p Body, frame: &mut Frame, call: &Call) -> Result<Value, Stop> {
+        let argument = Self::sole_argument(call)?;
+        match self.eval(body, frame, argument)? {
+            Value::Error(code) => Err(Stop::Error(code)),
+            _ => Err(Stop::Error("ORNA-EVAL-TYPE")),
+        }
+    }
+
+    /// `Some(e)`: the present option holding the value of `e`. The call takes exactly one argument; a defaulted or
+    /// missing argument is an argument error.
+    fn option_some(
+        &mut self,
+        body: &'p Body,
+        frame: &mut Frame,
+        call: &Call,
+    ) -> Result<Value, Stop> {
+        let argument = Self::sole_argument(call)?;
+        Ok(Value::Option(Some(Rc::new(
+            self.eval(body, frame, argument)?,
+        ))))
+    }
+
+    /// The one expression argument of a single-argument intrinsic form. A defaulted or missing argument is an
+    /// argument error.
+    fn sole_argument(call: &Call) -> Result<ExprId, Stop> {
         let [
             Arg {
                 value: ArgValue::Expr(argument),
@@ -816,10 +841,7 @@ impl<'p> Machine<'p> {
         else {
             return Err(Stop::Error("ORNA-EVAL-ARGUMENT"));
         };
-        match self.eval(body, frame, *argument)? {
-            Value::Error(code) => Err(Stop::Error(code)),
-            _ => Err(Stop::Error("ORNA-EVAL-TYPE")),
-        }
+        Ok(*argument)
     }
 
     /// Binds `value` to `pat` when it matches. Bindings made before a later
