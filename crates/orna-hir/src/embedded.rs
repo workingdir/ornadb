@@ -1,8 +1,7 @@
 //! The engine-embedded interface modules `core` and `sys` (design hir.md H2,
 //! decision D12).
 //!
-//! Their sources live under `interface/` and are generated from the old
-//! catalogue by `scripts/gen_core_interface.py`. They declare the engine's
+//! Their sources live under `interface/` as hand-written Orna (decision D19). They declare the engine's
 //! natives with body-less `native fn`, which bind to the engine registry (a
 //! key in these modules is an engine native; see `NativeBinding`). Lowering
 //! loads them ahead of every caller's sources, so a native call always has a

@@ -9,10 +9,8 @@
 //! `STANDARD_BINDING_MODULES` table by `tests/oracle_standard_binding_modules.rs`
 //! before any stage deletes that table.
 
-pub mod digest;
 mod dispatch;
 mod effect;
-pub mod export;
 mod id;
 mod modules;
 mod pin;

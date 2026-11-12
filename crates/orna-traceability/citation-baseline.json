@@ -31,6 +31,7 @@
     "orna-sys",
     "orna-sys-codegen",
     "orna-sys-id",
+    "orna-sys-interface",
     "orna-sys-model",
     "orna-table",
     "orna-traceability",
