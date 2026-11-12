@@ -64,6 +64,9 @@ mod operator;
 mod option_pattern_tests;
 mod protocol;
 mod quantity;
+mod table_write;
+#[cfg(test)]
+mod table_write_tests;
 #[cfg(test)]
 mod temperature_tests;
 #[cfg(test)]

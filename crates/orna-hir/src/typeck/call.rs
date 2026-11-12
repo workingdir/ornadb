@@ -366,22 +366,18 @@ impl<'a> BodyCheck<'a> {
         };
         match op {
             TableOp::Insert | TableOp::Upsert => {
-                self.check_slot(body, call, 0, Some(row), span.clone())?;
+                self.check_table_row(body, call, 0, table, row, op)?;
             }
             TableOp::Update => {
                 let key = self.table_key_ty(table)?;
                 self.check_slot(body, call, 0, Some(key), span.clone())?;
-                self.check_slot(body, call, 1, Some(row), span.clone())?;
+                self.check_table_row(body, call, 1, table, row, op)?;
             }
             TableOp::Delete => {
                 let key = self.table_key_ty(table)?;
                 self.check_slot(body, call, 0, Some(key), span.clone())?;
             }
-            TableOp::Rekey => {
-                return Err(NotYetReason::Unsupported(
-                    "`rekey` is not on HIR yet".into(),
-                ));
-            }
+            TableOp::Rekey => self.check_rekey(body, call, table, span.clone())?,
             TableOp::Count | TableOp::First | TableOp::One => {}
             TableOp::AsOf => {
                 self.check_slot(body, call, 0, None, span.clone())?;
