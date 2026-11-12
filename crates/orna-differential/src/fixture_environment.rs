@@ -22,11 +22,11 @@ pub type Customer {}
 pub type EmailHeader {
     address: Str,
 }
-pub table Contact(id: Str) {
-    first: Str,
-    last: Str,
+pub table Contact(id: Str = \"generated\") {
+    first: Str = \"\",
+    last: Str = \"\",
     name: Str,
-    emails: [Str],
+    emails: [Str] = [],
     full_name: Str => \"{first} {last}\",
 }
 pub table Note {
@@ -40,5 +40,9 @@ pub table Order {
 pub table Audit {
     action: Str,
     order: Order,
+}
+pub table Payment {
+    order: Order,
+    amount: Int,
 }
 ";

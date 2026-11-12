@@ -37,7 +37,7 @@ bead = "ornadb-csenl.21"
 
 [[harness-allowance]]
 case = "invalid/duplicate-key.orna"
-reason = "old pipeline answers ORNA-EVAL-NAME for the duplicate key because the H0 observer has no table store; the executor reaches the store boundary (ORNA-EVAL-TABLE-ROW)."
+reason = "old pipeline answers ORNA-EVAL-NAME for the duplicate key because the H0 observer has no table store; the executor runs the second insert against the attached Contact store and reports the spec duplicate-key error (ORNA-EVAL-TABLE-DUPLICATE-KEY)."
 bead = "ornadb-csenl.21"
 
 [[harness-allowance]]
@@ -52,7 +52,7 @@ bead = "ornadb-csenl.21"
 
 [[harness-allowance]]
 case = "valid/effectful-expression.orna"
-reason = "old pipeline answers ORNA-EVAL-NAME because the H0 observer has no table store; the executor reaches the store boundary (ORNA-EVAL-TABLE-ROW)."
+reason = "old pipeline answers ORNA-EVAL-NAME because the H0 observer has no table store for the attached Contact table; the executor runs the insert and returns the spec record (defaults applied: id \"generated\", emails []). Not credited as agreement."
 bead = "ornadb-csenl.21"
 
 # Cases the executor runs by reading a table field as a function, `map(Contact.field)`, over the table. The

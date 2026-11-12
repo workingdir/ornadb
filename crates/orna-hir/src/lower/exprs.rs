@@ -19,6 +19,7 @@ use crate::{
 
 use super::blocks::lower_block;
 use super::calls::{attach_type_arguments, classify_callee};
+use super::classify::ParamInfo;
 use super::control::lower_control;
 use super::declare::Builder;
 use super::free_names::free_names;
@@ -718,6 +719,40 @@ fn lower_concurrent_argument(
     }
 }
 
+/// The deprecated `as: T` witness of a call whose callee declares no parameter
+/// named `as`: the 1.2 alias for the type argument `<T>`. Returns the index of
+/// the witness argument and the type it names. A witness that is not a plain
+/// path does not name a type, so it stays an ordinary argument and fails there.
+fn as_witness_type(
+    params: Option<&[ParamInfo]>,
+    type_arguments: &[TypeExpr],
+    arguments: &[orna_syntax::Argument],
+) -> Option<(usize, TypeExpr)> {
+    if !type_arguments.is_empty() || params?.iter().any(|param| param.name == Name::new("as")) {
+        return None;
+    }
+    let index = arguments
+        .iter()
+        .position(|argument| argument.name.as_deref() == Some("as"))?;
+    let value = &arguments[index].value;
+    let mut segments = Vec::new();
+    if !flatten_path(value, &mut segments) {
+        return None;
+    }
+    let path = segments
+        .iter()
+        .map(|(segment, _)| (*segment).to_owned())
+        .collect();
+    Some((
+        index,
+        TypeExpr::Name {
+            path,
+            arguments: Vec::new(),
+            span: value.span().clone(),
+        },
+    ))
+}
+
 /// Lowers one call, including its classified callee and bound arguments.
 fn lower_call(
     builder: &mut Builder<'_>,
@@ -744,11 +779,17 @@ fn lower_call(
         }
     };
     super::mark_callee(&mut builder.program, module, &callee_span);
+    let witness = as_witness_type(params.as_deref(), type_arguments, arguments);
+    let witness_index = witness.as_ref().map(|(index, _)| *index);
+    let witnessed = witness.map(|(_, ty)| vec![ty]);
+    let type_arguments = witnessed.as_deref().unwrap_or(type_arguments);
     let callee = attach_type_arguments(builder, state, callee, type_arguments);
     let concurrent = super::calls::starts_concurrent_bodies(builder, &callee);
     let lowered = arguments
         .iter()
-        .map(|argument| {
+        .enumerate()
+        .filter(|(index, _)| Some(*index) != witness_index)
+        .map(|(_, argument)| {
             let value = if concurrent {
                 lower_concurrent_argument(builder, state, &argument.value)
             } else {
