@@ -5,8 +5,8 @@
 
 use std::sync::LazyLock;
 
-use orna_hir::{ModulePath, Name, SourceId, SourceUnit};
-use orna_standard_sources::reference_standard_sources_v1;
+use orna_hir::{Lowering, ModulePath, Name, PreludeExports, SourceId, SourceUnit};
+use orna_standard_sources::{REFERENCE_STANDARD_PRELUDE_EXPORTS_V1, reference_standard_sources_v1};
 use orna_syntax::{SyntaxTree, parse_module_with_file};
 
 /// One standard module: the path lowering registers it under and its parsed tree.
@@ -39,9 +39,14 @@ fn module_path_of(logical: &str) -> ModulePath {
     ModulePath::new(segments.into_iter().map(Name::new))
 }
 
-/// The standard units followed by the session unit `session`, which lowers under `path`.
-pub(crate) fn units_with<'a>(session: &'a SyntaxTree, path: ModulePath) -> Vec<SourceUnit<'a>> {
-    let mut units: Vec<SourceUnit<'a>> = MODULES
+/// The standard library lowered once per process, and the source index the session module lowers under: the first
+/// index after the standard units.
+static LOWERED: LazyLock<(Lowering, u32)> = LazyLock::new(|| {
+    let prelude = PreludeExports::default().with_module(
+        ModulePath::new([Name::new("std"), Name::new("prelude")]),
+        REFERENCE_STANDARD_PRELUDE_EXPORTS_V1.iter().copied(),
+    );
+    let units: Vec<SourceUnit<'_>> = MODULES
         .iter()
         .enumerate()
         .map(|(index, module)| SourceUnit {
@@ -50,12 +55,17 @@ pub(crate) fn units_with<'a>(session: &'a SyntaxTree, path: ModulePath) -> Vec<S
             path: module.path.clone(),
         })
         .collect();
-    units.push(SourceUnit {
-        source: source_id(MODULES.len()),
-        tree: session,
-        path,
-    });
-    units
+    let mut lowering = Lowering::new(&prelude);
+    lowering.extend(&units);
+    (
+        lowering,
+        u32::try_from(MODULES.len()).expect("source index fits u32"),
+    )
+});
+
+/// The standard library lowered, and the source index the session module lowers under.
+pub(crate) fn lowering() -> (Lowering, u32) {
+    LOWERED.clone()
 }
 
 fn source_id(index: usize) -> SourceId {
