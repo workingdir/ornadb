@@ -121,3 +121,50 @@ fn a_typed_program_has_no_diagnostics_on_its_module() {
         .expect("the test module is registered");
     assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
 }
+
+#[test]
+fn a_relation_stage_binds_its_named_zone_argument_at_lowering() {
+    let accepted =
+        lower_source("pub fn f(values: [Int]): [Int] = values | bucket_by(1.day, zone: 0);\n");
+    assert!(
+        with_code(&accepted, crate::diag::ARGUMENT).is_empty(),
+        "{:?}",
+        with_code(&accepted, crate::diag::ARGUMENT)
+    );
+}
+
+#[test]
+fn an_unknown_named_argument_to_a_relation_stage_is_a_spanned_diagnostic() {
+    let source = "pub fn f(values: [Int]): [Int] = values | bucket_by(1.day, nope: 0);\n";
+    let program = lower_source(source);
+    let found = with_code(&program, crate::diag::ARGUMENT);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(
+        found[0].1.message.contains("nope"),
+        "{}",
+        found[0].1.message
+    );
+    assert!(spanned(source, found[0].1).contains("nope: 0"));
+}
+
+#[test]
+fn an_omitted_required_period_of_a_relation_stage_is_a_diagnostic() {
+    let program = lower_source("pub fn f(values: [Int]): [Int] = values | bucket_by(zone: 0);\n");
+    let found = with_code(&program, crate::diag::ARGUMENT);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(
+        found[0].1.message.contains("required"),
+        "{}",
+        found[0].1.message
+    );
+}
+
+#[test]
+fn a_sys_native_resolves_by_its_one_one_spelling() {
+    let program = lower_source("pub fn f(v: Blob): Int = sys.blob.length(v);\n");
+    assert!(
+        with_code(&program, crate::diag::UNRESOLVED).is_empty(),
+        "{:?}",
+        with_code(&program, crate::diag::UNRESOLVED)
+    );
+}

@@ -72,3 +72,12 @@ bead = "ornadb-csenl.21"
 case = "valid/computed-and-defaulted-fields.orna"
 reason = "old pipeline answers ORNA-EVAL-NAME because the H0 observer has no table store; the executor maps the table's computed field over zero rows and returns the empty list the spec defines"
 bead = "ornadb-csenl.21"
+
+# Cases the executor runs whose result is a raw `Blob`, which the old pipeline answers
+# `ORNA-EVAL-VALUE` because its blob results are ROV3 blob references. The executor's bytes are the
+# spec result; the old side is the representation gap. Matches only that exact pair (old
+# `ORNA-EVAL-VALUE`, executor `Ok`); any other disagreement stays a mismatch.
+[[representation-allowance]]
+case = "valid/blob-range.orna"
+reason = "the old pipeline answers ORNA-EVAL-VALUE for a raw Blob result (its blob values are ROV3 references, which sys.blob.from_bytes does not produce); the executor returns the canonical bytes the spec defines"
+bead = "ornadb-csenl.20"

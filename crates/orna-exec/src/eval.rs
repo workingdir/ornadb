@@ -234,7 +234,7 @@ impl<'p> Machine<'p> {
                     closure.env.clone(),
                 )
             }
-            Callee::Native { def, targs } => {
+            Callee::Native { def, targs } | Callee::Sys { def, targs } => {
                 let program = self.program;
                 let DefKind::Fn(function) = &program.defs[*def].kind else {
                     return Err(Stop::NotYet("call of a non-function definition (H5)"));
@@ -245,7 +245,6 @@ impl<'p> Machine<'p> {
                 let values = natives::in_parameter_order(arguments, function.params.len())?;
                 self.native(*def, type_args(&callee_targs), values)
             }
-            Callee::Sys { .. } => Err(Stop::NotYet("sys call (H5)")),
             Callee::TableOp { table, op } => self.table_op(body, frame, call, *table, *op),
             Callee::Relational { op } => relation::relational(self, body, frame, call, *op),
             Callee::Intrinsic(IntrinsicForm::Fail) => self.fail(body, frame, call),
