@@ -1590,6 +1590,8 @@ type, and H4 only needs types from H2 for arithmetic selection; section 7.2).
 - **Risk.** The long tail: a production path whose behaviour is covered by no
   corpus case. Mitigation: the shadow period, and a rule that any production
   discrepancy found later first becomes a corpus case.
+- **Plan.** The concrete cutover, shadow, rollback and deletion plan, with
+  measured exit criteria per consumer, is [hir-cutover.md](hir-cutover.md).
 
 ### 6.4 Step parity
 
