@@ -36,6 +36,7 @@
     "orna-sys-model",
     "orna-table",
     "orna-traceability",
+    "orna-unicode",
     "orna-value"
   ],
   "cited_ids": [

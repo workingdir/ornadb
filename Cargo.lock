@@ -1579,6 +1579,7 @@ dependencies = [
  "orna-standard-sources",
  "orna-syntax",
  "orna-sys",
+ "orna-unicode",
  "orna-value",
  "serde",
  "serde_json",
@@ -1714,6 +1715,7 @@ dependencies = [
  "orna-repository",
  "orna-runtime",
  "orna-syntax",
+ "orna-unicode",
  "orna-value",
  "tempfile",
  "unicode-normalization",
@@ -1946,6 +1948,13 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+]
+
+[[package]]
+name = "orna-unicode"
+version = "1.0.0"
+dependencies = [
+ "unicode-normalization",
 ]
 
 [[package]]
