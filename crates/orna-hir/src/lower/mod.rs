@@ -31,6 +31,7 @@ mod imports;
 mod incremental;
 mod items;
 mod literals;
+mod namespace;
 mod natives;
 mod option_pats;
 mod pats;
@@ -85,6 +86,20 @@ pub fn lower(sources: &[SourceUnit<'_>]) -> Program {
 #[must_use]
 pub fn lower_with_prelude(sources: &[SourceUnit<'_>], prelude: &PreludeExports) -> Program {
     let mut lowering = Lowering::new(prelude);
+    lowering.extend(sources);
+    lowering.into_program()
+}
+
+/// Lowers every source into one program; `prelude` gives each module's `as _` names,
+/// and each name in `attached` is an attached database whose root namespace the
+/// sources resolve (ORNA-ATTACH-001).
+#[must_use]
+pub fn lower_with_attached(
+    sources: &[SourceUnit<'_>],
+    prelude: &PreludeExports,
+    attached: &[Name],
+) -> Program {
+    let mut lowering = Lowering::new_attached(prelude, attached);
     lowering.extend(sources);
     lowering.into_program()
 }

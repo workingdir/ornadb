@@ -70,7 +70,9 @@ pub use ids::{
     BodyId, DefId, ExprId, Idx, IndexVec, LocalId, ModuleId, ModulePath, Name, PatId, SourceId,
 };
 pub use infer::{Conflict, InferCtxt};
-pub use lower::{Lowering, PreludeExports, SourceUnit, lower, lower_with_prelude};
+pub use lower::{
+    Lowering, PreludeExports, SourceUnit, lower, lower_with_attached, lower_with_prelude,
+};
 pub use name_use::{NameTarget, NameUse, UseContext};
 pub use pat::Pat;
 pub use print::{print_signature, print_type};

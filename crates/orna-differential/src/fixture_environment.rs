@@ -11,23 +11,14 @@
 //! callables that have no body in source, stay in the environment ratchet and
 //! are not invented.
 
-/// The source of the attached fixture tables and nominal types.
-///
-/// `Contact.full_name` is the spec's computed-field example
-/// (`full_name: Str => "{first} {last}"`, ORNA-FIELD-010); the old catalogue
-/// records only that the field is computed.
+/// The source of the attached fixture tables and nominal types that stay under
+/// `fixture.attached`. `Contact` is not here: the `contacts` database below owns it,
+/// and reference cases reach it by its bare name through `use contacts.*;`.
 pub const ATTACHED_SUPPORT: &str = "\
 pub type Account {}
 pub type Customer {}
 pub type EmailHeader {
     address: Str,
-}
-pub table Contact(id: Str = \"generated\") {
-    first: Str = \"\",
-    last: Str = \"\",
-    name: Str,
-    emails: [Str] = [],
-    full_name: Str => \"{first} {last}\",
 }
 pub table Note {
     created: Instant,
@@ -44,5 +35,57 @@ pub table Audit {
 pub table Payment {
     order: Order,
     amount: Int,
+}
+";
+
+/// The attached database modules, as `(logical path, source)`. The old catalogue
+/// names each one by its module (`contacts`, `energy`, `mail`). The observer
+/// attaches a root only to a reference case that names it (see
+/// `observe_new::attached_databases`), so a case reaches `contacts.Contact` with no
+/// `use`. A module that needs a unit (`mph`) imports the fixture units.
+pub const DATABASE_SUPPORT: [(&str, &str); 3] = [
+    ("contacts.orna", CONTACTS_SUPPORT),
+    ("energy.orna", ENERGY_SUPPORT),
+    ("mail.orna", MAIL_SUPPORT),
+];
+
+/// The `contacts` database.
+///
+/// `Contact.full_name` is the spec's computed-field example
+/// (`full_name: Str => "{first} {last}"`, ORNA-FIELD-010); the old catalogue
+/// records only that the field is computed.
+const CONTACTS_SUPPORT: &str = "\
+pub table Contact(id: Str = \"generated\") {
+    first: Str = \"\",
+    last: Str = \"\",
+    name: Str,
+    emails: [Str] = [],
+    full_name: Str => \"{first} {last}\",
+}
+";
+
+/// The `energy` database: the shape the old catalogue gives `Reading`.
+const ENERGY_SUPPORT: &str = "\
+use fixture.units.*;
+pub table Reading {
+    rpm: Int,
+    speed: Float<mph>,
+    time: Instant,
+}
+";
+
+/// The `mail` database: the shape the old catalogue gives `Email`, the message
+/// fields plus the provider identity a stored email carries.
+const MAIL_SUPPORT: &str = "\
+pub table Email {
+    body_html: Str,
+    body_text: Str,
+    from: Str,
+    id: Str,
+    received: Instant,
+    sent: Instant,
+    subject: Str,
+    to: Str,
+    provider: Str,
 }
 ";

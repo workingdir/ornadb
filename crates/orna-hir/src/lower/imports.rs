@@ -426,7 +426,7 @@ impl Builder {
                 },
                 None => PathKind::MissingMember {
                     module: child,
-                    member: take,
+                    member: take + 1,
                 },
             };
         }
@@ -438,7 +438,7 @@ impl Builder {
             },
             None => PathKind::MissingMember {
                 module: root,
-                member: 0,
+                member: 1,
             },
         }
     }

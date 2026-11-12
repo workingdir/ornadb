@@ -32,7 +32,7 @@ use std::sync::LazyLock;
 
 use orna_hir::{
     Callee, ExprKind, Idx, ModulePath, Name, NameTarget, Program, RelOp, SourceId, SourceUnit,
-    lower, lower_with_prelude,
+    lower, lower_with_attached,
 };
 use orna_standard_sources::reference_standard_sources_v1;
 use orna_syntax::{
@@ -42,7 +42,7 @@ use orna_syntax::{
 
 use crate::Route;
 use crate::case::{Case, CaseKind, Family};
-use crate::fixture_environment::ATTACHED_SUPPORT;
+use crate::fixture_environment::{ATTACHED_SUPPORT, DATABASE_SUPPORT};
 
 /// The repository's standard modules, parsed once per test process.
 struct StandardModule {
@@ -90,6 +90,71 @@ static FIXTURE_ATTACHED: LazyLock<StandardModule> = LazyLock::new(|| {
         logical,
     }
 });
+
+/// The attached database modules (`fixture_environment::DATABASE_SUPPORT`),
+/// reached by reference cases as `contacts.Contact` with no `use`.
+static FIXTURE_DATABASES: LazyLock<Vec<StandardModule>> = LazyLock::new(|| {
+    DATABASE_SUPPORT
+        .iter()
+        .map(|(logical, text)| {
+            let logical = (*logical).to_owned();
+            StandardModule {
+                path: module_path_of(&logical),
+                tree: parse_module_with_file(text, logical.clone()).value,
+                logical,
+            }
+        })
+        .collect()
+});
+
+/// The database roots a reference case may attach, with the names that make a
+/// case need the root: the root itself, plus the bare table name for `contacts`,
+/// whose `Contact` a reference module reaches through `use contacts.*;`.
+const ATTACHABLE_DATABASES: [(&str, &[&str]); 3] = [
+    ("contacts", &["contacts", "Contact"]),
+    ("energy", &["energy"]),
+    ("mail", &["mail"]),
+];
+
+/// Connector paths the source-only environment cannot supply (bead ornadb-csenl.15).
+/// A case that reaches one keeps that connector's root unattached: attaching `mail`
+/// would turn `mail.google.sync`, a name the fixture-catalogue environment supplies,
+/// into an owned unresolved export of an attached database.
+const UNSUPPLIED_CONNECTORS: [&str; 1] = ["mail.google"];
+
+/// The attached database roots one reference case sees: a root is attached when the
+/// case names it and does not reach one of its [`UNSUPPLIED_CONNECTORS`].
+fn attached_databases(case: &Case) -> Vec<&'static str> {
+    let tokens: Vec<&str> = case
+        .sources
+        .iter()
+        .flat_map(|source| {
+            source
+                .text
+                .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.'))
+        })
+        .filter(|token| !token.is_empty())
+        .collect();
+    let first_segment = |token: &str| token.split('.').next().unwrap_or(token).to_owned();
+    let reaches = |prefix: &str| {
+        tokens
+            .iter()
+            .any(|token| *token == prefix || token.starts_with(&format!("{prefix}.")))
+    };
+    ATTACHABLE_DATABASES
+        .iter()
+        .filter(|(root, names)| {
+            let named = names
+                .iter()
+                .any(|name| tokens.iter().any(|token| first_segment(token) == *name));
+            let connector_reached = UNSUPPLIED_CONNECTORS
+                .iter()
+                .any(|connector| connector.split('.').next() == Some(*root) && reaches(connector));
+            named && !connector_reached
+        })
+        .map(|(root, _)| *root)
+        .collect()
+}
 
 /// The namespace a logical path declares (`ORNA-NS-001` to `ORNA-NS-004`).
 ///
@@ -180,16 +245,21 @@ pub fn lower_case(case: &Case) -> Result<LoweredProgram, String> {
 /// bare name only through an import, so the observer adds the import the
 /// catalogue supplies implicitly. The spliced item carries the snippet's spans,
 /// which hold no call or diagnostic.
-fn import_fixture_units(tree: &mut SyntaxTree) {
-    let import = parse_module_with_file(
-        "use fixture.units.*;\nuse fixture.attached.*;\n",
-        "fixture/import.orna",
-    )
-    .value;
+fn import_fixture_units(tree: &mut SyntaxTree, attached_roots: &[&str]) {
+    let mut text = String::from("use fixture.units.*;\nuse fixture.attached.*;\n");
+    if attached_roots.contains(&"contacts") {
+        text.push_str("use contacts.*;\n");
+    }
+    let import = parse_module_with_file(&text, "fixture/import.orna").value;
     tree.items.splice(0..0, import.items);
 }
 
 fn lower_module_case(case: &Case) -> Result<LoweredProgram, String> {
+    let attached_roots = if case.family == Family::Reference {
+        attached_databases(case)
+    } else {
+        Vec::new()
+    };
     let mut parsed = Vec::new();
     let mut parse_diagnostics = 0;
     for source in &case.sources {
@@ -197,7 +267,7 @@ fn lower_module_case(case: &Case) -> Result<LoweredProgram, String> {
         parse_diagnostics += outcome.diagnostics.len();
         let mut tree = outcome.value;
         if case.family == Family::Reference {
-            import_fixture_units(&mut tree);
+            import_fixture_units(&mut tree, &attached_roots);
         }
         parsed.push((source.clone(), tree));
     }
@@ -209,6 +279,12 @@ fn lower_module_case(case: &Case) -> Result<LoweredProgram, String> {
     if case.family == Family::Reference {
         standard.push(&FIXTURE_UNITS);
         standard.push(&FIXTURE_ATTACHED);
+        standard.extend(FIXTURE_DATABASES.iter().filter(|module| {
+            module
+                .logical
+                .strip_suffix(".orna")
+                .is_some_and(|root| attached_roots.contains(&root))
+        }));
     }
     let standard = standard.into_iter();
     let mut units = Vec::new();
@@ -238,7 +314,8 @@ fn lower_module_case(case: &Case) -> Result<LoweredProgram, String> {
     }
     let prelude =
         orna_check::hir_check::prelude_of_profile(&orna_evaluator::reference_standard_profile());
-    let program = lower_with_prelude(&units, &prelude);
+    let attached: Vec<Name> = attached_roots.iter().copied().map(Name::new).collect();
+    let program = lower_with_attached(&units, &prelude, &attached);
     let (logical_paths, owned) = bookkeeping(&program, &logical_paths, &owned);
     Ok(LoweredProgram {
         program,

@@ -20,6 +20,14 @@ impl Lowering {
     /// [`Lowering::into_program`].
     #[must_use]
     pub fn new(prelude: &PreludeExports) -> Self {
+        Self::new_attached(prelude, &[])
+    }
+
+    /// Starts a lowering whose scopes also bind each attached database's root
+    /// namespace (ORNA-ATTACH-001), so `database.Table` resolves through the module
+    /// whose path is `database`.
+    #[must_use]
+    pub fn new_attached(prelude: &PreludeExports, attached: &[crate::Name]) -> Self {
         let embedded: Vec<SourceUnit<'_>> = crate::embedded::parsed()
             .iter()
             .enumerate()
@@ -29,7 +37,7 @@ impl Lowering {
                 path: module.path.clone(),
             })
             .collect();
-        let mut builder = Builder::new(prelude);
+        let mut builder = Builder::new(prelude, attached);
         builder.declare_units(&embedded);
         Self { builder }
     }
