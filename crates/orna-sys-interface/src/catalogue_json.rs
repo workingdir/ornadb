@@ -5,7 +5,10 @@
 
 use serde_json::{Map, Value, json};
 
-use crate::{RawCounts, RawField, RawFunction, RawRelation, RawRemovedName, RawSingleton, RawSystemApi, RawValueType};
+use crate::{
+    RawCounts, RawField, RawFunction, RawRelation, RawRemovedName, RawSingleton, RawSystemApi,
+    RawValueType,
+};
 
 /// The language version the identity generator pins.
 const LANGUAGE_VERSION: &str = "1.1.0";
