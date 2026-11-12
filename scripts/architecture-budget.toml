@@ -469,10 +469,10 @@ name = "orna-traceability"
 [[crate]]
 name = "orna-value"
 [crate.files]
-"src/blob.rs" = 1248
+"src/blob.rs" = 1245
 "src/format3_context_tests.rs" = 1423
 "src/lib.rs" = 2334
-"src/schema.rs" = 1240
+"src/schema.rs" = 1237
 [crate.functions]
 "src/format3_context_tests.rs::mime1_annotations_reject_noncanonical_and_unsafe_inputs" = 198
 "src/schema.rs::validate_value_as_type" = 128
