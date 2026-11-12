@@ -4,6 +4,7 @@
 //! native declarations reproduce it field by field.
 
 use super::*;
+use orna_sys_interface::{RawCounts, RawReferenceAlias, RawRelation, RawRemovedName, RawSingleton};
 
 pub(super) fn raw_document(source: &str) -> Result<RawSystemApi, SystemApiError> {
     reject_duplicate_json_members(source)?;
@@ -400,7 +401,7 @@ fn native_declarations_reproduce_the_json_descriptor_field_by_field() {
         "../../../orna-sys-id/catalogue/sys-1.1.0.json"
     ))
     .expect("the generated JSON descriptor decodes");
-    let native = super::native_raw::native_raw_document().expect("sys.orna decodes");
+    let native = orna_sys_interface::native_raw_document().expect("sys.orna decodes");
     assert_eq!(native.counts, json.counts);
     assert_rows_match("singletons", &native.singletons, &json.singletons);
     assert_rows_match(
@@ -423,7 +424,7 @@ fn native_declarations_reproduce_the_json_descriptor_field_by_field() {
 
 #[test]
 fn native_relations_are_read_only() {
-    let native = super::native_raw::native_raw_document().expect("sys.orna decodes");
+    let native = orna_sys_interface::native_raw_document().expect("sys.orna decodes");
     assert!(!native.relations.is_empty());
     for relation in &native.relations {
         assert!(

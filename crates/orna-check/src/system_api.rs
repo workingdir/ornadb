@@ -10,6 +10,8 @@ use std::{
     sync::OnceLock,
 };
 
+use orna_sys_interface::{RawField, RawFunction, RawSystemApi, RawValueType};
+
 #[cfg(test)]
 const MAX_JSON_NESTING_DEPTH: usize = 128;
 
@@ -241,7 +243,9 @@ pub(crate) enum SystemApiError {
 
 impl SystemApi {
     pub(crate) fn embedded() -> Result<Self, SystemApiError> {
-        let api = Self::from_raw(native_raw::native_raw_document()?)?;
+        let descriptor =
+            orna_sys_interface::native_raw_document().map_err(|_| SystemApiError::InvalidJson)?;
+        let api = Self::from_raw(descriptor)?;
         #[cfg(not(target_arch = "wasm32"))]
         api.validate_dispatch_table(orna_sys::system_dispatch_table())?;
         #[cfg(not(target_arch = "wasm32"))]
@@ -1659,99 +1663,8 @@ fn split_top_level(source: &str, separator: char) -> Vec<&str> {
 
 #[cfg(test)]
 mod json_guard;
-mod native_raw;
 #[cfg(test)]
 use json_guard::raw_document;
-
-#[derive(Debug, PartialEq)]
-struct RawSystemApi {
-    counts: RawCounts,
-    singletons: Vec<RawSingleton>,
-    opaque_identifiers: Vec<String>,
-    reference_aliases: Vec<RawReferenceAlias>,
-    value_types: Vec<RawValueType>,
-    enums: BTreeMap<String, Vec<String>>,
-    relations: Vec<RawRelation>,
-    functions: Vec<RawFunction>,
-    failure_codes: Vec<String>,
-    removed_names: BTreeMap<String, RawRemovedName>,
-}
-
-#[derive(Debug, PartialEq)]
-struct RawCounts {
-    singletons: usize,
-    opaque_identifiers: usize,
-    reference_aliases: usize,
-    value_types: usize,
-    enums: usize,
-    relations: usize,
-    functions: usize,
-    failure_codes: usize,
-}
-
-#[derive(Debug, PartialEq)]
-struct RawSingleton {
-    name: String,
-    ty: String,
-    availability: String,
-}
-
-#[derive(Debug, PartialEq)]
-struct RawReferenceAlias {
-    name: String,
-    target: String,
-    definition: String,
-}
-
-#[derive(Debug, PartialEq)]
-struct RawValueType {
-    name: String,
-    kind: String,
-    purpose: String,
-    type_parameters: Vec<String>,
-    fields: Vec<RawField>,
-    invariants: Vec<String>,
-}
-
-#[derive(Debug, PartialEq)]
-struct RawRelation {
-    name: String,
-    grouped_handle: String,
-    kind: String,
-    availability: String,
-    key: String,
-    purpose: String,
-    key_fields: Vec<String>,
-    invariants: Vec<String>,
-    fields: Vec<RawField>,
-    writable: bool,
-    reference_type: String,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-struct RawField {
-    name: String,
-    ty: String,
-}
-
-#[derive(Debug, PartialEq)]
-struct RawFunction {
-    name: String,
-    signature: String,
-    effect: String,
-    purpose: String,
-    since: Option<String>,
-    contract: Option<String>,
-    preconditions: Option<String>,
-    ownership: Option<String>,
-    snapshot_rule: Option<String>,
-}
-
-#[derive(Debug, PartialEq)]
-struct RawRemovedName {
-    replacement: Option<String>,
-    diagnostic: String,
-}
 
 fn validate_value_type_metadata(value: &RawValueType) -> Result<(), SystemApiError> {
     if !matches!(

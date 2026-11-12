@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use orna_syntax::{Declaration, TypeMember, TypeRepresentation, parse_interface};
 
-use super::native_raw::{
+use orna_sys_interface::{
     NAMESPACE_FILES, SYS_ORNA, catalogue_class, declared_names, native_label, render_generics,
     render_native, render_type,
 };

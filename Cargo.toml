@@ -33,6 +33,7 @@ members = [
     "crates/orna-sys",
     "crates/orna-sys-codegen",
     "crates/orna-sys-id",
+    "crates/orna-sys-interface",
     "crates/orna-sys-model",
     "crates/orna-traceability",
     "crates/orna-value",
