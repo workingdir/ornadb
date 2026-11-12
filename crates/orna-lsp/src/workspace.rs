@@ -19,7 +19,7 @@ use std::sync::{Arc, OnceLock};
 use lsp_types::Uri;
 use orna_hir::{
     BodyId, DefId, DefKind, LocalId, ModuleId as HirModuleId, Name, NameTarget, NameUse, Program,
-    SourceId, SourceUnit, TyKind, UseContext, lower,
+    SourceId, SourceUnit, TyKind, UseContext, lower_with_prelude,
 };
 use orna_syntax::{Declaration, Keyword, SyntaxSpan, Token, TokenKind, UseTail, lex, parse_module};
 
@@ -377,7 +377,8 @@ impl Workspace {
             });
             source += 1;
         }
-        let program = lower(&units);
+        let prelude = crate::standard::reference_prelude();
+        let program = lower_with_prelude(&units, &prelude);
         let mut workspace = Self {
             modules,
             standard,

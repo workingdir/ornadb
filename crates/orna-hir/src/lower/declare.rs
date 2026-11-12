@@ -212,12 +212,18 @@ pub(crate) struct Builder<'a> {
     pub(crate) unit_jobs: Vec<super::units::UnitJob>,
     /// The type `Self` names while an implementation's members are lowered.
     pub(crate) self_ty: Option<crate::Ty>,
+    /// The names each module exports through `use module as _;` (ORNA-IMPORT-005).
+    pub(crate) prelude: super::prelude::PreludeExports,
 }
 
 impl<'a> Builder<'a> {
     /// Creates the program skeleton and registers every source module.
-    pub(crate) fn new(sources: &'a [SourceUnit<'a>]) -> Self {
+    pub(crate) fn new(
+        sources: &'a [SourceUnit<'a>],
+        prelude: &super::prelude::PreludeExports,
+    ) -> Self {
         let mut builder = Self {
+            prelude: prelude.clone(),
             sources,
             program: Program::empty(),
             pending: Vec::new(),

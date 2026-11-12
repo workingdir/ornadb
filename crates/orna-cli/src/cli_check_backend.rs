@@ -77,7 +77,8 @@ fn old_located(project: &LoadedProject) -> Result<Located, Diagnostic> {
 }
 
 fn hir_located(project: &LoadedProject) -> Located {
-    let checked = hir_check::check(project.modules(), project.standard_sources());
+    let prelude = hir_check::prelude_of_profile(&orna_evaluator::reference_standard_profile());
+    let checked = hir_check::check(project.modules(), project.standard_sources(), &prelude);
     hir_check::located_diagnostics(&checked.findings)
 }
 
