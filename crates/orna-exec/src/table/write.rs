@@ -7,8 +7,8 @@
 use orna_hir::{DefId, FieldInitializer, Name, Program, TableDef};
 
 use super::{
-    absent_row_needs_snapshot, check_row, field_named, insert_fields, is_computed, key_bytes,
-    key_of_row, put_row, read_row, record_fields, store_invariant,
+    absent_row, check_row, field_named, insert_fields, is_computed, key_bytes, key_of_row, put_row,
+    read_row, record_fields, store_invariant,
 };
 use crate::error::Stop;
 use crate::machine::Machine;
@@ -80,7 +80,9 @@ pub(super) fn update(
 ) -> Result<Value, Stop> {
     let program = machine.program;
     let key = key_bytes(key)?;
-    let existing = read_row(machine, table, &key)?.ok_or_else(absent_row_needs_snapshot)?;
+    let Some(existing) = read_row(machine, table, &key)? else {
+        return Err(absent_row(machine));
+    };
     let fields = merge(program, schema, existing, record_fields(patch)?, false)?;
     if key_of_row(program, schema, &fields)? != key {
         return Err(Stop::Error("ORNA-EVAL-TABLE-KEY"));
@@ -106,12 +108,17 @@ pub(super) fn rekey(
     new: &Value,
 ) -> Result<Value, Stop> {
     let program = machine.program;
+    if schema.key.is_empty() {
+        return Err(Stop::Error("ORNA-EVAL-TABLE-UNADMITTED"));
+    }
     let old_key = key_bytes(old)?;
     let new_key = key_bytes(new)?;
     if old_key == new_key {
         return Err(Stop::Error("ORNA-EVAL-TABLE-DUPLICATE-KEY"));
     }
-    let existing = read_row(machine, table, &old_key)?.ok_or_else(absent_row_needs_snapshot)?;
+    let Some(existing) = read_row(machine, table, &old_key)? else {
+        return Err(absent_row(machine));
+    };
     if read_row(machine, table, &new_key)?.is_some() {
         return Err(Stop::Error("ORNA-EVAL-TABLE-DUPLICATE-KEY"));
     }
