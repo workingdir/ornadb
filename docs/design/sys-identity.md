@@ -580,7 +580,7 @@ crates/orna-sys-id/                  new crate, zero runtime dependencies
     Cargo.toml                       [build-dependencies] serde_json = "..."
     build.rs                         catalogue JSON -> generated Rust in OUT_DIR
     catalogue/
-        sys-1.1.0.json               byte copy of api/sys.json (sha256 pinned in build.rs)
+        sys-1.1.0.json               deleted in SN1; sys.orna is the input (see sys-as-native.md)
         engine-1.1.0.json            sealed + engine-private identity table (new, derived)
     src/
         lib.rs                       re-exports, Origin, SysEffect, SysVersion
@@ -945,7 +945,7 @@ for the `HostOperationDescriptor` field it retypes in S2.
 
 ### S0 - `orna-sys-id`: generate the identity tables (no consumers)
 
-*Files:* new `crates/orna-sys-id/**` (Cargo.toml, build.rs, `catalogue/sys-1.1.0.json`,
+*Files:* new `crates/orna-sys-id/**` (Cargo.toml, build.rs, `catalogue/sys-1.1.0.json` (deleted in SN1),
 `catalogue/engine-1.1.0.json`, `src/{lib,versioned,function,error_code,relation,removed,descriptor}.rs`,
 `tests/{catalogue_bijection,versioned_id,removed_names}.rs`), root `Cargo.toml` members.
 

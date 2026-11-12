@@ -11,11 +11,14 @@ mod sha256;
 
 use serde_json::{Value, json};
 
-const SYS: &str = include_str!("../catalogue/sys-1.1.0.json");
+fn sys_text() -> String {
+    let raw = orna_sys_interface::native_raw_document().expect("sys.orna decodes");
+    render(&orna_sys_interface::catalogue_json(&raw))
+}
 const ENGINE: &str = include_str!("../catalogue/engine-1.1.0.json");
 
 fn sys_value() -> Value {
-    serde_json::from_str(SYS).expect("catalogue is valid JSON")
+    serde_json::from_str(&sys_text()).expect("catalogue is valid JSON")
 }
 
 fn engine_value() -> Value {
@@ -42,7 +45,7 @@ fn expect_error(sys: &Value, engine: &Value, needle: &str) {
 
 #[test]
 fn the_unmutated_catalogues_generate() {
-    let generated = generator::generate(SYS, ENGINE).expect("reviewed catalogues generate");
+    let generated = generator::generate(&sys_text(), ENGINE).expect("reviewed catalogues generate");
     assert!(generated.functions.contains("pub enum SysFunction"));
     assert!(generated.functions.contains("\"sys.meta\""));
     assert!(generated.codes.contains("\"sys.abi.precondition_failed\""));
@@ -63,7 +66,7 @@ fn the_unmutated_catalogues_generate() {
 fn any_change_to_the_engine_inventory_bytes_breaks_the_pin() {
     let mutated = ENGINE.replacen("\"origin\": \"engine\"", "\"origin\": \"engine \"", 1);
     assert_ne!(mutated, ENGINE);
-    let message = generator::generate(SYS, &mutated)
+    let message = generator::generate(&sys_text(), &mutated)
         .expect_err("an engine edit must fail the sha256 pin")
         .to_string();
     assert!(message.contains("engine-1.1.0.json sha256"), "{message}");
@@ -157,7 +160,7 @@ fn structural_engine_edits_are_rejected() {
 
 #[test]
 fn a_catalogue_edit_changes_the_generated_tables() {
-    let baseline = generator::generate_unchecked(SYS, ENGINE).expect("baseline generates");
+    let baseline = generator::generate_unchecked(&sys_text(), ENGINE).expect("baseline generates");
     assert!(baseline.functions.contains("\"sys.meta\""));
     assert!(!baseline.functions.contains("sys.meta_changed"));
 

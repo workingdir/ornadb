@@ -1,8 +1,7 @@
 //! Typed, generated identity for the Orna 1.1.0 `sys` surface.
 //!
-//! Every name in this crate is generated from the vendored specification catalogue
-//! (`catalogue/sys-1.1.0.json`, a byte copy of `reference/Orna-1.1.0/api/sys.json`)
-//! or from the engine-private inventory in `catalogue/engine-1.1.0.json`. Names exist
+//! Every name in this crate is generated from the `sys` declarations in `sys.orna`, rendered by
+//! `orna-sys-interface`, or from the engine-private inventory in `catalogue/engine-1.1.0.json`. Names exist
 //! only at the parse and print boundaries; production code matches on the enums.
 //!
 //! The crate has no runtime dependencies so that both `orna-compat-v1` (below it) and

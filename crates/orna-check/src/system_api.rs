@@ -12,20 +12,13 @@ use std::{
 
 use orna_sys_interface::{RawField, RawFunction, RawSystemApi, RawValueType};
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 const MAX_JSON_NESTING_DEPTH: usize = 128;
 
-#[cfg(test)]
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 fn generated_system_api_json() -> &'static str {
     static GENERATED: OnceLock<String> = OnceLock::new();
     GENERATED.get_or_init(orna_sys::system_api_json).as_str()
-}
-
-#[cfg(test)]
-#[cfg(target_arch = "wasm32")]
-fn generated_system_api_json() -> &'static str {
-    include_str!("../generated/sys_api.json")
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -350,7 +343,7 @@ impl SystemApi {
         Ok(())
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) fn from_json(source: &str) -> Result<Self, SystemApiError> {
         Self::from_raw(raw_document(source)?)
     }
@@ -1661,9 +1654,9 @@ fn split_top_level(source: &str, separator: char) -> Vec<&str> {
     pieces
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod json_guard;
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 use json_guard::raw_document;
 
 fn validate_value_type_metadata(value: &RawValueType) -> Result<(), SystemApiError> {
@@ -1681,24 +1674,12 @@ fn validate_value_type_metadata(value: &RawValueType) -> Result<(), SystemApiErr
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
 
     fn document() -> serde_json::Value {
         serde_json::from_str(generated_system_api_json()).unwrap()
-    }
-
-    // Wasm builds read the committed copy; native builds read the generator.
-    // This pins them together so the copy cannot drift silently.
-    #[cfg(not(target_arch = "wasm32"))]
-    #[test]
-    fn committed_wasm_copy_matches_generated_system_api() {
-        assert_eq!(
-            include_str!("../generated/sys_api.json"),
-            orna_sys::system_api_json(),
-            "generated/sys_api.json is stale; regenerate it from orna-sys"
-        );
     }
 
     fn value_type(document: &mut serde_json::Value) -> &mut serde_json::Value {
@@ -3098,5 +3079,5 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod native_equivalence;

@@ -10,7 +10,11 @@ use serde_json::Value;
 
 const SYS_ORNA: &str = include_str!("../../orna-hir/interface/sys.orna");
 const ENGINE_ORNA: &str = include_str!("../../orna-hir/interface/sys/engine.orna");
-const CATALOGUE: &str = include_str!("../catalogue/sys-1.1.0.json");
+fn catalogue() -> Value {
+    orna_sys_interface::catalogue_json(
+        &orna_sys_interface::native_raw_document().expect("sys.orna decodes"),
+    )
+}
 const ENGINE: &str = include_str!("../catalogue/engine-1.1.0.json");
 
 /// The variant names of the single `FailureCode` enum in `source`, in source order.
@@ -52,9 +56,8 @@ fn spelled_codes(variants: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// The frozen `failure_codes` array of a catalogue file.
-fn frozen_codes(json: &str) -> Vec<String> {
-    let root: Value = serde_json::from_str(json).expect("frozen catalogue is valid JSON");
+/// The `failure_codes` array of the sys catalogue rendered from `sys.orna`.
+fn frozen_codes(root: &Value) -> Vec<String> {
     root["failure_codes"]
         .as_array()
         .expect("failure_codes is an array")
@@ -66,14 +69,15 @@ fn frozen_codes(json: &str) -> Vec<String> {
 #[test]
 fn portable_failure_code_enum_is_the_frozen_sys_set_in_order() {
     let variants = declared_variants(SYS_ORNA, "sys.orna");
-    assert_eq!(spelled_codes(&variants), frozen_codes(CATALOGUE));
+    assert_eq!(spelled_codes(&variants), frozen_codes(&catalogue()));
     assert_eq!(variants.len(), 67);
 }
 
 #[test]
 fn engine_failure_code_enum_is_the_frozen_engine_set_in_order() {
     let variants = declared_variants(ENGINE_ORNA, "sys/engine.orna");
-    assert_eq!(spelled_codes(&variants), frozen_codes(ENGINE));
+    let engine: Value = serde_json::from_str(ENGINE).expect("engine catalogue is JSON");
+    assert_eq!(spelled_codes(&variants), frozen_codes(&engine));
     assert_eq!(variants.len(), 61);
 }
 
