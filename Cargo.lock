@@ -1434,6 +1434,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "orna-cbor"
+version = "1.0.0"
+
+[[package]]
 name = "orna-check"
 version = "1.0.0"
 dependencies = [
