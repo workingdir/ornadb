@@ -576,6 +576,15 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// Whether the definition is a protocol. A generic bound may name only a protocol.
+    pub(crate) fn def_is_protocol(&self, def: DefId) -> bool {
+        match &self.pending[def.index()].kind {
+            PendingKind::Unbuilt(declaration) => matches!(**declaration, DeclAst::Protocol(..)),
+            PendingKind::Built(crate::DefKind::Protocol(_)) => true,
+            PendingKind::Function(_) | PendingKind::Built(_) => false,
+        }
+    }
+
     /// Writes the pending definitions and bodies into the program.
     pub(crate) fn finish(mut self) -> Program {
         let error_ty = self.program.tys.error();
