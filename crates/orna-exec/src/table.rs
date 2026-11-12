@@ -127,7 +127,8 @@ fn insert_fields(
 fn delete(machine: &mut Machine<'_>, table: DefId, key: &Value) -> Result<Value, Stop> {
     let key = key_bytes(key)?;
     if machine
-        .store
+        .host
+        .store()
         .get(table, &key)
         .map_err(|error| store_invariant(&error))?
         .is_none()
@@ -135,7 +136,8 @@ fn delete(machine: &mut Machine<'_>, table: DefId, key: &Value) -> Result<Value,
         return Err(absent_row(machine));
     }
     machine
-        .store
+        .host
+        .store()
         .delete(table, &key)
         .map_err(|error| store_invariant(&error))?;
     Ok(Value::Unit)
@@ -159,7 +161,8 @@ fn read_row(
     key: &[u8],
 ) -> Result<Option<Vec<(Name, Value)>>, Stop> {
     let Some(bytes) = machine
-        .store
+        .host
+        .store()
         .get(table, key)
         .map_err(|error| store_invariant(&error))?
     else {
@@ -189,7 +192,8 @@ fn put_row(
 ) -> Result<(), Stop> {
     let bytes = encode(row.to_raw().map_err(Stop::Error)?, "ORNA-EVAL-VALUE")?;
     machine
-        .store
+        .host
+        .store()
         .put(table, key, &bytes, expect)
         .map_err(|error| match error {
             StoreError::Expectation(_) => Stop::Error(code),

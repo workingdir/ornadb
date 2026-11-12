@@ -10,6 +10,7 @@ use std::mem;
 use orna_hir::{DefId, DefKind, Program};
 
 use crate::error::{ExecError, Stop};
+use crate::host::StoreHost;
 use crate::link;
 use crate::machine::{ExecLimits, Machine};
 use crate::store::TableStore;
@@ -71,11 +72,15 @@ pub fn evaluate_global(
     store: Box<dyn TableStore>,
     globals: &mut Globals,
 ) -> (Result<Value, ExecError>, Box<dyn TableStore>) {
-    let mut machine = Machine::new(program, limits, None, store);
-    machine.globals = mem::take(globals);
-    let result = define(&mut machine, program, def);
-    *globals = mem::take(&mut machine.globals);
-    (result, machine.into_store())
+    let mut host = StoreHost::new(store);
+    let result = {
+        let mut machine = Machine::new(program, limits, None, &mut host);
+        machine.globals = mem::take(globals);
+        let result = define(&mut machine, program, def);
+        *globals = mem::take(&mut machine.globals);
+        result
+    };
+    (result, host.into_store())
 }
 
 fn define(machine: &mut Machine<'_>, program: &Program, def: DefId) -> Result<Value, ExecError> {
