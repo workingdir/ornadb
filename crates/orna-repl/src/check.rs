@@ -2,14 +2,12 @@
 
 use orna_exec::{ExecError, ExecLimits, Globals, MemoryStore, Value, measure_entry_in};
 use orna_hir::{
-    DefId, DefKind, ModulePath, Name, PreludeExports, Program, lower_with_prelude, print_type,
-    typeck,
+    DefId, DefKind, Lowering, ModulePath, Name, Program, SourceId, SourceUnit, print_type, typeck,
 };
 use orna_syntax::parse_session_module_with_file;
 
 use crate::compose::ENTRY;
 use crate::error::ReplError;
-use crate::standard;
 
 /// The module path the session's source lowers under.
 const MODULE: &str = "repl";
@@ -30,8 +28,12 @@ pub(crate) struct Evaluated {
     pub(crate) effectful: bool,
 }
 
-/// Lowers and typechecks `source`. The first diagnostic raised in the session module rejects it.
-pub(crate) fn lower_checked(source: &str) -> Result<Program, ReplError> {
+/// Lowers and typechecks the session module `source` over the standard library, which `standard` holds lowered.
+/// The first diagnostic raised in the session module rejects it.
+pub(crate) fn lower_checked(
+    standard: &(Lowering, u32),
+    source: &str,
+) -> Result<Program, ReplError> {
     let parsed = parse_session_module_with_file(source, "repl.orna");
     if !parsed.is_ok() {
         return Err(ReplError::new(
@@ -39,16 +41,14 @@ pub(crate) fn lower_checked(source: &str) -> Result<Program, ReplError> {
             "the composed session source does not parse",
         ));
     }
-    let prelude = PreludeExports::default().with_module(
-        ModulePath::new([Name::new("std"), Name::new("prelude")]),
-        orna_standard_sources::REFERENCE_STANDARD_PRELUDE_EXPORTS_V1
-            .iter()
-            .copied(),
-    );
-    let mut program = lower_with_prelude(
-        &standard::units_with(&parsed.value, ModulePath::new([Name::new(MODULE)])),
-        &prelude,
-    );
+    let (lowering, index) = standard;
+    let mut lowering = lowering.clone();
+    lowering.extend(&[SourceUnit {
+        source: SourceId::new(*index),
+        tree: &parsed.value,
+        path: ModulePath::new([Name::new(MODULE)]),
+    }]);
+    let mut program = lowering.into_program();
     typeck(&mut program);
     if let Err(errors) = program.validate() {
         return Err(ReplError::new(
@@ -69,11 +69,12 @@ pub(crate) fn lower_checked(source: &str) -> Result<Program, ReplError> {
 /// Lowers `source`, finds its entry, and evaluates it with `arguments` in parameter order unless it is effectful.
 /// Each `seed` is the value of the module-level `let` of that name, so that `let` is kept and not evaluated again.
 pub(crate) fn evaluate(
+    standard: &(Lowering, u32),
     source: &str,
     arguments: Vec<Value>,
     seeds: &[(String, Value)],
 ) -> Result<Evaluated, ReplError> {
-    let program = lower_checked(source)?;
+    let program = lower_checked(standard, source)?;
     let entry = module_def(&program, ENTRY, |kind| matches!(kind, DefKind::Fn(_)))
         .ok_or_else(|| ReplError::new("ORNA-REPL-INTERNAL", "the composed session has no entry"))?;
     let DefKind::Fn(function) = &program.defs[entry].kind else {

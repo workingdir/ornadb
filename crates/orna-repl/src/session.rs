@@ -10,15 +10,11 @@ use orna_syntax::{
     Declaration, Expr, Item, Pattern, ReplInput, SyntaxSpan as SourceSpan, parse_repl,
 };
 
+use crate::base::{Base, Definition};
 use crate::check::{self, Evaluated};
 use crate::compose::{self, LAST, RESERVED_PREFIX};
 use crate::error::ReplError;
-
-#[derive(Clone, Debug)]
-struct Definition {
-    name: String,
-    text: String,
-}
+use crate::standard;
 
 /// A value with the printed type the HIR gave it.
 #[derive(Clone, Debug)]
@@ -31,25 +27,23 @@ struct Typed {
 struct Binding {
     name: String,
     typed: Typed,
-    /// The declaration of the module-level `let` when the binding is a global; `None` for a parameter.
-    global: Option<String>,
+    /// Whether the binding is a module-level `let`: its declaration is then in the session's base.
+    global: bool,
 }
 
-/// What one input sees: its entry parameters with their values, the module-level `let`s its module carries, and the
-/// values those `let`s are seeded with.
+/// What one input sees: its entry parameters with their values, and the values its module-level `let`s are seeded
+/// with.
 struct Scope {
     parameters: Vec<(String, String)>,
     arguments: Vec<Value>,
-    globals: Vec<String>,
     seeds: Vec<(String, Value)>,
 }
 
 /// The session: every definition and binding a commit has applied, and the previous result, `$_`.
 #[derive(Debug, Default)]
 pub struct Session {
-    /// The `use` declarations the prompt accepted, in order: every input's module starts with them.
-    imports: Vec<String>,
-    definitions: Vec<Definition>,
+    /// The session's source: its `use` declarations, function definitions and module-level `let`s.
+    base: Base,
     bindings: Vec<Binding>,
     last: Option<Typed>,
     revision: u64,
@@ -67,7 +61,8 @@ pub struct Staged {
 #[derive(Debug)]
 enum Change {
     Define(Definition),
-    Bind(Binding),
+    /// A `let` binding, with its declaration when the binding is a module-level `let`.
+    Bind(Binding, Option<Definition>),
     /// A `use` declaration: it joins the session's imports.
     Import(String),
     Evaluate(Typed),
@@ -125,14 +120,17 @@ impl Session {
         match staged.change {
             Change::Define(definition) => {
                 self.remove(&definition.name);
-                self.definitions.push(definition);
+                self.base = std::mem::take(&mut self.base).with_definition(definition);
             }
-            Change::Bind(binding) => {
+            Change::Bind(binding, global) => {
                 self.remove(&binding.name);
+                if let Some(global) = global {
+                    self.base = std::mem::take(&mut self.base).with_global(global);
+                }
                 self.bindings.push(binding);
             }
             Change::Evaluate(typed) => self.last = Some(typed),
-            Change::Import(text) => self.imports.push(text),
+            Change::Import(text) => self.base = std::mem::take(&mut self.base).with_import(text),
             Change::Discard => {}
         }
         self.revision += 1;
@@ -143,8 +141,7 @@ impl Session {
     pub fn rollback(&self, _staged: Staged) {}
 
     fn remove(&mut self, name: &str) {
-        self.definitions
-            .retain(|definition| definition.name != name);
+        self.base = self.base.without(name);
         self.bindings.retain(|binding| binding.name != name);
     }
 
@@ -158,8 +155,13 @@ impl Session {
         let body = compose::rewrite(input, &expression.span(), &references)?;
         let scope = self.scope(&references, &compose::identifiers(&body)?, "")?;
         let entry = compose::entry(&scope.parameters, None, &body);
-        let source = self.module_source(&scope, "", Some(&entry));
-        let evaluated = check::evaluate(&source, scope.arguments, &scope.seeds)?;
+        let source = self.base.source(Some(&entry));
+        let evaluated = check::evaluate(
+            &standard::lowering(),
+            &source,
+            scope.arguments,
+            &scope.seeds,
+        )?;
         Ok(self.staged(evaluated, |typed| {
             if keep {
                 Change::Evaluate(typed)
@@ -193,20 +195,31 @@ impl Session {
                     .transpose()?;
                 let scope = self.scope(&references, &identifiers, name)?;
                 let entry = compose::entry(&scope.parameters, annotation, &body);
-                let source = self.module_source(&scope, name, Some(&entry));
-                let evaluated = check::evaluate(&source, scope.arguments, &scope.seeds)?;
+                let source = self.base.without(name).source(Some(&entry));
+                let evaluated = check::evaluate(
+                    &standard::lowering(),
+                    &source,
+                    scope.arguments,
+                    &scope.seeds,
+                )?;
                 let declaration = if global {
-                    Some(compose::declaration_text(input, item)?)
+                    Some(Definition {
+                        name: name.clone(),
+                        text: compose::declaration_text(input, item)?,
+                    })
                 } else {
                     None
                 };
                 let name = name.clone();
                 let mut staged = self.staged(evaluated, |typed| {
-                    Change::Bind(Binding {
-                        name,
-                        typed,
-                        global: declaration,
-                    })
+                    Change::Bind(
+                        Binding {
+                            name,
+                            typed,
+                            global,
+                        },
+                        declaration,
+                    )
                 });
                 // A `let` binds its name and produces no value at the prompt.
                 staged.result = None;
@@ -220,23 +233,19 @@ impl Session {
                         "a function cannot read the previous result",
                     ));
                 }
-                let text = compose::declaration_text(input, item)?;
-                let source = compose::module(
-                    self.imports
-                        .iter()
-                        .map(String::as_str)
-                        .chain(self.definitions_except(&signature.name))
-                        .chain([text.as_str()]),
-                    None,
-                );
-                check::lower_checked(&source)?;
+                let definition = Definition {
+                    name: signature.name.clone(),
+                    text: compose::declaration_text(input, item)?,
+                };
+                let checked = self
+                    .base
+                    .without(&signature.name)
+                    .with_definition(definition.clone());
+                check::lower_checked(&standard::lowering(), &checked.definitions_source())?;
                 Ok(Staged {
                     base_revision: self.revision,
                     effectful: false,
-                    change: Change::Define(Definition {
-                        name: signature.name.clone(),
-                        text,
-                    }),
+                    change: Change::Define(definition),
                     result: None,
                 })
             }
@@ -252,7 +261,7 @@ impl Session {
     /// declaration the session already accepts is a no-op.
     fn stage_import(&self, input: &str, item: &Item) -> Result<Staged, ReplError> {
         let text = compose::declaration_text(input, item)?;
-        if self.imports.contains(&text) {
+        if self.base.has_import(&text) {
             return Ok(Staged {
                 base_revision: self.revision,
                 effectful: false,
@@ -260,17 +269,8 @@ impl Session {
                 result: None,
             });
         }
-        let scope = self.scope(&[], &[], "")?;
-        let source = compose::module(
-            self.imports
-                .iter()
-                .map(String::as_str)
-                .chain([text.as_str()])
-                .chain(self.definitions_except(""))
-                .chain(scope.globals.iter().map(String::as_str)),
-            None,
-        );
-        check::lower_checked(&source)?;
+        let source = self.base.clone().with_import(text.clone()).source(None);
+        check::lower_checked(&standard::lowering(), &source)?;
         Ok(Staged {
             base_revision: self.revision,
             effectful: false,
@@ -329,24 +329,18 @@ impl Session {
         let mut scope = Scope {
             parameters: Vec::new(),
             arguments: Vec::new(),
-            globals: Vec::new(),
             seeds: Vec::new(),
         };
         for binding in &self.bindings {
-            match &binding.global {
-                Some(text) if binding.name != shadowed => {
-                    scope.globals.push(text.clone());
-                    scope
-                        .seeds
-                        .push((binding.name.clone(), binding.typed.value.clone()));
-                }
-                Some(_) if !identifiers.contains(&binding.name) => {}
-                _ => {
-                    scope
-                        .parameters
-                        .push((binding.name.clone(), binding.typed.ty.clone()));
-                    scope.arguments.push(binding.typed.value.clone());
-                }
+            if binding.global && binding.name != shadowed {
+                scope
+                    .seeds
+                    .push((binding.name.clone(), binding.typed.value.clone()));
+            } else if !binding.global || identifiers.contains(&binding.name) {
+                scope
+                    .parameters
+                    .push((binding.name.clone(), binding.typed.ty.clone()));
+                scope.arguments.push(binding.typed.value.clone());
             }
         }
         if !references.is_empty() {
@@ -358,26 +352,6 @@ impl Session {
             scope.arguments.push(last.value.clone());
         }
         Ok(scope)
-    }
-
-    fn definitions_except<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a str> + 'a {
-        self.definitions
-            .iter()
-            .filter(move |definition| definition.name != name)
-            .map(|definition| definition.text.as_str())
-    }
-
-    /// The module source for one input: the session's imports, the definitions it keeps, its module-level `let`s, then
-    /// its entry.
-    fn module_source(&self, scope: &Scope, shadowed: &str, entry: Option<&str>) -> String {
-        compose::module(
-            self.imports
-                .iter()
-                .map(String::as_str)
-                .chain(self.definitions_except(shadowed))
-                .chain(scope.globals.iter().map(String::as_str)),
-            entry,
-        )
     }
 }
 

@@ -129,20 +129,3 @@ pub(crate) fn entry(parameters: &[(String, String)], result: Option<&str>, body:
     let result = result.map(|ty| format!(": {ty}")).unwrap_or_default();
     format!("fn {ENTRY}({parameters}){result} = {body};")
 }
-
-/// The module source: the given definitions, then the optional entry.
-pub(crate) fn module<'a>(
-    definitions: impl IntoIterator<Item = &'a str>,
-    entry: Option<&str>,
-) -> String {
-    let mut source = String::new();
-    for definition in definitions {
-        source.push_str(definition);
-        source.push('\n');
-    }
-    if let Some(entry) = entry {
-        source.push_str(entry);
-        source.push('\n');
-    }
-    source
-}

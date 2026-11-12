@@ -15,7 +15,7 @@ use super::{BodyState, pats};
 
 /// Lowers one control expression.
 pub(crate) fn lower_control(
-    builder: &mut Builder<'_>,
+    builder: &mut Builder,
     state: &mut BodyState,
     expr: &AstExpr,
 ) -> ExprId {
@@ -71,7 +71,7 @@ pub(crate) fn lower_control(
 }
 
 fn lower_if(
-    builder: &mut Builder<'_>,
+    builder: &mut Builder,
     state: &mut BodyState,
     condition: Option<&AstExpr>,
     then: Option<&AstExpr>,
@@ -96,7 +96,7 @@ fn lower_if(
 }
 
 fn lower_for(
-    builder: &mut Builder<'_>,
+    builder: &mut Builder,
     state: &mut BodyState,
     binding: Option<&orna_syntax::Pattern>,
     iter: Option<&AstExpr>,
@@ -126,7 +126,7 @@ fn lower_for(
 }
 
 fn lower_case(
-    builder: &mut Builder<'_>,
+    builder: &mut Builder,
     state: &mut BodyState,
     scrutinee: Option<&AstExpr>,
     arms: &[orna_syntax::CaseArm],

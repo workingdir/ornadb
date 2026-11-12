@@ -16,7 +16,7 @@ use crate::{DefId, Import, ImportTarget, ModuleId, ModuleOrigin, ModulePath, Nam
 
 use super::declare::{Builder, PendingUse};
 
-impl Builder<'_> {
+impl Builder {
     /// Resolves every `use` declaration into the importing module's scope.
     pub(crate) fn resolve_imports(&mut self) {
         let uses = std::mem::take(&mut self.uses);

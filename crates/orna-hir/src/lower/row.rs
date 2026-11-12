@@ -24,7 +24,7 @@ pub(crate) struct RowScope {
 }
 
 /// The sibling field of `table` named `name` and its declared type, when there is one.
-fn sibling_field(builder: &Builder<'_>, table: DefId, name: &Name) -> Option<(DefId, Ty)> {
+fn sibling_field(builder: &Builder, table: DefId, name: &Name) -> Option<(DefId, Ty)> {
     let PendingKind::Built(DefKind::Table(table)) = &builder.pending[table.index()].kind else {
         return None;
     };
@@ -43,7 +43,7 @@ fn sibling_field(builder: &Builder<'_>, table: DefId, name: &Name) -> Option<(De
 /// `None` when the body has no row scope or no sibling field matches, so the caller resolves the name
 /// as usual.
 pub(crate) fn lower_sibling_field(
-    builder: &mut Builder<'_>,
+    builder: &mut Builder,
     state: &mut BodyState,
     name: &Name,
     span: &SyntaxSpan,

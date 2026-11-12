@@ -13,7 +13,7 @@ use super::{BodyState, pats};
 
 /// Lowers a block: statements in order and an optional tail.
 pub(super) fn lower_block(
-    builder: &mut Builder<'_>,
+    builder: &mut Builder,
     state: &mut BodyState,
     statements: &[Statement],
     tail: Option<&AstExpr>,
@@ -108,11 +108,7 @@ pub(super) fn lower_block(
 }
 
 /// Lowers an assignment target to a place.
-fn lower_place(
-    builder: &mut Builder<'_>,
-    state: &mut BodyState,
-    target: &AssignmentTarget,
-) -> Place {
+fn lower_place(builder: &mut Builder, state: &mut BodyState, target: &AssignmentTarget) -> Place {
     match target {
         AssignmentTarget::Name { name, span } => {
             let name = Name::new(name);

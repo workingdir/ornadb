@@ -45,7 +45,7 @@ fn builtin(name: &str) -> Option<&'static str> {
 
 /// Lowers one written type in the module `module` and generics `generics`.
 pub(crate) fn lower_type(
-    builder: &mut Builder<'_>,
+    builder: &mut Builder,
     module: ModuleId,
     generics: &[Name],
     expr: &TypeExpr,
@@ -107,7 +107,7 @@ pub(crate) fn lower_type(
 
 /// Lowers a named type, with or without arguments.
 fn lower_named(
-    builder: &mut Builder<'_>,
+    builder: &mut Builder,
     module: ModuleId,
     generics: &[Name],
     path: &[String],
@@ -214,7 +214,7 @@ fn lower_named(
 
 /// Lowers a builtin scalar spelling and records its use; `None` when the spelling is not builtin.
 fn lower_builtin(
-    builder: &mut Builder<'_>,
+    builder: &mut Builder,
     module: ModuleId,
     spelling: &str,
     span: &orna_syntax::SyntaxSpan,
@@ -273,7 +273,7 @@ fn language_constructor(name: &Name, args: &[Ty]) -> Option<TyKind> {
 /// program only in `Builder::finish`, so this asks the pending table: reading
 /// `program.defs` here would answer "not a type" for every declaration and turn
 /// each written nominal type into the diagnostic type.
-fn nominal(builder: &mut Builder<'_>, def: DefId, args: Vec<Ty>) -> Ty {
+fn nominal(builder: &mut Builder, def: DefId, args: Vec<Ty>) -> Ty {
     if builder.is_nominal(def) {
         builder
             .program

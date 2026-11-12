@@ -20,7 +20,7 @@ use crate::{
 /// checker types it as the unit. `None` when no unit of that name is in scope; the caller then tries the
 /// builtin postfix table. Several families in scope defining the name are ambiguous and reported by name.
 pub(crate) fn lower_suffix_unit(
-    builder: &mut Builder<'_>,
+    builder: &mut Builder,
     state: &mut BodyState,
     base: &AstExpr,
     name: &str,
@@ -84,7 +84,7 @@ pub(crate) fn lower_suffix_unit(
 }
 
 /// The name of the family a unit belongs to, for a diagnostic.
-fn family_name(builder: &Builder<'_>, unit: DefId) -> String {
+fn family_name(builder: &Builder, unit: DefId) -> String {
     match &builder.pending[unit.index()].kind {
         PendingKind::Built(DefKind::Unit(UnitDef {
             family: Some(family),
@@ -118,7 +118,7 @@ pub(crate) fn family_dimension(variants: &[EnumVariant], lowered: &[DefId]) -> D
     DimensionDef { unit }
 }
 
-impl<'a> Builder<'a> {
+impl Builder {
     /// Declares one variant of a unit family as a unit. A derived variant queues its expression.
     pub(crate) fn build_family_unit(
         &mut self,

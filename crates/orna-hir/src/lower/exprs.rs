@@ -30,11 +30,7 @@ use super::{BodyState, pats};
 pub(super) const ERROR_SLOT: &str = "_error";
 
 /// Lowers one expression.
-pub(crate) fn lower_expr(
-    builder: &mut Builder<'_>,
-    state: &mut BodyState,
-    expr: &AstExpr,
-) -> ExprId {
+pub(crate) fn lower_expr(builder: &mut Builder, state: &mut BodyState, expr: &AstExpr) -> ExprId {
     if let Some(id) = lower_atom(builder, state, expr) {
         return id;
     }
@@ -59,7 +55,7 @@ pub(crate) fn lower_expr(
 }
 
 /// Lowers names, literals and interpolated strings.
-fn lower_atom(builder: &mut Builder<'_>, state: &mut BodyState, expr: &AstExpr) -> Option<ExprId> {
+fn lower_atom(builder: &mut Builder, state: &mut BodyState, expr: &AstExpr) -> Option<ExprId> {
     Some(match expr {
         AstExpr::Name { text, span } => lower_name(builder, state, text, span),
         AstExpr::Literal { text, kind, span } => match lower_literal(text, *kind) {
@@ -118,11 +114,7 @@ fn lower_atom(builder: &mut Builder<'_>, state: &mut BodyState, expr: &AstExpr) 
 }
 
 /// Lowers unary, binary, range, index, field and grouped expressions.
-fn lower_operator(
-    builder: &mut Builder<'_>,
-    state: &mut BodyState,
-    expr: &AstExpr,
-) -> Option<ExprId> {
+fn lower_operator(builder: &mut Builder, state: &mut BodyState, expr: &AstExpr) -> Option<ExprId> {
     Some(match expr {
         AstExpr::Unary { op, rhs, span } => {
             let operand = lower_expr(builder, state, rhs);
@@ -194,7 +186,7 @@ fn lower_operator(
 
 /// Lowers `base.name`: a numeric postfix literal, an enum variant, a field or an unresolved member.
 fn lower_field(
-    builder: &mut Builder<'_>,
+    builder: &mut Builder,
     state: &mut BodyState,
     base: &AstExpr,
     name: &str,
@@ -281,7 +273,7 @@ fn lower_field(
 
 /// Lowers tuple, list and record expressions.
 fn lower_collection(
-    builder: &mut Builder<'_>,
+    builder: &mut Builder,
     state: &mut BodyState,
     expr: &AstExpr,
 ) -> Option<ExprId> {
@@ -318,7 +310,7 @@ fn lower_collection(
 
 /// Lowers calls, constructions and lambdas.
 fn lower_invocation(
-    builder: &mut Builder<'_>,
+    builder: &mut Builder,
     state: &mut BodyState,
     expr: &AstExpr,
 ) -> Option<ExprId> {
@@ -356,7 +348,7 @@ fn lower_invocation(
 
 /// Adds one expression with the untyped stage's type.
 pub(crate) fn push(
-    builder: &mut Builder<'_>,
+    builder: &mut Builder,
     state: &mut BodyState,
     kind: ExprKind,
     span: SyntaxSpan,
@@ -372,7 +364,7 @@ pub(crate) fn push(
 
 /// Adds one expression with the type its declaration already states.
 pub(crate) fn push_typed(
-    builder: &mut Builder<'_>,
+    builder: &mut Builder,
     state: &mut BodyState,
     kind: ExprKind,
     span: SyntaxSpan,
@@ -389,7 +381,7 @@ pub(crate) fn push_typed(
 
 /// The field definition `name` denotes on a value of `ty`, when the written
 /// type states it. This reads declared types only; inference is stage H2.
-fn field_of_type(builder: &Builder<'_>, ty: Ty, name: &Name) -> Option<DefId> {
+fn field_of_type(builder: &Builder, ty: Ty, name: &Name) -> Option<DefId> {
     match builder.program.tys.kind(ty)? {
         TyKind::Adt(def, _) => payload_fields(builder, *def)
             .into_iter()
@@ -406,7 +398,7 @@ fn field_of_type(builder: &Builder<'_>, ty: Ty, name: &Name) -> Option<DefId> {
 /// The definition a `base.name` access that has no field type names: a member of the type or enum the
 /// dotted `base` path names (`Status.draft`, `Length.kilometre`).
 fn qualified_member(
-    builder: &Builder<'_>,
+    builder: &Builder,
     state: &BodyState,
     base: &AstExpr,
     name: &str,
@@ -430,7 +422,7 @@ fn qualified_member(
 }
 
 /// The declared type of a field definition.
-fn field_type(builder: &mut Builder<'_>, field: DefId) -> Ty {
+fn field_type(builder: &mut Builder, field: DefId) -> Ty {
     match &builder.pending[field.index()].kind {
         super::declare::PendingKind::Built(DefKind::Field(definition)) => definition.ty,
         _ => builder.program.tys.error(),
@@ -438,11 +430,11 @@ fn field_type(builder: &mut Builder<'_>, field: DefId) -> Ty {
 }
 
 /// The field definitions a table, nominal type or enum variant owns.
-fn payload_fields(builder: &Builder<'_>, owner: DefId) -> Vec<DefId> {
+fn payload_fields(builder: &Builder, owner: DefId) -> Vec<DefId> {
     payload(builder, owner)
 }
 
-fn payload(builder: &Builder<'_>, owner: DefId) -> Vec<DefId> {
+fn payload(builder: &Builder, owner: DefId) -> Vec<DefId> {
     use super::declare::PendingKind;
     match &builder.pending[owner.index()].kind {
         PendingKind::Built(DefKind::Variant(variant)) => variant.fields.clone(),
@@ -453,15 +445,11 @@ fn payload(builder: &Builder<'_>, owner: DefId) -> Vec<DefId> {
 }
 
 /// Adds one diagnostic expression.
-pub(crate) fn error_expr(
-    builder: &mut Builder<'_>,
-    state: &mut BodyState,
-    span: SyntaxSpan,
-) -> ExprId {
+pub(crate) fn error_expr(builder: &mut Builder, state: &mut BodyState, span: SyntaxSpan) -> ExprId {
     push(builder, state, ExprKind::Error, span)
 }
 
-fn lower_all(builder: &mut Builder<'_>, state: &mut BodyState, exprs: &[AstExpr]) -> Box<[ExprId]> {
+fn lower_all(builder: &mut Builder, state: &mut BodyState, exprs: &[AstExpr]) -> Box<[ExprId]> {
     exprs
         .iter()
         .map(|expr| lower_expr(builder, state, expr))
@@ -471,7 +459,7 @@ fn lower_all(builder: &mut Builder<'_>, state: &mut BodyState, exprs: &[AstExpr]
 
 /// Lowers a bare name: a local slot, a definition, or a diagnostic.
 pub(crate) fn lower_name(
-    builder: &mut Builder<'_>,
+    builder: &mut Builder,
     state: &mut BodyState,
     text: &str,
     span: &SyntaxSpan,
@@ -532,7 +520,7 @@ pub(crate) fn lower_name(
 
 /// Lowers an arithmetic, comparison, logical or pipeline operator.
 fn lower_binary(
-    builder: &mut Builder<'_>,
+    builder: &mut Builder,
     state: &mut BodyState,
     lhs: &AstExpr,
     op: &str,
@@ -606,7 +594,7 @@ fn bin_op(op: &str) -> Option<BinOp> {
 
 /// Lowers `lhs |? handler` into recovery with one synthetic error slot.
 fn lower_recover(
-    builder: &mut Builder<'_>,
+    builder: &mut Builder,
     state: &mut BodyState,
     lhs: &AstExpr,
     rhs: &AstExpr,
@@ -633,7 +621,7 @@ fn lower_recover(
 
 /// Lowers a pipeline stage: the stage's callee applied to `input`.
 fn lower_stage(
-    builder: &mut Builder<'_>,
+    builder: &mut Builder,
     state: &mut BodyState,
     stage: &AstExpr,
     input: Option<ExprId>,
@@ -692,7 +680,7 @@ pub(crate) fn flatten_path<'a>(expr: &'a AstExpr, out: &mut Vec<(&'a str, Syntax
 /// list literal, is a concurrent body; any other argument lowers as usual, so
 /// a nested lambda never inherits the flag.
 fn lower_concurrent_argument(
-    builder: &mut Builder<'_>,
+    builder: &mut Builder,
     state: &mut BodyState,
     value: &AstExpr,
 ) -> ExprId {
@@ -755,7 +743,7 @@ fn as_witness_type(
 
 /// Lowers one call, including its classified callee and bound arguments.
 fn lower_call(
-    builder: &mut Builder<'_>,
+    builder: &mut Builder,
     state: &mut BodyState,
     callee: &AstExpr,
     type_arguments: &[TypeExpr],
@@ -827,7 +815,7 @@ fn lower_call(
 }
 
 /// The declared result type of a call, when the callee states one.
-fn call_type(builder: &mut Builder<'_>, callee: &crate::Callee) -> Ty {
+fn call_type(builder: &mut Builder, callee: &crate::Callee) -> Ty {
     match callee {
         crate::Callee::Source { def, .. }
         | crate::Callee::Native { def, .. }
@@ -850,7 +838,7 @@ fn call_type(builder: &mut Builder<'_>, callee: &crate::Callee) -> Ty {
 /// twice. Only the root segment carries `context`; a later segment is a member
 /// and records as a field.
 pub(crate) fn record_prefix_uses(
-    builder: &mut Builder<'_>,
+    builder: &mut Builder,
     module: crate::ModuleId,
     body: Option<crate::BodyId>,
     segments: &[(Name, SyntaxSpan)],
@@ -903,7 +891,7 @@ pub(crate) fn record_prefix_uses(
 
 /// Lowers a nominal or variant construction.
 fn lower_construct(
-    builder: &mut Builder<'_>,
+    builder: &mut Builder,
     state: &mut BodyState,
     path: &[orna_syntax::NameSegment],
     fields: &[orna_syntax::RecordField],
@@ -1016,7 +1004,7 @@ fn lower_construct(
 
 /// Lowers a lambda: its own body, its parameter slots and its captures.
 fn lower_lambda(
-    builder: &mut Builder<'_>,
+    builder: &mut Builder,
     state: &mut BodyState,
     parameters: &[orna_syntax::LambdaParameter],
     body: &AstExpr,
