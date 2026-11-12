@@ -45,6 +45,10 @@ name = "orna-value"
 layer = 1
 
 [[crate]]
+name = "orna-unicode"
+layer = 1
+
+[[crate]]
 name = "orna-sys-model"
 layer = 1
 
