@@ -22,7 +22,7 @@ their source. Anything not measured is marked `not measured`.
 | Diagnostic codes, old checker vs HIR | `crates/orna-differential/tests/diagnostic_codes.rs`, 211 cases, 0 skipped | 104 cases differ | 104 rows under `## expected` in `crates/orna-differential/tests/diagnostic_codes_differing.txt` | the differing set equals the expected rows exactly; a listed case that now agrees fails as stale |
 | Executor agreement (H4) | `crates/orna-differential/tests/exec_share.rs`, corpus of 226 cases | 48 of 62 run cases agree; 110 evaluable; 48 of 48 agreeing run cases have exact step parity | `agreed = 48`, `evaluable = 110`, `steps-exact = 48`, and 14 allowances (9 `harness-allowance`, 1 `representation-allowance`, 4 `executor-gap-allowance`) in `crates/orna-differential/tests/differential/exec-share.toml` | `agreed` and `steps-exact` may only grow; `evaluable` is the denominator |
 | Typed share (H2) | `crates/orna-differential/tests/typed_share.rs` | 49 of 104 old-accepted cases typed; 14 not lowered; 108 old-rejected cases excluded | `typed = 35`, `lowered = 104` in `crates/orna-differential/tests/differential/typed-share.toml` | see the comparator note below |
-| REPL inline (H8) | `crates/orna-repl/tests/repl_inline_differential.rs` | 15 of 48 runnable fixtures agree; 104 fixtures in total; 56 excluded; 33 expected disagreements | `AGREED_FLOOR = 15` in the test; 33 rows under `## expected` in `crates/orna-repl/tests/repl_inline_differing.txt`, each with a one-line reason; 56 excluded in `crates/orna-repl/tests/repl_inline_exclusions.txt` | `agreed >= 15`; the disagreement set equals the 33 rows |
+| REPL inline (H8) | `crates/orna-differential/tests/repl_inline_differential.rs` | 15 of 48 runnable fixtures agree; 104 fixtures in total; 56 excluded; 33 expected disagreements | `AGREED_FLOOR = 15` in the test; 33 rows under `## expected` in `crates/orna-differential/tests/repl_inline_differing.txt`, each with a one-line reason; 56 excluded in `crates/orna-differential/tests/repl_inline_exclusions.txt` | `agreed >= 15`; the disagreement set equals the 33 rows |
 | Expected differences (harness allowlist) | `crates/orna-differential/tests/differential/expected-differences.toml` | 98 `[[difference]]` and 9 `[[environment]]` entries; 856 lines | 107 `reason` and 107 `bead` fields | not checked: no test found that verifies each cited bead exists (gap G19) |
 
 Notes on the table:
@@ -144,18 +144,9 @@ leaves `orna check`'s names unchanged. The naming is decision Q7.
   this shape. The key is the entry's natural unit: the diagnostic code with its
   logical path and line for check; the case name with the canonical result or
   error code for run and REPL.
-- Per nightly run: the job runs the corpus in shadow mode and writes a
-  JSON-lines report with one record per difference: `entry`, `case`, `old`,
-  `hir`. The job fails if a difference is in neither `expected-differences.toml`
-  nor the diagnostic and REPL expected-row files.
+- Per nightly run: the `shadow-report` job of `nightly-gates.yml` runs the `shadow_report` test (`crates/orna-differential/tests/shadow_report.rs`, ignored by default) over the whole corpus through the old and HIR pipelines, with `ORNA_SHADOW_REPORT` naming `shadow-report.md`. The test writes a markdown report, which the job uploads as the `shadow-report` artifact and appends to the job summary. To run it locally: `ORNA_SHADOW_REPORT=shadow-report.md cargo test -p orna-differential --test shadow_report --locked -- --ignored --nocapture`. A difference is unexplained when the matching ratchet test would fail on it: the diagnostic expected-row table, the executor allowance table, or the REPL expected-row file. A ledger row that matches no case is stale. The job fails on any unexplained difference or stale row. It is not part of the evidence summary.
 
-What exists today: `.github/workflows/nightly-gates.yml` runs on
-`cron: "23 1 * * *"` (line 30). Its `rest` shard runs `cargo test --locked
---no-fail-fast` over `--workspace` minus `orna-cli`, `orna-evaluator`, `orna-sys`
-and `orna-conformance` (lines 128-150). The ratchet tests of section 1 therefore
-run nightly, through the `rest` shard (for `orna-differential` and `orna-repl`).
-No nightly job writes a shadow report or compares the two pipelines over the
-whole corpus (gap G9).
+What exists today: `.github/workflows/nightly-gates.yml` runs on `cron: "23 1 * * *"` under `on.schedule`. Its `workspace` job's `rest` matrix entry runs `cargo test --locked --no-fail-fast` over `--workspace` minus `orna-cli`, `orna-evaluator`, `orna-sys` and `orna-conformance`. The ratchet tests of section 1 therefore run nightly, through the `rest` shard (for `orna-differential` and `orna-repl`). The `shadow-report` job adds the whole-corpus comparison (gap G9). It has not yet run nightly, so criterion C1(c) is not yet met.
 
 ### 4.3 Triage
 
@@ -324,7 +315,7 @@ Each decision is stated so that the answer is an option letter or a short phrase
 | G6 | C2 | the assertion gate has no HIR switch; it calls `orna_check` directly | none | propose a bead under `ornadb-csenl.24` |
 | G7 | C5 | `orna run`, REPL, serve and mount have no switch; serve and mount have no corpus ratchet | none | propose beads under `ornadb-csenl.24` |
 | G8 | C7 | `hir.md` 6.6 says H1 LSP is env-gated; no gate exists; LSP HIR status unverified | `ornadb-csenl.16` (H1, "lowering, resolver and call classification; LSP on HIR") | verify the LSP path before H9 |
-| G9 | section 4.2 | no nightly shadow report; the `rest` shard runs the ratchets but no whole-corpus comparison | none | propose a bead under `ornadb-csenl.24` |
+| G9 | section 4.2 | closed by the `shadow-report` job of `nightly-gates.yml`: the whole corpus runs through both pipelines and writes a markdown report (section 4.2) | none | the job has no run history yet, so criterion C1(c) is not met |
 | G10 | P2, section 2 | production types from `orna-check` (decision Q6) | `ornadb-csenl.18` (H3), `.24` (H9) | decision Q6 |
 | G11 | P1 | the differential harness has a normal dependency on the old evaluator; no golden freeze exists | none | propose a bead under `ornadb-csenl.24` |
 | G12 | C3 | step re-baseline and `Expr.weight` removal (`hir.md` 6.4) | `ornadb-csenl.19` (H4), `.24` (H9) | recorded in the H9 PR |
@@ -346,7 +337,7 @@ All runs at `0f1e5961d` in a worktree with a private `CARGO_TARGET_DIR`.
   differ (expected 104)"; "executor agreement: 48/62 run cases agree with the old
   pipeline (226 cases in the corpus)"; "exact step parity: 48/48"; "typed share:
   49/104 old-checker-accepted cases (14 cases are not lowered)".
-- `cargo test -p orna-repl --test repl_inline_differential -- --nocapture`:
+- `cargo test -p orna-differential --test repl_inline_differential -- --nocapture`:
   exit 0. Output: "repl-inline differential: agreed 15 of 48 runnable, 104 total, 33
   expected disagreements".
 - Counts: `wc -l` and `find ... -name '*.rs' | xargs cat | wc -l` for every line
