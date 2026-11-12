@@ -98,6 +98,8 @@ impl InferCtxt {
             return Ok(());
         }
         match (types.kind(left).cloned(), types.kind(right).cloned()) {
+            (Some(TyKind::Infer(var)), Some(TyKind::Error)) => self.bind(types, var, right),
+            (Some(TyKind::Error), Some(TyKind::Infer(var))) => self.bind(types, var, left),
             (Some(TyKind::Error), _) | (_, Some(TyKind::Error)) => Ok(()),
             (Some(TyKind::Never), _) | (_, Some(TyKind::Never)) => Ok(()),
             (Some(TyKind::Infer(var)), _) => self.bind(types, var, right),
