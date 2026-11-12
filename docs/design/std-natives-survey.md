@@ -27,7 +27,7 @@ key in `natives::lookup` (76 keys), plus the root intrinsic `Some`, which is rou
 | `encoding/ovb` | 2 | 2 of 2 | 2 of 2 | none |
 | `collection` (group_by, rank, asof_join, bucket_by, last) | 5 | 5 of 5 (`core.collection`) | 4 of 5 | `bucket_by`: see below |
 | `query` relation operators (count, filter, map, ...) | 17 | `core.collection.*` by name | 17 of 17 | none; std re-exports these names |
-| `query` windows and time series (see below) | 6 | 0 of 6 | 0 of 6 | pure, unported; no core declaration |
+| `query` windows and time series (see below) | 6 | 5 of 6 (`core.collection.__window_*`, `__strictly_ordered_time_series`) | 5 of 6 | `recursive_cte` undeclared; std wrappers not rewired (submodule) |
 | `money` (quantize, allocate, format) | 3 | 0 of 3 | 0 of 3 | `Money<C>` is not on HIR (H4); `format` also needs locale data |
 | `random` (bytes, choose, integer, shuffle) | 4 | 0 of 4 | 0 of 4 | host entropy (`randomness` effect); no entropy host in orna-exec |
 | `stream` (from_provider) | 1 | 0 of 1 | 0 of 1 | host provider effect; no provider host |
@@ -53,23 +53,21 @@ key in `natives::lookup` (76 keys), plus the root intrinsic `Some`, which is rou
 - `random` (bytes, choose, integer, shuffle): the spec has no seeded or deterministic random semantics (spec 09), so
   there is no reference behaviour to port. Blocked on an entropy host.
 - `stream.from_provider`, `ui.node`: host provider and presentation effects. Not implementable in orna-exec today.
-- `query` windows: `window_rate`, `window_rate_integrate`, `window_derivative`, `window_integrate`,
-  `strictly_ordered_time_series`, `recursive_cte`. These are pure over `[(Instant, T)]` and have no core declaration.
-  They are the only unblocked std natives that remain.
+- `query` windows: `recursive_cte` is the only window-family native without a core declaration.
 
 ## Next steps
 
-1. Interface declarations for the unblocked query windows, in their own commit in the core interface pattern
-   (hand-written Orna, no JSON). Then executor bindings and tests.
+1. Rewire `stdlib/std/query.orna` to the window leaves (submodule commit), then declare and bind `recursive_cte`
+   once it has a declaration form.
 2. `bucket_by` typeck and executor binding, once the period type `P` is checked.
 3. Beads for the host-blocked families: clock and entropy (`now`, `uuid7`, `random.*`), provider streams
    (`stream.from_provider`), presentation (`ui.node`), money (H4), structured `Error` (H2b/H5).
 
-## Window natives: why not in this slice
+## Window natives
 
-`window_rate`, `window_rate_integrate`, `window_derivative`, `window_integrate`, `strictly_ordered_time_series`, and
-`recursive_cte` are host-free but not yet portable as a declaration-only change. The old evaluator implements the
-window math in Rust (`crates/orna-evaluator/src/intrinsics/collection.rs`, from about line 826): rate and integrate
-divide a generic `T` by `Instant` differences, so the core declaration must first fix the numeric constraint on `T`.
-The std wrappers (`stdlib/std/query.orna`, lines 139-200) also validate window parameters before the native runs,
-so the native contract must match that validation exactly. This is the next slice.
+`window_rate`, `window_rate_integrate`, `window_derivative`, `window_integrate` and `strictly_ordered_time_series`
+are declared in `core.collection` as `__`-prefixed leaves over `[(Instant, T)]`, with an unbounded `T` like the
+`core.stats` series natives, and bound in `crates/orna-exec/src/natives/window.rs`. They copy the old evaluator's
+`window_time_series_statistics` and `strictly_ordered_time_series` (`crates/orna-evaluator/src/intrinsics/collection.rs`,
+about line 826), with the same steps, charges and errors. `recursive_cte` is not declared: it is not in the
+declaration form yet. `stdlib/std/query.orna` does not call these leaves yet; rewiring it is a submodule change.

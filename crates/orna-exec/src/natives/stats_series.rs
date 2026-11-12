@@ -19,7 +19,7 @@ use crate::value::Value;
 const NANOS_PER_SECOND: u32 = 1_000_000_000;
 
 /// The nanoseconds since the Unix epoch of an instant. Any other value is a type error.
-fn instant_nanos(value: &Value) -> Result<BigInt, Stop> {
+pub(super) fn instant_nanos(value: &Value) -> Result<BigInt, Stop> {
     let Value::Instant {
         unix_seconds,
         nanosecond,
@@ -41,7 +41,7 @@ fn elapsed_seconds(start: &Value, end: &Value) -> Result<Decimal, Stop> {
 }
 
 /// One `(time, value)` point of a series: a pair of two elements.
-fn point_pair(point: &Value) -> Result<(&Value, &Value), Stop> {
+pub(super) fn point_pair(point: &Value) -> Result<(&Value, &Value), Stop> {
     let Value::Tuple(pair) = point else {
         return Err(Stop::Error("ORNA-EVAL-TYPE"));
     };
@@ -52,7 +52,7 @@ fn point_pair(point: &Value) -> Result<(&Value, &Value), Stop> {
 }
 
 /// The points of a series, in order. Times must be instants and strictly increasing, and there must be at least two.
-fn series_points(points: &[Value]) -> Result<Vec<(&Value, &Value)>, Stop> {
+pub(super) fn series_points(points: &[Value]) -> Result<Vec<(&Value, &Value)>, Stop> {
     let mut result: Vec<(&Value, &Value)> = Vec::with_capacity(points.len());
     let mut previous: Option<BigInt> = None;
     for point in points {
@@ -72,7 +72,7 @@ fn series_points(points: &[Value]) -> Result<Vec<(&Value, &Value)>, Stop> {
 
 /// The slope between two points: the value change per elapsed second. Floats divide in binary64; integers and
 /// decimals divide exactly, and a decimal operand keeps a decimal result.
-fn series_slope(
+pub(super) fn series_slope(
     limits: &ExecLimits,
     start: (&Value, &Value),
     end: (&Value, &Value),
@@ -113,6 +113,14 @@ pub(in crate::natives) fn derivative(
     let [points] = exactly(arguments)?;
     let rows = list(points)?;
     let points = series_points(&rows)?;
+    Ok(list_of(derivative_pairs(machine, &points)?))
+}
+
+/// The slope of each adjacent pair of a checked series, as `(Instant, slope)` pairs timed at the later point.
+pub(super) fn derivative_pairs(
+    machine: &mut Machine<'_>,
+    points: &[(&Value, &Value)],
+) -> Result<Vec<Value>, Stop> {
     let mut derivatives = Vec::with_capacity(points.len() - 1);
     for window in points.windows(2) {
         machine.tick(1)?;
@@ -120,7 +128,7 @@ pub(in crate::natives) fn derivative(
         derivatives.push(pair(window[1].0.clone(), slope));
         collection_items(machine, derivatives.len())?;
     }
-    Ok(list_of(derivatives))
+    Ok(derivatives)
 }
 
 /// `integrate<T>(points: [(Instant, T)]): T?`. The trapezoidal area under the series.
@@ -132,13 +140,18 @@ pub(in crate::natives) fn integrate(
     let [points] = exactly(arguments)?;
     let rows = list(points)?;
     let points = series_points(&rows)?;
+    area(&machine.limits, &points)
+}
+
+/// The trapezoidal area under a checked series: binary64 when every value is a float, exact otherwise.
+pub(super) fn area(limits: &ExecLimits, points: &[(&Value, &Value)]) -> Result<Value, Stop> {
     if points
         .iter()
         .all(|(_, value)| matches!(value, Value::Float(_)))
     {
-        return float_area(&points);
+        return float_area(points);
     }
-    decimal_area(&machine.limits, &points)
+    decimal_area(limits, points)
 }
 
 /// The trapezoidal area of an all-float series, in binary64.
