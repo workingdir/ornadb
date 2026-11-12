@@ -89,6 +89,12 @@ fn expected_differences() -> BTreeSet<String> {
 /// call-site mismatch under `ORNA-S021-TYPE`; the pairing is unproven per message.
 fn recorded_reason(code: &str) -> Option<&'static str> {
     match code {
+        "sys.version.incompatible" => Some(
+            "HIR applies the production sys admission (ORNA-SYS-008): a catalogued member with no \
+             linked provider is rejected at lowering, as the executor requires; the checker compared \
+             here analyses on the declared surface (SystemProviders::DeclaredSurface) and does not gate \
+             providers",
+        ),
         "ORNA-S010-IMPORT" => {
             Some("HIR import diagnostic the checker does not report under this code; unclassified")
         }
@@ -101,9 +107,11 @@ fn recorded_reason(code: &str) -> Option<&'static str> {
             "checker type mismatch; HIR reports arity or constraint conflicts as ORNA-INFER-011 or ORNA-INFER-007, \
                  stops at ORNA-S000 on parse errors, or reports unresolved names first (ORNA-S012); the ledger comments list each case",
         ),
-        "ORNA-INFER-011" => {
-            Some("HIR constraint conflict; the checker reports the same site as ORNA-S021-TYPE")
-        }
+        "ORNA-INFER-011" => Some(
+            "HIR constraint conflict. Range membership (`value in range`, ORNA-RANGE-006) is typed; the \
+             residual conflict is a legacy fixture passing `0..10` where the spec's `take(rows, count: Int)` \
+             takes an Int (09-standard-library.md:31); the checker reports the same site as ORNA-S021-TYPE",
+        ),
         "ORNA-INFER-007" => {
             Some("HIR unsolved-variable diagnostic; the checker has no code for it")
         }
@@ -112,8 +120,9 @@ fn recorded_reason(code: &str) -> Option<&'static str> {
              (docs/design/hir.md, H2a subset), so the difference is expected, not a spec-required error",
         ),
         "ORNA-S022-UNSUPPORTED" => Some(
-            "HIR reports forms the H2a subset does not type, and top-level offset or affine units (units.md C6, \
-                 user modules; valid/affine-unit); otherwise unclassified",
+            "HIR reports `sys` as a module rather than a value and does not represent sys declarations or \
+             module calls (stage H5, sys.orna lowering, docs/design/hir.md); also top-level offset or affine \
+             units (H2c, valid/affine-unit) and one unary-operator table artifact",
         ),
         "ORNA-EVAL-ARGUMENT" => Some(
             "HIR binds named arguments only against statically known parameter labels; member, std and \

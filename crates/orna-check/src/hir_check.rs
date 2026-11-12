@@ -6,16 +6,75 @@
 //! those findings to the diagnostics and origins the old `Analysis` reports,
 //! so a caller can compare the two checkers code by code.
 
+use std::sync::Arc;
+
 use orna_hir::{
     Idx, ModuleOrigin, ModulePath, Name, PreludeExports, Program, SourceId, SourceUnit,
-    lower_with_prelude, typeck,
+    SysAdmission, SysMemberStatus, lower_with_admission, typeck,
 };
 use orna_syntax::{SyntaxSpan, SyntaxTree, parse_module_with_file};
 use orna_value::Diagnostic;
 
 use crate::StandardDependencyProfile;
 use crate::located::DiagnosticOrigin;
+use crate::system_api::{PathResolution, SystemMember, embedded_system_api};
 use crate::{DIAG_PARSE, ModuleInput, diag};
+
+/// The host's `sys` admission, read from the embedded catalogue and the
+/// production providers linked into this build (`system_api.rs`).
+///
+/// A catalogued member is `Unlinked` when no provider serves it. The member
+/// mapping is the one `system_calls::infer_descriptor_system_path` uses, so the
+/// HIR gate and the descriptor checker refuse the same members.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CatalogueAdmission;
+
+impl SysAdmission for CatalogueAdmission {
+    fn status(&self, path: &[&str]) -> SysMemberStatus {
+        let api = embedded_system_api();
+        let name = path.join(".");
+        let status = |linked: bool| {
+            if linked {
+                SysMemberStatus::Linked
+            } else {
+                SysMemberStatus::Unlinked
+            }
+        };
+        if api.historical_relation(path).is_some() {
+            let view = name.strip_suffix(".as_of").unwrap_or(&name);
+            return status(api.provider_linked(SystemMember::HistoricalView(view)));
+        }
+        if path == ["sys", "database", "as_of"] {
+            return status(api.provider_linked(SystemMember::HistoricalView("sys.database")));
+        }
+        if let Some(singleton) = api.historical_singleton(path) {
+            return status(api.provider_linked(SystemMember::HistoricalView(&singleton.name)));
+        }
+        if let Some(functions) = api.function(&name) {
+            return status(
+                functions
+                    .iter()
+                    .any(|function| api.provider_linked(SystemMember::Callable(&function.label))),
+            );
+        }
+        if api.relation(&name).is_some() {
+            return status(api.provider_linked(SystemMember::Relation(&name)));
+        }
+        if api.enum_value(path).is_some() {
+            return SysMemberStatus::Linked;
+        }
+        match api.resolve(path) {
+            PathResolution::ReadOnly(_) => match api.singleton_view(path) {
+                Some(singleton) => status(api.provider_linked(SystemMember::Singleton(singleton))),
+                // The admitted table catalogue is served by the evaluator.
+                None => SysMemberStatus::Linked,
+            },
+            PathResolution::Removed(_)
+            | PathResolution::KnownUnsupported
+            | PathResolution::Unknown => SysMemberStatus::Unknown,
+        }
+    }
+}
 
 /// One pinned standard source, as `(logical path, text)`. The logical path is
 /// under the reserved `std/` root, as the project loader supplies it.
@@ -65,7 +124,7 @@ pub fn check(
             path: module_path_of(logical),
         })
         .collect();
-    let mut program = lower_with_prelude(&units, prelude);
+    let mut program = lower_with_admission(&units, prelude, &[], Arc::new(CatalogueAdmission));
     typeck(&mut program);
     let mut findings = parse_findings;
     findings.extend(project_findings(&program, &trees));
