@@ -107,12 +107,15 @@ valid/table-key-default.orna :: ORNA-S021-TYPE => ORNA-S010-IMPORT
 valid/table-reference.orna :: (none) => ORNA-S012-UNRESOLVED
 valid/unbounded-stream.orna :: (none) => ORNA-S012-UNRESOLVED
 valid/unit-cross-database.orna :: (none) => ORNA-S012-UNRESOLVED
-# Table-write rows: the old checker's fixture catalogue (orna-check lib.rs) declares Contact required = {name} and no admission for Audit; HIR derives required fields from the declaration, as spec table insert (Orna-1.1.0) and production admission (assertions.rs) do. Orchestrator decision pending.
+# Spec-derived: effectful-display's Display impl calls Audit.insert with only `message`; HIR reports E2002/E2003 from the Audit table declaration, while the old fixture catalogue has no Audit admission. Decision per Main: declaration-derived required fields are correct.
 invalid/effectful-display.orna :: E7201 => E2002; E2003; ORNA-INFER-007; ORNA-S012-UNRESOLVED
+# Spec-derived: unknown-field inserts `banana`, which E2003 reports; HIR also reports E2002 for a declared required Contact field the insert omits. The old fixture catalogue lists Contact required = {name} only. Decision per Main: declaration-derived required fields are correct.
 invalid/unknown-field.orna :: E2003 => E2002; E2003
 invalid/unparenthesized-lambda-stage.orna :: ORNA-S000-PARSE; ORNA-S021-TYPE => ORNA-S000-PARSE
 valid/codec-json.orna :: (none) => ORNA-EVAL-ARGUMENT; ORNA-INFER-007
+# Spec-derived: effectful-expression inserts Contact supplying only `name`; HIR reports E2002 for a declared required Contact field that the old fixture catalogue (required = {name}) does not list. Decision per Main: declaration-derived required fields are correct.
 valid/effectful-expression.orna :: (none) => E2002
+# Spec-derived: duplicate-key inserts both omit declared required Contact fields, which HIR reports as E2002 from the declaration-derived required set. The old checker reports nothing statically; the duplicate key is a runtime rule. Decision per Main: declaration-derived required fields are correct.
 invalid/duplicate-key.orna :: (none) => E2002
 valid/lambda.orna :: (none) => ORNA-S012-UNRESOLVED
 valid/transactional-scope.orna :: (none) => ORNA-S012-UNRESOLVED
