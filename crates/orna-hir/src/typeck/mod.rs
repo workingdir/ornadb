@@ -64,6 +64,7 @@ mod operator;
 mod option_pattern_tests;
 mod protocol;
 mod quantity;
+mod table_fields;
 #[cfg(test)]
 mod temperature_tests;
 #[cfg(test)]
@@ -725,7 +726,7 @@ impl<'a> BodyCheck<'a> {
         let span = expr.span.clone();
         let ty = match (expr.kind, expected) {
             (ExprKind::Record(fields), Some(expected)) => {
-                self.check_record(body, &fields, expected, span.clone())?
+                self.check_record(body, &fields, expected, span.clone(), true)?
             }
             (ExprKind::List(elements), Some(expected))
                 if matches!(self.kind_of(self.resolved(expected)), Some(TyKind::List(_))) =>
