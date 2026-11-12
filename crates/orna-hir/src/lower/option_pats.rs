@@ -13,7 +13,7 @@ use super::pats::lower_pattern_with;
 /// Whether a constructor pattern is the language's `Some(p)`: one unqualified
 /// `Some` that no user definition names, with one positional sub-pattern.
 pub(super) fn is_option_some(
-    builder: &Builder<'_>,
+    builder: &Builder,
     module: ModuleId,
     path: &[NameSegment],
     arguments: &[AstPattern],
@@ -36,7 +36,7 @@ pub(super) fn is_option_some(
 /// Lowers `Some(argument)`, recording the `Some` spelling as the language
 /// intrinsic it names.
 pub(super) fn lower_option_some(
-    builder: &mut Builder<'_>,
+    builder: &mut Builder,
     state: &mut BodyState,
     segment: &NameSegment,
     argument: &AstPattern,

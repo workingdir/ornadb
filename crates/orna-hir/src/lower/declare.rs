@@ -30,6 +30,7 @@ use super::{BodyState, SourceUnit};
 pub(crate) const BUILTIN_SOURCE: u32 = u32::MAX;
 
 /// One `use` declaration awaiting resolution.
+#[derive(Clone)]
 pub(crate) struct PendingUse {
     /// The importing module.
     pub(crate) module: ModuleId,
@@ -42,6 +43,7 @@ pub(crate) struct PendingUse {
 }
 
 /// One declaration, before its kind is built.
+#[derive(Clone)]
 pub(crate) struct PendingDef {
     /// The declaring module.
     pub(crate) module: ModuleId,
@@ -68,6 +70,7 @@ pub(crate) enum UnitLookup {
 }
 
 /// The state of one definition while lowering.
+#[derive(Clone)]
 pub(crate) enum PendingKind {
     /// A top-level declaration whose `DefKind` needs types or bodies.
     Unbuilt(Box<DeclAst>),
@@ -79,6 +82,7 @@ pub(crate) enum PendingKind {
 }
 
 /// A function while its signature and body are being lowered.
+#[derive(Clone)]
 pub(crate) struct PendingFunction {
     /// Generic parameters, with protocol bounds resolved in phase 3.
     pub(crate) generics: Vec<crate::GenericParam>,
@@ -99,6 +103,7 @@ pub(crate) struct PendingFunction {
 }
 
 /// The declaration syntax a pending definition retains.
+#[derive(Clone)]
 pub(crate) enum DeclAst {
     /// A function.
     Function(FunctionSignature, Expr),
@@ -184,10 +189,12 @@ impl DeclAst {
     }
 }
 
-/// Phase 1 through 4 state.
-pub(crate) struct Builder<'a> {
-    /// The sources being lowered.
-    pub(crate) sources: &'a [SourceUnit<'a>],
+/// Phase 1 through 4 state. It owns everything it lowers, so it can be cloned
+/// to snapshot an incremental lowering.
+#[derive(Clone)]
+pub(crate) struct Builder {
+    /// Items lowered so far: one per built definition and per body job.
+    pub(crate) lowered: usize,
     /// The program under construction.
     pub(crate) program: Program,
     /// Definitions by id.
@@ -216,15 +223,12 @@ pub(crate) struct Builder<'a> {
     pub(crate) prelude: super::prelude::PreludeExports,
 }
 
-impl<'a> Builder<'a> {
-    /// Creates the program skeleton and registers every source module.
-    pub(crate) fn new(
-        sources: &'a [SourceUnit<'a>],
-        prelude: &super::prelude::PreludeExports,
-    ) -> Self {
-        let mut builder = Self {
+impl Builder {
+    /// Creates an empty builder; [`Builder::declare_units`] registers modules.
+    pub(crate) fn new(prelude: &super::prelude::PreludeExports) -> Self {
+        Self {
             prelude: prelude.clone(),
-            sources,
+            lowered: 0,
             program: Program::empty(),
             pending: Vec::new(),
             scopes: Vec::new(),
@@ -237,25 +241,34 @@ impl<'a> Builder<'a> {
             body_jobs: Vec::new(),
             unit_jobs: Vec::new(),
             self_ty: None,
-        };
-        let mut registered = Vec::with_capacity(sources.len());
-        for unit in sources {
-            let origin = origin_of(&unit.path);
-            let module = builder.add_module(unit.path.clone(), origin, unit.source);
-            registered.push(module);
+        }
+    }
+
+    /// Declares the modules and items of `units`. A module whose path is already
+    /// registered is reused, so a session module can grow without a duplicate diagnostic.
+    pub(crate) fn declare_units(&mut self, units: &[SourceUnit<'_>]) {
+        let mut modules = Vec::with_capacity(units.len());
+        for unit in units {
+            let module = match self.by_path.get(&unit.path) {
+                Some(module) => *module,
+                None => {
+                    let origin = origin_of(&unit.path);
+                    self.add_module(unit.path.clone(), origin, unit.source)
+                }
+            };
+            modules.push(module);
         }
         // `lower` always prepends the embedded interfaces, which include `sys` (D12).
-        builder.sys_module = builder.by_path[&ModulePath::new([Name::new("sys")])];
-        builder.program.native_abi = crate::ENGINE_NATIVE_ABI;
-        builder.register_implicit_std();
-        let roots = super::imports::implicit_roots(builder.std_module, builder.sys_module);
-        for scope in &mut builder.scopes {
+        self.sys_module = self.by_path[&ModulePath::new([Name::new("sys")])];
+        self.program.native_abi = crate::ENGINE_NATIVE_ABI;
+        self.register_implicit_std();
+        let roots = super::imports::implicit_roots(self.std_module, self.sys_module);
+        for scope in &mut self.scopes {
             for (name, module) in &roots {
                 scope.modules.insert(name.clone(), *module);
             }
         }
-        builder.declare_sources(&registered);
-        builder
+        self.declare_sources(units, &modules);
     }
 
     /// Adds one module and registers its path.
@@ -305,8 +318,8 @@ impl<'a> Builder<'a> {
     }
 
     /// Declares every top-level item of every source module.
-    fn declare_sources(&mut self, modules: &[ModuleId]) {
-        for (unit, module) in self.sources.iter().zip(modules) {
+    fn declare_sources(&mut self, units: &[SourceUnit<'_>], modules: &[ModuleId]) {
+        for (unit, module) in units.iter().zip(modules) {
             for item in &unit.tree.items {
                 self.declare_item(*module, item);
             }

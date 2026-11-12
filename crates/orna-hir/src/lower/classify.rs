@@ -143,7 +143,7 @@ pub(crate) enum Classified {
     NotCallable,
 }
 
-impl Builder<'_> {
+impl Builder {
     /// The `sys` native whose 1.1 spelling is `spelling` (`sys.blob.from_bytes`).
     ///
     /// A native declares its spelling with the `spelling` clause; one without a clause is spelled `sys.<name>`.

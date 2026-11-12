@@ -22,7 +22,7 @@ use super::literals::lower_literal;
 
 /// Lowers one pattern with no written type.
 pub(crate) fn lower_pattern(
-    builder: &mut Builder<'_>,
+    builder: &mut Builder,
     state: &mut BodyState,
     pattern: &AstPattern,
 ) -> PatId {
@@ -34,7 +34,7 @@ pub(crate) fn lower_pattern(
 /// The expected type is pushed into binding slots and, where the pattern
 /// destructures a tuple, list, record or constructor, into the sub-patterns.
 pub(crate) fn lower_pattern_with(
-    builder: &mut Builder<'_>,
+    builder: &mut Builder,
     state: &mut BodyState,
     pattern: &AstPattern,
     expected: Option<Ty>,
@@ -151,7 +151,7 @@ pub(crate) fn lower_pattern_with(
 
 /// The declared type of a record-pattern field, when the expected type names
 /// one.
-fn field_type(builder: &Builder<'_>, expected: Ty, name: &str) -> Option<Ty> {
+fn field_type(builder: &Builder, expected: Ty, name: &str) -> Option<Ty> {
     match builder.program.tys.kind(expected).cloned() {
         Some(TyKind::Record(fields)) => fields
             .iter()
@@ -163,7 +163,7 @@ fn field_type(builder: &Builder<'_>, expected: Ty, name: &str) -> Option<Ty> {
 }
 
 /// The type of a field definition named `name` on `owner`.
-fn field_definition(builder: &Builder<'_>, owner: DefId, name: &str) -> Option<Ty> {
+fn field_definition(builder: &Builder, owner: DefId, name: &str) -> Option<Ty> {
     let field = match &builder.pending[owner.index()].kind {
         PendingKind::Built(DefKind::Table(table)) => table
             .fields
@@ -190,7 +190,7 @@ fn field_definition(builder: &Builder<'_>, owner: DefId, name: &str) -> Option<T
 
 /// Lowers a constructor pattern against its resolved definition.
 fn lower_constructor(
-    builder: &mut Builder<'_>,
+    builder: &mut Builder,
     state: &mut BodyState,
     path: &[orna_syntax::NameSegment],
     arguments: &[AstPattern],
@@ -305,7 +305,7 @@ fn lower_constructor(
 }
 
 /// The declared type of one field definition.
-fn field_definition_of(builder: &Builder<'_>, field: DefId) -> Option<Ty> {
+fn field_definition_of(builder: &Builder, field: DefId) -> Option<Ty> {
     match &builder.pending[field.index()].kind {
         PendingKind::Built(DefKind::Field(definition)) => Some(definition.ty),
         _ => None,
@@ -313,19 +313,19 @@ fn field_definition_of(builder: &Builder<'_>, field: DefId) -> Option<Ty> {
 }
 
 /// The definition of the field named `name` on `owner`.
-fn find_field(builder: &Builder<'_>, owner: DefId, name: &str) -> Option<DefId> {
+fn find_field(builder: &Builder, owner: DefId, name: &str) -> Option<DefId> {
     payload(builder, owner)
         .into_iter()
         .find(|field| builder.def_name(*field).as_str() == name)
 }
 
 /// The definition of the field at `index` on `owner`.
-fn field_at(builder: &Builder<'_>, owner: DefId, index: usize) -> Option<DefId> {
+fn field_at(builder: &Builder, owner: DefId, index: usize) -> Option<DefId> {
     payload(builder, owner).get(index).copied()
 }
 
 /// The field definitions a constructor owns, in declaration order.
-pub(crate) fn payload(builder: &Builder<'_>, owner: DefId) -> Vec<DefId> {
+pub(crate) fn payload(builder: &Builder, owner: DefId) -> Vec<DefId> {
     use crate::DefKind;
     match &builder.pending[owner.index()].kind {
         PendingKind::Built(DefKind::Variant(variant)) => variant.fields.clone(),

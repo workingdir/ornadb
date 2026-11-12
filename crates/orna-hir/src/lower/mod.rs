@@ -28,6 +28,7 @@ mod declare;
 mod exprs;
 mod free_names;
 mod imports;
+mod incremental;
 mod items;
 mod literals;
 mod natives;
@@ -35,6 +36,7 @@ mod option_pats;
 mod pats;
 mod prelude;
 mod row;
+mod signatures;
 mod types;
 mod units;
 
@@ -48,7 +50,7 @@ use crate::{
 };
 
 pub(crate) use classify::{rel_op as relation_operation, table_op as table_operation};
-pub(crate) use declare::Builder;
+pub use incremental::Lowering;
 pub use prelude::PreludeExports;
 
 /// One parsed source and the module path its spans belong to.
@@ -82,25 +84,9 @@ pub fn lower(sources: &[SourceUnit<'_>]) -> Program {
 /// rejecting it, so validation failures are lowering bugs.
 #[must_use]
 pub fn lower_with_prelude(sources: &[SourceUnit<'_>], prelude: &PreludeExports) -> Program {
-    let embedded = crate::embedded::parsed();
-    let mut units: Vec<SourceUnit<'_>> = embedded
-        .iter()
-        .enumerate()
-        .map(|(index, module)| SourceUnit {
-            source: crate::embedded::source_id(index),
-            tree: &module.tree,
-            path: module.path.clone(),
-        })
-        .collect();
-    units.extend(sources.iter().cloned());
-    let mut builder = Builder::new(&units, prelude);
-    builder.resolve_imports();
-    builder.lower_items();
-    let mut program = builder.finish();
-    crate::units::eval::run(&mut program);
-    crate::effect_pass::run(&mut program);
-    crate::rules::run(&mut program);
-    program
+    let mut lowering = Lowering::new(prelude);
+    lowering.extend(sources);
+    lowering.into_program()
 }
 
 /// One lexical scope while a body is lowered.

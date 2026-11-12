@@ -59,7 +59,7 @@ fn pending_params(name: &Name) -> Option<Vec<ParamInfo>> {
 /// separate activations that capture snapshots (design 03, "Concurrent bodies
 /// capture snapshots"). These are `parallel`, `race` and `timeout`, and
 /// `sys.start`.
-pub(crate) fn starts_concurrent_bodies(builder: &Builder<'_>, callee: &Callee) -> bool {
+pub(crate) fn starts_concurrent_bodies(builder: &Builder, callee: &Callee) -> bool {
     match callee {
         Callee::Intrinsic(form) => matches!(
             form,
@@ -74,7 +74,7 @@ pub(crate) fn starts_concurrent_bodies(builder: &Builder<'_>, callee: &Callee) -
 
 /// Resolves and classifies the callee of a call.
 pub(crate) fn classify_callee(
-    builder: &mut Builder<'_>,
+    builder: &mut Builder,
     state: &mut BodyState,
     callee: &AstExpr,
     span: &SyntaxSpan,
@@ -98,7 +98,7 @@ pub(crate) fn classify_callee(
 
 /// Classifies a bare-name callee.
 fn classify_name(
-    builder: &mut Builder<'_>,
+    builder: &mut Builder,
     state: &mut BodyState,
     text: &str,
     span: &SyntaxSpan,
@@ -180,7 +180,7 @@ fn classify_name(
 
 /// Classifies a dotted-path callee.
 fn classify_path(
-    builder: &mut Builder<'_>,
+    builder: &mut Builder,
     state: &mut BodyState,
     segments: &[(&str, SyntaxSpan)],
     span: &SyntaxSpan,
@@ -273,7 +273,7 @@ fn classify_path(
 
 /// Classifies a path whose prefix names a definition, then a member of it (`Note.insert`).
 fn classify_member_path(
-    builder: &mut Builder<'_>,
+    builder: &mut Builder,
     state: &mut BodyState,
     segments: &[(&str, SyntaxSpan)],
     base: DefId,
@@ -320,7 +320,7 @@ fn classify_member_path(
 
 /// Reports a path whose root name does not resolve.
 fn report_unresolved_root(
-    builder: &mut Builder<'_>,
+    builder: &mut Builder,
     state: &BodyState,
     segments: &[(&str, SyntaxSpan)],
     names: &[Name],
@@ -347,7 +347,7 @@ fn report_unresolved_root(
 
 /// The classification of a resolved definition.
 fn classified_def(
-    builder: &mut Builder<'_>,
+    builder: &mut Builder,
     state: &mut BodyState,
     def: crate::DefId,
     span: &SyntaxSpan,
@@ -369,7 +369,7 @@ fn classified_def(
 
 /// Lowers the value part of a dotted path, dropping the member name.
 fn lower_path_value(
-    builder: &mut Builder<'_>,
+    builder: &mut Builder,
     state: &mut BodyState,
     segments: &[(&str, SyntaxSpan)],
 ) -> ExprId {
@@ -394,7 +394,7 @@ fn lower_path_value(
 
 /// Attaches written type arguments to a callee that carries them.
 pub(crate) fn attach_type_arguments(
-    builder: &mut Builder<'_>,
+    builder: &mut Builder,
     state: &mut BodyState,
     callee: Callee,
     type_arguments: &[TypeExpr],
