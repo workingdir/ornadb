@@ -30,6 +30,7 @@ orna-storage = { path = "../orna-storage", features = ["compact-writer-fixtures"
 orna-serving = { path = "../orna-serving" }
 orna-table = { path = "../orna-table" }
 orna-value = { path = "../orna-value" }
+orna-cursor = { path = "../orna-cursor" }
 num-bigint = "0.4.6"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
