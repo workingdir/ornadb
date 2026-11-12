@@ -663,22 +663,6 @@ reason = "the sys.blob.capture_file spelling now resolves in HIR (lower/imports.
 bead = "ornadb-csenl.20"
 
 [[difference]]
-case = "valid/blob-writer.orna"
-field = "effects"
-first = "examples.valid.blob-writer::capture=TableRead+Opaque+MayFail"
-second = "examples.valid.blob-writer::capture=RuntimeAdmin+TableRead+MayFail"
-reason = "the sys.blob.begin spelling now resolves in HIR, so the call carries its declared runtime_admin clause; the old checker reports Opaque for the unresolved sys spelling. HIR is the more precise set"
-bead = "ornadb-csenl.20"
-
-[[difference]]
-case = "valid/reviewed-commit.orna"
-field = "effects"
-first = "examples.valid.reviewed-commit::publish=Opaque+MayFail"
-second = "examples.valid.reviewed-commit::publish=StorageAdmin+MayFail"
-reason = "the sys.admin.commit_reviewed spelling now resolves in HIR, so the call carries its declared storage_admin clause; the old checker reports Opaque for the unresolved sys spelling. HIR is the more precise set"
-bead = "ornadb-csenl.20"
-
-[[difference]]
 case = "invalid/assert-effectful-table.orna"
 field = "rules"
 first = "ORNA-A091-007: declaration assertion uses forbidden network effect"
