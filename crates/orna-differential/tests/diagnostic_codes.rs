@@ -3,19 +3,21 @@
 //! For every module case the old checker analyses, the set of diagnostic codes
 //! the checker reports is compared with the set HIR reports on the case's
 //! source modules after lowering and typing. Each code is counted per case as
-//! agreeing, checker-only or HIR-only. The number of cases whose code sets
-//! differ is ratcheted: it may only go down, and every code that differs must
-//! carry a recorded reason.
+//! agreeing, checker-only or HIR-only.
+//!
+//! The cases whose code sets differ are ratcheted exactly: the measured set must
+//! equal the `## expected` section of `diagnostic_codes_differing.txt`. A new
+//! difference fails the test, and a listed case that now agrees fails it as
+//! stale. Every differing code must carry a recorded reason.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use orna_differential::case::{Case, CaseKind, Corpus};
-use orna_differential::{compare, observe_checker, observe_new};
+use orna_differential::{observe_checker, observe_new};
 use orna_hir::{Idx, ModuleOrigin};
 
-/// Cases whose diagnostic code sets differ, measured when this test landed.
-/// The count may only go down.
-const RECORDED_CODE_DIFFERENCES: usize = 153;
+/// The expected differences, one `<case> :: <checker codes> => <HIR codes>` line each.
+const DIFFERING: &str = include_str!("diagnostic_codes_differing.txt");
 
 /// The old checker's diagnostic codes for a case.
 fn checker_codes(case: &Case) -> Option<BTreeSet<String>> {
@@ -35,18 +37,47 @@ fn hir_codes(case: &Case) -> Option<BTreeSet<String>> {
     orna_hir::typeck(&mut lowered.program);
     let program = &lowered.program;
     let owned = &lowered.owned;
-    Some(
-        program
-            .diagnostics()
-            .filter(|(module, _)| program.modules[*module].origin == ModuleOrigin::Project)
-            .filter(|(module, _)| owned.get(module.index()).copied().unwrap_or(false))
-            .map(|(_, diagnostic)| diagnostic.code.to_owned())
-            .collect(),
-    )
+    let mut codes: BTreeSet<String> = program
+        .diagnostics()
+        .filter(|(module, _)| program.modules[*module].origin == ModuleOrigin::Project)
+        .filter(|(module, _)| owned.get(module.index()).copied().unwrap_or(false))
+        .map(|(_, diagnostic)| diagnostic.code.to_owned())
+        .collect();
+    // The old checker reports each syntax diagnostic of a project module as
+    // `ORNA-S000-PARSE`; HIR lowers the recovered tree and reports the same code.
+    if lowered.parse_diagnostics > 0 {
+        codes.insert(orna_check::DIAG_PARSE.to_owned());
+    }
+    Some(codes)
 }
 
 fn joined(codes: &BTreeSet<String>) -> String {
+    if codes.is_empty() {
+        return "(none)".to_owned();
+    }
     codes.iter().cloned().collect::<Vec<_>>().join("; ")
+}
+
+/// One differing case, in the form `diagnostic_codes_differing.txt` lists it.
+fn difference_line(case: &str, old: &BTreeSet<String>, new: &BTreeSet<String>) -> String {
+    format!("{case} :: {} => {}", joined(old), joined(new))
+}
+
+/// The `## expected` section of `diagnostic_codes_differing.txt`.
+fn expected_differences() -> BTreeSet<String> {
+    let mut expected = BTreeSet::new();
+    let mut in_expected = false;
+    for line in DIFFERING.lines() {
+        if let Some(section) = line.strip_prefix("## ") {
+            in_expected = section == "expected";
+            continue;
+        }
+        let line = line.trim_end();
+        if in_expected && !line.is_empty() && !line.starts_with('#') {
+            expected.insert(line.to_owned());
+        }
+    }
+    expected
 }
 
 /// Why a code's per-case sets differ, recorded with the measurement.
@@ -58,9 +89,6 @@ fn joined(codes: &BTreeSet<String>) -> String {
 /// call-site mismatch under `ORNA-S021-TYPE`; the pairing is unproven per message.
 fn recorded_reason(code: &str) -> Option<&'static str> {
     match code {
-        "ORNA-S000-PARSE" => {
-            Some("the checker reports parse errors; HIR lowering does not re-report them")
-        }
         "ORNA-S010-IMPORT" => {
             Some("HIR import diagnostic the checker does not report under this code; unclassified")
         }
@@ -76,15 +104,16 @@ fn recorded_reason(code: &str) -> Option<&'static str> {
         "ORNA-INFER-007" => {
             Some("HIR unsolved-variable diagnostic; the checker has no code for it")
         }
-        "ORNA-S020-ANNOTATION" => {
-            Some("public annotation: HIR and checker disagree on which bodies they reach")
-        }
+        "ORNA-S020-ANNOTATION" => Some(
+            "HIR rejects unannotated public parameters (D1, the H2a annotated subset); \
+             ORNA-INFER-004 says omission is not an error, so this is a stage gap, not spec-required",
+        ),
         "ORNA-S022-UNSUPPORTED" => Some(
             "HIR reports forms the H2a subset does not type, and top-level offset or affine units (units.md C6, \
                  user modules; valid/affine-unit); otherwise unclassified",
         ),
         "ORNA-EVAL-ARGUMENT" => {
-            Some("HIR call-binding arity error; the checker maps it only in rules.rs")
+            Some("HIR call-binding named-argument error; the checker maps it only in rules.rs")
         }
         code if code.starts_with("ORNA100-")
             || code.starts_with("ORNA091-")
@@ -105,7 +134,7 @@ fn every_diagnostic_code_matches_the_checker_per_case() {
     let mut compared = 0usize;
     let mut skipped = 0usize;
     let mut table: BTreeMap<String, [usize; 3]> = BTreeMap::new();
-    let mut differences = Vec::new();
+    let mut measured = BTreeSet::new();
     for case in &corpus.cases {
         if matches!(case.kind, CaseKind::Repl | CaseKind::StandardBundle) {
             continue;
@@ -125,28 +154,26 @@ fn every_diagnostic_code_matches_the_checker_per_case() {
             }
         }
         if old != new {
-            differences.push(compare::difference(
-                &case.id,
-                "codes",
-                joined(&old),
-                joined(&new),
-            ));
+            measured.insert(difference_line(&case.id, &old, &new));
         }
     }
+    let expected = expected_differences();
     println!(
         "diagnostic codes over {compared} cases ({skipped} skipped); columns: agree, checker-only, hir-only; \
-         {} cases differ (recorded {RECORDED_CODE_DIFFERENCES})",
-        differences.len()
+         {} cases differ (expected {})",
+        measured.len(),
+        expected.len()
     );
     for (code, row) in &table {
-        let reason = recorded_reason(code).unwrap_or("UNRECORDED");
+        let reason = if row[1] + row[2] == 0 {
+            "agrees on every case"
+        } else {
+            recorded_reason(code).unwrap_or("UNRECORDED")
+        };
         println!(
             "{code}: agree {} checker-only {} hir-only {} :: {reason}",
             row[0], row[1], row[2]
         );
-    }
-    for difference in &differences {
-        println!("{}", difference.describe());
     }
     let unrecorded: Vec<&String> = table
         .iter()
@@ -157,9 +184,24 @@ fn every_diagnostic_code_matches_the_checker_per_case() {
         unrecorded.is_empty(),
         "differing codes without a recorded reason: {unrecorded:?}"
     );
+    let unexpected: Vec<&String> = measured.difference(&expected).collect();
+    let stale: Vec<&String> = expected.difference(&measured).collect();
     assert!(
-        differences.len() <= RECORDED_CODE_DIFFERENCES,
-        "code differences grew from {RECORDED_CODE_DIFFERENCES} to {}",
-        differences.len()
+        unexpected.is_empty(),
+        "code differences not listed in diagnostic_codes_differing.txt:\n{}",
+        unexpected
+            .iter()
+            .map(|line| line.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    assert!(
+        stale.is_empty(),
+        "listed code differences that now agree (remove them):\n{}",
+        stale
+            .iter()
+            .map(|line| line.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 }

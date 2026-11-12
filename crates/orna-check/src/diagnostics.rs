@@ -2,6 +2,7 @@
 
 use orna_value::Diagnostic;
 
+pub const DIAG_PARSE: &str = "ORNA-S000-PARSE";
 pub const DIAG_BAD_PATH: &str = "ORNA-S001-PATH";
 pub const DIAG_NAMESPACE: &str = "ORNA-S002-NAMESPACE";
 pub const DIAG_RESERVED: &str = "ORNA-S003-RESERVED";

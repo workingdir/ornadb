@@ -144,6 +144,9 @@ pub struct LoweredProgram {
     /// Whether the module belongs to the case rather than the standard
     /// dependency its imports reach.
     pub owned: Vec<bool>,
+    /// The syntax diagnostics raised by the case's own sources. HIR lowers the
+    /// recovered tree, so these are reported as `ORNA-S000-PARSE`.
+    pub parse_diagnostics: usize,
 }
 
 /// Lowers one case, or explains why the stage cannot.
@@ -172,8 +175,11 @@ fn import_fixture_units(tree: &mut SyntaxTree) {
 
 fn lower_module_case(case: &Case) -> Result<LoweredProgram, String> {
     let mut parsed = Vec::new();
+    let mut parse_diagnostics = 0;
     for source in &case.sources {
-        let mut tree = parse_module_with_file(&source.text, source.logical_path.clone()).value;
+        let outcome = parse_module_with_file(&source.text, source.logical_path.clone());
+        parse_diagnostics += outcome.diagnostics.len();
+        let mut tree = outcome.value;
         if case.family == Family::Reference {
             import_fixture_units(&mut tree);
         }
@@ -219,6 +225,7 @@ fn lower_module_case(case: &Case) -> Result<LoweredProgram, String> {
         program,
         logical_paths,
         owned,
+        parse_diagnostics,
     })
 }
 
@@ -292,6 +299,7 @@ fn lower_expression_case(case: &Case) -> Result<LoweredProgram, String> {
         program,
         logical_paths,
         owned,
+        parse_diagnostics: parsed.diagnostics.len(),
     })
 }
 
