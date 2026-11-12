@@ -72,3 +72,26 @@ fn the_text_family_declares_exactly_the_ten_ported_natives() {
         ]
     );
 }
+
+/// The `sys` blob read-side natives are bound; `blob_verify` needs the dependency structure and stays unbound.
+#[test]
+fn the_sys_blob_family_binds_its_read_side_natives() {
+    for name in [
+        "blob_length",
+        "blob_digest",
+        "blob_read",
+        "blob_from_bytes",
+        "blob_to_bytes",
+    ] {
+        let key = NativeKey {
+            module: ModulePath::new(["sys"].into_iter().map(Name::new)),
+            name: Name::new(name),
+        };
+        assert!(lookup(&key).is_some(), "sys.{name} has no engine native");
+    }
+    let verify = NativeKey {
+        module: ModulePath::new(["sys"].into_iter().map(Name::new)),
+        name: Name::new("blob_verify"),
+    };
+    assert!(lookup(&verify).is_none());
+}

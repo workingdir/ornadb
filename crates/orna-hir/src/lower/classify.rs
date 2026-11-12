@@ -91,6 +91,29 @@ pub(crate) fn rel_op(name: &str) -> Option<RelOp> {
     })
 }
 
+/// The declared parameters of a relation stage that takes named arguments. `bucket_by(values, period,
+/// zone)` (ORNA-TIME-002): `zone` is optional for elapsed periods and required for calendar bucketing
+/// of `Instant`, which typing decides. Other stages declare no named parameters here.
+pub(crate) fn relational_params(op: RelOp) -> Option<Vec<ParamInfo>> {
+    match op {
+        RelOp::BucketBy => Some(vec![
+            ParamInfo {
+                name: Name::new("values"),
+                has_default: false,
+            },
+            ParamInfo {
+                name: Name::new("period"),
+                has_default: false,
+            },
+            ParamInfo {
+                name: Name::new("zone"),
+                has_default: true,
+            },
+        ]),
+        _ => None,
+    }
+}
+
 /// One parameter as the binder needs it.
 #[derive(Clone, Debug)]
 pub(crate) struct ParamInfo {
@@ -121,6 +144,31 @@ pub(crate) enum Classified {
 }
 
 impl Builder<'_> {
+    /// The `sys` native whose 1.1 spelling is `spelling` (`sys.blob.from_bytes`).
+    ///
+    /// A native declares its spelling with the `spelling` clause; one without a clause is spelled `sys.<name>`.
+    /// Overload labels (`sys.admin.plan_checkout(Str)`) are not plain spellings and never match.
+    pub(crate) fn sys_native_by_spelling(&self, spelling: &str) -> Option<DefId> {
+        self.pending.iter().enumerate().find_map(|(index, item)| {
+            let PendingKind::Function(function) = &item.kind else {
+                return None;
+            };
+            if function.native.is_none()
+                || self.program.modules[item.module].origin != ModuleOrigin::Sys
+            {
+                return None;
+            }
+            let declared = item.clauses.spelling.as_ref().map_or_else(
+                || format!("sys.{}", item.name.as_str()),
+                |clause| clause.text.clone(),
+            );
+            if declared != spelling {
+                return None;
+            }
+            Some(DefId::new(u32::try_from(index).ok()?))
+        })
+    }
+
     /// Classifies one resolved definition.
     pub(crate) fn classify_def(&self, def: DefId) -> Classified {
         let module = self.pending[def.index()].module;

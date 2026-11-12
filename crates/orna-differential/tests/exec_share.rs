@@ -27,6 +27,9 @@ fn executor_agreement_with_the_old_pipeline_only_grows() {
     let harness_allowances =
         compare::load_harness_allowances().expect("the harness allowances parse");
     let mut harness_used = vec![false; harness_allowances.len()];
+    let representation_allowances =
+        compare::load_representation_allowances().expect("the representation allowances parse");
+    let mut representation_used = vec![false; representation_allowances.len()];
     for case in &corpus.cases {
         match observe_exec::run_case(case) {
             ExecOutcome::NotYet(reason) => {
@@ -55,6 +58,15 @@ fn executor_agreement_with_the_old_pipeline_only_grows() {
                     ) {
                         continue;
                     }
+                    if representation_allowed(
+                        case,
+                        observation.outcome.as_ref(),
+                        &outcome,
+                        &representation_allowances,
+                        &mut representation_used,
+                    ) {
+                        continue;
+                    }
                     mismatches.push(format!(
                         "{}: executor {outcome:?}, old {:?}",
                         case.id, observation.outcome
@@ -71,6 +83,10 @@ fn executor_agreement_with_the_old_pipeline_only_grows() {
         }
     }
     mismatches.extend(harness_stale(&harness_allowances, &harness_used));
+    mismatches.extend(representation_stale(
+        &representation_allowances,
+        &representation_used,
+    ));
     let old_harness_environment = harness_used.iter().filter(|used| **used).count();
     println!(
         "old-harness environment: {old_harness_environment} run cases differ only by the H0 observer's missing table store"
@@ -157,6 +173,47 @@ fn harness_environment_allowed(
         }
         None => false,
     }
+}
+
+/// Whether `case`'s disagreement is the old pipeline's raw-blob representation gap: the old
+/// pipeline answers `ORNA-EVAL-VALUE` for a result the executor returns as a raw `Blob`, and the
+/// case is listed in `[[representation-allowance]]`. Any other disagreement is still a mismatch.
+fn representation_allowed(
+    case: &Case,
+    old: Option<&Result<Vec<u8>, String>>,
+    executor: &Result<Vec<u8>, String>,
+    allowances: &[compare::HarnessAllowance],
+    used: &mut [bool],
+) -> bool {
+    let value_gap = matches!(old, Some(Err(code)) if code == "ORNA-EVAL-VALUE");
+    if !value_gap || !executor.is_ok() {
+        return false;
+    }
+    match allowances
+        .iter()
+        .position(|allowance| allowance.case == case.id)
+    {
+        Some(index) => {
+            used[index] = true;
+            true
+        }
+        None => false,
+    }
+}
+
+/// The representation allowances that no longer cover a run: each must be removed.
+fn representation_stale(allowances: &[compare::HarnessAllowance], used: &[bool]) -> Vec<String> {
+    allowances
+        .iter()
+        .zip(used)
+        .filter(|(_, used)| !**used)
+        .map(|(allowance, _)| {
+            format!(
+                "{}: representation allowance is stale; the case no longer differs, remove it",
+                allowance.case
+            )
+        })
+        .collect()
 }
 
 /// Whether a source of `case` declares a table, the shape the H0 observer has no store for.
