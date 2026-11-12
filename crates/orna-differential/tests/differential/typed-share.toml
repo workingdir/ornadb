@@ -22,14 +22,18 @@
 #   typing regression: HIR now emits the primary code the corpus expects.
 # - New definition, measured on origin/main 3aa41cd44: 33 of 104 old-checker
 #   accepted cases typed; 108 old-checker rejected cases excluded; 14 cases not
-#   lowered. The ratchet is measured from this baseline and only grows.
+#   lowered. The ratchet is measured from this baseline.
 # - Re-measured at cc24d270e (the core.units base): 35 of 104 typed. The recorded
 #   33 was stale; the ratchet is raised to the measured value.
+# - Re-measured at af9a80627 (origin/main, with the pinned stdlib fdf63e87): 51
+#   of 104 typed. The recorded 35 was stale; the ratchet is raised to 51.
 #
-# The typed count may only grow: update it in the commit that types more of the
-# corpus. A change to `lowered` is a corpus change or a lowering change, and the
-# measured denominator must be recorded in the same PR, exactly as the exclusion
-# account does.
+# The typed count is exact: it must equal the measured count in both directions.
+# A fall is a typing or lowering regression. A rise is typed corpus work, and
+# the PR that makes it must record the new count here in the same change. A
+# change to `lowered` is a corpus change or a lowering change, and the measured
+# denominator must be recorded in the same PR, exactly as the exclusion account
+# does.
 #
 # H2a is a strict subset: a body the subset cannot type is written to stderr by
 # the test with the reason and is not a program error ("not yet on HIR"). The
@@ -38,5 +42,5 @@
 # and the checker's special cases (H3).
 
 [[typed-share]]
-typed = 35
+typed = 51
 lowered = 104

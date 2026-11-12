@@ -8,7 +8,8 @@
 //! The cases whose code sets differ are ratcheted exactly: the measured set must
 //! equal the `## expected` section of `diagnostic_codes_differing.txt`. A new
 //! difference fails the test, and a listed case that now agrees fails it as
-//! stale. Every differing code must carry a recorded reason.
+//! stale. Every listed row carries a reason field, and every differing code
+//! carries a recorded reason.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -16,7 +17,7 @@ use orna_differential::case::{Case, CaseKind, Corpus};
 use orna_differential::{observe_checker, observe_new};
 use orna_hir::{Idx, ModuleOrigin};
 
-/// The expected differences, one `<case> :: <checker codes> => <HIR codes>` line each.
+/// The expected differences, one `<case> :: <checker codes> => <HIR codes> :: <reason>` line each.
 const DIFFERING: &str = include_str!("diagnostic_codes_differing.txt");
 
 /// The old checker's diagnostic codes for a case.
@@ -58,9 +59,35 @@ fn joined(codes: &BTreeSet<String>) -> String {
     codes.iter().cloned().collect::<Vec<_>>().join("; ")
 }
 
-/// One differing case, in the form `diagnostic_codes_differing.txt` lists it.
+/// The recorded reasons of a case's differing codes, one per distinct text, joined with ` | `.
+fn reason_of(old: &BTreeSet<String>, new: &BTreeSet<String>) -> String {
+    let mut reasons: Vec<&str> = Vec::new();
+    for code in old.symmetric_difference(new) {
+        let reason = recorded_reason(code).unwrap_or("UNRECORDED");
+        if !reasons.contains(&reason) {
+            reasons.push(reason);
+        }
+    }
+    reasons.join(" | ")
+}
+
+/// One differing case, in the form `diagnostic_codes_differing.txt` lists it: `<case> :: <checker> => <HIR> :: <reason>`.
 fn difference_line(case: &str, old: &BTreeSet<String>, new: &BTreeSet<String>) -> String {
-    format!("{case} :: {} => {}", joined(old), joined(new))
+    format!(
+        "{case} :: {} => {} :: {}",
+        joined(old),
+        joined(new),
+        reason_of(old, new)
+    )
+}
+
+/// The reason field of a `diagnostic_codes_differing.txt` row, or `None` when the row has none.
+fn row_reason(line: &str) -> Option<&str> {
+    let mut fields = line.splitn(3, " :: ");
+    let _case = fields.next()?;
+    let codes = fields.next()?;
+    let reason = fields.next()?.trim();
+    (codes.contains(" => ") && !reason.is_empty()).then_some(reason)
 }
 
 /// The `## expected` section of `diagnostic_codes_differing.txt`.
@@ -213,6 +240,19 @@ fn every_diagnostic_code_matches_the_checker_per_case() {
         stale.is_empty(),
         "listed code differences that now agree (remove them):\n{}",
         stale
+            .iter()
+            .map(|line| line.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    let without_reason: Vec<&String> = expected
+        .iter()
+        .filter(|line| row_reason(line).is_none())
+        .collect();
+    assert!(
+        without_reason.is_empty(),
+        "listed code differences without a reason field (`<case> :: <checker> => <HIR> :: <reason>`):\n{}",
+        without_reason
             .iter()
             .map(|line| line.as_str())
             .collect::<Vec<_>>()

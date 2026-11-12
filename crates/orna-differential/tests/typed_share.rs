@@ -16,7 +16,7 @@ use orna_differential::observe_checker;
 use orna_differential::observe_new;
 
 #[test]
-fn typed_share_of_the_corpus_only_grows() {
+fn typed_share_of_the_corpus_matches_the_recorded_ratchet() {
     let corpus = Corpus::load().expect("the corpus loads and reconciles");
     let recorded = compare::load_typed_share().expect("the typed-share ratchet parses");
     let mut lowered = 0usize;
