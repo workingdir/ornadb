@@ -150,3 +150,18 @@ fn sys_row_mutator_is_rejected_not_accepted() {
         codes(&program)
     );
 }
+
+#[test]
+fn linked_sys_row_mutator_is_unsupported_not_admitted() {
+    let program = lowered("pub fn a() = sys.Audit.insert(1);\n");
+    assert!(
+        codes(&program).contains(&UNSUPPORTED),
+        "a linked `sys` row mutator must report ORNA-S022-UNSUPPORTED: {:?}",
+        codes(&program)
+    );
+    assert!(
+        !codes(&program).contains(&SYS_VERSION_INCOMPATIBLE),
+        "a linked `sys` row mutator is linked, not an admission rejection: {:?}",
+        codes(&program)
+    );
+}

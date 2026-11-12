@@ -407,7 +407,7 @@ fn lower_path_value(
     };
     if super::namespace::is_sys_rooted(state, first) {
         let (_, span) = &segments[segments.len() - 1];
-        return super::namespace::resolve_sys_value(builder, state, segments, span);
+        return super::namespace::lower_sys_value(builder, state, segments, span);
     }
     let mut value = super::exprs::lower_name(builder, state, first, first_span);
     for (name, span) in &segments[1..] {
