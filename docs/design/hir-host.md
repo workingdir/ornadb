@@ -253,7 +253,209 @@ owner declares them as `sys.database.head`/`.cwd` aliases instead, only that one
 
 ## 2. Part B: Money
 
-Section 2 is filled in by the following commits.
+### B1. What is decided and what this part adds
+
+Decided elsewhere and not reopened: `Money<C>` is a library type with no currency axis in the kernel (kernel-and-library.md
+5.7, owner direction O4); `Rate<C, U>` is a separate library type; operators are protocol calls with the output as a
+protocol parameter (D16, `core/ops.orna` has `Add`, `Sub`, `Mul`, `Div`, `Neg`, `Order`); `Money`'s wire form
+`[Decimal, currency id]` (tag 60007) is kept by a registry in Rust (D17, P9-A); a call to a loop-free pure `core`
+function costs one step (D18); `core` is pure (kernel-and-library.md 6.1). The spec rules are ORNA-MONEY-001 to -010
+(`reference/Orna-1.1.0/source/05-types.md:276-298`).
+
+This part adds: where each piece is declared, how the executor represents it, the exact diagnostic rules for
+`E5001`, `E5002`, `E5003` (and `E5004`, `E5103`, which the same corpus cases need), and an ordered slice list.
+`Rate<C, U>` (`valid/money-rate`, ORNA-MONEY-003) and currency conversion (ORNA-MONEY-005, a data-backed std
+operation) are **out of scope**; `valid/money-rate` stays in the environment ratchet.
+
+### B2. Declaration, in core Orna
+
+`crates/orna-hir/interface/core/money.orna`, module `core.money`, a hand-written module with bodies like
+`core/temperature.orna` (it must lower with zero diagnostics, `tests/embedded_clean.rs`):
+
+```orna
+use core.ops.{Add, Sub, Mul, Div, Neg, Order};
+use core.{Ordering};
+
+// ORNA-MONEY-004: the stable contract. A symbol is deliberately not a member.
+pub protocol Currency {
+    static code: Str;
+    static minor_digits: Int;
+}
+
+// An exact amount in currency `C`. The currency is in the type, not in a field. Engine representation: the executor
+// value `Money { amount, currency }` (tag 60007), bound by the P9-A registry (section B6).
+pub type Money<C impl Currency> {
+    pub amount: Decimal,
+    impl Add<Self, Self>     { fn add(self, other: Self): Self = money_add(self, other); }
+    impl Sub<Self, Self>     { fn sub(self, other: Self): Self = money_sub(self, other); }
+    impl Mul<Decimal, Self>  { fn mul(self, factor: Decimal): Self = money_scale(self, factor); }
+    impl Div<Decimal, Self>  { fn div(self, divisor: Decimal): Self = money_divide(self, divisor); }
+    impl Neg<Self>           { fn neg(self): Self = money_negate(self); }
+    impl Order               { fn compare(self, other: Self): Ordering = money_compare(self, other); }
+}
+
+native fn money_add<C impl Currency>(left: Money<C>, right: Money<C>): Money<C> effect none;
+// money_sub, money_scale, money_divide, money_negate, money_compare, likewise
+```
+
+Why this shape, from the code as it is:
+
+- **Instances forward to top-level natives** because a `native fn` is legal only at the top level of a module
+  (`native_declaration_is_top_level_only` rejects it in `impl`, native-declarations.md section 3.14 test list). The
+  instance bodies are ordinary Orna calls, so `a + b` lowers to `Callee::Source` of the instance and then
+  `Callee::Native`, as hir.md 2.6 says, and D18 charges one step per loop-free pure `core` call.
+- **`Self`, not `Money<C>`, in protocol arguments** because "a type's own name as a protocol argument inside its
+  `impl` does not resolve yet" (the note at the top of `core/temperature.orna`). `Self` does.
+- **A public `amount` field** like `Temperature.kelvin`. Reading it is the explicit decimal conversion that
+  ORNA-MONEY-003 requires before money meets `Float`.
+- **No `impl Display` in the first cut.** The kernel-and-library.md listing writes `"{C.code} {self.base}"`, which
+  needs a static read through a type parameter (P3d, "`C.code` with `C impl Currency` does not resolve" `[probe]`).
+  Formatting is the native `format` of section B7, which receives `C` as a type argument (`NativeFn` takes `&[Ty]`) and
+  reads the currency's statics from the program itself. This removes P3d from the critical path.
+- **Prelude export.** `Money` and `Currency` are root-environment names (spec 09-standard-library.md:7, 136). The
+  `PreludeExports` of `lower/prelude.rs` gains both, so `Money<GBP>` resolves without `use`, which removes
+  `Money` from the `CURRENCY_AND_UNIT` environment category.
+
+### B3. Currency declarations
+
+A currency is a nominal type that implements `Currency` in its own `impl` (spec example, ORNA-MONEY-004):
+`pub type GBP { impl Currency { static code = "GBP"; static minor_digits = 2; } }`. The reference corpus uses `GBP`,
+`EUR` and `USD` with no declaration: the old checker attaches them as fixture symbols. The harness supplies them as
+Orna source, as it supplies `fixture.units` and `fixture.attached` (`fixture_environment.rs`): a `fixture.currencies`
+module with the three declarations, imported by `import_fixture_units`. This removes `GBP`, `EUR`, `USD` from the
+`CURRENCY_AND_UNIT` category; `kWh`, `mph`, `A`, `C` stay there until the unit fixtures land.
+
+**Open point Q-B1 (decision needed, default stated).** `valid/currency.orna` declares `pub protocol Currency` itself and
+then `impl Currency` on `GBP`. In HIR a module declaration shadows the root name, so that `Currency` is a different
+`DefId` from `core.money.Currency`, and `Money<GBP>` would fail the bound `C impl core.money.Currency`. The old checker
+holds the protocol as the Rust string `"Currency"` (kernel-and-library.md F02) and accepts any protocol of that name.
+Default decided here: **a protocol is the currency protocol when it is `core.money.Currency` or when it is named
+`Currency` and its members are exactly `static code: Str` and `static minor_digits: Int`** (the ORNA-MONEY-004
+contract). This keeps `valid/currency` valid, and keeps `invalid/currency-static-symbol` (extra `static symbol`)
+rejected, with one predicate in `orna-hir/src/engine_money.rs` that typeck and the executor both read (the pattern of
+`engine_order.rs` and `engine_display.rs`). The alternative, record `valid/currency` as an expected difference and make
+shadowing the protocol an error, costs nothing to switch to: the predicate is the only place that changes.
+
+### B4. Construction: `12.34.GBP`, `Money<GBP>(x)`
+
+- **Suffix.** `lower_field` already tries, in order, a unit suffix (`lower_suffix_unit`) and the built-in postfix table
+  (`lower_numeric_postfix`). Add a third step (P2-A rule 2): when the name resolves to a *type* in scope (not a unit),
+  lower `literal.Name` as `Callee::Ctor { def: Money }` applied to the literal, with result type `Money<Name>`. The
+  literal is lowered exactly (an integer or decimal `Lit`, never through `Float`, ORNA-MONEY-010). A `Float` literal
+  (`12.34f.GBP`) is `E5004`. Whether `Name impl Currency` is checked at lowering or typeck: **typeck**, because the
+  `impl` may follow the use; a failure there is `ORNA-S012-UNRESOLVED` "unit suffix cannot be resolved", as today.
+- **Call form.** `Money<GBP>(x)` is the same `Callee::Ctor` (call.rs: "An enum variant, nominal or `Money<C>`
+  constructor"). `x: Decimal` or `Int` is accepted (an `Int` is exact); `Float` is `E5004` (`invalid/money-float`).
+- **Executor.** `Callee::Ctor` carries no type arguments, so the executor reads the call expression's type
+  (`body.exprs[id].ty` = `Adt(Money, [Adt(GBP)])`), resolves a type-parameter argument through the frame's type
+  environment, and builds `Value::Money { amount, currency }`. `currency` is the 16-byte object id of the currency
+  type, derived from its qualified name by the function that derives nominal type ids for source enums
+  (`orna_value::enum_type_id(qualified_name(..))`, as `variants.rs` does). `[INFERENCE]` The old evaluator receives the
+  currency id from the application's trusted `NominalDefinition` (`orna-evaluator/src/lib.rs:530-545`), not from a
+  derivation. The first step of slice HB6 is to read how the application assigns it and to record the equality (or the
+  difference) in a test against `valid/money-serialization`'s golden bytes before any value is built.
+
+### B5. The `E5001`, `E5002`, `E5003` rules
+
+The three codes are published (kernel-and-library.md 4.7: "A new 'no instance' code must keep them for the same
+inputs"), and today they are produced by the old checker only (`orna-check/src/diagnostics.rs:65-70`). The four corpus
+cases that need them are `evaluate = true`, so the old outcome is the code and the executor agrees only when HIR rejects
+the same input with the same code. Measured inputs:
+
+| Case | Source | Old code | Class |
+|---|---|---|---|
+| `invalid/incompatible-dimensions` | `90.days + 4.kWh` | `E5001` | quantity dimensions differ |
+| `invalid/affine-addition` | `20.C + 5.C` | `E5002` | two affine points added |
+| `invalid/currency-addition` | `10.GBP + 5.EUR` | `E5003` | two different currencies |
+| `invalid/affine-sum` (`evaluate = false`) | `values \| sum` over `[Float<C>]` | `E5003` | absolute quantity summed |
+
+Only the third is Money. They share one mechanism, because all are "the operator has no instance, and the kernel knows a
+better class for the failure". The mechanism (slice HB4) is one pure function in `orna-hir/src/engine_codes.rs`, beside
+`engine_money.rs`:
+
+```rust
+/// The published code for a failed binary operator, when the operand types name a known class of failure.
+pub fn operator_rejection(program: &Program, op: BinOp, left: Ty, right: Ty) -> Option<&'static str>;
+```
+
+Typeck (`typeck/operator.rs`, the no-instance branch of `settle_operator`) calls it before it words the generic
+message, so the code stays kernel-owned and the library supplies only text (P7-A: "Codes are stable and kernel-owned").
+Rules, in the order they are tried:
+
+| Operator and operand types | Code |
+|---|---|
+| `+`, `-`, `<`, `<=`, `>`, `>=` where the operands are `core.money.Money<C>` and `Money<D>`, `C != D` | `E5003` |
+| `+`, `-`, `*`, `/`, comparison where one operand is `Money<_>` and the other is `Float` | `E5103` |
+| `Money<C> * Money<C>` | the generic no-instance diagnostic (there is no such impl, kernel-and-library.md 5.7 table) |
+| `+`, `-` where both operands are `core.temperature.Temperature` (affine points) | `E5002` |
+| `+`, `-` where both operands are `Quantity` values of different dimensions (the existing `ORNA-UNIT-DIM` site in `typeck/quantity.rs`) | `E5001` |
+| a fold (`sum`) over an affine point type | `E5003` |
+
+`E5001` and `E5002` are **units**, not Money; they are in this document only because the brief groups the three codes
+and they use the same mechanism. Slice HB5 adds them. The old code for `Money<C>(Float)` is `E5004`; for a `Float`
+operand `E5103`. `ORNA-UNIT-DIM` stays the code of the unit-family declaration rule (units.md ORNA-UNIT-010); only the
+operator-level mismatch is `E5001`. Decision Q11 of hir-cutover.md (accept named differences) is not needed for these
+codes: they are equal by construction.
+
+### B6. Executor representation and arithmetic
+
+`Value::Money { amount: Decimal, currency: [u8; 16] }` already exists and already round-trips through `to_raw` and
+`raw_value::money_from`. The registry (P9-A) is the fact that the `core.money.Money` definition **is** that value:
+`orna-exec/src/engine_money.rs` names the path `core.money.Money`, and a build-time unit test asserts the declaration
+exists with one type parameter and the field `amount`, so a rename of the `core` path fails a test (D17: renaming is an
+ABI bump).
+
+The natives of B2 (`money_add`, `money_sub`, `money_scale`, `money_divide`, `money_negate`, `money_compare`) are
+registered under `("core.money", name)` in `natives/mod.rs`, in a new `natives/money.rs`. Semantics are copied from the
+old evaluator, not redesigned: `money_pair_binary` and `money_binary` (`orna-evaluator/src/lib.rs:7067-7092`,
+`:7616-7664`), checked by the differential harness. Each charges one step (D18). Two amounts with different `currency`
+ids cannot reach a native (E5003 is static); if they do, the native answers `ORNA-EVAL-TYPE`. `==` and `!=` stay
+canonical equality, which includes the currency id. The field read `m.amount` is `ExprKind::Field` on a
+`Value::Money`, a one-case addition to the executor's field read.
+
+### B7. `quantize`, `allocate`, `format`
+
+The old intrinsics are `std.money.{quantize, allocate, format}` over a generic `T` (`orna-intrinsics/src/modules/money.rs`):
+`quantize(amount, minor_digits, rounding)`, `allocate(amount, weights, minor_digits, rounding = null)` and
+`format(amount, currency_code, minor_digits, rounding, locale)`. They stay `std.money` forwarders in the pinned std
+repository (a separate repository; this document changes nothing there). Under D12 the implementations are engine
+natives declared in `core.money`:
+
+```orna
+pub native fn quantize<C impl Currency>(amount: Money<C>, rounding: Rounding): Money<C> effect none;
+pub native fn allocate<C impl Currency>(amount: Money<C>, weights: [Int], rounding: Rounding? = null): [Money<C>] effect none;
+pub native fn format<C impl Currency>(amount: Money<C>, rounding: Rounding, locale: Locale): Str effect pinned_data;
+```
+
+- `minor_digits` and `currency_code` are no longer arguments: the native reads `C.code` and `C.minor_digits` from the
+  currency type's `impl Currency` through `targs[0]`, which is what the std wrapper passes today. The std wrapper keeps
+  its `Str`/`Int` signature and is unchanged until the std repository moves. The generic `T` form (`quantize` of a bare
+  `Decimal`) is not covered by these declarations; slice HB7 states what it covers, `[INFERENCE]` because the corpus does
+  not exercise a bare-`Decimal` quantize.
+- Rounding rules are those of `std/money.orna`: `half_even`, `half_up`, `toward_zero`, `away_from_zero`, `floor`, `ceil`.
+  `core.Rounding` and `core.decimal.divide` already take that enum (`core/decimal.orna`), so the arithmetic is the
+  shared `decimal_round.rs`, not a copy.
+- Allocation uses "descending fractional remainder with input-index ties" (the intrinsic's own note), the method
+  ORNA-MONEY-006 specifies.
+- `format` has effect `PinnedData` in the old catalogue: symbols, grouping and decimal marks come from a captured locale
+  profile (ORNA-MONEY-009). The effect name in a `core` declaration must be a `sys.EffectKind` member or `none`
+  (native-declarations.md 3.8); if `pinned_data` is not one, the slice records the mapping it uses. The locale profile
+  reaches the native through the `Host` (the `ActivationContext` of slice HA3 gains a `locale` field in HB7), so a browser
+  build and `orna run` differ only by the host value. `format` is therefore the one money native that depends on part A,
+  and is last in the order.
+
+### B8. Harness consequences
+
+- `observe_exec` already turns a `sys.version.incompatible` lowering diagnostic into the run outcome (PR #9918
+  `admission_rejection`). HB8 generalises it: a typeck `E5001`-`E5004`/`E5103` diagnostic on an owned module is the run
+  outcome, because the old pipeline's outcome for an `evaluate` case that its checker rejects is the checker's code.
+  `[INFERENCE]` `observe_new::lower_case` may not run `typeck`; HB8 starts by checking and adds the call if not.
+- `valid/currency`: the old outcome is `ORNA-EVAL-TYPE` (measured), the spec result is a `Money<GBP>` value. The
+  executor will run it and disagree. It needs an allowance entry with a reason and bead; it cannot raise `agreed`.
+- Expected movement, each verified by the slice's measured ratchet and not assumed: HA1 may add `valid/sys-checkpoint`,
+  `valid/sys-run-history`, `valid/sys-table-query`, `valid/historical-query` to `agreed`; HA5 may add `valid/sys-storage`;
+  HB8 may add `invalid/currency-addition`, `invalid/affine-addition`, `invalid/incompatible-dimensions`. That is up to 8
+  of the 48 cases the executor does not run today (measured baseline: `agreed = 48`, `evaluable = 110`).
 
 --------------------------------------------------------------------------
 
