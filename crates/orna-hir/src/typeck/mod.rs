@@ -793,11 +793,26 @@ impl<'a> BodyCheck<'a> {
                 Some(expected),
             ) if matches!(self.kind_of(self.resolved(expected)), Some(TyKind::Float)) => {
                 // ORNA-LIT-002: an unsuffixed numeral checked against Float is correctly rounded to binary64.
-                // The decimal text is exact, and Rust's float parser rounds to nearest, ties to even.
+                // The decimal text is exact, and Rust's float parser rounds to nearest, ties to even. A text
+                // the parser rejects is reported, never replaced by a NaN literal.
                 let text = format!("{coefficient}e{exponent}");
-                let value = text.parse::<f64>().unwrap_or(f64::NAN);
-                body.exprs[id].kind = ExprKind::Lit(crate::Lit::Float(value.to_bits()));
-                expected
+                match text.parse::<f64>() {
+                    Ok(value) => {
+                        body.exprs[id].kind = ExprKind::Lit(crate::Lit::Float(value.to_bits()));
+                        expected
+                    }
+                    Err(_) => {
+                        self.conflicts += 1;
+                        self.diagnostics.push(HirDiagnostic::new(
+                            crate::diag::UNSUPPORTED,
+                            Box::<str>::from(
+                                "this numeral cannot be lowered to a binary64 Float; the HIR does not represent it",
+                            ),
+                            span.clone(),
+                        ));
+                        self.error()
+                    }
+                }
             }
             (kind, expected) => {
                 let ty = self.infer_shallow(body, id, kind, span.clone())?;
