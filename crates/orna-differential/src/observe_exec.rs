@@ -68,7 +68,7 @@ fn run_with(case: &Case, cancel: Option<Arc<AtomicBool>>) -> ExecOutcome {
     if !case.rows.is_empty() || !case.arguments.is_empty() || !case.inputs.is_empty() {
         return ExecOutcome::NotYet("the case binds rows, arguments or inputs (H5/H8)".to_owned());
     }
-    let lowered = match observe_new::lower_case(case) {
+    let lowered = match observe_new::lower_case_admitted(case) {
         Ok(lowered) => lowered,
         Err(error) => return ExecOutcome::NotYet(error),
     };
