@@ -234,7 +234,7 @@ every module).
   `sys_admin_set_storage_preference` and `sys_admin_rewrite_storage` are
   `#[allow(dead_code)]` functions whose bodies panic. They are registered
   through `#[ornasys]`, which generates
-  `crates/orna-check/generated/sys_api.json` lines 15 and 20. The spec names
+  `crates/orna-check/generated/sys_api.json` (deleted in SN1) lines 15 and 20. The spec names
   both in `reference/Orna-1.1.0/api/retired.json`, and
   `crates/orna-check/tests/system_storage_contract.rs:56` tests the retired
   name through `fixtures/publication/sys-admin-retired-storage-preference.orna`.

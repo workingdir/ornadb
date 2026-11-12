@@ -106,9 +106,9 @@ section 1.2).
 | # | File | Bytes | Role |
 |---|---|---|---|
 | 0 | `reference/Orna-1.1.0/api/sys.json` | 168,272 | the frozen specification file (outside the repository) |
-| 1 | `crates/orna-sys-id/catalogue/sys-1.1.0.json` | 168,272 | byte copy; input of the identity generator |
+| 1 | (deleted in SN1) `crates/orna-sys-id/catalogue/sys-1.1.0.json` | 168,272 | was a byte copy of the frozen file; the identity generator now reads the rendered catalogue |
 | 2 | `crates/orna-sys-id/catalogue/engine-1.1.0.json` | 19,346 | engine names, durable ids, host operations |
-| 3 | `crates/orna-check/generated/sys_api.json` | 168,272 | byte copy for `wasm32` (`system_api.rs:23`) |
+| 3 | (deleted in SN1) `crates/orna-check/generated/sys_api.json` | 168,272 | was the `wasm32` byte copy; `orna-sys` now builds the document in memory |
 | 4 | `crates/orna-sys/src/system_api_inventory.json` | 138,274 | the type graph: all of the file except `functions` |
 | 5 | `crates/orna-sys/src/system_api_schema.json` | 7,149 | JSON Schema of the document |
 | 6 | `crates/orna-conformance/tests/fixtures/reference/api/sys.json` | 168,272 | frozen fixture |
@@ -131,7 +131,7 @@ A and B. Nothing checks chain C against its input.
 
 ```text
 A  typed ids
-   reference api/sys.json --copy--> orna-sys-id/catalogue/sys-1.1.0.json --+
+   reference api/sys.json (frozen, not copied) --> sys.orna (SN1 input) --+
                                     orna-sys-id/catalogue/engine-1.1.0.json +--> build/generator.rs (4,676 lines)
    --> 9 generated Rust files (617,183 bytes)
    --> orna-sys, orna-application, orna-cli, orna-conformance, orna-live, orna-sys-codegen, orna-compat-v1
@@ -143,10 +143,10 @@ B  published JSON, descriptors, provider ABI, Orna stubs
    --> orna_sys::system_api_json() --> orna-check parses it at run time
 
 C  HIR interface
-   sys-1.1.0.json --> scripts/gen_interface.py --> orna-hir/interface/sys.orna --> embedded.rs --> lowering
+   sys.orna (hand-written) --> orna-hir/interface --> embedded.rs --> lowering
 
 D  wasm copy
-   chain B output --copy, checked in--> orna-check/generated/sys_api.json --> orna-check on wasm32
+   chain B output --built in memory by orna-sys--> orna-check on wasm32 (no copy; SN1)
 ```
 
 * Chain B is ADR 0111 and 0112 in code. The ADR says "Keep those annotated declarations as the only authored
@@ -559,10 +559,10 @@ fixture and never an input of the build.
 
 | File | Bytes | Role |
 |---|---|---|
-| `crates/orna-sys-id/catalogue/sys-1.1.0.json` | 168,272 | the identity input; a copy of the frozen file |
+| (deleted in SN1) `crates/orna-sys-id/catalogue/sys-1.1.0.json` | 168,272 | was the identity input, a copy of the frozen file |
 | `crates/orna-sys-id/catalogue/engine-1.1.0.json` | 19,346 | engine names, sealed ids, host operations |
 | `crates/orna-intrinsics/std_intrinsics.json` | 91,449 | the 124 `core` natives, rendered from Rust descriptors |
-| `crates/orna-check/generated/sys_api.json` | 168,272 | the checker's `wasm32` copy |
+| (deleted in SN1) `crates/orna-check/generated/sys_api.json` | 168,272 | was the checker's `wasm32` copy |
 | `crates/orna-sys/src/system_api_inventory.json` | 138,274 | the type graph that chain B reads |
 | `crates/orna-sys/src/system_api_schema.json` | 7,149 | JSON Schema of the published document |
 | nine files in `OUT_DIR` | built | chain B outputs, listed below |
@@ -1042,7 +1042,7 @@ SN5 --> SN7 host operations (optional)
 **SN3: flip the run-time readers.** One PR per reader, in any order. Each PR keeps the equality test green.
 
 * The old checker: the adapter of section 2.5 replaces the JSON loader of `crates/orna-check/src/system_api.rs`. The
-  committed `generated/sys_api.json` stops being read.
+  `generated/sys_api.json` was deleted in SN1; the checker reads the document `orna-sys` builds in memory.
 * `orna-sys`: the descriptors, the format selection (from the lifecycle clauses, 4.4), the provider ABI and the provider
   linkage read the lowered declarations. The 11 `role` pairs move to a Rust table keyed by declaration path. The
   `#[ornasys]` blocks no longer feed anything.
@@ -1202,7 +1202,7 @@ pub fn impact(object: sys.Object) =
 
 ### 7.1 Today
 
-**In the JSON** (`crates/orna-sys-id/catalogue/sys-1.1.0.json:6118-6122`). The signature is one line in the file. It is
+**In the JSON** (the frozen copy `crates/orna-conformance/tests/fixtures/reference/api/sys.json:6118-6122`; the live copy was deleted in SN1). The signature is one line in the file. It is
 wrapped here for width.
 
 ```json
@@ -1475,7 +1475,7 @@ Run from the repository root at `cc24d270e`. Python snippets read the JSON with 
 
 * File bytes and digests: `wc -c` and `sha256sum` over the nine files of section 1.1 and the reference file.
 * JSON members, effects, overloads, `since`, `contract`, `preconditions`, `ownership`, `snapshot_rule`, relation
-  availability, handle prefixes: a script over `crates/orna-sys-id/catalogue/sys-1.1.0.json`. The overload test splits
+  availability, handle prefixes: a script over the frozen `reference/api/sys.json` (the live `sys-1.1.0.json` was deleted in SN1). The overload test splits
   each label at `(` or `<`. The 19 `sys.rt` handles are compared with the field names of `sys.RuntimeView`.
 * Failure-code spelling: a script over both catalogues. It checks `sys(.[a-z0-9]+(_[a-z0-9]+)*)+`, the absence of `__`,
   the distinct count after `.` becomes `__` (128), and the four-segment count (27).

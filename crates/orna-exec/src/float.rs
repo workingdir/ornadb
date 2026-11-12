@@ -45,7 +45,7 @@ pub(crate) fn binary(op: BinOp, lhs: u64, rhs: u64) -> Result<Value, Stop> {
         BinOp::Le => Ok(Value::Bool(a <= b)),
         BinOp::Gt => Ok(Value::Bool(a > b)),
         BinOp::Ge => Ok(Value::Bool(a >= b)),
-        BinOp::Pow => Err(Stop::NotYet("Float exponentiation (needs libm)")),
+        BinOp::Pow => Ok(canonical(libm::pow(a, b))),
         BinOp::In => Err(Stop::NotYet("membership is a Contains call after typeck")),
     }
 }

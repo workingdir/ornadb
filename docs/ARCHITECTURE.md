@@ -32,7 +32,7 @@ the unit tests assert the two agree.
 | 0 | primitives | orna-base |
 | 1 | value | orna-value, orna-sys-model |
 | 2 | syntax | orna-syntax, orna-intrinsics, orna-sys-codegen |
-| 3 | identity and IR | orna-hir, orna-sys-id, orna-standard-sources, orna-sys-macros |
+| 3 | identity and IR | orna-hir, orna-sys-id, orna-sys-interface, orna-standard-sources, orna-sys-macros |
 | 4 | analysis | orna-check |
 | 5 | evaluation | orna-evaluator |
 | 6 | hosts (I/O) | orna-sys, orna-security |

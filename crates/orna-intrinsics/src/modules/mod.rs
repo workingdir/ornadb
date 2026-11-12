@@ -144,7 +144,7 @@ pub struct Intrinsic {
     pub effect: Effect,
     pub dispatch: Dispatch,
     pub justification: Justification,
-    /// One sentence, emitted into `std_intrinsics.json` and the design docs.
+    /// One sentence describing the binding for the design docs.
     pub note: &'static str,
     /// Pins in which this binding is active (spec 9:11, ORNA-LIB-001).
     pub pins: PinRange,

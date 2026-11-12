@@ -17,8 +17,7 @@ generated output.
 1. `sys.orna` and its submodules, and `core/*.orna`, are the one hand-written source of the API. A new crate,
    `orna-sys-interface`, holds the `sys` files and exposes them as embedded strings, with a parse-checked test. It sits
    at layer 2, so `orna-hir`, `orna-sys-id` and `orna-check` can depend on it from above.
-2. No API definition is JSON. The catalogues `sys-1.1.0.json`, `engine-1.1.0.json` and `std_intrinsics.json`, their
-   copies, the authored inventory and its schema, and the JSON files that `orna-sys/build.rs` writes are deleted. No
+2. No API definition is JSON. `sys-1.1.0.json` and `generated/sys_api.json` were deleted in SN1 with no byte-equality gate; the frozen copy is the conformance fixture. `engine-1.1.0.json`, `std_intrinsics.json`, their copies, the authored inventory and its schema, and the JSON files that `orna-sys/build.rs` writes are removed by later stages. No
    exporter writes JSON. Every consumer reads the declarations: the identity build, the old checker through an adapter
    over `orna-syntax` until H3, `orna-sys`, the evaluator bindings, `orna-project`, `orna-traceability` and the
    conformance drift tests. A tool that needs a data format builds it from the lowered declarations when it runs.

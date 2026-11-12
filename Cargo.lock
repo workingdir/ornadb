@@ -1443,6 +1443,7 @@ dependencies = [
  "orna-intrinsics",
  "orna-syntax",
  "orna-sys",
+ "orna-sys-interface",
  "orna-value",
  "serde_json",
  "sha2 0.10.9",
@@ -1597,6 +1598,7 @@ dependencies = [
 name = "orna-exec"
 version = "1.0.0"
 dependencies = [
+ "libm",
  "num-bigint 0.4.8",
  "num-integer",
  "num-traits",
@@ -1898,6 +1900,15 @@ name = "orna-sys-id"
 version = "1.0.0"
 dependencies = [
  "orna-base",
+ "orna-syntax",
+ "orna-sys-interface",
+ "serde_json",
+]
+
+[[package]]
+name = "orna-sys-interface"
+version = "1.0.0"
+dependencies = [
  "orna-syntax",
  "serde_json",
 ]

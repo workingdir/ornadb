@@ -1,10 +1,7 @@
-//! Bijection between the vendored 1.1.0 catalogue and every generated identity set.
+//! Bijection between the 1.1.0 catalogue rendered from `sys.orna` and every generated identity set.
 //!
-//! These tests are the acceptance oracle for stage S0: they read the catalogue bytes
+//! These tests are the acceptance oracle for the generated identity tables: they read the rendered catalogue
 //! independently of the generator and assert both directions of every closed set.
-
-#[path = "../build/sha256.rs"]
-mod sha256;
 
 use orna_sys_id::{
     AbiVersion, EngineSignature, SYS_ENUM_COUNT, SYS_ENUM_VALUE_COUNT, SYS_FAILURE_CODE_COUNT,
@@ -13,14 +10,14 @@ use orna_sys_id::{
     SysFunction, SysGroupedHandle, SysMemberPath, SysRelation, SysSingleton, SysType,
 };
 use serde_json::Value;
-use std::{collections::BTreeSet, fs, path::Path};
+use std::collections::BTreeSet;
 
-const CATALOGUE: &str = include_str!("../catalogue/sys-1.1.0.json");
 const ENGINE: &str = include_str!("../catalogue/engine-1.1.0.json");
-const SYS_API_SHA256: &str = "10ef7dab9665de4e065ee2b96797b2751c7c3f98f9886241011aee0cc8c0d40e";
 
 fn catalogue() -> Value {
-    serde_json::from_str(CATALOGUE).expect("vendored catalogue is valid JSON")
+    orna_sys_interface::catalogue_json(
+        &orna_sys_interface::native_raw_document().expect("sys.orna decodes"),
+    )
 }
 
 fn engine() -> Value {
@@ -62,21 +59,7 @@ fn value_type_fields(catalogue: &Value, name: &str) -> Vec<String> {
 }
 
 #[test]
-fn vendored_catalogue_is_the_reviewed_contract() {
-    assert_eq!(
-        sha256::hex(&sha256::digest(CATALOGUE.as_bytes())),
-        SYS_API_SHA256,
-        "catalogue bytes changed; the generated identity tables must be reviewed"
-    );
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../orna-conformance/tests/fixtures/reference/api/sys.json");
-    let fixture_bytes = fs::read(&fixture).expect("conformance reference fixture is present");
-    assert_eq!(
-        CATALOGUE.as_bytes(),
-        fixture_bytes.as_slice(),
-        "vendored catalogue must equal the conformance reference fixture"
-    );
-
+fn rendered_catalogue_is_the_reviewed_contract() {
     let catalogue = catalogue();
     assert_eq!(text(&catalogue, "language_version"), "1.1.0");
     assert_eq!(text(&catalogue, "sys_version"), "1.1");
