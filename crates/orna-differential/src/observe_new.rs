@@ -32,7 +32,7 @@ use std::sync::LazyLock;
 
 use orna_hir::{
     Callee, ExprKind, Idx, ModulePath, Name, NameTarget, Program, RelOp, SourceId, SourceUnit,
-    lower, lower_with_attached,
+    lower, lower_with_admission,
 };
 use orna_standard_sources::reference_standard_sources_v1;
 use orna_syntax::{
@@ -315,7 +315,8 @@ fn lower_module_case(case: &Case) -> Result<LoweredProgram, String> {
     let prelude =
         orna_check::hir_check::prelude_of_profile(&orna_evaluator::reference_standard_profile());
     let attached: Vec<Name> = attached_roots.iter().copied().map(Name::new).collect();
-    let program = lower_with_attached(&units, &prelude, &attached);
+    let admission = std::sync::Arc::new(orna_check::hir_check::CatalogueAdmission);
+    let program = lower_with_admission(&units, &prelude, &attached, admission);
     let (logical_paths, owned) = bookkeeping(&program, &logical_paths, &owned);
     Ok(LoweredProgram {
         program,
