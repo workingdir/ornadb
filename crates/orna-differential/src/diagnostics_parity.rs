@@ -11,7 +11,7 @@ use orna_hir::{Idx, ModuleOrigin};
 use crate::case::{Case, CaseKind, Corpus};
 use crate::{observe_checker, observe_new};
 
-/// The expected differences, one `<case> :: <checker codes> => <HIR codes>` line each.
+/// The expected differences, one `<case> :: <checker codes> => <HIR codes> :: <reason>` line each.
 pub const DIFFERING: &str = include_str!("../tests/diagnostic_codes_differing.txt");
 
 /// The old checker's diagnostic codes for a case.
@@ -57,10 +57,38 @@ pub fn joined(codes: &BTreeSet<String>) -> String {
     codes.iter().cloned().collect::<Vec<_>>().join("; ")
 }
 
-/// One differing case, in the form `diagnostic_codes_differing.txt` lists it.
+/// The recorded reasons of a case's differing codes, one per distinct text, joined with ` | `.
+#[must_use]
+pub fn reason_of(old: &BTreeSet<String>, new: &BTreeSet<String>) -> String {
+    let mut reasons: Vec<&str> = Vec::new();
+    for code in old.symmetric_difference(new) {
+        let reason = recorded_reason(code).unwrap_or("UNRECORDED");
+        if !reasons.contains(&reason) {
+            reasons.push(reason);
+        }
+    }
+    reasons.join(" | ")
+}
+
+/// One differing case, in the form `diagnostic_codes_differing.txt` lists it: `<case> :: <checker> => <HIR> :: <reason>`.
 #[must_use]
 pub fn difference_line(case: &str, old: &BTreeSet<String>, new: &BTreeSet<String>) -> String {
-    format!("{case} :: {} => {}", joined(old), joined(new))
+    format!(
+        "{case} :: {} => {} :: {}",
+        joined(old),
+        joined(new),
+        reason_of(old, new)
+    )
+}
+
+/// The reason field of a `diagnostic_codes_differing.txt` row, or `None` when the row has none.
+#[must_use]
+pub fn row_reason(line: &str) -> Option<&str> {
+    let mut fields = line.splitn(3, " :: ");
+    let _case = fields.next()?;
+    let codes = fields.next()?;
+    let reason = fields.next()?.trim();
+    (codes.contains(" => ") && !reason.is_empty()).then_some(reason)
 }
 
 /// The `## expected` section of a differing-cases ledger.
@@ -91,6 +119,12 @@ pub fn expected_differences(ledger: &str) -> BTreeSet<String> {
 #[must_use]
 pub fn recorded_reason(code: &str) -> Option<&'static str> {
     match code {
+        "sys.version.incompatible" => Some(
+            "HIR applies the production sys admission (ORNA-SYS-008): a catalogued member with no \
+             linked provider is rejected at lowering, as the executor requires; the checker compared \
+             here analyses on the declared surface (SystemProviders::DeclaredSurface) and does not gate \
+             providers",
+        ),
         "ORNA-S010-IMPORT" => {
             Some("HIR import diagnostic the checker does not report under this code; unclassified")
         }

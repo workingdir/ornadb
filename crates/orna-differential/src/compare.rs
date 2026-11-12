@@ -350,16 +350,26 @@ pub fn parse_typed_share(source: &str) -> Result<TypedShare, String> {
 
 /// Applies the typed-share ratchet.
 ///
-/// The typed count may only grow. The denominator may move when the corpus
-/// changes, but it must be the measured value: a new or removed case is a
-/// deliberate edit of this file, exactly as the exclusion account is.
+/// The recorded `typed` count must equal the measured count exactly, in both
+/// directions: a fall is a lowering or typing regression, and a rise is typed
+/// corpus work that must be recorded in the same PR. The denominator must also
+/// be the measured value: a new or removed case is a deliberate edit of
+/// `typed-share.toml`, exactly as the exclusion account is.
 #[must_use]
 pub fn typed_share_ratchet(recorded: TypedShare, observed: TypedShare) -> Vec<String> {
     let mut failures = Vec::new();
     if observed.typed < recorded.typed {
         failures.push(format!(
-            "typed share fell from {} to {} of {} lowered cases; the ratchet only grows",
+            "typed share fell from {} to {} of {} lowered cases; a typing or lowering \
+             regression, not an update to record",
             recorded.typed, observed.typed, observed.lowered
+        ));
+    }
+    if observed.typed > recorded.typed {
+        failures.push(format!(
+            "typed share rose from {} to {} of {} lowered cases; set `typed = {}` in \
+             tests/differential/typed-share.toml and record it in the same PR",
+            recorded.typed, observed.typed, observed.lowered, observed.typed
         ));
     }
     if observed.lowered != recorded.lowered {

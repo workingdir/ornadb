@@ -8,15 +8,15 @@
 //! The cases whose code sets differ are ratcheted exactly: the measured set must
 //! equal the `## expected` section of `diagnostic_codes_differing.txt`. A new
 //! difference fails the test, and a listed case that now agrees fails it as
-//! stale. Every differing code must carry a recorded reason. The measurement and
-//! the reasons live in `orna_differential::diagnostics_parity`, shared with the
-//! shadow report.
+//! stale. Every listed row carries a reason field, and every differing code
+//! carries a recorded reason. The measurement and the reasons live in
+//! `orna_differential::diagnostics_parity`, shared with the shadow report.
 
 use std::collections::BTreeSet;
 
 use orna_differential::case::Corpus;
 use orna_differential::diagnostics_parity::{
-    DIFFERING, difference_line, expected_differences, measure, recorded_reason,
+    DIFFERING, difference_line, expected_differences, measure, recorded_reason, row_reason,
 };
 
 #[test]
@@ -73,6 +73,19 @@ fn every_diagnostic_code_matches_the_checker_per_case() {
         stale.is_empty(),
         "listed code differences that now agree (remove them):\n{}",
         stale
+            .iter()
+            .map(|line| line.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    let without_reason: Vec<&String> = expected
+        .iter()
+        .filter(|line| row_reason(line).is_none())
+        .collect();
+    assert!(
+        without_reason.is_empty(),
+        "listed code differences without a reason field (`<case> :: <checker> => <HIR> :: <reason>`):\n{}",
+        without_reason
             .iter()
             .map(|line| line.as_str())
             .collect::<Vec<_>>()
