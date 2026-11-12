@@ -249,6 +249,12 @@ impl<'p> Machine<'p> {
             Callee::Relational { op } => relation::relational(self, body, frame, call, *op),
             Callee::Intrinsic(IntrinsicForm::Fail) => self.fail(body, frame, call),
             Callee::Intrinsic(IntrinsicForm::OptionSome) => self.option_some(body, frame, call),
+            Callee::Intrinsic(IntrinsicForm::Now) => {
+                self.no_argument_intrinsic(call, natives::clock::now)
+            }
+            Callee::Intrinsic(IntrinsicForm::Uuid7) => {
+                self.no_argument_intrinsic(call, natives::clock::uuid7)
+            }
             Callee::Intrinsic(_) => Err(Stop::NotYet("intrinsic form (H4)")),
             Callee::Pending { .. } => Err(Stop::NotYet("member call awaiting the type pass (H2)")),
             Callee::Ctor { def } => self.construct(body, frame, call, *def),
@@ -812,6 +818,18 @@ impl<'p> Machine<'p> {
             Value::Error(code) => Err(Stop::Error(code)),
             _ => Err(Stop::Error("ORNA-EVAL-TYPE")),
         }
+    }
+
+    /// A zero-argument intrinsic form: the clock and entropy reads. Any argument is an argument error.
+    fn no_argument_intrinsic(
+        &mut self,
+        call: &Call,
+        read: fn(&mut Self) -> Result<Value, Stop>,
+    ) -> Result<Value, Stop> {
+        if !call.args.is_empty() {
+            return Err(Stop::Error("ORNA-EVAL-ARGUMENT"));
+        }
+        read(self)
     }
 
     /// `Some(e)`: the present option holding the value of `e`. The call takes exactly one argument; a defaulted or
