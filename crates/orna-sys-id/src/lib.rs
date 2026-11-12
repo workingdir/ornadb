@@ -19,6 +19,7 @@
 pub mod descriptor;
 pub mod dispatch;
 pub mod engine;
+pub mod engine_ids;
 pub mod error_code;
 pub mod function;
 pub mod host_operation;
