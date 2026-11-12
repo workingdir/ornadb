@@ -125,7 +125,7 @@ impl CheckoutFence {
             });
         };
         let owner = repo
-            .acquire_runtime_owner_lock(super::invocation_owner_id())
+            .acquire_runtime_owner_lock(orna_runtime::process_owner_id())
             .map_err(|error| match error {
                 RepositoryError::RepositoryBusy => runtime_in_use(),
                 _ => checkout_runtime_unavailable(),

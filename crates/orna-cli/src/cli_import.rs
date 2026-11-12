@@ -25,7 +25,7 @@ use orna_repository::offline_copy::{OfflineCopy, PAYLOAD_BUFFER_BYTES};
 use orna_value::normalize_media_type;
 
 use super::Diagnostic;
-use crate::encoding::hex;
+use orna_base::hex;
 
 const USAGE: &str = "usage: orna import <bundle-dir> --dry-run [--limit N] [--quiet] [--metadata-only] [--type MEDIA_TYPE] [--format human|table]";
 

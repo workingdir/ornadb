@@ -1465,6 +1465,7 @@ dependencies = [
  "orna-application",
  "orna-base",
  "orna-check",
+ "orna-cli-support",
  "orna-conformance",
  "orna-evaluator",
  "orna-exec",
@@ -1489,6 +1490,19 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "orna-cli-support"
+version = "0.1.0"
+dependencies = [
+ "orna-base",
+ "orna-project",
+ "orna-repository",
+ "orna-runtime",
+ "orna-value",
+ "sha2 0.10.9",
+ "tempfile",
 ]
 
 [[package]]

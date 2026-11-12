@@ -168,6 +168,10 @@ name = "orna-application"
 layer = 13
 
 [[crate]]
+name = "orna-cli-support"
+layer = 13
+
+[[crate]]
 name = "orna-cli"
 layer = 14
 allowed = ["orna-conformance"]

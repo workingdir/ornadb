@@ -1,14 +1,13 @@
-//! Byte and text codecs the verbs share: lowercase hex and percent decoding.
-//!
-//! The hexadecimal codec is `orna-base`'s; this module re-exports it under the
-//! crate-local names the verbs already use.
+//! The percent decoder the `serve` and mount surfaces share. The hexadecimal
+//! codec is `orna-base`'s.
 
-pub(crate) use orna_base::{hex, hex_digit};
+use orna_base::hex_digit;
 
 /// Decodes the `%XX` escapes of `value` and, for a form field
 /// (`plus_as_space`), the `+` that stands for a space. `None` for a malformed
 /// escape or a result that is not UTF-8.
-pub(crate) fn percent_decode(value: &str, plus_as_space: bool) -> Option<String> {
+#[must_use]
+pub fn percent_decode(value: &str, plus_as_space: bool) -> Option<String> {
     let mut decoded = Vec::with_capacity(value.len());
     let mut rest = value.bytes();
     while let Some(byte) = rest.next() {

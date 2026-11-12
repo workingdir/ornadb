@@ -1741,7 +1741,7 @@ fn served_runtime_holds_the_process_owner_lease() {
             .to_owned(),
     );
     let clone = open_served_clone(&endpoint).expect("`orna serve` resolves the clone");
-    let owner = invocation_owner_id();
+    let owner = orna_runtime::process_owner_id();
     let executor = current_thread_executor().expect("test executor");
     let lease = executor
         .block_on(clone.runtime.acquire_lease(owner))
