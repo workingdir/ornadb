@@ -5,6 +5,12 @@
 //! the same otherwise-unresolved name are ambiguous (ORNA-S011), and `sys` is
 //! built in and never shadowed (ORNA-NS-006). Resolution runs once; every later
 //! question is a table lookup.
+//!
+//! Root-environment names (`Money` and `Currency` from `core.money`) are bound
+//! after the glob pass rather than through a `PreludeExports` table, so a local
+//! declaration or any import, explicit or wildcard, shadows them. This is a
+//! deliberate deviation from the design text, accepted by the orchestrator
+//! (hir-host.md B2); see `bind_root_environment`.
 
 use std::collections::BTreeMap;
 

@@ -60,3 +60,25 @@ fn a_local_money_declaration_wins_over_the_root_name() {
     );
     assert_eq!(user_diagnostics(&program), Vec::<String>::new());
 }
+
+/// A glob import that provides `Money` shadows the root-environment name, deterministically: the root
+/// binding runs after glob finalisation and skips any name a scope already binds (lower/imports.rs).
+/// The imported `Money` has a `cents` field the core `Money` lacks, so `m.cents` lowers only if the glob wins.
+#[test]
+fn a_glob_import_of_money_shadows_the_root_name() {
+    let util = parse("pub type Money {\n    cents: Int,\n}\n");
+    let main = parse("use util.*;\npub fn cents_of(m: Money): Int = m.cents;\n");
+    let program = lower(&[
+        SourceUnit {
+            source: SourceId::new(0),
+            tree: &util,
+            path: ModulePath::new([Name::new("util")]),
+        },
+        SourceUnit {
+            source: SourceId::new(1),
+            tree: &main,
+            path: ModulePath::new([Name::new("main")]),
+        },
+    ]);
+    assert_eq!(user_diagnostics(&program), Vec::<String>::new());
+}
