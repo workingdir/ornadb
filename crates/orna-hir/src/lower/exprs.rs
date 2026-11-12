@@ -24,6 +24,7 @@ use super::control::lower_control;
 use super::declare::Builder;
 use super::free_names::free_names;
 use super::literals::lower_literal;
+use super::namespace::{missing_module_export, namespace_member};
 use super::{BodyState, pats};
 
 /// The synthetic slot name a `|?` handler binds its failure to.
@@ -202,6 +203,32 @@ fn lower_field(
         let literal = push(builder, state, ExprKind::Lit(literal), span.clone());
         state.exprs[literal].weight = 2;
         return literal;
+    }
+    if let Some((path, def)) = namespace_member(builder, state, base, name) {
+        // `database.Table` and `namespace.export` name the export itself; the module base is not a value.
+        let name_span = SyntaxSpan::new(span.end.saturating_sub(name.len()), span.end);
+        let mut path_segments = path;
+        path_segments.push((Name::new(name), name_span.clone()));
+        record_prefix_uses(
+            builder,
+            state.module,
+            Some(state.id),
+            &path_segments,
+            crate::UseContext::Value,
+        );
+        super::record_body_use(
+            &mut builder.program,
+            state.module,
+            state.id,
+            name_span,
+            Name::new(name),
+            crate::UseContext::Value,
+            NameTarget::Def(def),
+        );
+        return push(builder, state, ExprKind::Def(def), span.clone());
+    }
+    if let Some(missing) = missing_module_export(builder, state, base, name, span) {
+        return missing;
     }
     let member_of_path = qualified_member(builder, state, base, name);
     let base = lower_expr(builder, state, base);

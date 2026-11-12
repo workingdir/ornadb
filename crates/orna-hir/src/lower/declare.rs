@@ -221,13 +221,16 @@ pub(crate) struct Builder {
     pub(crate) self_ty: Option<crate::Ty>,
     /// The names each module exports through `use module as _;` (ORNA-IMPORT-005).
     pub(crate) prelude: super::prelude::PreludeExports,
+    /// The attached databases whose root namespaces every scope binds (ORNA-ATTACH-001).
+    pub(crate) attached: Vec<Name>,
 }
 
 impl Builder {
     /// Creates an empty builder; [`Builder::declare_units`] registers modules.
-    pub(crate) fn new(prelude: &super::prelude::PreludeExports) -> Self {
+    pub(crate) fn new(prelude: &super::prelude::PreludeExports, attached: &[Name]) -> Self {
         Self {
             prelude: prelude.clone(),
+            attached: attached.to_vec(),
             lowered: 0,
             program: Program::empty(),
             pending: Vec::new(),
@@ -262,7 +265,13 @@ impl Builder {
         self.sys_module = self.by_path[&ModulePath::new([Name::new("sys")])];
         self.program.native_abi = crate::ENGINE_NATIVE_ABI;
         self.register_implicit_std();
-        let roots = super::imports::implicit_roots(self.std_module, self.sys_module);
+        let mut roots = super::imports::implicit_roots(self.std_module, self.sys_module);
+        // An attached database is a root namespace of its own module path (ORNA-ATTACH-001).
+        for name in &self.attached {
+            if let Some(module) = self.by_path.get(&ModulePath::new([name.clone()])) {
+                roots.insert(name.clone(), *module);
+            }
+        }
         for scope in &mut self.scopes {
             for (name, module) in &roots {
                 scope.modules.insert(name.clone(), *module);
