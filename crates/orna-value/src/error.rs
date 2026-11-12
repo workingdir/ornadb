@@ -105,4 +105,18 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+impl From<orna_cbor::Error> for Error {
+    fn from(error: orna_cbor::Error) -> Self {
+        match error {
+            orna_cbor::Error::Truncated => Self::Truncated,
+            orna_cbor::Error::NonCanonical => Self::NonCanonical,
+            orna_cbor::Error::Unsupported => Self::Unsupported,
+            orna_cbor::Error::InvalidUtf8 => Self::InvalidUtf8,
+            orna_cbor::Error::DuplicateOrUnorderedMapKey => Self::DuplicateOrUnorderedMapKey,
+            orna_cbor::Error::Limit => Self::Limit,
+            orna_cbor::Error::BignumPayload => Self::InvalidValue,
+        }
+    }
+}
+
 pub type Result<T> = std::result::Result<T, Error>;

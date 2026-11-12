@@ -1,11 +1,10 @@
 //! Validation of raw OVB values against the tag registry.
 
-use crate::cbor::encode_raw;
 use crate::decimal::Decimal;
 use crate::error::Error;
 use crate::identity::uuid_array;
 use crate::primary_key::is_permitted_key;
-use crate::raw::{Raw, array, bytes, int_u64, integer, is_nan_bits, map, text};
+use crate::raw::{Raw, array, bytes, encode_raw, int_u64, integer, map, text};
 use crate::schema::{validate_type, validate_value_as_type};
 use crate::snapshot::Snapshot;
 use crate::tags::{
@@ -19,6 +18,7 @@ use crate::{CANONICAL_NAN_BITS, MAX_DEPTH, Result};
 use num_bigint::BigInt;
 use num_bigint::Sign;
 use num_traits::Zero;
+use orna_cbor::is_nan_bits;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use unicode_normalization::UnicodeNormalization;

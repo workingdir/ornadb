@@ -1955,6 +1955,7 @@ dependencies = [
  "num-integer",
  "num-traits",
  "orna-base",
+ "orna-cbor",
  "orna-conformance",
  "orna-repository",
  "orna-syntax",
