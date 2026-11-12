@@ -107,3 +107,7 @@ valid/unit-cross-database.orna :: (none) => ORNA-S012-UNRESOLVED
 invalid/effectful-display.orna :: E7201 => E2002; E2003; ORNA-S012-UNRESOLVED
 invalid/unparenthesized-lambda-stage.orna :: ORNA-S000-PARSE; ORNA-S021-TYPE => ORNA-S000-PARSE
 valid/lambda.orna :: (none) => ORNA-S012-UNRESOLVED
+# Spec-derived: valid/ranges.orna passes a range where take(rows, count: Int) requires Int (09-standard-library.md:31); HIR reports ORNA-INFER-011 and the old checker accepts it. Expected difference.
+# Spec-derived: invalid/implicit-conversion-chain.orna needs A -> B -> C, which ORNA-CONVERT-007 forbids; its types are undeclared, so HIR's ORNA-S012 is the first error and the checker's ORNA-S021 is extra.
+# S021 checker-only rows: six parse-error cases stop at ORNA-S000 in HIR; three arity cases (anonymous stages, wildcard) are ORNA-INFER-011 or ORNA-INFER-007 in HIR (ORNA-INFER-011 is the spec code for constraint conflicts); legacy-tryfrom is a legacy-syntax case; five cases report ORNA-S012, ORNA-S010 or ORNA-S022 in HIR first.
+# S020 rows: D1 strict, INFER-004 SHOULD allows the old behaviour (owner decision).
