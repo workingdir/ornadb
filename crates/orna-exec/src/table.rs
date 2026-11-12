@@ -283,6 +283,28 @@ fn is_computed(program: &Program, field: DefId) -> bool {
     )
 }
 
+/// The value of the table field `field` in `row`, as a field access or a `map` of the field reads it. A computed
+/// field runs its body with the row as `self`; a stored field is read from the row by name.
+pub(crate) fn field_of_row(
+    machine: &mut Machine<'_>,
+    field: DefId,
+    row: Value,
+) -> Result<Value, Stop> {
+    let program = machine.program;
+    if let Some(FieldInitializer::Computed(body)) = initializer(program, field) {
+        return machine.invoke(body, vec![(0, row)], &[], None);
+    }
+    let Value::Record(fields) = row else {
+        return Err(Stop::Error("ORNA-EVAL-TYPE"));
+    };
+    let name = &program.defs[field].name;
+    fields
+        .iter()
+        .find(|(key, _)| key == name)
+        .map(|(_, value)| value.clone())
+        .ok_or(Stop::Error("ORNA-EVAL-FIELD"))
+}
+
 /// A store failure other than a violated expectation. The executor's own calls keep the store's
 /// activation open and its key lookups valid, so reaching this is an invariant break, not a language error.
 pub(crate) fn store_invariant(_error: &StoreError) -> Stop {
