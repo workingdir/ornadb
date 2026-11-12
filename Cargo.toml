@@ -3,6 +3,7 @@ members = [
     "crates/orna-base",
     "crates/orna-application",
     "crates/orna-cli",
+    "crates/orna-cli-support",
     "crates/archive/orna-compat-v1",
     "crates/orna-unicode",
     "crates/orna-intrinsics",

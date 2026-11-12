@@ -15,7 +15,7 @@
 use orna_repository::TypedKey;
 
 use super::Diagnostic;
-use crate::encoding::{hex, hex_digit};
+use orna_base::{hex, hex_digit};
 
 /// Every row key one `KEY_TEXT` spelling can name, in the order to try them.
 ///

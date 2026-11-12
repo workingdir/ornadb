@@ -26,6 +26,7 @@ missing_errors_doc = "allow"
 sha2 = "0.10"
 orna-base = { path = "../orna-base" }
 orna-application = { path = "../orna-application" }
+orna-cli-support = { path = "../orna-cli-support" }
 orna-conformance = { path = "../orna-conformance" }
 orna-evaluator = { path = "../orna-evaluator" }
 orna-project-repl = { path = "../orna-project-repl" }

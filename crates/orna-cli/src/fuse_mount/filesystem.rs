@@ -293,11 +293,14 @@ impl WorkspaceFilesystem {
                             "Blob edit target is not an admitted row field".to_owned()
                         })?;
                     let initial = read_blob_bytes(&graph, &reference)?;
-                    let schema_identity = crate::table_schema::committed_table_schema_identity(
-                        &writer.repository,
-                        save.table.object_id(),
-                    )
-                    .map_err(|error| format!("edit could not capture the table schema: {error}"))?;
+                    let schema_identity =
+                        orna_cli_support::table_schema::committed_table_schema_identity(
+                            &writer.repository,
+                            save.table.object_id(),
+                        )
+                        .map_err(|error| {
+                            format!("edit could not capture the table schema: {error}")
+                        })?;
                     let image = Arc::new(VfsFileSnapshot::new(
                         row_image_pin(&save.source.rows),
                         Arc::<[u8]>::from([]),
@@ -360,7 +363,7 @@ impl WorkspaceFilesystem {
                     )
                 })
             } else {
-                let opened = crate::table_schema::committed_table_schema_identity(
+                let opened = orna_cli_support::table_schema::committed_table_schema_identity(
                     &writer.repository,
                     save.table.object_id(),
                 )
@@ -1110,7 +1113,7 @@ pub(crate) fn refusal_is_unservable_retained(
     else {
         return false;
     };
-    crate::table_schema::committed_table_schema_unresolvable(
+    orna_cli_support::table_schema::committed_table_schema_unresolvable(
         &save.writer.repository,
         save.table.object_id(),
     )
@@ -1419,7 +1422,7 @@ impl WorkspaceFilesystem {
         // the owner the runtime would take: this process's owner.
         let graph_owner_id = match &writer {
             Some(writer) => Some(writer.owner_id),
-            None => Some(super::invocation_owner_id()),
+            None => Some(orna_runtime::process_owner_id()),
         };
 
         let project = match &writer {
@@ -3314,7 +3317,7 @@ impl Filesystem for WorkspaceFilesystem {
             reply.opened(fuser::FileHandle(handle), EDITABLE_OPEN_FLAGS);
             return;
         }
-        let schema_identity = match crate::table_schema::committed_table_schema_identity(
+        let schema_identity = match orna_cli_support::table_schema::committed_table_schema_identity(
             &save.writer.repository,
             save.table.object_id(),
         ) {
