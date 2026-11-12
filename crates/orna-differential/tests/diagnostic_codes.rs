@@ -92,9 +92,11 @@ fn recorded_reason(code: &str) -> Option<&'static str> {
         "ORNA-S010-IMPORT" => {
             Some("HIR import diagnostic the checker does not report under this code; unclassified")
         }
-        "ORNA-S012-UNRESOLVED" => {
-            Some("std and sys names the H1 resolver does not export yet (H2 std export)")
-        }
+        "ORNA-S012-UNRESOLVED" => Some(
+            "HIR resolves environment-only names (fixture tables, currency and unit names, connectors, \
+             harness names) that the checker resolves from its observer catalogue, and reports missing \
+             `use` imports the spec requires (ORNA-IMPORT); not a std export gap",
+        ),
         "ORNA-S021-TYPE" => {
             Some("checker call-site type mismatch; HIR reports the conflict as ORNA-INFER-011")
         }
@@ -105,16 +107,19 @@ fn recorded_reason(code: &str) -> Option<&'static str> {
             Some("HIR unsolved-variable diagnostic; the checker has no code for it")
         }
         "ORNA-S020-ANNOTATION" => Some(
-            "HIR rejects unannotated public parameters (D1, the H2a annotated subset); \
-             ORNA-INFER-004 says omission is not an error, so this is a stage gap, not spec-required",
+            "HIR requires annotated public parameters under D1 (docs/design/hir.md, H2a subset); \
+             ORNA-INFER-004 makes annotation a SHOULD, so this is a deviation closed by H2b inference, \
+             not a spec-required error",
         ),
         "ORNA-S022-UNSUPPORTED" => Some(
             "HIR reports forms the H2a subset does not type, and top-level offset or affine units (units.md C6, \
                  user modules; valid/affine-unit); otherwise unclassified",
         ),
-        "ORNA-EVAL-ARGUMENT" => {
-            Some("HIR call-binding named-argument error; the checker maps it only in rules.rs")
-        }
+        "ORNA-EVAL-ARGUMENT" => Some(
+            "HIR binds named arguments only against statically known parameter labels; member, std and \
+             relation callees bind after H2 settles them (hir.md call binding), and a lambda or function-value \
+             callee has no labels (spec structural function types), so its rejection is the spec verdict",
+        ),
         code if code.starts_with("ORNA100-")
             || code.starts_with("ORNA091-")
             || code.starts_with("ORNA-A091-") =>
