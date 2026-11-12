@@ -81,6 +81,9 @@ impl<'a> BodyCheck<'a> {
                 // A protocol member takes the receiver as its first argument (D1: the receiver is not written out).
                 call.args = with_receiver(&call.args, base);
                 protocol_member = true;
+            } else if matches!(settled, Callee::Native { .. }) {
+                // `Decimal.divide` is the native `core.decimal.divide`: the receiver is its dividend, argument 0.
+                call.args = with_receiver(&call.args, base);
             } else if matches!(settled, Callee::Relational { .. }) {
                 // A relation stage takes its receiver as argument 0, as a pipe does: `rows.take(n)` is `rows | take(n)`.
                 call.args = with_receiver(&call.args, base);
@@ -201,7 +204,28 @@ impl<'a> BodyCheck<'a> {
                 return Ok(Some(Callee::Relational { op }));
             }
         }
+        if name.as_str() == "divide" && matches!(self.kind_of(resolved), Some(TyKind::Decimal)) {
+            return self.decimal_divide(name).map(Some);
+        }
         self.settle_protocol_call(resolved, name, span)
+    }
+
+    /// `Decimal.divide` is the engine native `core.decimal.divide`; the receiver is its dividend (argument 0).
+    fn decimal_divide(&self, name: &Name) -> Result<Callee, NotYetReason> {
+        let path = crate::ModulePath::new([Name::new("core"), Name::new("decimal")]);
+        let def = self
+            .program
+            .modules
+            .iter()
+            .find(|module| module.path == path)
+            .and_then(|module| module.exports.get(name).copied())
+            .ok_or_else(|| {
+                NotYetReason::Unsupported("the core.decimal module is not loaded".into())
+            })?;
+        Ok(Callee::Native {
+            def,
+            targs: Box::new([]),
+        })
     }
 
     /// Types a source, native or `sys` call against the resolved signature.

@@ -85,7 +85,6 @@ valid/cross-table-assertion.orna :: (none) => ORNA-S012-UNRESOLVED
 valid/currency-locale-format.orna :: (none) => ORNA-EVAL-ARGUMENT; ORNA-INFER-007; ORNA-INFER-011; ORNA-S012-UNRESOLVED
 valid/currency.orna :: (none) => ORNA-S012-UNRESOLVED
 valid/cwd-head.orna :: (none) => ORNA-S012-UNRESOLVED
-valid/decimal-division.orna :: (none) => ORNA-EVAL-ARGUMENT; ORNA-S012-UNRESOLVED
 valid/effectful-expression.orna :: (none) => ORNA-S012-UNRESOLVED
 valid/executable-assertion.orna :: (none) => ORNA-S012-UNRESOLVED
 valid/failure-natural-key.orna :: ORNA-S021-TYPE => ORNA-S012-UNRESOLVED; ORNA-S020-ANNOTATION; ORNA-S022-UNSUPPORTED

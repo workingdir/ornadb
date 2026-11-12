@@ -1,0 +1,6 @@
+// Natives of core.decimal (ORNA-NUM-005: division whose exact result is not finite needs an explicit scale and rounding).
+use core.{Rounding};
+
+// core.decimal.divide: `dividend.divide(value, scale:, rounding:)`, the quotient rounded to `scale` digits after the
+// point. A zero divisor fails with ORNA-EVAL-DIVIDE-BY-ZERO; a negative scale fails with ORNA-EVAL-VALUE.
+pub native fn divide(dividend: Decimal, value: Decimal, scale: Int, rounding: Rounding): Decimal effect none;

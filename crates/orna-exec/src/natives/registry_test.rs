@@ -16,6 +16,10 @@ const PORTED: &[(&str, &str)] = &[
         include_str!("../../../orna-hir/interface/core/hash.orna"),
     ),
     (
+        "core.decimal",
+        include_str!("../../../orna-hir/interface/core/decimal.orna"),
+    ),
+    (
         "core.text",
         include_str!("../../../orna-hir/interface/core/text.orna"),
     ),

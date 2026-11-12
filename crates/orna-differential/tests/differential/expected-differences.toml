@@ -388,6 +388,14 @@ reason = "the name is a language-defined native; its declaration moves into `cor
 bead = "ornadb-csenl.20"
 
 [[difference]]
+case = "valid/decimal-division.orna"
+field = "effects"
+first = "examples.valid.decimal-division::rounded_third=pure"
+second = "examples.valid.decimal-division::rounded_third=Opaque"
+reason = "the native `divide` carries an Opaque effect in the HIR (the Callee native effect), so `rounded_third` is not pure; the checker reads the native call as pure. Closes when the checker's native effect table is consulted for core.decimal divide"
+bead = "ornadb-csenl.20"
+
+[[difference]]
 case = "valid/effectful-expression.orna"
 field = "resolution-unresolved"
 first = "Contact:0"
@@ -1031,8 +1039,8 @@ bead = "ornadb-csenl.16"
 
 [[environment]]
 category = "pending-p3b-names"
-count = 2
-reason = "names that need a later typed-pipeline phase (phase 3b): half_even of a decimal division, and Str used as an as:-argument of a secret display. They resolve only once that phase lands. Count 2 is measured after method calls on a non-path receiver lower as pending member calls (the secret display's .display() receiver is now typed, so its Str is reached)"
+count = 1
+reason = "names that need a later typed-pipeline phase (phase 3b): Str used as an as:-argument of a secret display; it resolves only once that phase lands. The decimal division's half_even is now a core.Rounding variant (H5 slice 3b), so it no longer counts here. Count 1 is measured after method calls on a non-path receiver lower as pending member calls (the secret display's .display() receiver is now typed, so its Str is reached)"
 bead = "ornadb-csenl.16"
 
 [[environment]]

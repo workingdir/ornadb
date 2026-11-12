@@ -103,7 +103,6 @@ pub fn classify(case_id: &str, diagnostic: &str) -> Option<&'static str> {
         "log" | "process" | "read" | "rows" | "get" | "valid_email" | "fallback" | "left"
         | "middle" | "missing" | "EmailHeader" => HARNESS_ENVIRONMENT,
         "for_each" | "mean" | "ref" | "open" => MISSING_IMPORT,
-        "half_even" => PENDING_P3B,
         "Str" if case_id.ends_with("secret-display.orna") => PENDING_P3B,
         "Ordering" | "List" => IMPLEMENT,
         _ => UNCLASSIFIED,
