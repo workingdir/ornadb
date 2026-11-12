@@ -68,6 +68,9 @@ pub(crate) struct Machine<'p> {
     pub(crate) store: Box<dyn TableStore>,
     /// The session's evaluated top-level `let`s. Taken from the caller for the run and handed back after it.
     pub(crate) globals: Globals,
+    /// Whether this run's store starts empty and no other writer shares it, so a row absent from the store is
+    /// absent from the activation. Only the entry points that create their own empty store set it.
+    pub(crate) empty_snapshot: bool,
     steps: u64,
     calls: u64,
     depth: usize,
@@ -90,6 +93,7 @@ impl<'p> Machine<'p> {
             ordering: OnceCell::new(),
             store,
             globals: Globals::new(),
+            empty_snapshot: false,
             steps: 0,
             calls: 0,
             depth: 0,
@@ -239,6 +243,7 @@ fn run(
     cancel: Option<Arc<AtomicBool>>,
 ) -> Run {
     let mut machine = Machine::new(program, limits, cancel, Box::new(MemoryStore::new()));
+    machine.empty_snapshot = true;
     let result = start(&mut machine, program, entry);
     Run {
         result,
@@ -276,14 +281,9 @@ pub fn measure_entry(
     arguments: Vec<Value>,
     limits: ExecLimits,
 ) -> Result<Measured, ExecError> {
-    measure_entry_with_store(
-        program,
-        entry,
-        arguments,
-        limits,
-        Box::new(MemoryStore::new()),
-    )
-    .0
+    let mut machine = Machine::new(program, limits, None, Box::new(MemoryStore::new()));
+    machine.empty_snapshot = true;
+    measure(&mut machine, program, entry, arguments)
 }
 
 /// As [`measure_entry`], but the run reads and writes `store`. The store comes back with the run's writes
