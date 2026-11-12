@@ -80,3 +80,18 @@ pub native fn __minimum<T>(values: [T]): T? effect none;
 
 // std.collection.__maximum
 pub native fn __maximum<T>(values: [T]): T? effect none;
+
+// std.query.__strictly_ordered_time_series
+pub native fn __strictly_ordered_time_series<T>(points: [(Instant, T)]): Bool effect none;
+
+// std.query.__window_rate
+pub native fn __window_rate<T>(points: [(Instant, T)], size: Int, step: Int): [T?] effect none;
+
+// std.query.__window_rate_integrate
+pub native fn __window_rate_integrate<T>(points: [(Instant, T)], size: Int, step: Int): [(T?, T?)] effect none;
+
+// std.query.__window_derivative
+pub native fn __window_derivative<T>(points: [(Instant, T)], size: Int, step: Int): [[(Instant, T)]] effect none;
+
+// std.query.__window_integrate
+pub native fn __window_integrate<T>(points: [(Instant, T)], size: Int, step: Int): [T?] effect none;
