@@ -127,7 +127,7 @@ fn one(arguments: Vec<Value>) -> Result<Value, Stop> {
     Ok(value)
 }
 
-fn blob(value: Value) -> Result<Rc<[u8]>, Stop> {
+pub(super) fn blob(value: Value) -> Result<Rc<[u8]>, Stop> {
     match value {
         Value::Blob(bytes) => Ok(bytes),
         _ => Err(Stop::Error("ORNA-EVAL-TYPE")),

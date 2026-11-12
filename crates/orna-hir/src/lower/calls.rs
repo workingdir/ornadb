@@ -118,7 +118,10 @@ fn classify_name(
             Some((Callee::Intrinsic(form), None))
         }
         NameTarget::Unresolved => match super::classify::rel_op(name.as_str()) {
-            Some(op) => Some((Callee::Relational { op }, None)),
+            Some(op) => Some((
+                Callee::Relational { op },
+                super::classify::relational_params(op),
+            )),
             None => {
                 builder.diagnose(
                     module,
