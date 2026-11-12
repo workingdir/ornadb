@@ -1,7 +1,7 @@
 //! Table writes over lowered source, against the old evaluator's outcomes:
-//! `ORNA-EVAL-TABLE-DUPLICATE-KEY` for a key already holding a row,
-//! `ORNA-EVAL-TABLE-MISSING-ROW` is not reported: a delete, update or rekey of an absent key is declined as NotYet
-//! until H5 binds the activation snapshot. `ORNA-EVAL-TABLE-ROW` for a row that omits a stored field or writes a computed or key field it may not.
+//! `ORNA-EVAL-TABLE-MISSING-ROW` for a delete, update or rekey of an absent key in a run whose store starts empty;
+//! a run over a caller's store declines the same write as NotYet until H5 binds the activation snapshot.
+//! `ORNA-EVAL-TABLE-ROW` for a row that omits a stored field or writes a computed or key field it may not.
 
 use orna_exec::{ExecError, ExecLimits, Value, run_entry};
 use orna_hir::{DefId, DefKind, ModulePath, Name, Program, SourceId, SourceUnit, lower};
@@ -59,13 +59,11 @@ fn a_second_insert_at_the_same_key_fails_as_a_duplicate() {
 }
 
 #[test]
-fn deleting_an_absent_key_is_declined_until_the_snapshot() {
+fn deleting_an_absent_key_fails_as_missing_row() {
     let source = format!("{NOTE}pub fn run() {{\n    Note.delete(7);\n}}\n");
     assert_eq!(
         run(&source),
-        Err(ExecError::NotYet(
-            "missing-row write needs the activation snapshot (H5)"
-        ))
+        Err(ExecError::Code("ORNA-EVAL-TABLE-MISSING-ROW"))
     );
 }
 
@@ -124,13 +122,11 @@ fn an_update_rewrites_the_named_fields_of_a_present_row() {
 }
 
 #[test]
-fn an_update_of_an_absent_key_is_declined_until_the_snapshot() {
+fn an_update_of_an_absent_key_fails_as_missing_row() {
     let source = format!("{NOTE}pub fn run() {{\n    Note.update(9, {{ text: \"b\" }});\n}}\n");
     assert_eq!(
         run(&source),
-        Err(ExecError::NotYet(
-            "missing-row write needs the activation snapshot (H5)"
-        ))
+        Err(ExecError::Code("ORNA-EVAL-TABLE-MISSING-ROW"))
     );
 }
 
@@ -151,15 +147,13 @@ fn a_rekey_moves_the_row_to_the_new_key() {
 }
 
 #[test]
-fn a_rekey_declines_a_read_of_the_old_key() {
+fn a_rekey_leaves_no_row_at_the_old_key() {
     let source = format!(
         "{NOTE}pub fn run() {{\n    Note.insert({{ id: 1, text: \"a\" }});\n    Note.rekey(1, 2);\n    Note.delete(1);\n}}\n"
     );
     assert_eq!(
         run(&source),
-        Err(ExecError::NotYet(
-            "missing-row write needs the activation snapshot (H5)"
-        ))
+        Err(ExecError::Code("ORNA-EVAL-TABLE-MISSING-ROW"))
     );
 }
 

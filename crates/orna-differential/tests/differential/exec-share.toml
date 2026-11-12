@@ -81,3 +81,35 @@ bead = "ornadb-csenl.21"
 case = "valid/blob-range.orna"
 reason = "the old pipeline answers ORNA-EVAL-VALUE for a raw Blob result (its blob values are ROV3 references, which sys.blob.from_bytes does not produce); the executor returns the canonical bytes the spec defines"
 bead = "ornadb-csenl.20"
+
+# Cases the executor runs whose update or rekey targets a key the table does not hold. The executor
+# answers the spec result for an absent row. Four disagree with the old pipeline, each for a named
+# reason, and each entry matches only its exact (executor, old) error-code pair; any other
+# disagreement on that case stays a mismatch.
+[[executor-gap-allowance]]
+case = "invalid/key-update.orna"
+executor = "ORNA-EVAL-TABLE-MISSING-ROW"
+old = "E3002"
+reason = "old pipeline rejects the key update statically (E3002); the HIR checker has no equivalent static rule, so the executor runs the update and reports the absent row (ORNA-EVAL-TABLE-MISSING-ROW). Static rejection parity is an open checker gap."
+bead = "ornadb-0xfiw"
+
+[[executor-gap-allowance]]
+case = "invalid/computed-field-update.orna"
+executor = "ORNA-EVAL-TABLE-MISSING-ROW"
+old = "E3011"
+reason = "old pipeline rejects the computed-field update statically (E3011); the HIR checker has no equivalent static rule, so the executor runs the update and reports the absent row (ORNA-EVAL-TABLE-MISSING-ROW). Static rejection parity is an open checker gap."
+bead = "ornadb-0xfiw"
+
+[[executor-gap-allowance]]
+case = "invalid/rekey-auto-id.orna"
+executor = "ORNA-EVAL-TABLE-UNADMITTED"
+old = "E3013"
+reason = "old pipeline rejects the rekey of an auto-generated id statically (E3013); the HIR checker has no equivalent static rule, so the executor reports the rekey as unadmitted (ORNA-EVAL-TABLE-UNADMITTED). Static rejection parity is an open checker gap."
+bead = "ornadb-0xfiw"
+
+[[executor-gap-allowance]]
+case = "valid/explicit-rekey.orna"
+executor = "ORNA-EVAL-TABLE-MISSING-ROW"
+old = "ORNA-EVAL-TABLE-SNAPSHOT"
+reason = "the H0 observer supplies no captured table snapshot, so the old pipeline answers ORNA-EVAL-TABLE-SNAPSHOT for the rekey; the executor answers the spec result for rekeying an absent key (ORNA-EVAL-TABLE-MISSING-ROW). The old side is the observer environment."
+bead = "ornadb-csenl.21"
