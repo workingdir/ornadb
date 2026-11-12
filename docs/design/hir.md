@@ -1461,7 +1461,8 @@ type, and H4 only needs types from H2 for arithmetic selection; section 7.2).
   accumulated special cases (checkpoints, snapshot contexts, secrets, money),
   and the spec gives typing rules only as INFER-1. H2a ships a strict subset;
   anything the subset cannot type is reported as "not yet on HIR" and the
-  harness counts it, so the ratchet is "typed share of the corpus only grows".
+  harness counts it, so the ratchet is exact: the recorded `typed` count equals
+  the measured count in both directions (`typed-share.toml`; gap G3).
 
 #### H3: effects pass and checker rules on HIR; `orna check` on HIR (`ornadb-csenl.18`)
 
@@ -1474,8 +1475,10 @@ type, and H4 only needs types from H2 for arithmetic selection; section 7.2).
   invalid and conformance cases; `Analysis` equal for the library entry points
   consumed by `orna-application`; the effect set of every corpus function
   equals the old `EffectSummary` or is listed. `orna check` runs on HIR by
-  default; `ORNA_CHECK_LEGACY=1` selects the old path for two releases of
-  nightly runs, then goes.
+  default. The old path stays selectable for two releases of nightly runs, then
+  goes. Its switch is named under decision Q7 (`hir-cutover.md` section 7). The
+  switches that exist today are `ORNA_CHECK_HIR` and `ORNA_CHECK_SHADOW`
+  (`crates/orna-cli/src/cli_check_backend.rs`); no `ORNA_CHECK_LEGACY` exists.
 - **Deletes.** In `orna-check`: `inference.rs` (3,294), `calls.rs` (2,877),
   `intrinsics.rs` (1,255), `flow.rs` (1,234), `imports.rs` (1,112),
   `collections.rs` and `collection_calls.rs` (439), `scope.rs` (137),
@@ -1634,8 +1637,10 @@ becomes the definition: baselines are re-recorded once, in one reviewed PR, and
 
 Before H9 every stage can be reverted by reverting its PRs, because the old
 pipeline never stopped being authoritative; the only shipped-code edits are the
-`route-trace` feature (H0) and consumer switches that H1 (LSP) and H3 (`orna
-check`) gate behind an environment variable for a fixed period. H9's per-entry
+`route-trace` feature (H0) and consumer switches that H3 (`orna check`) gates
+behind the `ORNA_CHECK_HIR` and `ORNA_CHECK_SHADOW` environment variables for a
+fixed period. H1 (LSP) has no environment gate: the gate is not yet implemented
+(tracked under `ornadb-csenl.16`). H9's per-entry
 switches are single-line defaults with the old path intact until the final
 deletion PR.
 
@@ -1998,7 +2003,7 @@ crate total where only part goes.
 | H6 | the conformance crate's three table handlers and their use for assertion admission (`semantic_adapter.rs:4590, 4695, 6318`); `committed_read_limits` and `CommittedReadLimits` (`orna-project/src/table_storage.rs:66`) | to be counted in the PR |
 | H7 | `orna-evaluator/src/explain_bindings.rs` 369 | 369 |
 | H8 | `orna-check/src/repl.rs` 564; `orna-evaluator/src/repl.rs` 1,766; the admission and alias code of `orna-project-repl` (2,605 total); the write path at `orna-application/src/repl_transaction.rs:525-560` | about 2,330 plus the project-repl share |
-| H9 | `orna-evaluator` entire (30,818, including `sys_bindings.rs` 2,942 and `relation.rs` 1,375); `orna-intrinsics` (4,894); `SourceMutationEffectHandler` and its async wrapper (`orna-application/src/lib.rs:1599-2963`, about 1,360), `Functions`, `StandardLayer`, `with_standard_sources` (`:294-406`); the three effect-handler traits and their adapters; `contextual_snapshot.rs` handler (668); the `route-trace` feature; `Expr.weight`; the legacy `analyze*` bodies; `ORNA_CHECK_LEGACY` | about 38,000 |
+| H9 | `orna-evaluator` entire (30,818, including `sys_bindings.rs` 2,942 and `relation.rs` 1,375); `orna-intrinsics` (4,894); `SourceMutationEffectHandler` and its async wrapper (`orna-application/src/lib.rs:1599-2963`, about 1,360), `Functions`, `StandardLayer`, `with_standard_sources` (`:294-406`); the three effect-handler traits and their adapters; `contextual_snapshot.rs` handler (668); the `route-trace` feature; `Expr.weight`; the legacy `analyze*` bodies | about 38,000 |
 
 Totals from the rows above that carry a number: about 69,000 lines deleted, from
 the 107,875 lines of the six crates of section 1.1 plus the 4,089 of

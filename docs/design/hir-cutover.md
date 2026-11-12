@@ -33,16 +33,14 @@ Notes on the table:
   inputs (H5/H8): 14"); those printed counts are over the whole corpus, not over
   the 14 non-agreeing run cases, and they are not reconciled to the allowance
   file here.
-- **Typed-share comparator.** `typed_share_ratchet` in
-  `crates/orna-differential/src/compare.rs:357-371` fails when `typed` falls and
-  when `lowered` changes. It does not fail when `typed` rises. The recorded
-  value (35) is therefore below the measured 49 and still passes. The file must
-  be raised in the H2 PR (gap G3).
-- **Diagnostic-code rows carry no reason.** The file header says "every
-  differing code must carry a recorded reason", and the test's own comment says
-  the same. A row is only `<case> :: <checker codes> => <HIR codes>`, with no
-  reason field, and the test does not check for one (gap G2). Criterion C1(b)
-  below needs this fixed.
+- **Typed-share comparator (fixed, gap G3).** `typed_share_ratchet` in
+  `crates/orna-differential/src/compare.rs` fails when `typed` falls, when `typed`
+  rises, and when `lowered` changes. The recorded `typed` is 51, the value measured
+  at af9a80627 with the pinned stdlib (51 of 104 old-accepted cases typed). The
+  earlier figure of 35 was stale.
+- **Diagnostic-code rows carry a reason (fixed, gap G2).** Every row of
+  `diagnostic_codes_differing.txt` is `<case> :: <checker codes> => <HIR codes> ::
+  <reason>`, and the test fails on a row without a reason. Criterion C1(b) holds.
 - **REPL rows carry reasons.** Each of the 33 rows in
   `repl_inline_differing.txt` has a one-line reason. That is the format the
   diagnostic file lacks.
@@ -90,12 +88,13 @@ Grep of `crates/` for `ORNA_CHECK_` finds two variables, both read in
 
 Discrepancies with `hir.md`:
 
-- `hir.md` section 6.3 (H3) names an `ORNA_CHECK_LEGACY` variable. No such
-  variable exists in the code. It is not needed for the flip (decision Q7).
-- `hir.md` section 6.6 says H1 (LSP) and H3 are gated by an environment variable.
-  Only H3 has one. `crates/orna-lsp/src` has no `ORNA_LSP` switch; its
-  `env::var_os` reads are `XDG_CACHE_HOME` and `HOME` (`standard.rs:290-292`).
-  The LSP's HIR status is therefore unverified (gap G8).
+- `hir.md` section 6.3 named an `ORNA_CHECK_LEGACY` variable that does not
+  exist. Corrected in this PR: it names `ORNA_CHECK_HIR` and `ORNA_CHECK_SHADOW`,
+  which exist. The old-path switch is decision Q7.
+- `hir.md` section 6.6 said H1 (LSP) is gated by an environment variable. No gate
+  exists in `crates/orna-lsp/src` (its `env::var_os` reads are `XDG_CACHE_HOME`
+  and `HOME`, `standard.rs:290-292`). Corrected in this PR: the LSP gate is not
+  yet implemented, tracked under `ornadb-csenl.16` (gap G8).
 - No switch exists for the assertion gate, `orna run`, the REPL, `serve` or the
   mount (gaps G6, G7). The per-entry switches in section 4.1 are new work.
 
@@ -106,13 +105,13 @@ Each criterion is a number that a command prints or a file records.
 
 | Consumer | Stage | Criteria (all required) | Measured now |
 |---|---|---|---|
-| C1 `orna check` | H3 | (a) diagnostic-code differing rows = 0, or each remaining row names a bead and the owner accepts it as an intended difference (decision Q11); (b) every row has a reason field (gap G2); (c) the shadow report shows zero unlisted differences on two consecutive nightly runs (section 4); (d) criterion C6 holds | 104 rows; no reason field; no nightly shadow report |
+| C1 `orna check` | H3 | (a) diagnostic-code differing rows = 0, or each remaining row names a bead and the owner accepts it as an intended difference (decision Q11); (b) every row has a reason field (gap G2, fixed in this PR); (c) the shadow report shows zero unlisted differences on two consecutive nightly runs (section 4); (d) criterion C6 holds | 102 rows, each with a reason field; no nightly shadow report |
 | C2 assertion gate (`assertion_gate.rs`) | H9 step 1 | (a) a switch exists (gap G6); (b) the gate's own tests pass with the HIR backend; (c) zero shadow differences on two consecutive nightly runs | no switch; calls `orna_check::analyze_with_providers` directly |
 | C3 `orna run` (executor) | H4 to H6 | (a) `agreed + allowances = evaluable` with every allowance naming a bead; (b) `steps-exact = agreed`; (c) zero shadow differences on two consecutive nightly runs; (d) the step re-baseline of `hir.md` section 6.4 is recorded in the flip PR | agreed 48; evaluable 110; allowances 9 + 1 + 4 = 14; steps 48 of 48 |
 | C4 REPL | H8 | (a) `agreed` equals the 48 runnable fixtures (currently 15); (b) the 33 expected rows are empty, or each names a bead; (c) the 56 excluded fixtures stay listed in `repl_inline_exclusions.txt` with a reason; (d) zero shadow differences on two consecutive nightly runs | 15 of 48; 33 expected; 56 excluded |
 | C5 `serve` and mount | H9 steps 4 and 5 | (a) a switch exists (gap G7); (b) the serve and mount tests pass with HIR; (c) zero shadow differences on two consecutive nightly runs. None of the three ratchet files of section 1 covers these two entry points (gap G7) | no switch; no ratchet |
-| C6 typed share | H2 | `typed` equals the measured value on the old-accepted corpus, and `typed-share.toml` records it in the same PR | measured 49 of 104; file records 35 (gap G3) |
-| C7 LSP | H1 | (a) the LSP conformance suite (`crates/orna-lsp/tests/ji3t0_conformance.rs`) passes against HIR; (b) no production import of `orna_check` remains in `crates/orna-lsp` | not verified (gap G8) |
+| C6 typed share | H2 | `typed` equals the measured value on the old-accepted corpus, and `typed-share.toml` records it in the same PR | measured 51 of 104; file records 51; comparator exact both ways (gap G3, fixed in this PR) |
+| C7 LSP | H1 | (a) the LSP conformance suite (`crates/orna-lsp/tests/ji3t0_conformance.rs`) passes against HIR; (b) no production import of `orna_check` remains in `crates/orna-lsp` | not verified; the LSP gate is not yet implemented (gap G8; `ornadb-csenl.16`) |
 | C8 allowlist hygiene | H9 | every `expected-differences.toml` entry names a bead that exists; no `[[difference]]` lacks a reason; the entry count is recorded in the PR | 107 entries, 107 reason and 107 bead fields; bead existence not checked (gap G19) |
 | C9 benchmarks | H9 | the benchmarks of `hir.md` section 7.4 meet their targets in CI | not measured here (gap G13) |
 | C10 dependency | H9 | `cargo metadata` shows no `orna-evaluator`, `orna-intrinsics`, `orna-project-repl` or `orna-check` types needed by production (and `orna-compat-v1` removed from the production graph) | `orna-evaluator` present |
@@ -252,7 +251,6 @@ comparison.
 | `route-trace` feature | `crates/orna-evaluator/Cargo.toml:13-18` (feature and `required-features` for a binary); consumer `crates/orna-differential/Cargo.toml:19` | not measured | H9 | located (was gap G14); removed when the harness no longer needs the old step counters |
 | `Expr.weight` | lowered expression field (HIR side) | not measured | H9 (`hir.md` 6.4) | removed with the step re-baseline (gap G12) |
 | Legacy `analyze*` bodies | `orna-check` | not measured | H9 | removed with the H3 modules |
-| `ORNA_CHECK_LEGACY` | none | 0 | H3 | the variable does not exist (section 2.1) |
 
 Measured subtotal of the H9 items with a verified size: orna-evaluator src
 31,317 + orna-intrinsics src 4,639 + application region 1,365 + orna-project-repl
@@ -298,9 +296,8 @@ Each decision is stated so that the answer is an option letter or a short phrase
   name and API, yet its H3 list deletes `types.rs`. The two statements conflict,
   so the owner must pick one.
 - **Q7.** Switch naming and form: per-entry `ORNA_<ENTRY>_HIR` and
-  `ORNA_<ENTRY>_SHADOW` (proposed), or one `ORNA_BACKEND=old|shadow|hir`. Also
-  confirm that `hir.md` 6.3's `ORNA_CHECK_LEGACY` is dropped, since it does not
-  exist.
+  `ORNA_<ENTRY>_SHADOW` (proposed), or one `ORNA_BACKEND=old|shadow|hir`. The
+  `hir.md` 6.3 reference to `ORNA_CHECK_LEGACY` is removed (corrected in this PR).
 - **Q8.** Shadow triage: the SLA for a nightly difference, and whether a calendar
   minimum applies in addition to two consecutive clean nightly runs.
 - **Q9.** Differential harness after deletion: freeze old outputs as golden files
@@ -317,13 +314,13 @@ Each decision is stated so that the answer is an option letter or a short phrase
 | # | Criterion | Gap | Bead | Note |
 |---|---|---|---|---|
 | G1 | C1 | 104 differing diagnostic-code rows | `ornadb-csenl.18` (H3, "effects pass and checker rules on HIR; orna check on HIR") | open |
-| G2 | C1(b), C8 | diagnostic-code rows have no reason field, though the header requires one; the test does not check for one | none | propose a bead under `ornadb-csenl.18` |
-| G3 | C6 | `typed-share.toml` records 35; measured 49. The comparator does not fail when `typed` rises | `ornadb-csenl.17` (H2, "Ty, inference and expression typing on HIR, diffed against the checker") | raise the file in the H2 PR |
+| G2 | C1(b), C8 | diagnostic-code rows had no reason field | none | fixed in this PR: each row carries a reason; the test fails on a row without one |
+| G3 | C6 | `typed-share.toml` recorded 35; measured 51. The comparator did not fail when `typed` rose | `ornadb-csenl.17` (H2, "Ty, inference and expression typing on HIR, diffed against the checker") | fixed in this PR: file records 51; comparator exact both ways |
 | G4 | C3 | exec agreement 48 of 110 evaluable; 14 allowances (9 harness, 1 representation, 4 executor-gap) | `ornadb-csenl.19` (H4, "orna-exec pure core"), `.20` (H5, "Host trait, core/sys native declarations"), `.21` (H6, "TableStore, cursors and one mutation path"), `ornadb-0xfiw` (executor gap) | each allowance names its bead in `exec-share.toml` |
 | G5 | C4 | REPL 15 of 48 runnable agree; 33 expected rows | `ornadb-csenl.23` (H8, "REPL as incremental module on HIR") | open |
 | G6 | C2 | the assertion gate has no HIR switch; it calls `orna_check` directly | none | propose a bead under `ornadb-csenl.24` |
 | G7 | C5 | `orna run`, REPL, serve and mount have no switch; serve and mount have no corpus ratchet | none | propose beads under `ornadb-csenl.24` |
-| G8 | C7 | `hir.md` 6.6 says H1 LSP is env-gated; no gate exists; LSP HIR status unverified | `ornadb-csenl.16` (H1, "lowering, resolver and call classification; LSP on HIR") | verify the LSP path before H9 |
+| G8 | C7 | `hir.md` 6.6 said H1 LSP is env-gated; no gate exists; LSP HIR status unverified | `ornadb-csenl.16` (H1, "lowering, resolver and call classification; LSP on HIR") | `hir.md` corrected in this PR; LSP gate not yet implemented; verify the LSP path under `ornadb-csenl.16` before H9 |
 | G9 | section 4.2 | no nightly shadow report; the `rest` shard runs the ratchets but no whole-corpus comparison | none | propose a bead under `ornadb-csenl.24` |
 | G10 | P2, section 2 | production types from `orna-check` (decision Q6) | `ornadb-csenl.18` (H3), `.24` (H9) | decision Q6 |
 | G11 | P1 | the differential harness has a normal dependency on the old evaluator; no golden freeze exists | none | propose a bead under `ornadb-csenl.24` |
@@ -331,7 +328,7 @@ Each decision is stated so that the answer is an option letter or a short phrase
 | G13 | C9 | benchmarks of `hir.md` 7.4 not measured in this plan | `ornadb-csenl.15` (H0, "orna-hir crate scaffold, differential harness, baseline benchmarks") | baselines are an H0 deliverable |
 | G14 | section 6.2 | `route-trace` feature: located at `crates/orna-evaluator/Cargo.toml:13-18`; not sized | `ornadb-csenl.24` | size in the H9 PR |
 | G15 | section 3 (bead hygiene) | `docs/language/DECIDED.md` decides D1 to D19, but beads `ornadb-csenl.1` (D1, "type inference: constraint inference or required parameter annotations") and the other language-decision beads are `OPEN` | owner | not an H9 blocker; misleading to the next reader |
-| G16 | section 2.1 | `hir.md` 6.3 names `ORNA_CHECK_LEGACY`, which does not exist; `hir.md` 6.6 claims H1 and H3 env gates, only H3 exists | none | correct `hir.md` in the H9 PR |
+| G16 | section 2.1 | `hir.md` 6.3 named `ORNA_CHECK_LEGACY`, which does not exist; `hir.md` 6.6 claimed H1 and H3 env gates, only H3 exists | none | fixed in this PR in `hir.md` |
 | G17 | section 6.3 | `sys.explain` planner decision (Q1, Q2) | `ornadb-csenl.22` (H7) | owner |
 | G18 | section 6.3 | `orna-compat-v1`, `orna-table`, filler std (Q3 to Q5) | none | owner |
 | G19 | C8 | 107 expected entries each have a bead field; the cited beads are not checked | `ornadb-csenl.24` | add a check before H9 |
@@ -342,10 +339,12 @@ Each decision is stated so that the answer is an option letter or a short phrase
 All runs at `0f1e5961d` in a worktree with a private `CARGO_TARGET_DIR`.
 
 - `cargo test -p orna-differential --test exec_share --test typed_share --test diagnostic_codes`:
-  exit 0. Output: "diagnostic codes over 211 cases (0 skipped) ... 104 cases
-  differ (expected 104)"; "executor agreement: 48/62 run cases agree with the old
-  pipeline (226 cases in the corpus)"; "exact step parity: 48/48"; "typed share:
-  49/104 old-checker-accepted cases (14 cases are not lowered)".
+  exit 0 at af9a80627, with the pinned stdlib. Re-run in this PR: "102 cases differ
+  (expected 102)" from `diagnostic_codes`; "typed share: 51/104
+  old-checker-accepted cases (14 cases are not lowered)" from `typed_share`.
+  Earlier figures, not re-run here, at 0f1e5961d: "executor agreement: 48/62 run
+  cases agree with the old pipeline (226 cases in the corpus)"; "exact step parity:
+  48/48".
 - `cargo test -p orna-repl --test repl_inline_differential -- --nocapture`:
   exit 0. Output: "repl-inline differential: agreed 15 of 48 runnable, 104 total, 33
   expected disagreements".
