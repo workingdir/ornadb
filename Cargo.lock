@@ -1565,6 +1565,7 @@ dependencies = [
  "orna-project-repl",
  "orna-standard-sources",
  "orna-syntax",
+ "orna-sys",
  "orna-value",
  "serde",
  "serde_json",
