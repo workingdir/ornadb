@@ -64,3 +64,12 @@ key in `natives::lookup` (76 keys), plus the root intrinsic `Some`, which is rou
 2. `bucket_by` typeck and executor binding, once the period type `P` is checked.
 3. Beads for the host-blocked families: clock and entropy (`now`, `uuid7`, `random.*`), provider streams
    (`stream.from_provider`), presentation (`ui.node`), money (H4), structured `Error` (H2b/H5).
+
+## Window natives: why not in this slice
+
+`window_rate`, `window_rate_integrate`, `window_derivative`, `window_integrate`, `strictly_ordered_time_series`, and
+`recursive_cte` are host-free but not yet portable as a declaration-only change. The old evaluator implements the
+window math in Rust (`crates/orna-evaluator/src/intrinsics/collection.rs`, from about line 826): rate and integrate
+divide a generic `T` by `Instant` differences, so the core declaration must first fix the numeric constraint on `T`.
+The std wrappers (`stdlib/std/query.orna`, lines 139-200) also validate window parameters before the native runs,
+so the native contract must match that validation exactly. This is the next slice.
