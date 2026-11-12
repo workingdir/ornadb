@@ -24,6 +24,7 @@ use crate::{
 
 use super::declare::{Builder, DeclAst, PendingFunction, PendingKind};
 use super::exprs::lower_expr;
+use super::natives::{declared_effects, native_symbol};
 use super::{BodyState, pats};
 
 /// One body to lower once signatures are final.
@@ -38,8 +39,9 @@ pub(crate) enum BodyJob {
         body: BodyId,
         /// The expression the body evaluates.
         expr: Box<Expr>,
-        /// The owner whose row an assertion body writes as `self`.
-        self_ty: Option<DefId>,
+        /// The type of the subject a body writes as `self`: a table or nominal row, or a
+        /// refined type's base value.
+        self_ty: Option<Ty>,
     },
 }
 
@@ -343,7 +345,8 @@ impl Builder<'_> {
                     ));
                 }
                 TableMember::Assertion { value, span } => {
-                    assertions.push(self.build_assertion(module, def, value, span.clone()));
+                    let row = self.row_type(def);
+                    assertions.push(self.build_assertion(module, def, value, span.clone(), row));
                 }
                 TableMember::Implementation {
                     implementation,
@@ -402,11 +405,12 @@ impl Builder<'_> {
             ty,
             initializer: Some(kind),
         }));
+        let self_ty = owner.map(|table| self.row_type(table));
         self.body_jobs.push(BodyJob::Expression {
             def: field,
             body: kind.body(),
             expr: Box::new(value),
-            self_ty: owner,
+            self_ty,
         });
     }
 
@@ -427,13 +431,20 @@ impl Builder<'_> {
         }
     }
 
-    /// Builds one assertion definition and its body job.
+    /// The type of a table's or nominal type's row, which an assertion body reads as `self`.
+    fn row_type(&mut self, owner: DefId) -> Ty {
+        self.program.tys.intern(TyKind::Adt(owner, Box::new([])))
+    }
+
+    /// Builds one assertion definition and its body job. `subject` is the type `self` names in
+    /// the body: the row for a table or nominal type, the base value for a refined type.
     fn build_assertion(
         &mut self,
         module: ModuleId,
         owner: DefId,
         value: &Expr,
         span: SyntaxSpan,
+        subject: Ty,
     ) -> DefId {
         let body = self.allocate_body(owner);
         let def = self.declare_nested(
@@ -447,7 +458,7 @@ impl Builder<'_> {
             def,
             body,
             expr: Box::new(value.clone()),
-            self_ty: Some(owner),
+            self_ty: Some(subject),
         });
         def
     }
@@ -594,12 +605,12 @@ impl Builder<'_> {
         let names = generic_names(generics);
         let params = self.build_generics(module, &names, generics);
         let mut members = Vec::new();
-        let type_members = match representation {
-            TypeRepresentation::Alias { ty, refinements } => {
-                let _ = super::types::lower_type(self, module, &names, ty);
-                refinements.as_slice()
-            }
-            TypeRepresentation::Nominal { members } => members.as_slice(),
+        let (type_members, refined_base) = match representation {
+            TypeRepresentation::Alias { ty, refinements } => (
+                refinements.as_slice(),
+                Some(super::types::lower_type(self, module, &names, ty)),
+            ),
+            TypeRepresentation::Nominal { members } => (members.as_slice(), None),
         };
         for member in type_members {
             match member {
@@ -633,7 +644,20 @@ impl Builder<'_> {
                     members.push(field);
                 }
                 TypeMember::Assertion { value, span } => {
-                    members.push(self.build_assertion(module, def, value, span.clone()));
+                    let assertion = match refined_base {
+                        Some(base) => self.build_assertion(
+                            module,
+                            def,
+                            &implicit_subject(value),
+                            span.clone(),
+                            base,
+                        ),
+                        None => {
+                            let row = self.row_type(def);
+                            self.build_assertion(module, def, value, span.clone(), row)
+                        }
+                    };
+                    members.push(assertion);
                 }
                 TypeMember::Implementation {
                     implementation,
@@ -906,6 +930,9 @@ impl Builder<'_> {
         else {
             return None;
         };
+        if !self.def_is_protocol(protocol) {
+            return None;
+        }
         let args = arguments
             .iter()
             .map(|argument| super::types::lower_type(self, module, names, argument))
@@ -1103,25 +1130,22 @@ impl Builder<'_> {
         def: DefId,
         body_id: BodyId,
         expr: &Expr,
-        self_ty: Option<DefId>,
+        self_ty: Option<Ty>,
     ) {
         let module = self.pending[def.index()].module;
         let mut state = BodyState::new(body_id, def, module);
         state.push_scope(expr.span().start);
-        if let Some(owner) = self_ty {
-            // An assertion's owner row is written as `self` (design section
-            // 2.4); the slot is the body's only parameter.
-            let ty = self
-                .program
-                .tys
-                .intern(crate::TyKind::Adt(owner, Box::new([])));
+        if let Some(ty) = self_ty {
+            // An assertion's subject is written as `self` (design section 2.4); the slot
+            // is the body's only parameter.
             let span = orna_syntax::SyntaxSpan::new(0, 0);
             let slot = state.add_local(crate::Name::new("self"), ty, span);
-            if matches!(
-                self.pending[def.index()].kind,
-                super::declare::PendingKind::Built(crate::DefKind::Field(_))
-            ) {
-                state.row = Some(super::row::RowScope { slot, table: owner });
+            if let (
+                super::declare::PendingKind::Built(crate::DefKind::Field(_)),
+                Some(&crate::TyKind::Adt(table, _)),
+            ) = (&self.pending[def.index()].kind, self.program.tys.kind(ty))
+            {
+                state.row = Some(super::row::RowScope { slot, table });
             }
             state.params.push(slot);
         }
@@ -1130,6 +1154,27 @@ impl Builder<'_> {
         state.pop_scope(expr.span().end);
         let error_ty = self.program.tys.error();
         self.complete_body(state, error_ty);
+    }
+}
+
+/// A refined type's predicate may omit its subject: `assert >= 0` compares the value being
+/// refined, which the body names `self`. Written as `self >= 0`, it lowers like any comparison.
+fn implicit_subject(value: &Expr) -> Expr {
+    match value {
+        Expr::Unary { op, rhs, span }
+            if matches!(op.as_str(), "==" | "!=" | "<" | "<=" | ">" | ">=" | "in") =>
+        {
+            Expr::Binary {
+                lhs: Box::new(Expr::Name {
+                    text: "self".to_owned(),
+                    span: span.clone(),
+                }),
+                op: op.clone(),
+                rhs: rhs.clone(),
+                span: span.clone(),
+            }
+        }
+        _ => value.clone(),
     }
 }
 
@@ -1148,40 +1193,4 @@ fn generic_names(generics: &[GenericParameter]) -> Vec<crate::Name> {
         .iter()
         .map(|generic| crate::Name::new(&generic.name))
         .collect()
-}
-
-/// The C symbol a shared library exports for a native key (library document
-/// section 4): `orna_` followed by the module path segments and the name joined
-/// by `__`. The flag is false when a part is outside `[A-Za-z0-9_]`.
-fn native_symbol(module: &crate::ModulePath, name: &crate::Name) -> (String, bool) {
-    let parts: Vec<&str> = module
-        .segments()
-        .iter()
-        .chain(std::iter::once(name))
-        .map(crate::Name::as_str)
-        .collect();
-    let ascii = parts.iter().all(|part| {
-        part.bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-    });
-    (format!("orna_{}", parts.join("__")), ascii)
-}
-
-/// The effect kinds a native declaration's `effect` clause names (ORNA-NATIVE-009).
-/// A recovered parse with no clause contributes nothing; a class spelling outside
-/// the vocabulary fails closed as `Opaque`.
-fn declared_effects(clause: Option<&NativeEffectSet>) -> crate::EffectSet {
-    match clause {
-        Some(NativeEffectSet::Classes { classes, .. }) => {
-            classes
-                .iter()
-                .fold(crate::EffectSet::empty(), |set, class| {
-                    set.join(match crate::EffectKind::from_class(&class.text) {
-                        Some(kind) => crate::EffectSet::single(kind),
-                        None => crate::EffectSet::opaque(),
-                    })
-                })
-        }
-        Some(NativeEffectSet::None { .. }) | None => crate::EffectSet::empty(),
-    }
 }
