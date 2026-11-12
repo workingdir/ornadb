@@ -13,9 +13,9 @@
 # are not part of `agreed`.
 
 [[exec-share]]
-agreed = 43
+agreed = 47
 evaluable = 110
-steps-exact = 43
+steps-exact = 47
 old-harness-environment = 1
 
 # Cases the executor runs against a declared table that the old pipeline answers `ORNA-EVAL-NAME`

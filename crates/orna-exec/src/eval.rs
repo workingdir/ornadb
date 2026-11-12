@@ -32,6 +32,8 @@ impl<'p> Machine<'p> {
         match &body.exprs[id].kind {
             ExprKind::Lit(lit) => self.literal(lit),
             ExprKind::Local(slot) => frame.get(*slot),
+            // A bare word no pass resolved names nothing at run time, the old pipeline's `ORNA-EVAL-NAME`.
+            ExprKind::BareName(_) => Err(Stop::Error("ORNA-EVAL-NAME")),
             ExprKind::Unary { op, operand } => {
                 let value = self.eval(body, frame, *operand)?;
                 ops::unary(*op, value)
