@@ -28,6 +28,7 @@ mod stats_round;
 mod stats_series;
 mod stats_stddev;
 mod stats_variance;
+mod sys_blob;
 mod text;
 mod time;
 mod time_format;
@@ -77,6 +78,11 @@ pub(crate) fn lookup(key: &NativeKey) -> Option<NativeFn> {
             collection::basic::union_rows
         }
         ("core.collection", "sum") | ("core.collection", "__numeric_sum") => collection::basic::sum,
+        ("sys", "blob_length") => sys_blob::blob_length,
+        ("sys", "blob_digest") => sys_blob::blob_digest,
+        ("sys", "blob_read") => sys_blob::blob_read,
+        ("sys", "blob_from_bytes") => sys_blob::blob_from_bytes,
+        ("sys", "blob_to_bytes") => sys_blob::blob_to_bytes,
         ("core.collection", "first") => collection::basic::first,
         ("core.collection", "last") => collection::basic::last,
         ("core.collection", "min") | ("core.collection", "__minimum") => {

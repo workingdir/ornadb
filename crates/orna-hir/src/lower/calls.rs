@@ -36,19 +36,6 @@ fn intrinsic_params(form: crate::IntrinsicForm) -> Option<Vec<ParamInfo>> {
     }
 }
 
-/// The parameters a relation stage declares. `bucket_by(values, period, zone)`; the zone may be omitted, as in
-/// the spec's `readings | bucket_by(1.day)`.
-fn relational_params(op: crate::RelOp) -> Option<Vec<ParamInfo>> {
-    match op {
-        crate::RelOp::BucketBy => Some(vec![
-            param("values", false),
-            param("period", false),
-            param("zone", true),
-        ]),
-        _ => None,
-    }
-}
-
 fn param(name: &str, has_default: bool) -> ParamInfo {
     ParamInfo {
         name: Name::new(name),
@@ -155,7 +142,10 @@ fn classify_name(
             Some((Callee::Intrinsic(form), intrinsic_params(form)))
         }
         NameTarget::Unresolved => match super::classify::rel_op(name.as_str()) {
-            Some(op) => Some((Callee::Relational { op }, relational_params(op))),
+            Some(op) => Some((
+                Callee::Relational { op },
+                super::classify::relational_params(op),
+            )),
             None => {
                 builder.diagnose(
                     module,

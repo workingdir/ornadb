@@ -12,22 +12,6 @@
 # carrying each case's fixture-catalogue environment).
 
 [[difference]]
-case = "valid/blob-range.orna"
-field = "call-classification"
-first = "examples/valid/blob-range.orna@40..59=SysHost"
-second = "no HIR call"
-reason = "the name is a `sys` or engine-native `std` surface member; `core.orna` and `sys.orna` declare those surfaces in stage H5 (D12), until then HIR has no declaration to resolve it to"
-bead = "ornadb-csenl.20"
-
-[[difference]]
-case = "valid/blob-range.orna"
-field = "call-classification"
-first = "examples/valid/blob-range.orna@80..93=SysHost"
-second = "no HIR call"
-reason = "the name is a `sys` or engine-native `std` surface member; `core.orna` and `sys.orna` declare those surfaces in stage H5 (D12), until then HIR has no declaration to resolve it to"
-bead = "ornadb-csenl.20"
-
-[[difference]]
 case = "valid/cwd-head.orna"
 field = "call-classification"
 first = "examples/valid/cwd-head.orna@29..51=SourceFunction"
@@ -212,62 +196,6 @@ reason = "the fixture-catalogue environment the reference corpus is admitted aga
 bead = "ornadb-csenl.15"
 
 [[difference]]
-case = "valid/blob-import.orna"
-field = "resolution-unresolved"
-first = "capture_file:0"
-second = "capture_file:1"
-reason = "the name is a `sys` or engine-native `std` surface member; `core.orna` and `sys.orna` declare those surfaces in stage H5 (D12), until then HIR has no declaration to resolve it to"
-bead = "ornadb-csenl.20"
-
-[[difference]]
-case = "valid/blob-nested.orna"
-field = "resolution-unresolved"
-first = "length:0"
-second = "length:1"
-reason = "the name is a `sys` or engine-native `std` surface member; `core.orna` and `sys.orna` declare those surfaces in stage H5 (D12), until then HIR has no declaration to resolve it to"
-bead = "ornadb-csenl.20"
-
-[[difference]]
-case = "valid/blob-range.orna"
-field = "resolution-unresolved"
-first = "from_bytes:0"
-second = "from_bytes:1"
-reason = "the name is a `sys` or engine-native `std` surface member; `core.orna` and `sys.orna` declare those surfaces in stage H5 (D12), until then HIR has no declaration to resolve it to"
-bead = "ornadb-csenl.20"
-
-[[difference]]
-case = "valid/blob-range.orna"
-field = "resolution-unresolved"
-first = "read:0"
-second = "read:1"
-reason = "the name is a `sys` or engine-native `std` surface member; `core.orna` and `sys.orna` declare those surfaces in stage H5 (D12), until then HIR has no declaration to resolve it to"
-bead = "ornadb-csenl.20"
-
-[[difference]]
-case = "valid/blob-writer.orna"
-field = "resolution-unresolved"
-first = "append:0"
-second = "append:1"
-reason = "the name is a `sys` or engine-native `std` surface member; `core.orna` and `sys.orna` declare those surfaces in stage H5 (D12), until then HIR has no declaration to resolve it to"
-bead = "ornadb-csenl.20"
-
-[[difference]]
-case = "valid/blob-writer.orna"
-field = "resolution-unresolved"
-first = "begin:0"
-second = "begin:1"
-reason = "the name is a `sys` or engine-native `std` surface member; `core.orna` and `sys.orna` declare those surfaces in stage H5 (D12), until then HIR has no declaration to resolve it to"
-bead = "ornadb-csenl.20"
-
-[[difference]]
-case = "valid/blob-writer.orna"
-field = "resolution-unresolved"
-first = "finish:0"
-second = "finish:1"
-reason = "the name is a `sys` or engine-native `std` surface member; `core.orna` and `sys.orna` declare those surfaces in stage H5 (D12), until then HIR has no declaration to resolve it to"
-bead = "ornadb-csenl.20"
-
-[[difference]]
 case = "valid/calendar-bucket.orna"
 field = "resolution-unresolved"
 first = "Europe:0"
@@ -322,14 +250,6 @@ first = "mail:0"
 second = "mail:1"
 reason = "the fixture-catalogue environment the reference corpus is admitted against supplies this name; the case carries no declaration for it and HIR lowering's environment is source-only, so carrying each case's environment is H0 corpus-fidelity work"
 bead = "ornadb-csenl.15"
-
-[[difference]]
-case = "valid/failure-natural-key.orna"
-field = "resolution-unresolved"
-first = "replay_failure:0"
-second = "replay_failure:1"
-reason = "the name is a `sys` or engine-native `std` surface member; `core.orna` and `sys.orna` declare those surfaces in stage H5 (D12), until then HIR has no declaration to resolve it to"
-bead = "ornadb-csenl.20"
 
 [[difference]]
 case = "valid/finite-stream.orna"
@@ -492,14 +412,6 @@ reason = "the fixture-catalogue environment the reference corpus is admitted aga
 bead = "ornadb-csenl.15"
 
 [[difference]]
-case = "valid/reviewed-commit.orna"
-field = "resolution-unresolved"
-first = "commit_reviewed:0"
-second = "commit_reviewed:1"
-reason = "the name is a `sys` or engine-native `std` surface member; `core.orna` and `sys.orna` declare those surfaces in stage H5 (D12), until then HIR has no declaration to resolve it to"
-bead = "ornadb-csenl.20"
-
-[[difference]]
 case = "valid/secret-reference.orna"
 field = "resolution-unresolved"
 first = "google:0"
@@ -514,14 +426,6 @@ first = "mail:0"
 second = "mail:1"
 reason = "the fixture-catalogue environment the reference corpus is admitted against supplies this name; the case carries no declaration for it and HIR lowering's environment is source-only, so carrying each case's environment is H0 corpus-fidelity work"
 bead = "ornadb-csenl.15"
-
-[[difference]]
-case = "valid/stream-admin-repl.orna"
-field = "resolution-unresolved"
-first = "skip_failure:0"
-second = "skip_failure:1"
-reason = "the name is a `sys` or engine-native `std` surface member; `core.orna` and `sys.orna` declare those surfaces in stage H5 (D12), until then HIR has no declaration to resolve it to"
-bead = "ornadb-csenl.20"
 
 [[difference]]
 case = "valid/sys-checkpoint.orna"
@@ -708,14 +612,6 @@ reason = "the name is a `sys` or engine-native `std` surface member; `core.orna`
 bead = "ornadb-csenl.20"
 
 [[difference]]
-case = "valid/blob-writer.orna"
-field = "resolution-unresolved"
-first = "from_bytes:0"
-second = "from_bytes:1"
-reason = "the name is a `sys` or engine-native `std` surface member; `core.orna` and `sys.orna` declare those surfaces in stage H5 (D12), until then HIR has no declaration to resolve it to"
-bead = "ornadb-csenl.20"
-
-[[difference]]
 case = "valid/cwd-head.orna"
 field = "resolution-unresolved"
 first = "CWD:0"
@@ -829,6 +725,30 @@ first = "examples.valid.pipeline-precedence::increment_count=pure"
 second = "examples.valid.pipeline-precedence::increment_count=TableRead+MayFail"
 reason = "same cause as count_is_positive: `values | count` over a list parameter is classified as a relation terminal by name"
 bead = "ornadb-csenl.18"
+
+[[difference]]
+case = "valid/blob-import.orna"
+field = "effects"
+first = "examples.valid.blob-import::import_song=TableWrite+Opaque+MayFail"
+second = "examples.valid.blob-import::import_song=RuntimeAdmin+TableWrite+MayFail"
+reason = "the sys.blob.capture_file spelling now resolves in HIR (lower/imports.rs sys spelling lookup), so the call carries its declared runtime_admin clause; the old checker still reports Opaque for the unresolved sys spelling. HIR is the more precise set"
+bead = "ornadb-csenl.20"
+
+[[difference]]
+case = "valid/blob-writer.orna"
+field = "effects"
+first = "examples.valid.blob-writer::capture=TableRead+Opaque+MayFail"
+second = "examples.valid.blob-writer::capture=RuntimeAdmin+TableRead+MayFail"
+reason = "the sys.blob.begin spelling now resolves in HIR, so the call carries its declared runtime_admin clause; the old checker reports Opaque for the unresolved sys spelling. HIR is the more precise set"
+bead = "ornadb-csenl.20"
+
+[[difference]]
+case = "valid/reviewed-commit.orna"
+field = "effects"
+first = "examples.valid.reviewed-commit::publish=Opaque+MayFail"
+second = "examples.valid.reviewed-commit::publish=StorageAdmin+MayFail"
+reason = "the sys.admin.commit_reviewed spelling now resolves in HIR, so the call carries its declared storage_admin clause; the old checker reports Opaque for the unresolved sys spelling. HIR is the more precise set"
+bead = "ornadb-csenl.20"
 
 [[difference]]
 case = "invalid/assert-effectful-table.orna"

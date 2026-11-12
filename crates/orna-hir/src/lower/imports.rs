@@ -12,7 +12,7 @@ use orna_syntax::UseTail;
 
 use crate::Idx;
 use crate::resolve::PathKind;
-use crate::{DefId, Import, ImportTarget, ModuleId, ModulePath, Name, NameTarget};
+use crate::{DefId, Import, ImportTarget, ModuleId, ModuleOrigin, ModulePath, Name, NameTarget};
 
 use super::declare::{Builder, PendingUse};
 
@@ -392,6 +392,20 @@ impl Builder<'_> {
     fn resolve_from_module(&self, root: ModuleId, rest: &[Name]) -> PathKind {
         if rest.is_empty() {
             return PathKind::Module(root);
+        }
+        if self.program.modules[root].origin == ModuleOrigin::Sys {
+            // A `sys` native is reached by its 1.1 spelling (`sys.blob.from_bytes`), not by its declared name.
+            let spelling = self.program.modules[root]
+                .path
+                .segments()
+                .iter()
+                .chain(rest)
+                .map(Name::as_str)
+                .collect::<Vec<_>>()
+                .join(".");
+            if let Some(def) = self.sys_native_by_spelling(&spelling) {
+                return PathKind::Def(def);
+            }
         }
         let base = self.program.modules[root].path.clone();
         for take in (1..=rest.len()).rev() {

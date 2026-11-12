@@ -440,16 +440,26 @@ pub fn load_harness_allowances() -> Result<Vec<HarnessAllowance>, String> {
 
 /// Parses the harness allowances. A missing reason or bead is a load error.
 pub fn parse_harness_allowances(source: &str) -> Result<Vec<HarnessAllowance>, String> {
+    parse_allowances(source, "harness-allowance")
+}
+
+/// Reads the `[[representation-allowance]]` tables of `tests/differential/exec-share.toml`: the cases whose old
+/// pipeline answer is a representation gap for a raw `Blob` result, not the executor's result.
+pub fn load_representation_allowances() -> Result<Vec<HarnessAllowance>, String> {
+    let path = differential_dir().join("exec-share.toml");
+    parse_allowances(&read_file(&path)?, "representation-allowance")
+}
+
+/// Parses the `table` allowances. A missing reason or bead is a load error.
+fn parse_allowances(source: &str, table: &str) -> Result<Vec<HarnessAllowance>, String> {
     let document = toml_lite::parse(source)?;
     let mut allowances = Vec::new();
-    for table in document.tables_named("harness-allowance") {
-        let case = table.string("case")?.to_owned();
-        let reason = table.string("reason")?.to_owned();
-        let bead = table.string("bead")?.to_owned();
+    for entry in document.tables_named(table) {
+        let case = entry.string("case")?.to_owned();
+        let reason = entry.string("reason")?.to_owned();
+        let bead = entry.string("bead")?.to_owned();
         if reason.trim().is_empty() || bead.trim().is_empty() {
-            return Err(format!(
-                "{case}: a harness allowance needs a reason and a bead"
-            ));
+            return Err(format!("{case}: a {table} needs a reason and a bead"));
         }
         allowances.push(HarnessAllowance { case, reason, bead });
     }
