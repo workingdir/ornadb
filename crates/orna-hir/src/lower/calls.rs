@@ -27,6 +27,35 @@ use super::exprs::{error_expr, flatten_path, lower_expr, push};
 /// One callee and the parameters its arguments bind to, when it declares them.
 pub(crate) type ClassifiedCallee = Option<(Callee, Option<Vec<ParamInfo>>)>;
 
+/// The parameters a root form declares, for labelled arguments. The spec writes
+/// `error(code: .., message: ..)`.
+fn intrinsic_params(form: crate::IntrinsicForm) -> Option<Vec<ParamInfo>> {
+    match form {
+        crate::IntrinsicForm::Error => Some(vec![param("code", false), param("message", false)]),
+        _ => None,
+    }
+}
+
+/// The parameters a relation stage declares. `bucket_by(values, period, zone)`; the zone may be omitted, as in
+/// the spec's `readings | bucket_by(1.day)`.
+fn relational_params(op: crate::RelOp) -> Option<Vec<ParamInfo>> {
+    match op {
+        crate::RelOp::BucketBy => Some(vec![
+            param("values", false),
+            param("period", false),
+            param("zone", true),
+        ]),
+        _ => None,
+    }
+}
+
+fn param(name: &str, has_default: bool) -> ParamInfo {
+    ParamInfo {
+        name: Name::new(name),
+        has_default,
+    }
+}
+
 /// Whether a callee starts concurrent bodies: the lambdas it receives run as
 /// separate activations that capture snapshots (design 03, "Concurrent bodies
 /// capture snapshots"). These are `parallel`, `race` and `timeout`, and
@@ -115,10 +144,10 @@ fn classify_name(
         NameTarget::Def(def) => classified_def(builder, state, def, span),
         NameTarget::Intrinsic => {
             let form = super::classify::intrinsic_form(name.as_str())?;
-            Some((Callee::Intrinsic(form), None))
+            Some((Callee::Intrinsic(form), intrinsic_params(form)))
         }
         NameTarget::Unresolved => match super::classify::rel_op(name.as_str()) {
-            Some(op) => Some((Callee::Relational { op }, None)),
+            Some(op) => Some((Callee::Relational { op }, relational_params(op))),
             None => {
                 builder.diagnose(
                     module,
