@@ -8,14 +8,16 @@ use std::rc::Rc;
 
 use num_bigint::Sign;
 use num_traits::ToPrimitive;
-use orna_hir::{ArgValue, Body, Call, Callee, DefId, DefKind, ExprId, ExprKind, RelOp};
+use orna_hir::{
+    ArgValue, Body, Call, Callee, DefId, DefKind, ExprId, ExprKind, FieldRef, Program, RelOp,
+};
 
 use crate::error::Stop;
 use crate::frame::Frame;
 use crate::machine::Machine;
 use crate::raw_value;
 use crate::store::{CursorId, Direction, KeyBounds};
-use crate::table::{decode_row, store_invariant};
+use crate::table::{decode_row, field_of_row, store_invariant};
 use crate::value::Value;
 
 /// The consumer of one row. It returns `false` to stop the pipeline.
@@ -39,11 +41,19 @@ enum Stage {
     /// Passes a row on when its predicate is true.
     Filter(Value),
     /// Passes the transform of each row.
-    Map(Value),
+    Map(Transform),
     /// Passes the first `n` rows, then ends the pipeline.
     Take(usize),
     /// Skips the first `n` rows.
     Drop(usize),
+}
+
+/// What a `map` applies to each row: a callable value, or a table field read as a function of the row.
+enum Transform {
+    /// A callable value, applied to each row.
+    Closure(Value),
+    /// A table field, read from each row (a computed field runs its body).
+    Field(DefId),
 }
 
 /// Whether the pipeline continues after a row.
@@ -128,13 +138,51 @@ fn append<'p>(
     let source = source_of(machine, body, frame, input, stages)?;
     let stage = match op {
         RelOp::Filter => Stage::Filter(argument_value(machine, body, frame, call, 1)?),
-        RelOp::Map => Stage::Map(argument_value(machine, body, frame, call, 1)?),
+        RelOp::Map => Stage::Map(transform_argument(machine, body, frame, call)?),
         RelOp::Take => Stage::Take(count_argument(machine, body, frame, call)?),
         RelOp::Drop => Stage::Drop(count_argument(machine, body, frame, call)?),
         _ => return Err(Stop::NotYet("relation stage (H7)")),
     };
     stages.push(stage);
     Ok(source)
+}
+
+/// The transform of a `map` call: a table field named as a function is read from each row, and any other argument
+/// is evaluated to a callable value.
+fn transform_argument<'p>(
+    machine: &mut Machine<'p>,
+    body: &'p Body,
+    frame: &mut Frame,
+    call: &Call,
+) -> Result<Transform, Stop> {
+    let id = expr_argument(call, 1)?;
+    match table_field(machine.program, body, id) {
+        Some(def) => Ok(Transform::Field(def)),
+        None => Ok(Transform::Closure(machine.eval(body, frame, id)?)),
+    }
+}
+
+/// The table field a `Table.field` reference names, if `id` is one. The field is settled by definition or, while
+/// the type pass leaves it a name, looked up among the table's fields.
+fn table_field(program: &Program, body: &Body, id: ExprId) -> Option<DefId> {
+    let ExprKind::Field { base, field } = &body.exprs[id].kind else {
+        return None;
+    };
+    let ExprKind::Def(table) = body.exprs[*base].kind else {
+        return None;
+    };
+    let DefKind::Table(table) = &program.defs[table].kind else {
+        return None;
+    };
+    match field {
+        FieldRef::Def(def) => Some(*def),
+        FieldRef::Name(name) => table
+            .fields
+            .iter()
+            .copied()
+            .find(|def| program.defs[*def].name == *name),
+        FieldRef::Index(_) => None,
+    }
 }
 
 /// The source of `input`. A stage call is part of the same pipeline, so it is appended and not evaluated.
@@ -284,7 +332,10 @@ fn push<'p>(
             }
         }
         Stage::Map(transform) => {
-            let mapped = machine.call_closure(transform, vec![row])?;
+            let mapped = match transform {
+                Transform::Closure(callable) => machine.call_closure(callable, vec![row])?,
+                Transform::Field(field) => field_of_row(machine, *field, row)?,
+            };
             push(machine, stages, counts, index + 1, mapped, sink)
         }
         Stage::Drop(count) => {

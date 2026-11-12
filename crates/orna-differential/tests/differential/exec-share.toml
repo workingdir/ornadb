@@ -16,7 +16,7 @@
 agreed = 47
 evaluable = 110
 steps-exact = 47
-old-harness-environment = 6
+old-harness-environment = 9
 
 # Cases the executor runs against a declared table that the old pipeline answers `ORNA-EVAL-NAME`
 # only because the H0 observer supplies no table store for a module with no rows. The count is a
@@ -53,6 +53,24 @@ bead = "ornadb-csenl.21"
 [[harness-allowance]]
 case = "valid/effectful-expression.orna"
 reason = "old pipeline answers ORNA-EVAL-NAME because the H0 observer has no table store; the executor reaches the store boundary (ORNA-EVAL-TABLE-ROW)."
+bead = "ornadb-csenl.21"
+
+# Cases the executor runs by reading a table field as a function, `map(Contact.field)`, over the table. The
+# H0 observer supplies no table store for a module with no rows, so the old pipeline answers `ORNA-EVAL-NAME`;
+# the executor returns the spec result, the empty list (CBOR `0x80`) of an empty table. Not credited as agreement.
+[[harness-allowance]]
+case = "valid/computed-field.orna"
+reason = "old pipeline answers ORNA-EVAL-NAME because the H0 observer has no table store; the executor maps the table's computed field over zero rows and returns the empty list the spec defines"
+bead = "ornadb-csenl.21"
+
+[[harness-allowance]]
+case = "valid/default-and-computed-fields.orna"
+reason = "old pipeline answers ORNA-EVAL-NAME because the H0 observer has no table store; the executor maps the table's computed field over zero rows and returns the empty list the spec defines"
+bead = "ornadb-csenl.21"
+
+[[harness-allowance]]
+case = "valid/computed-and-defaulted-fields.orna"
+reason = "old pipeline answers ORNA-EVAL-NAME because the H0 observer has no table store; the executor maps the table's computed field over zero rows and returns the empty list the spec defines"
 bead = "ornadb-csenl.21"
 
 # Cases the executor runs whose result is a raw `Blob`, which the old pipeline answers
