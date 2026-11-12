@@ -22,6 +22,7 @@ pub mod explain;
 mod float;
 mod frame;
 mod globals;
+mod host;
 mod link;
 mod machine;
 mod natives;
@@ -39,9 +40,12 @@ mod variants;
 
 pub use error::ExecError;
 pub use globals::{Globals, evaluate_global};
+pub use host::{
+    ActivationContext, Host, HostFailure, HostInstant, HostManifest, RowSource, StoreHost, SysSlot,
+};
 pub use machine::{
-    ExecLimits, Measured, Run, measure_entry, measure_entry_in, measure_entry_with_store,
-    run_entry, run_entry_cancellable,
+    ExecLimits, Measured, Run, measure_entry, measure_entry_in, measure_entry_with_host,
+    measure_entry_with_store, run_entry, run_entry_cancellable, run_entry_with_host,
 };
 #[cfg(feature = "test-support")]
 pub use store::contract;

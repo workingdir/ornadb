@@ -27,7 +27,7 @@ use orna_runtime::{
 use orna_value::Format3Context;
 
 /// The production table schema identity (ORNA-VFS-019), shared with the mount.
-#[path = "../../src/table_schema.rs"]
+#[path = "../../../orna-cli-support/src/table_schema.rs"]
 mod table_schema;
 pub use table_schema::committed_table_schema_identity;
 

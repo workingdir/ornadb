@@ -23,7 +23,7 @@
 
 use super::{Diagnostic, Endpoint, cli_legacy, cli_row_key, local_project_path};
 use crate::cli_row_key::render_key;
-use crate::encoding::hex;
+use orna_base::hex;
 
 use orna_repository::{
     AdmittedRow, FormatContextError, GitCommitRef, KeyRange, NativeGraphContext, Repository,

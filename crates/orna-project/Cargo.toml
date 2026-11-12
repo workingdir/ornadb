@@ -12,6 +12,7 @@ orna-repository = { path = "../orna-repository" }
 orna-check = { path = "../orna-check" }
 orna-syntax = { path = "../orna-syntax" }
 orna-value = { path = "../orna-value" }
+orna-unicode = { path = "../orna-unicode" }
 num-bigint = "0.4.6"
 orna-runtime = { path = "../orna-runtime" }
 orna-exec = { path = "../orna-exec" }

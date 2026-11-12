@@ -129,7 +129,8 @@ pub(super) fn rekey(
     }
     let row = raw_value::record(fields);
     machine
-        .store
+        .host
+        .store()
         .delete(table, &old_key)
         .map_err(|error| store_invariant(&error))?;
     put_row(
