@@ -80,6 +80,7 @@ layer = 3
 [[crate]]
 name = "orna-sys-interface"
 layer = 2
+allowed = ["orna-syntax"]
 
 [[crate]]
 name = "orna-standard-sources"
