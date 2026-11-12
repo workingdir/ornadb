@@ -11,7 +11,7 @@ use crate::dispatch::ProtocolMembers;
 use crate::error::{ExecError, Stop};
 use crate::frame::{Frame, TypeEnv};
 use crate::globals::Globals;
-use crate::host::{Host, StoreHost};
+use crate::host::{Host, HostInstant, StoreHost};
 use crate::link;
 use crate::natives::NativeFn;
 use crate::store::TableStore;
@@ -68,6 +68,9 @@ pub(crate) struct Machine<'p> {
     /// The host the run reads its tables, clock, entropy and `sys` members from. Each entry-point activation opens
     /// one store activation on its store, committed or rolled back.
     pub(crate) host: &'p mut dyn Host,
+    /// The instant of this activation, read from the host once when the machine starts (ORNA-TXN-005). `now` and
+    /// `uuid7` read it; the host is not asked again within the run.
+    pub(crate) activation_time: HostInstant,
     /// The session's evaluated top-level `let`s. Taken from the caller for the run and handed back after it.
     pub(crate) globals: Globals,
     /// Whether this run's store starts empty and no other writer shares it, so a row absent from the store is
@@ -85,6 +88,7 @@ impl<'p> Machine<'p> {
         cancel: Option<Arc<AtomicBool>>,
         host: &'p mut dyn Host,
     ) -> Self {
+        let activation_time = host.now();
         Self {
             program,
             limits,
@@ -94,6 +98,7 @@ impl<'p> Machine<'p> {
             protocols: OnceCell::new(),
             ordering: OnceCell::new(),
             host,
+            activation_time,
             globals: Globals::new(),
             empty_snapshot: false,
             steps: 0,

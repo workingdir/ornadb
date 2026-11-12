@@ -363,7 +363,7 @@ Startable now (independent of in-flight PRs):
   `orna-sys`) into layer 6. The budget entry for `introspection.rs` shrinks from
   17,855 to the remainder. Acceptance: `introspection.rs` no longer over the
   recorded cap; the new crate file is under 1200 lines or recorded.
-- **S5 `orna-fuse`.** Move `orna-cli/src/fuse_mount/` (filesystem, 4,596 lines)
+- **S5 `orna-fuse`.** Move `orna-cli/src/fuse_mount/` (13.2k lines, not the earlier 4,596 figure)
   into layer 14. The 7603h.13 bead is superseded by this slice. Acceptance:
   `orna-cli` budget drops by the moved lines; `orna --help` and `orna status
   --porcelain` byte-identical.

@@ -76,7 +76,7 @@ name = "orna-conformance"
 [crate.files]
 "src/lib.rs" = 2962
 "src/main.rs" = 1981
-"src/semantic_adapter.rs" = 14479
+"src/semantic_adapter.rs" = 13779
 [crate.functions]
 "src/lib.rs::execute_reference_project_runtime_adapter" = 208
 "src/lib.rs::run_fixture" = 123
