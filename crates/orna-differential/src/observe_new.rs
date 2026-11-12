@@ -42,6 +42,7 @@ use orna_syntax::{
 
 use crate::Route;
 use crate::case::{Case, CaseKind, Family};
+use crate::fixture_environment::ATTACHED_SUPPORT;
 
 /// The repository's standard modules, parsed once per test process.
 struct StandardModule {
@@ -75,6 +76,17 @@ static FIXTURE_UNITS: LazyLock<StandardModule> = LazyLock::new(|| {
     StandardModule {
         path: module_path_of(&logical),
         tree: parse_module_with_file(orna_check::FIXTURE_UNIT_SUPPORT, logical.clone()).value,
+        logical,
+    }
+});
+
+/// The attached fixture declarations (`fixture_environment::ATTACHED_SUPPORT`),
+/// reached by reference cases through `use fixture.attached.*;`.
+static FIXTURE_ATTACHED: LazyLock<StandardModule> = LazyLock::new(|| {
+    let logical = "fixture/attached.orna".to_owned();
+    StandardModule {
+        path: module_path_of(&logical),
+        tree: parse_module_with_file(ATTACHED_SUPPORT, logical.clone()).value,
         logical,
     }
 });
@@ -166,7 +178,11 @@ pub fn lower_case(case: &Case) -> Result<LoweredProgram, String> {
 /// catalogue supplies implicitly. The spliced item carries the snippet's spans,
 /// which hold no call or diagnostic.
 fn import_fixture_units(tree: &mut SyntaxTree) {
-    let import = parse_module_with_file("use fixture.units.*;\n", "fixture/import.orna").value;
+    let import = parse_module_with_file(
+        "use fixture.units.*;\nuse fixture.attached.*;\n",
+        "fixture/import.orna",
+    )
+    .value;
     tree.items.splice(0..0, import.items);
 }
 
@@ -186,6 +202,7 @@ fn lower_module_case(case: &Case) -> Result<LoweredProgram, String> {
     let mut standard: Vec<&StandardModule> = STANDARD_MODULES.iter().collect();
     if case.family == Family::Reference {
         standard.push(&FIXTURE_UNITS);
+        standard.push(&FIXTURE_ATTACHED);
     }
     let standard = standard.into_iter();
     let mut units = Vec::new();

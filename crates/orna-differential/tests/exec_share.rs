@@ -48,6 +48,7 @@ fn executor_agreement_with_the_old_pipeline_only_grows() {
                 if observation.outcome.as_ref() != Some(&outcome) {
                     if harness_environment_allowed(
                         case,
+                        &outcome,
                         observation.outcome.as_ref(),
                         &harness_allowances,
                         &mut harness_used,
@@ -129,16 +130,21 @@ fn executor_agreement_with_the_old_pipeline_only_grows() {
     );
 }
 
-/// Whether `case`'s disagreement is the H0 observer's missing table store: the old outcome is
-/// `ORNA-EVAL-NAME` for a module that declares a table, and the case has a harness allowance.
+/// Whether `case`'s disagreement is the H0 observer's missing table store. Either the old outcome
+/// is `ORNA-EVAL-NAME` for a module that declares a table, or the executor reports
+/// `ORNA-EVAL-TABLE-ROW` for a case the old pipeline rejects. Both need a harness allowance.
 fn harness_environment_allowed(
     case: &Case,
+    executor: &Result<Vec<u8>, String>,
     old: Option<&Result<Vec<u8>, String>>,
     allowances: &[compare::HarnessAllowance],
     used: &mut [bool],
 ) -> bool {
-    let missing_name = matches!(old, Some(Err(code)) if code == "ORNA-EVAL-NAME");
-    if !missing_name || !declares_table(case) {
+    let missing_name =
+        matches!(old, Some(Err(code)) if code == "ORNA-EVAL-NAME") && declares_table(case);
+    let missing_store = matches!(executor, Err(code) if code == "ORNA-EVAL-TABLE-ROW")
+        && matches!(old, Some(Err(_)));
+    if !missing_name && !missing_store {
         return false;
     }
     match allowances

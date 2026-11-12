@@ -12,14 +12,6 @@
 # carrying each case's fixture-catalogue environment).
 
 [[difference]]
-case = "invalid/duplicate-key.orna"
-field = "call-classification"
-first = "examples/invalid/duplicate-key.orna@15..29=SourceFunction"
-second = "no HIR call"
-reason = "the callee is supplied by the fixture-catalogue environment and the case carries no declaration for it, so the HIR program has no call at that span; carrying each case's environment is H0 corpus-fidelity work"
-bead = "ornadb-csenl.15"
-
-[[difference]]
 case = "valid/blob-range.orna"
 field = "call-classification"
 first = "examples/valid/blob-range.orna@40..59=SysHost"
@@ -39,14 +31,6 @@ bead = "ornadb-csenl.20"
 case = "valid/cwd-head.orna"
 field = "call-classification"
 first = "examples/valid/cwd-head.orna@29..51=SourceFunction"
-second = "no HIR call"
-reason = "the callee is supplied by the fixture-catalogue environment and the case carries no declaration for it, so the HIR program has no call at that span; carrying each case's environment is H0 corpus-fidelity work"
-bead = "ornadb-csenl.15"
-
-[[difference]]
-case = "valid/effectful-expression.orna"
-field = "call-classification"
-first = "examples/valid/effectful-expression.orna@15..29=SourceFunction"
 second = "no HIR call"
 reason = "the callee is supplied by the fixture-catalogue environment and the case carries no declaration for it, so the HIR program has no call at that span; carrying each case's environment is H0 corpus-fidelity work"
 bead = "ornadb-csenl.15"
@@ -140,50 +124,10 @@ reason = "the fixture-catalogue environment the reference corpus is admitted aga
 bead = "ornadb-csenl.15"
 
 [[difference]]
-case = "invalid/computed-field-insert.orna"
-field = "resolution-unresolved"
-first = "Contact:0"
-second = "Contact:1"
-reason = "the fixture-catalogue environment the reference corpus is admitted against supplies this name; the case carries no declaration for it and HIR lowering's environment is source-only, so carrying each case's environment is H0 corpus-fidelity work"
-bead = "ornadb-csenl.15"
-
-[[difference]]
-case = "invalid/computed-field-update.orna"
-field = "resolution-unresolved"
-first = "Contact:0"
-second = "Contact:1"
-reason = "the fixture-catalogue environment the reference corpus is admitted against supplies this name; the case carries no declaration for it and HIR lowering's environment is source-only, so carrying each case's environment is H0 corpus-fidelity work"
-bead = "ornadb-csenl.15"
-
-[[difference]]
 case = "invalid/cross-database-write.orna"
 field = "resolution-unresolved"
 first = "work:0"
 second = "work:1"
-reason = "the fixture-catalogue environment the reference corpus is admitted against supplies this name; the case carries no declaration for it and HIR lowering's environment is source-only, so carrying each case's environment is H0 corpus-fidelity work"
-bead = "ornadb-csenl.15"
-
-[[difference]]
-case = "invalid/duplicate-key.orna"
-field = "resolution-unresolved"
-first = "Contact:0"
-second = "Contact:2"
-reason = "the fixture-catalogue environment the reference corpus is admitted against supplies this name; the case carries no declaration for it and HIR lowering's environment is source-only, so carrying each case's environment is H0 corpus-fidelity work"
-bead = "ornadb-csenl.15"
-
-[[difference]]
-case = "invalid/effectful-display.orna"
-field = "resolution-unresolved"
-first = "Audit:0"
-second = "Audit:1"
-reason = "the fixture-catalogue environment the reference corpus is admitted against supplies this name; the case carries no declaration for it and HIR lowering's environment is source-only, so carrying each case's environment is H0 corpus-fidelity work"
-bead = "ornadb-csenl.15"
-
-[[difference]]
-case = "invalid/key-update.orna"
-field = "resolution-unresolved"
-first = "Contact:0"
-second = "Contact:1"
 reason = "the fixture-catalogue environment the reference corpus is admitted against supplies this name; the case carries no declaration for it and HIR lowering's environment is source-only, so carrying each case's environment is H0 corpus-fidelity work"
 bead = "ornadb-csenl.15"
 
@@ -194,14 +138,6 @@ first = "Ok:0"
 second = "Ok:1"
 reason = "the checker reports this legacy vocabulary under ORNA091-E-RESULT rather than ORNA-S012; HIR reports the name unresolved until the vocabulary moves into the HIR pass in stage H3"
 bead = "ornadb-csenl.18"
-
-[[difference]]
-case = "invalid/missing-required-field.orna"
-field = "resolution-unresolved"
-first = "Contact:0"
-second = "Contact:1"
-reason = "the fixture-catalogue environment the reference corpus is admitted against supplies this name; the case carries no declaration for it and HIR lowering's environment is source-only, so carrying each case's environment is H0 corpus-fidelity work"
-bead = "ornadb-csenl.15"
 
 [[difference]]
 case = "invalid/money-float.orna"
@@ -248,14 +184,6 @@ case = "invalid/two-durable-sources.orna"
 field = "resolution-unresolved"
 first = "openbanking:0"
 second = "openbanking:1"
-reason = "the fixture-catalogue environment the reference corpus is admitted against supplies this name; the case carries no declaration for it and HIR lowering's environment is source-only, so carrying each case's environment is H0 corpus-fidelity work"
-bead = "ornadb-csenl.15"
-
-[[difference]]
-case = "invalid/unknown-field.orna"
-field = "resolution-unresolved"
-first = "Contact:0"
-second = "Contact:1"
 reason = "the fixture-catalogue environment the reference corpus is admitted against supplies this name; the case carries no declaration for it and HIR lowering's environment is source-only, so carrying each case's environment is H0 corpus-fidelity work"
 bead = "ornadb-csenl.15"
 
@@ -364,14 +292,6 @@ reason = "the name is a language-defined native; its declaration moves into `cor
 bead = "ornadb-csenl.20"
 
 [[difference]]
-case = "valid/codec-json.orna"
-field = "resolution-unresolved"
-first = "Contact:0"
-second = "Contact:1"
-reason = "the fixture-catalogue environment the reference corpus is admitted against supplies this name; the case carries no declaration for it and HIR lowering's environment is source-only, so carrying each case's environment is H0 corpus-fidelity work"
-bead = "ornadb-csenl.15"
-
-[[difference]]
 case = "valid/cwd-head.orna"
 field = "resolution-unresolved"
 first = "contacts:0"
@@ -386,14 +306,6 @@ first = "half_even:0"
 second = "half_even:1"
 reason = "the name is a language-defined native; its declaration moves into `core.orna` in stage H5 (D12)"
 bead = "ornadb-csenl.20"
-
-[[difference]]
-case = "valid/effectful-expression.orna"
-field = "resolution-unresolved"
-first = "Contact:0"
-second = "Contact:1"
-reason = "the fixture-catalogue environment the reference corpus is admitted against supplies this name; the case carries no declaration for it and HIR lowering's environment is source-only, so carrying each case's environment is H0 corpus-fidelity work"
-bead = "ornadb-csenl.15"
 
 [[difference]]
 case = "valid/failure-natural-key.orna"
@@ -428,14 +340,6 @@ reason = "the name is a `sys` or engine-native `std` surface member; `core.orna`
 bead = "ornadb-csenl.20"
 
 [[difference]]
-case = "valid/function-block.orna"
-field = "resolution-unresolved"
-first = "Note:0"
-second = "Note:1"
-reason = "the fixture-catalogue environment the reference corpus is admitted against supplies this name; the case carries no declaration for it and HIR lowering's environment is source-only, so carrying each case's environment is H0 corpus-fidelity work"
-bead = "ornadb-csenl.15"
-
-[[difference]]
 case = "valid/function-values-and-pipelines.orna"
 field = "resolution-unresolved"
 first = "finance:0"
@@ -464,14 +368,6 @@ case = "valid/historical-query.orna"
 field = "resolution-unresolved"
 first = "contacts:0"
 second = "contacts:1"
-reason = "the fixture-catalogue environment the reference corpus is admitted against supplies this name; the case carries no declaration for it and HIR lowering's environment is source-only, so carrying each case's environment is H0 corpus-fidelity work"
-bead = "ornadb-csenl.15"
-
-[[difference]]
-case = "valid/key-default-allocated-once.orna"
-field = "resolution-unresolved"
-first = "Contact:0"
-second = "Contact:1"
 reason = "the fixture-catalogue environment the reference corpus is admitted against supplies this name; the case carries no declaration for it and HIR lowering's environment is source-only, so carrying each case's environment is H0 corpus-fidelity work"
 bead = "ornadb-csenl.15"
 
@@ -558,14 +454,6 @@ bead = "ornadb-csenl.15"
 [[difference]]
 case = "valid/pipeline.orna"
 field = "resolution-unresolved"
-first = "Contact:0"
-second = "Contact:1"
-reason = "the fixture-catalogue environment the reference corpus is admitted against supplies this name; the case carries no declaration for it and HIR lowering's environment is source-only, so carrying each case's environment is H0 corpus-fidelity work"
-bead = "ornadb-csenl.15"
-
-[[difference]]
-case = "valid/pipeline.orna"
-field = "resolution-unresolved"
 first = "contacts:0"
 second = "contacts:1"
 reason = "the fixture-catalogue environment the reference corpus is admitted against supplies this name; the case carries no declaration for it and HIR lowering's environment is source-only, so carrying each case's environment is H0 corpus-fidelity work"
@@ -642,22 +530,6 @@ first = "HEAD:0"
 second = "HEAD:1"
 reason = "`HEAD` is a contextual selector word the checker resolves as the argument of `as_of` (crates/orna-check/src/calls.rs); HIR has no selector rule, and the `sys` interface that types the argument arrives in stage H5 (D12)"
 bead = "ornadb-csenl.20"
-
-[[difference]]
-case = "valid/transactional-scope.orna"
-field = "resolution-unresolved"
-first = "Audit:0"
-second = "Audit:1"
-reason = "the fixture-catalogue environment the reference corpus is admitted against supplies this name; the case carries no declaration for it and HIR lowering's environment is source-only, so carrying each case's environment is H0 corpus-fidelity work"
-bead = "ornadb-csenl.15"
-
-[[difference]]
-case = "valid/transactional-scope.orna"
-field = "resolution-unresolved"
-first = "Order:0"
-second = "Order:1"
-reason = "the fixture-catalogue environment the reference corpus is admitted against supplies this name; the case carries no declaration for it and HIR lowering's environment is source-only, so carrying each case's environment is H0 corpus-fidelity work"
-bead = "ornadb-csenl.15"
 
 [[difference]]
 case = "valid/transactional-scope.orna"
@@ -854,14 +726,6 @@ bead = "ornadb-csenl.15"
 [[difference]]
 case = "valid/finite-stream.orna"
 field = "resolution-unresolved"
-first = "Contact:0"
-second = "Contact:1"
-reason = "the fixture-catalogue environment the reference corpus is admitted against supplies this name; the case carries no declaration for it and HIR lowering's environment is source-only, so carrying each case's environment is H0 corpus-fidelity work"
-bead = "ornadb-csenl.15"
-
-[[difference]]
-case = "valid/finite-stream.orna"
-field = "resolution-unresolved"
 first = "read:0"
 second = "read:1"
 reason = "the name is a `sys` or engine-native `std` surface member; `core.orna` and `sys.orna` declare those surfaces in stage H5 (D12), until then HIR has no declaration to resolve it to"
@@ -982,6 +846,14 @@ reason = "std.encoding.orna.encode is declared `: Str` in the pinned std wrapper
 bead = "ornadb-csenl.17"
 
 [[difference]]
+case = "valid/codec-orna.orna"
+field = "public-signature"
+first = "examples.valid.codec-orna::canonical=canonical(Contact) -> ByteStream"
+second = "examples.valid.codec-orna::canonical=canonical(Contact) -> Str"
+reason = "the same `std.encoding.orna.encode` cause as valid/formatting-does-not-serialize: the pinned std wrapper declares `: Str` and the HIR signature follows it, while the checker publishes `ByteStream`. The fixture environment now lets this case lower, so the difference is observed; which result type is normative is a checker/H2a decision"
+bead = "ornadb-csenl.17"
+
+[[difference]]
 case = "valid/affine-max.orna"
 field = "public-signature"
 first = "examples.valid.affine-max::hottest=hottest([Quantity]) -> Quantity?"
@@ -1001,8 +873,8 @@ bead = "ornadb-csenl.15"
 
 [[environment]]
 category = "fixture-tables-and-modules"
-count = 46
-reason = "fixture tables and modules (Contact, Message, Order, Account, and the like) come from the old checker's Rust Type objects, not from source. Lowering them is not done: the reference environment is carried by name only until real declarations exist, so each use is an H0 environment blocker that shrinks as declarations land"
+count = 27
+reason = "fixture tables and modules the old checker attaches without source (Message, Page, Payment, Reading, Status, DisplayContext, Contact in valid/table-reference, contacts, openbanking, vehicle). The attached declarations for Account, Customer, Note, Order, Audit and the Contact table are in fixture_environment.rs and resolve, except the one Contact use in valid/table-reference.orna, which still fails. The rest have no declared shape in the old catalogue (Payment amount is an error type there), so they stay blockers until their real declarations land"
 bead = "ornadb-csenl.15"
 
 [[environment]]
@@ -1019,8 +891,8 @@ bead = "ornadb-csenl.16"
 
 [[environment]]
 category = "harness-environment-names"
-count = 13
-reason = "harness bindings: the expression fixtures (fallback, left, middle, missing) and the example cases use names the harness supplies (log, process, read, rows, get, valid_email) or that the corpus mentions without declaring (EmailHeader, in From<EmailHeader>). The case declares none of them, so each use is an environment blocker that the harness fidelity work closes"
+count = 12
+reason = "harness bindings: the expression fixtures (fallback, left, middle, missing) and the example cases use names the harness supplies (log, process, read, rows, get, valid_email) the observer does not yet supply. EmailHeader now resolves from the attached fixture environment. The case declares none of them, so each use is an environment blocker that the harness fidelity work closes"
 bead = "ornadb-csenl.15"
 
 [[environment]]

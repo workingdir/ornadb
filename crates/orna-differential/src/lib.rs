@@ -43,6 +43,7 @@ pub mod case;
 pub mod compare;
 pub mod effects;
 pub mod environment;
+pub mod fixture_environment;
 pub mod observe_checker;
 pub mod observe_exec;
 pub mod observe_new;

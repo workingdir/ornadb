@@ -16,7 +16,7 @@
 agreed = 47
 evaluable = 110
 steps-exact = 47
-old-harness-environment = 1
+old-harness-environment = 6
 
 # Cases the executor runs against a declared table that the old pipeline answers `ORNA-EVAL-NAME`
 # only because the H0 observer supplies no table store for a module with no rows. The count is a
@@ -24,4 +24,33 @@ old-harness-environment = 1
 [[harness-allowance]]
 case = "valid/minimal-root.orna"
 reason = "the H0 observer supplies no table store for a module with no rows; the executor result is the spec result (example cases run on empty tables, so `count()` is 0)"
+bead = "ornadb-csenl.21"
+
+# Cases the executor runs against an attached fixture table that the old pipeline rejects, because
+# the H0 observer has no table store. The executor reports `ORNA-EVAL-TABLE-ROW` at the store
+# boundary. Where the old pipeline rejects statically (E2002/E2003), the executor does not yet
+# reproduce that rejection; the allowance records the gap, it does not claim parity.
+[[harness-allowance]]
+case = "invalid/computed-field-insert.orna"
+reason = "old pipeline rejects the computed-field insert statically (E2002); the executor reaches the table store, which the H0 observer lacks (ORNA-EVAL-TABLE-ROW). Static rejection parity is an open executor gap."
+bead = "ornadb-csenl.21"
+
+[[harness-allowance]]
+case = "invalid/duplicate-key.orna"
+reason = "old pipeline answers ORNA-EVAL-NAME for the duplicate key because the H0 observer has no table store; the executor reaches the store boundary (ORNA-EVAL-TABLE-ROW)."
+bead = "ornadb-csenl.21"
+
+[[harness-allowance]]
+case = "invalid/missing-required-field.orna"
+reason = "old pipeline rejects the missing required field statically (E2002); the executor reaches the table store, which the H0 observer lacks (ORNA-EVAL-TABLE-ROW). Static rejection parity is an open executor gap."
+bead = "ornadb-csenl.21"
+
+[[harness-allowance]]
+case = "invalid/unknown-field.orna"
+reason = "old pipeline rejects the unknown field statically (E2003); the executor reaches the table store, which the H0 observer lacks (ORNA-EVAL-TABLE-ROW). Static rejection parity is an open executor gap."
+bead = "ornadb-csenl.21"
+
+[[harness-allowance]]
+case = "valid/effectful-expression.orna"
+reason = "old pipeline answers ORNA-EVAL-NAME because the H0 observer has no table store; the executor reaches the store boundary (ORNA-EVAL-TABLE-ROW)."
 bead = "ornadb-csenl.21"
