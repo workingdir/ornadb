@@ -7,6 +7,7 @@ mod base64;
 mod bits;
 mod call;
 mod collection;
+mod decimal_divide;
 mod hash;
 mod json;
 mod order;
@@ -50,6 +51,7 @@ pub(crate) type NativeFn = fn(&mut Machine<'_>, &[Ty], Vec<Value>) -> Result<Val
 pub(crate) fn lookup(key: &NativeKey) -> Option<NativeFn> {
     let module = key.module.to_string();
     Some(match (module.as_str(), key.name.as_str()) {
+        ("core.decimal", "divide") => decimal_divide::divide,
         ("core.encoding.base64", "encode") => base64::encode,
         ("core.encoding.base64", "decode") => base64::decode,
         ("core.encoding.json", "encode") => json::encode,

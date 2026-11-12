@@ -466,6 +466,55 @@ fn parse_allowances(source: &str, table: &str) -> Result<Vec<HarnessAllowance>, 
     Ok(allowances)
 }
 
+/// One accepted executor-gap disagreement: the executor runs `case` and answers `executor`, and the
+/// old pipeline answers `old`, for an exact pair of error codes. The pair is listed per case, so any
+/// other disagreement on that case stays a mismatch. Each entry names the bead that closes it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutorGapAllowance {
+    /// The case.
+    pub case: String,
+    /// The error code the executor answers.
+    pub executor: String,
+    /// The error code the old pipeline answers.
+    pub old: String,
+    /// Why the two answers differ and what the executor is missing.
+    pub reason: String,
+    /// The bead that closes the difference.
+    pub bead: String,
+}
+
+/// Reads the `[[executor-gap-allowance]]` tables of `tests/differential/exec-share.toml`.
+pub fn load_executor_gap_allowances() -> Result<Vec<ExecutorGapAllowance>, String> {
+    let path = differential_dir().join("exec-share.toml");
+    parse_executor_gap_allowances(&read_file(&path)?)
+}
+
+/// Parses the executor-gap allowances. A missing field or an empty reason or bead is a load error.
+pub fn parse_executor_gap_allowances(source: &str) -> Result<Vec<ExecutorGapAllowance>, String> {
+    let document = toml_lite::parse(source)?;
+    let mut allowances = Vec::new();
+    for entry in document.tables_named("executor-gap-allowance") {
+        let case = entry.string("case")?.to_owned();
+        let executor = entry.string("executor")?.to_owned();
+        let old = entry.string("old")?.to_owned();
+        let reason = entry.string("reason")?.to_owned();
+        let bead = entry.string("bead")?.to_owned();
+        if reason.trim().is_empty() || bead.trim().is_empty() {
+            return Err(format!(
+                "{case}: an executor-gap-allowance needs a reason and a bead"
+            ));
+        }
+        allowances.push(ExecutorGapAllowance {
+            case,
+            executor,
+            old,
+            reason,
+            bead,
+        });
+    }
+    Ok(allowances)
+}
+
 /// One accepted step-count disagreement: the executor charges `executor` steps for a case the
 /// old pipeline charges `old` steps for. It matches only that exact pair, so a change in either
 /// count makes it stale and the test fails until the entry is updated or removed.

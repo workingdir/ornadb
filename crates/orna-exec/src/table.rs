@@ -45,6 +45,9 @@ impl<'p> Machine<'p> {
             }
             TableOp::Delete => {
                 let [key]: [Value; 1] = self.table_arguments(body, frame, call)?;
+                if schema.key.is_empty() {
+                    return Err(Stop::Error("ORNA-EVAL-TABLE-UNADMITTED"));
+                }
                 delete(self, table, &key)
             }
             TableOp::Upsert => {
@@ -129,7 +132,7 @@ fn delete(machine: &mut Machine<'_>, table: DefId, key: &Value) -> Result<Value,
         .map_err(|error| store_invariant(&error))?
         .is_none()
     {
-        return Err(absent_row_needs_snapshot());
+        return Err(absent_row(machine));
     }
     machine
         .store
@@ -138,10 +141,15 @@ fn delete(machine: &mut Machine<'_>, table: DefId, key: &Value) -> Result<Value,
     Ok(Value::Unit)
 }
 
-/// The stop for a write that names a key with no stored row. The old pipeline answers from an activation snapshot
-/// that this executor does not bind until H5, so the absence cannot yet be reported as `MISSING-ROW` honestly.
-pub(super) fn absent_row_needs_snapshot() -> Stop {
-    Stop::NotYet("missing-row write needs the activation snapshot (H5)")
+/// The stop for a write that names a key with no stored row. A run whose store starts empty knows that no
+/// earlier writer left the row behind, so the old pipeline's `MISSING-ROW` is reported. Any other store may hold
+/// rows the activation snapshot would show, which this executor does not bind until H5.
+pub(super) fn absent_row(machine: &Machine<'_>) -> Stop {
+    if machine.empty_snapshot {
+        Stop::Error("ORNA-EVAL-TABLE-MISSING-ROW")
+    } else {
+        Stop::NotYet("missing-row write needs the activation snapshot (H5)")
+    }
 }
 
 /// The stored fields of the row at `key`, or `None` when no row is there.

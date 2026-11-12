@@ -20,6 +20,17 @@ use orna_syntax::{Declaration, SyntaxTree, UseTail, Visibility, lex, parse_modul
 
 use crate::analysis::{EditorSymbol, EditorSymbolKind, symbol_for_item};
 use crate::documents::PositionMapper;
+use orna_hir::{ModulePath, Name, PreludeExports};
+
+/// The prelude exports of the reference standard library, as lowering binds them.
+pub(crate) fn reference_prelude() -> PreludeExports {
+    PreludeExports::default().with_module(
+        ModulePath::new([Name::new("std"), Name::new("prelude")]),
+        orna_standard_sources::REFERENCE_STANDARD_PRELUDE_EXPORTS_V1
+            .iter()
+            .copied(),
+    )
+}
 
 /// One public declaration of a standard module.
 #[derive(Debug)]

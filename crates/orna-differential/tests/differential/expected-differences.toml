@@ -191,7 +191,7 @@ bead = "ornadb-csenl.20"
 case = "valid/automatic-failure-propagation.orna"
 field = "resolution-unresolved"
 first = "Message:0"
-second = "Message:2"
+second = "Message:1"
 reason = "the fixture-catalogue environment the reference corpus is admitted against supplies this name; the case carries no declaration for it and HIR lowering's environment is source-only, so carrying each case's environment is H0 corpus-fidelity work"
 bead = "ornadb-csenl.15"
 
@@ -233,6 +233,14 @@ field = "resolution-unresolved"
 first = "half_even:0"
 second = "half_even:1"
 reason = "the name is a language-defined native; its declaration moves into `core.orna` in stage H5 (D12)"
+bead = "ornadb-csenl.20"
+
+[[difference]]
+case = "valid/decimal-division.orna"
+field = "effects"
+first = "examples.valid.decimal-division::rounded_third=pure"
+second = "examples.valid.decimal-division::rounded_third=Opaque"
+reason = "the native `divide` carries an Opaque effect in the HIR (the Callee native effect), so `rounded_third` is not pure; the checker reads the native call as pure. Closes when the checker's native effect table is consulted for core.decimal divide"
 bead = "ornadb-csenl.20"
 
 [[difference]]
@@ -399,7 +407,7 @@ bead = "ornadb-csenl.15"
 case = "valid/recovery-pipeline.orna"
 field = "resolution-unresolved"
 first = "Message:0"
-second = "Message:2"
+second = "Message:1"
 reason = "the fixture-catalogue environment the reference corpus is admitted against supplies this name; the case carries no declaration for it and HIR lowering's environment is source-only, so carrying each case's environment is H0 corpus-fidelity work"
 bead = "ornadb-csenl.15"
 
@@ -436,12 +444,20 @@ reason = "`HEAD` is a contextual selector word the checker resolves as the argum
 bead = "ornadb-csenl.20"
 
 [[difference]]
-case = "valid/transactional-scope.orna"
+case = "valid/table-key-default.orna"
 field = "resolution-unresolved"
-first = "Payment:0"
-second = "Payment:1"
-reason = "the fixture-catalogue environment the reference corpus is admitted against supplies this name; the case carries no declaration for it and HIR lowering's environment is source-only, so carrying each case's environment is H0 corpus-fidelity work"
-bead = "ornadb-csenl.15"
+first = "disambiguate:0"
+second = "disambiguate:1"
+reason = "imported from std.text, which HIR does not yet declare; the key default is lowered now, so the checker-unresolved name surfaces here. Per-name decision pending the std.text declaration"
+bead = "ornadb-csenl.16"
+
+[[difference]]
+case = "valid/table-key-default.orna"
+field = "resolution-unresolved"
+first = "slug:0"
+second = "slug:1"
+reason = "imported from std.text, which HIR does not yet declare; the key default is lowered now, so the checker-unresolved name surfaces here. Per-name decision pending the std.text declaration"
+bead = "ornadb-csenl.16"
 
 [[difference]]
 case = "valid/unbounded-stream.orna"
@@ -823,8 +839,8 @@ bead = "ornadb-csenl.16"
 
 [[environment]]
 category = "pending-p3b-names"
-count = 2
-reason = "names that need a later typed-pipeline phase (phase 3b): half_even of a decimal division, and Str used as an as:-argument of a secret display. They resolve only once that phase lands. Count 2 is measured after method calls on a non-path receiver lower as pending member calls (the secret display's .display() receiver is now typed, so its Str is reached)"
+count = 1
+reason = "names that need a later typed-pipeline phase (phase 3b): Str used as an as:-argument of a secret display; it resolves only once that phase lands. The decimal division's half_even is a core.Rounding variant (H5 slice 3b), so it no longer counts here. Count 1 is measured after method calls on a non-path receiver lower as pending member calls (the secret display's .display() receiver is now typed, so its Str is reached)"
 bead = "ornadb-csenl.16"
 
 [[environment]]
@@ -835,6 +851,6 @@ bead = "ornadb-csenl.16"
 
 [[environment]]
 category = "unclassified-names"
-count = 0
-reason = "every unresolved name is in a named category above; a new unclassified name fails the ratchet and needs a per-name decision"
+count = 2
+reason = "slug and disambiguate, imported by valid/table-key-default.orna from std.text. HIR does not yet declare std.text exports, so the named import is unavailable (ORNA-S010-IMPORT) and each use resolves to ORNA-S012-UNRESOLVED. The key default is now lowered (it was dropped before), so these names surface here. Per-name decision: declare std.text (or move these names to missing-import-names) when the std declaration lands"
 bead = "ornadb-csenl.16"

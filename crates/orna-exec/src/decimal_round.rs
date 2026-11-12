@@ -1,4 +1,4 @@
-//! Rounding of exact decimals to a scale, half to even, with the old evaluator's limits.
+//! Rounding of exact decimals to a scale under a rounding mode, with the old evaluator's limits.
 //!
 //! `divide_rounded` is the quotient of two decimals rounded to a scale in one step. `round_to_scale` rounds an exact
 //! decimal to a scale. Both keep the sign of the rounded value and fail `ORNA-EVAL-LIMIT` past [`MAX_EXPONENT`].
@@ -18,6 +18,17 @@ impl Decimal {
     /// `ORNA-EVAL-DIVIDE-BY-ZERO` for a zero divisor and `ORNA-EVAL-LIMIT` when the scale or an alignment power
     /// exceeds [`MAX_EXPONENT`].
     pub(crate) fn divide_rounded(&self, other: &Self, scale: usize) -> Result<Self, Stop> {
+        self.divide_rounded_with(other, scale, RoundingMode::HalfEven)
+    }
+
+    /// The quotient `self / other` rounded to `scale` digits after the point under `mode`. The errors are those of
+    /// [`Self::divide_rounded`].
+    pub(crate) fn divide_rounded_with(
+        &self,
+        other: &Self,
+        scale: usize,
+        mode: RoundingMode,
+    ) -> Result<Self, Stop> {
         if other.coefficient().is_zero() {
             return Err(Stop::Error("ORNA-EVAL-DIVIDE-BY-ZERO"));
         }
@@ -37,7 +48,7 @@ impl Decimal {
             denominator *= BigInt::from(10u8).pow(digits(&-power)?);
         }
         Self::new(
-            round_half_even(&numerator, &denominator),
+            round_with(mode, &numerator, &denominator),
             -BigInt::from(scale),
         )
     }
@@ -56,7 +67,7 @@ impl Decimal {
             self.coefficient() * BigInt::from(10u8).pow(digits(&shift)?)
         } else {
             let divisor = BigInt::from(10u8).pow(digits(&-shift)?);
-            round_half_even(self.coefficient(), &divisor)
+            round_with(RoundingMode::HalfEven, self.coefficient(), &divisor)
         };
         Self::new(coefficient, -BigInt::from(scale))
     }
@@ -71,20 +82,48 @@ fn digits(shift: &BigInt) -> Result<u32, Stop> {
     u32::try_from(count).map_err(|_| Stop::Error("ORNA-EVAL-LIMIT"))
 }
 
-/// `numerator / denominator` rounded half to even, for a positive denominator. Ties go to the even neighbour, and the
-/// rounding direction follows the sign of the numerator.
-fn round_half_even(numerator: &BigInt, denominator: &BigInt) -> BigInt {
+/// The rounding modes of `Decimal.divide`, one per `core.Rounding` member.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RoundingMode {
+    /// Ties to the even neighbour.
+    HalfEven,
+    /// Ties away from zero.
+    HalfUp,
+    /// Truncation toward zero.
+    TowardZero,
+    /// Always away from zero.
+    AwayFromZero,
+    /// Toward negative infinity.
+    Floor,
+    /// Toward positive infinity.
+    Ceil,
+}
+
+/// `numerator / denominator` rounded under `mode`, for a positive denominator. The truncated quotient moves one unit
+/// away from zero when the mode says so: down for a negative numerator, up otherwise.
+fn round_with(mode: RoundingMode, numerator: &BigInt, denominator: &BigInt) -> BigInt {
     let (mut quotient, remainder) = numerator.div_rem(denominator);
-    if !remainder.is_zero() {
-        let twice = remainder.abs() * 2u8;
-        if twice > *denominator
-            || (twice == *denominator && (&quotient % 2u8).abs() == BigInt::from(1u8))
-        {
-            if numerator.sign() == Sign::Minus {
-                quotient -= 1;
-            } else {
-                quotient += 1;
-            }
+    if remainder.is_zero() {
+        return quotient;
+    }
+    let negative = numerator.sign() == Sign::Minus;
+    let twice = remainder.abs() * 2u8;
+    let away = match mode {
+        RoundingMode::TowardZero => false,
+        RoundingMode::AwayFromZero => true,
+        RoundingMode::Floor => negative,
+        RoundingMode::Ceil => !negative,
+        RoundingMode::HalfUp => twice >= *denominator,
+        RoundingMode::HalfEven => {
+            twice > *denominator
+                || (twice == *denominator && (&quotient % 2u8).abs() == BigInt::from(1u8))
+        }
+    };
+    if away {
+        if negative {
+            quotient -= 1;
+        } else {
+            quotient += 1;
         }
     }
     quotient

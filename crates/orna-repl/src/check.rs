@@ -1,7 +1,10 @@
 //! Lowers and typechecks a composed module, then evaluates its entry on the executor.
 
 use orna_exec::{ExecError, ExecLimits, Globals, MemoryStore, Value, measure_entry_in};
-use orna_hir::{DefId, DefKind, ModulePath, Name, Program, lower, print_type, typeck};
+use orna_hir::{
+    DefId, DefKind, ModulePath, Name, PreludeExports, Program, lower_with_prelude, print_type,
+    typeck,
+};
 use orna_syntax::parse_session_module_with_file;
 
 use crate::compose::ENTRY;
@@ -36,10 +39,16 @@ pub(crate) fn lower_checked(source: &str) -> Result<Program, ReplError> {
             "the composed session source does not parse",
         ));
     }
-    let mut program = lower(&standard::units_with(
-        &parsed.value,
-        ModulePath::new([Name::new(MODULE)]),
-    ));
+    let prelude = PreludeExports::default().with_module(
+        ModulePath::new([Name::new("std"), Name::new("prelude")]),
+        orna_standard_sources::REFERENCE_STANDARD_PRELUDE_EXPORTS_V1
+            .iter()
+            .copied(),
+    );
+    let mut program = lower_with_prelude(
+        &standard::units_with(&parsed.value, ModulePath::new([Name::new(MODULE)])),
+        &prelude,
+    );
     typeck(&mut program);
     if let Err(errors) = program.validate() {
         return Err(ReplError::new(
