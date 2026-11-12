@@ -54,14 +54,14 @@ constructor`, 1 each `as_of`, `engine native not ported`, `field access ... (H2)
 
 | Case | Old pipeline outcome | HIR today (lowering diagnostics) | What closes it |
 |---|---|---|---|
-| `valid/sys-checkpoint` (`sys.Checkpoint.as_of(HEAD)`) | `sys.version.incompatible` | `` `sys` is a module, not a value `` | slice A1 (lowering of `sys` value paths) + admission |
-| `valid/sys-run-history` (`sys.Run.as_of(HEAD) \| sort_by(..)`) | `sys.version.incompatible` | same | A1 |
-| `valid/sys-table-query` (`sys.catalog.objects \| filter(.. sys.ObjectKind.table ..)`) | `sys.version.incompatible` | same, twice | A1 |
-| `valid/historical-query` (`contacts.Contact.as_of(sys.snapshot("HEAD~3"))`) | `sys.version.incompatible` | `the sys declarations are not represented yet` | A1 (PR #9918 already rewrites this diagnostic for an unlinked member) |
-| `valid/historical-program` | `sys.version.incompatible` | four diagnostics, one is `energy.daily` unresolved | A1, plus an `energy.daily` fixture function (harness, not Host) |
-| `valid/presentation-watch` (`std.ui.Table(sys.rt.streams)`) | `sys.version.incompatible` | `Page` not exported, `sys` not a value | A1, plus `std.ui` (separate native family) |
-| `valid/sys-storage` (`sys.Storage \| filter(..)`) | `ORNA-EVAL-UNSUPPORTED` | `sys` not a value | A1, then A3 (linked relation with no data) |
-| `valid/cwd-head` (`contacts.Contact.as_of(CWD) \| count`) | `ORNA-EVAL-NAME` (harness has no store) | runs, stops at `as_of` | A5, as a `[[harness-allowance]]` |
+| `valid/sys-checkpoint` (`sys.Checkpoint.as_of(HEAD)`) | `sys.version.incompatible` | `` `sys` is a module, not a value `` | HA1 (lowering of `sys` value paths) + admission |
+| `valid/sys-run-history` (`sys.Run.as_of(HEAD) \| sort_by(..)`) | `sys.version.incompatible` | same | HA1 |
+| `valid/sys-table-query` (`sys.catalog.objects \| filter(.. sys.ObjectKind.table ..)`) | `sys.version.incompatible` | same, twice | HA1 |
+| `valid/historical-query` (`contacts.Contact.as_of(sys.snapshot("HEAD~3"))`) | `sys.version.incompatible` | `the sys declarations are not represented yet` | HA1 (PR #9918 already rewrites this diagnostic for an unlinked member) |
+| `valid/historical-program` | `sys.version.incompatible` | four diagnostics, one is `energy.daily` unresolved | HA1, plus an `energy.daily` fixture function (harness, not Host) |
+| `valid/presentation-watch` (`std.ui.Table(sys.rt.streams)`) | `sys.version.incompatible` | `Page` not exported, `sys` not a value | HA1, plus `std.ui` (separate native family, not in this document) |
+| `valid/sys-storage` (`sys.Storage \| filter(..)`) | `ORNA-EVAL-UNSUPPORTED` | `sys` not a value | HA1, HA2, then HA5 (linked relation with no data) |
+| `valid/cwd-head` (`contacts.Contact.as_of(CWD) \| count`) | `ORNA-EVAL-NAME` (harness has no store) | runs, stops at `as_of` | HA6, as a `[[harness-allowance]]` |
 | `invalid/legacy-sys-runtime`, `legacy-sys-storage-call`, `mutate-sys-commit` | checker codes (`ORNA100-E-SYS-RUNTIME`, `ORNA100-E-SYS-STORAGE-CALL`, `E7001`) | `ORNA-S022-UNSUPPORTED` | H3 checker rules, not this document |
 
 So the first blocker is **lowering**: `lower/namespace.rs` refuses to treat `sys.<name>` as a module export
@@ -225,7 +225,7 @@ linkage that the **evaluator** owns (`LINKED_*` in `orna-sys-id/build/generator.
 | `sys.catalog.columns` (and `sys.Column`) | one row per table field: `name`, `position`, `type`, `optional`, `key_position`, `default_expression`, `computed_expression` | `FieldDef` and `FieldInitializer` of the same program |
 | `sys.rt.info` | `sys.RuntimeInfo`: versions, build id, mode, `read_only`, `supported_profiles` | a `HostInfo` record the embedder supplies |
 
-This is `ProgramCatalog` in `orna-exec/src/host/catalog.rs` (slice HA6). It needs no storage and no snapshot, and the
+This is `ProgramCatalog` in `orna-exec/src/host/catalog.rs` (slice HA7). It needs no storage and no snapshot, and the
 `Reference`/`Object` ids are derived from the same `ObjectId` scheme `Value::Enum` already uses (`variant_ids`).
 `sys.Materialization`, `sys.MaintenanceJob` and `sys.Storage` need publication metadata (`orna-runtime`) and are not
 in the first provider; with no data they answer `ORNA-EVAL-UNSUPPORTED`, which is what the old evaluator answers for
@@ -244,7 +244,7 @@ the rows they need, so no test depends on `orna-runtime` or a repository. The ha
 `valid/cwd-head` is the one corpus case that needs an activation snapshot. The old observer answers `ORNA-EVAL-NAME`
 because it has no store, so the executor, once it runs `as_of`, returns the spec result (`{ cwd: 0, head: 0 }`) and
 the case becomes a `[[harness-allowance]]` against `ornadb-csenl.21`, not an agreement. `HEAD` and `CWD` are not
-declared anywhere in HIR today (the environment ratchet lists them under `CONNECTOR_AND_HOST`). Slice HA5 declares them
+declared anywhere in HIR today (the environment ratchet lists them under `CONNECTOR_AND_HOST`). Slice HA6 declares them
 as `native static HEAD`/`CWD` of type `sys.SnapshotRef` in the root environment. `[INFERENCE]` the spec text names
 `HEAD` as a root name (ORNA-STATE-003 `relation.as_of(HEAD)`) but I did not find the chapter that declares it; if the
 owner declares them as `sys.database.head`/`.cwd` aliases instead, only that one declaration changes.
@@ -461,4 +461,41 @@ pub native fn format<C impl Currency>(amount: Money<C>, rounding: Rounding, loca
 
 ## 3. Slices and beads
 
-Section 3 is filled in by the following commits.
+Every slice is one PR by one implementer, with the files, tests and acceptance below (the same text is in the bead).
+Beads are children of epic `ornadb-csenl`. A slice never changes `layers.toml`; none needs to. The two parts are
+independent except HB7 (needs HA3). Within a part the order is the dependency order.
+
+### 3.1 Part A, in order
+
+| Slice | Bead | Depends on | Files | Tests | Acceptance |
+|---|---|---|---|---|---|
+| HA1 lower `sys` value paths | `ornadb-csenl.25` | none | `orna-hir` `lower/namespace.rs`, `lower/exprs.rs`, `lower/calls.rs` | unit tests with a test `SysAdmission` over `sys.Run`, `sys.rt.runs`, `sys.catalog.objects`, `sys.ObjectKind.table`, `sys.snapshot("x")` | `valid/sys-checkpoint`, `sys-run-history`, `sys-table-query`, `historical-query` lower with only `sys.version.incompatible`; measured `agreed` recorded (baseline 48) |
+| HA2 typeck sys relation values | `ornadb-csenl.26` | HA1 | `typeck/call.rs`, `typeck/expr.rs` | `sys.Storage \| filter(..)` is `Relation<Storage>`; `sys.rt.runs \| count` is `Int` | tests pass; typed-share ratchet recorded |
+| HA3 `Host`, `HostManifest`, `StoreHost` | `ornadb-csenl.27` | none | `orna-exec` `host.rs`, `machine.rs`, `lib.rs` | existing tests unchanged; host unit tests; manifest parity test vs `CatalogueAdmission` | `check_architecture.py` passes; no behaviour change |
+| HA4 clock and entropy natives | `ornadb-csenl.28` | HA3 | `natives/time.rs` (or `clock.rs`), `natives/mod.rs` | `now` equal within one activation; `uuid7` deterministic under `FixtureHost` | `core.now`, `core.uuid7` bound |
+| HA5 relation handles, provider source, `sys_call` | `ornadb-csenl.29` | HA3, HA2 | `value.rs`, `relation/pipeline.rs`, `eval.rs`, `host.rs` (`FixtureHost`) | `tests/sys_host.rs`: rows through `filter\|map\|take\|first\|count`; `take(1)` reads one row; registered member with no data is `ORNA-EVAL-UNSUPPORTED` | `valid/sys-storage` agrees; measured `agreed` recorded |
+| HA6 snapshots, `HEAD`/`CWD`, `as_of` | `ornadb-csenl.30` | HA5 | `orna-hir/interface`, `table.rs`, `host.rs`, `store/memory.rs` | `as_of(HEAD)` reads the snapshot, not current; `sys.rt` handle refuses `as_of`; unknown snapshot is `sys.snapshot.not_found` | `valid/cwd-head` runs, recorded as a harness allowance |
+| HA7 `ProgramCatalog` provider | `ornadb-csenl.31` | HA5 | `orna-exec` `host/catalog.rs`, `raw_value.rs` | `sys_catalog.rs`: tables and columns of a two-table program; `sys.rt.info` from `HostInfo` | rows match the declared tables; unlisted members stay unlinked |
+| HA8 runtime provider (`sys.rt.runs`, `streams`) | `ornadb-csenl.32` | HA5 | `orna-runtime` `host_rows.rs` | two projected runs yield two records; `sys.rt.runs \| count` is 2 through `run_entry_with_host` | `check_architecture.py` passes |
+
+### 3.2 Part B, in order
+
+| Slice | Bead | Depends on | Files | Tests | Acceptance |
+|---|---|---|---|---|---|
+| HB1 `core.money` declaration | `ornadb-csenl.33` | none | `interface/core/money.orna`, `embedded.rs`, `lower/prelude.rs`, `fixture_environment.rs`, `environment.rs` | `embedded_clean`; `Money<GBP>` resolves without `use` | zero diagnostics; environment counts re-measured |
+| HB2 currency suffix and constructor | `ornadb-csenl.34` | HB1 | `lower/exprs.rs`, `lower/units.rs` or `lower/currency.rs`, `lower/calls.rs` | `12.34.GBP`, `10.GBP`, `Money<GBP>(5)` lower to `Callee::Ctor` with exact literals; `12.34f.GBP` carries the `E5004` marker | tests pass |
+| HB3 `Currency` identity predicate | `ornadb-csenl.35` | HB1 | `engine_money.rs`, typeck bound check | `valid/currency` clean; `invalid/currency-static-symbol` rejected; other-member protocol not accepted | Q-B1 default implemented; owner can flip in one place |
+| HB4 Money operator typing, `E5003`/`E5004`/`E5103` | `ornadb-csenl.36` | HB2, HB3 | `engine_codes.rs`, `typeck/operator.rs`, `diag.rs` | `typeck/money_tests.rs`, one test per B5 row | differing-rows file updated with measured codes |
+| HB5 `E5001` and `E5002` | `ornadb-csenl.37` | HB4 | `engine_codes.rs`, `typeck/quantity.rs` | `90.days + 4.kWh`, `20.C + 5.C`, `values \| sum` over affine points | matching rows removed or updated |
+| HB6 executor Money values and arithmetic | `ornadb-csenl.38` | HB2, HB3 | `orna-exec` `engine_money.rs`, `natives/money.rs`, `natives/mod.rs`, `eval.rs`, `registry_test.rs` | `native_money.rs`: sums, `amount`, compare, currency-id test against `valid/money-serialization` bytes | tests pass; first step records whether the derived currency id matches the old one |
+| HB7 `quantize`, `allocate`, `format` | `ornadb-csenl.39` | HB6, HA3 | `core/money.orna`, `natives/money_round.rs` | all six rounding rules; `allocate(100.GBP, [1,1,1])` sums to 100; `format` takes the locale from the host | `registry_test` passes |
+| HB8 harness outcome for `E50xx`, allowances, ratchets | `ornadb-csenl.40` | HB5, HB6 | `observe_exec.rs`, `exec-share.toml` | exec_share, diagnostic_codes, typed_share ratchets | `invalid/currency-addition`, `affine-addition`, `incompatible-dimensions` agree; `valid/currency` allowance recorded |
+
+### 3.3 Open decisions
+
+- **Q-B1** (section B3): how a user-declared `Currency` protocol relates to `core.money.Currency`. Default implemented in
+  HB3. Owner ruling wanted before HB3 merges, but the default does not block HB1, HB2 or HB6.
+- **`HEAD` and `CWD`** (section A6): root native statics (default) or aliases of `sys.database.head`/`.cwd`. Decided in
+  the HA6 PR.
+- Not decided here and not needed: `Rate<C, U>`, currency conversion (ORNA-MONEY-005), `std.ui` (blocks
+  `valid/presentation-watch`), the blocking relation operators of H7 (`sort_by` and friends), `parallel` hosts.

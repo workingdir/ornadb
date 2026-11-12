@@ -1044,6 +1044,8 @@ Key differences from the handlers it replaces:
 - The browser build is specified as a `Host` with `io() = None` and `store()` over
   memory. The `Host` trait is not in code yet, and `orna-evaluator/src/browser_profile.rs`
   has no `io()` today (see `docs/design/native-libraries.md`).
+- The `Host` trait as it is built, its layering, the first `sys` provider, the `Money<C>` design and the slice list are
+  in [hir-host.md](hir-host.md). That document keeps `Host` in `orna-exec` and does not create an `orna-host` crate.
 
 ### 4.5 Versioning the native ABI
 
@@ -1592,6 +1594,8 @@ type, and H4 only needs types from H2 for arithmetic selection; section 7.2).
   discrepancy found later first becomes a corpus case.
 - **Plan.** The concrete cutover, shadow, rollback and deletion plan, with
   measured exit criteria per consumer, is [hir-cutover.md](hir-cutover.md).
+- **Host and Money.** The slices that give the executor a `Host`, `sys` providers and `Money<C>`, with their beads, are
+  in [hir-host.md](hir-host.md).
 
 ### 6.4 Step parity
 
