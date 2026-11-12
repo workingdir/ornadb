@@ -128,11 +128,12 @@ fn recorded_reason(code: &str) -> Option<&'static str> {
         "ORNA-S012-UNRESOLVED" => Some(
             "HIR resolves environment-only names (fixture tables, currency and unit names, connectors, \
              harness names) that the checker resolves from its observer catalogue, and reports missing \
-             `use` imports the spec requires (ORNA-IMPORT); not a std export gap",
+             `use` imports the spec requires (ORNA-IMPORT-005); deferred money, units and secret stages (hir.md); not a std export gap",
         ),
-        "ORNA-S021-TYPE" => {
-            Some("checker call-site type mismatch; HIR reports the conflict as ORNA-INFER-011")
-        }
+        "ORNA-S021-TYPE" => Some(
+            "checker type mismatch; HIR reports arity or constraint conflicts as ORNA-INFER-011 or ORNA-INFER-007, \
+                 stops at ORNA-S000 on parse errors, or reports unresolved names first (ORNA-S012); the ledger comments list each case",
+        ),
         "ORNA-INFER-011" => Some(
             "HIR constraint conflict. Range membership (`value in range`, ORNA-RANGE-006) is typed; the \
              residual conflict is a legacy fixture passing `0..10` where the spec's `take(rows, count: Int)` \
@@ -142,9 +143,8 @@ fn recorded_reason(code: &str) -> Option<&'static str> {
             Some("HIR unsolved-variable diagnostic; the checker has no code for it")
         }
         "ORNA-S020-ANNOTATION" => Some(
-            "HIR requires annotated public parameters under D1 (docs/design/hir.md, H2a subset); \
-             ORNA-INFER-004 makes annotation a SHOULD, so this is a deviation closed by H2b inference, \
-             not a spec-required error",
+            "D1 strict, INFER-004 SHOULD allows the old behaviour; HIR requires annotated public parameters \
+             (docs/design/hir.md, H2a subset), so the difference is expected, not a spec-required error",
         ),
         "ORNA-S022-UNSUPPORTED" => Some(
             "HIR reports `sys` as a module rather than a value and does not represent sys declarations or \
