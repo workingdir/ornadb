@@ -18,7 +18,7 @@
 
 use orna_syntax::SyntaxSpan;
 
-use crate::{Ty, TyInterner, TyKind, TyVar};
+use crate::{ParamIdx, Ty, TyInterner, TyKind, TyVar};
 
 /// Two types that cannot be made equal.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -220,13 +220,54 @@ impl InferCtxt {
     /// as an ambiguity and rejects the body, so no finished body holds one.
     #[must_use]
     pub fn zonk(&self, types: &mut TyInterner, ty: Ty) -> Ty {
+        self.zonk_with(types, ty, &mut |_| None)
+    }
+
+    /// Generalises the unsolved variables reachable from `ty` into the
+    /// parameters `first`, `first + 1`, ..., and binds each of them to its
+    /// parameter so no later zonk or ambiguity report sees it as open
+    /// (ORNA-INFER-003). Returns the zonked type and how many parameters were
+    /// introduced.
+    pub fn generalize(&mut self, types: &mut TyInterner, ty: Ty, first: u32) -> (Ty, usize) {
+        let mut assigned: Vec<TyVar> = Vec::new();
+        let zonked = self.zonk_with(types, ty, &mut |var| {
+            let position = assigned
+                .iter()
+                .position(|seen| *seen == var)
+                .unwrap_or_else(|| {
+                    assigned.push(var);
+                    assigned.len() - 1
+                });
+            Some(ParamIdx::new(
+                first + u32::try_from(position).expect("generics fit u32"),
+            ))
+        });
+        for (offset, var) in assigned.iter().enumerate() {
+            let index = first + u32::try_from(offset).expect("generics fit u32");
+            let param = types.intern(TyKind::Param(ParamIdx::new(index)));
+            self.vars[var.as_u32() as usize] = VarState::Bound(param);
+        }
+        (zonked, assigned.len())
+    }
+
+    /// Zonks `ty`, asking `sink` for the parameter that replaces each unsolved
+    /// variable; a variable `sink` declines stays an [`TyKind::Infer`].
+    fn zonk_with(
+        &self,
+        types: &mut TyInterner,
+        ty: Ty,
+        sink: &mut dyn FnMut(TyVar) -> Option<ParamIdx>,
+    ) -> Ty {
         let ty = self.resolve(types, ty);
         let Some(kind) = types.kind(ty).cloned() else {
             return ty;
         };
         let rebuilt = match kind {
-            TyKind::Infer(_)
-            | TyKind::Bool
+            TyKind::Infer(var) => match sink(var) {
+                Some(index) => TyKind::Param(index),
+                None => return ty,
+            },
+            TyKind::Bool
             | TyKind::Int
             | TyKind::Decimal
             | TyKind::Float
@@ -247,42 +288,47 @@ impl InferCtxt {
             | TyKind::Never
             | TyKind::Error
             | TyKind::Param(_) => return ty,
-            TyKind::Option(inner) => TyKind::Option(self.zonk(types, inner)),
-            TyKind::List(inner) => TyKind::List(self.zonk(types, inner)),
-            TyKind::Set(inner) => TyKind::Set(self.zonk(types, inner)),
-            TyKind::Range(inner) => TyKind::Range(self.zonk(types, inner)),
-            TyKind::Relation(inner) => TyKind::Relation(self.zonk(types, inner)),
-            TyKind::Stream(inner) => TyKind::Stream(self.zonk(types, inner)),
-            TyKind::Map(key, value) => TyKind::Map(self.zonk(types, key), self.zonk(types, value)),
+            TyKind::Option(inner) => TyKind::Option(self.zonk_with(types, inner, sink)),
+            TyKind::List(inner) => TyKind::List(self.zonk_with(types, inner, sink)),
+            TyKind::Set(inner) => TyKind::Set(self.zonk_with(types, inner, sink)),
+            TyKind::Range(inner) => TyKind::Range(self.zonk_with(types, inner, sink)),
+            TyKind::Relation(inner) => TyKind::Relation(self.zonk_with(types, inner, sink)),
+            TyKind::Stream(inner) => TyKind::Stream(self.zonk_with(types, inner, sink)),
+            TyKind::Map(key, value) => TyKind::Map(
+                self.zonk_with(types, key, sink),
+                self.zonk_with(types, value, sink),
+            ),
             TyKind::Tuple(elements) => TyKind::Tuple(
                 elements
                     .iter()
-                    .map(|element| self.zonk(types, *element))
+                    .map(|element| self.zonk_with(types, *element, sink))
                     .collect(),
             ),
             TyKind::Record(fields) => TyKind::Record(
                 fields
                     .iter()
-                    .map(|(name, field)| (name.clone(), self.zonk(types, *field)))
+                    .map(|(name, field)| (name.clone(), self.zonk_with(types, *field, sink)))
                     .collect(),
             ),
             TyKind::Adt(def, arguments) => TyKind::Adt(
                 def,
                 arguments
                     .iter()
-                    .map(|argument| self.zonk(types, *argument))
+                    .map(|argument| self.zonk_with(types, *argument, sink))
                     .collect(),
             ),
             TyKind::Fn(function) => TyKind::Fn(crate::FnTy {
                 params: function
                     .params
                     .iter()
-                    .map(|parameter| self.zonk(types, *parameter))
+                    .map(|parameter| self.zonk_with(types, *parameter, sink))
                     .collect(),
-                ret: self.zonk(types, function.ret),
+                ret: self.zonk_with(types, function.ret, sink),
                 effects: function.effects,
             }),
-            TyKind::Quantity(number, key) => TyKind::Quantity(self.zonk(types, number), key),
+            TyKind::Quantity(number, key) => {
+                TyKind::Quantity(self.zonk_with(types, number, sink), key)
+            }
         };
         types.intern(rebuilt)
     }

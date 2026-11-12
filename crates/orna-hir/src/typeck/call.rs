@@ -992,7 +992,10 @@ impl<'a> BodyCheck<'a> {
             Some(DefKind::Field(definition)) => Ok(definition.ty),
             Some(DefKind::Let(binding)) => {
                 let body = &self.program.bodies[binding.body];
-                let ty = body.exprs[body.root].ty;
+                let declared = binding
+                    .declared
+                    .filter(|ty| !matches!(self.program.tys.kind(*ty), Some(TyKind::Error)));
+                let ty = declared.unwrap_or(body.exprs[body.root].ty);
                 if matches!(self.program.tys.kind(ty), Some(TyKind::Error)) {
                     return Err(NotYetReason::Unsupported(
                         "the module-level binding's type is not on HIR yet".into(),

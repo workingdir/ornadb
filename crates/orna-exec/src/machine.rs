@@ -10,6 +10,7 @@ use orna_hir::{Body, BodyId, DefId, DefKind, FnBody, Program};
 use crate::dispatch::ProtocolMembers;
 use crate::error::{ExecError, Stop};
 use crate::frame::{Frame, TypeEnv};
+use crate::globals::Globals;
 use crate::link;
 use crate::natives::NativeFn;
 use crate::store::{MemoryStore, TableStore};
@@ -65,13 +66,15 @@ pub(crate) struct Machine<'p> {
     pub(crate) ordering: OnceCell<[VariantIds; 3]>,
     /// The table store. Each entry-point activation opens one store activation, committed or rolled back.
     pub(crate) store: Box<dyn TableStore>,
+    /// The session's evaluated top-level `let`s. Taken from the caller for the run and handed back after it.
+    pub(crate) globals: Globals,
     steps: u64,
     calls: u64,
     depth: usize,
 }
 
 impl<'p> Machine<'p> {
-    fn new(
+    pub(crate) fn new(
         program: &'p Program,
         limits: ExecLimits,
         cancel: Option<Arc<AtomicBool>>,
@@ -86,6 +89,7 @@ impl<'p> Machine<'p> {
             protocols: OnceCell::new(),
             ordering: OnceCell::new(),
             store,
+            globals: Globals::new(),
             steps: 0,
             calls: 0,
             depth: 0,
@@ -293,6 +297,27 @@ pub fn measure_entry_with_store(
 ) -> (Result<Measured, ExecError>, Box<dyn TableStore>) {
     let mut machine = Machine::new(program, limits, None, store);
     let result = measure(&mut machine, program, entry, arguments);
+    (result, machine.into_store())
+}
+
+/// As [`measure_entry_with_store`], but the run also reads and extends the session `globals`: a top-level `let` already
+/// evaluated by an earlier run is read from the cache, not evaluated again.
+///
+/// # Errors
+///
+/// As [`measure_entry`].
+pub fn measure_entry_in(
+    program: &Program,
+    entry: DefId,
+    arguments: Vec<Value>,
+    limits: ExecLimits,
+    store: Box<dyn TableStore>,
+    globals: &mut Globals,
+) -> (Result<Measured, ExecError>, Box<dyn TableStore>) {
+    let mut machine = Machine::new(program, limits, None, store);
+    machine.globals = std::mem::take(globals);
+    let result = measure(&mut machine, program, entry, arguments);
+    *globals = std::mem::take(&mut machine.globals);
     (result, machine.into_store())
 }
 

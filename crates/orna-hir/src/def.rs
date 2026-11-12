@@ -335,6 +335,8 @@ pub struct UnitFactor {
 pub struct LetDef {
     /// The initializer body.
     pub body: BodyId,
+    /// The written type annotation, if any. The body is checked against it.
+    pub declared: Option<Ty>,
 }
 
 /// A host-supplied opaque nominal type.
