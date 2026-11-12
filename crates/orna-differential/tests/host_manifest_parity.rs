@@ -12,9 +12,14 @@ fn linked_paths() -> Vec<String> {
         .links()
         .filter_map(|link| match link.member {
             // The catalogue keys callables by bare function name; the overload suffix is not part of the path.
-            SystemSurfaceMember::Callable(member) => {
-                Some(member.label().split('(').next().unwrap_or_default().to_owned())
-            }
+            SystemSurfaceMember::Callable(member) => Some(
+                member
+                    .label()
+                    .split('(')
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned(),
+            ),
             SystemSurfaceMember::Relation(member) => Some(member.name().to_owned()),
             SystemSurfaceMember::GroupedHandle(member) => Some(member.name().to_owned()),
             SystemSurfaceMember::Singleton(member) => Some(member.name().to_owned()),
@@ -26,7 +31,10 @@ fn linked_paths() -> Vec<String> {
 #[test]
 fn host_manifest_of_the_linked_members_agrees_with_catalogue_admission() {
     let paths = linked_paths();
-    assert!(!paths.is_empty(), "the production linkage must link some members");
+    assert!(
+        !paths.is_empty(),
+        "the production linkage must link some members"
+    );
 
     let mut manifest = HostManifest::new();
     for path in &paths {
