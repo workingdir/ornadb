@@ -13,11 +13,12 @@ use std::rc::Rc;
 
 use num_bigint::BigInt;
 use num_traits::{One, Signed, Zero};
-use orna_syntax::{
+use orna_syntax::parse_module_with_file;
+use orna_syntax_ast::SourceSpan as SyntaxSpan;
+use orna_syntax_ast::{
     AssignmentOperator, AssignmentTarget, ControlKind, Declaration, DimensionExpr, Expr,
     FieldInitializer, Item, LambdaParameter, LiteralKind, Pattern, ProtocolMember, Statement,
-    StringSegment, SyntaxSpan, SyntaxTree, TypeExpr, TypeMember, TypeRepresentation,
-    UnitDefinition, UseTail, parse_module_with_file,
+    StringSegment, SyntaxTree, TypeExpr, TypeMember, TypeRepresentation, UnitDefinition, UseTail,
 };
 use orna_value::{Diagnostic, SafeText};
 use sha2::{Digest, Sha256};
@@ -1268,7 +1269,7 @@ pub struct AssertionPlan {
     /// Source span of the assertion expression. `sys.ExpressionRef` is opaque
     /// and pinned to the snapshot that holds this span, so the span is the
     /// identity source for `sys.Assertion.expression`.
-    pub expression_span: orna_syntax::SyntaxSpan,
+    pub expression_span: orna_syntax_ast::SourceSpan,
     /// Position of the assertion among its owner's declarations, which
     /// `sys.Assertion.source_order` reports.
     pub source_order: usize,
@@ -1588,7 +1589,7 @@ pub fn admit_row_unit_with_key_spelling(
     if !result.diagnostics.is_empty() {
         return result;
     }
-    let orna_syntax::Expr::Record { fields, .. } = &parsed.value else {
+    let orna_syntax_ast::Expr::Record { fields, .. } = &parsed.value else {
         result
             .diagnostics
             .push(diag(DIAG_TYPE, "project row unit must contain one record"));
@@ -2372,8 +2373,8 @@ struct UnitShape {
 struct TableCheck<'a> {
     item: &'a Item,
     name: &'a str,
-    keys: &'a [orna_syntax::Parameter],
-    members: &'a [orna_syntax::TableMember],
+    keys: &'a [orna_syntax_ast::Parameter],
+    members: &'a [orna_syntax_ast::TableMember],
     symbols: &'a mut BTreeMap<String, Symbol>,
     scope: &'a Scope,
     plans: &'a mut Vec<AssertionPlan>,
@@ -2479,7 +2480,7 @@ fn check_table_item(check: TableCheck<'_>, diagnostics: &mut Vec<Diagnostic>) {
     if matches!(&row, Type::Record(_)) {
         if keys.is_empty()
             && members.iter().any(|member| {
-                matches!(member, orna_syntax::TableMember::Field { name, .. } if name == "id")
+                matches!(member, orna_syntax_ast::TableMember::Field { name, .. } if name == "id")
             })
         {
             // `id` is already the implicit logical key, so choosing a
@@ -2495,7 +2496,7 @@ fn check_table_item(check: TableCheck<'_>, diagnostics: &mut Vec<Diagnostic>) {
             declared_fields.insert("id".to_owned());
         }
         for member in members {
-            if let orna_syntax::TableMember::Field { name, .. } = member
+            if let orna_syntax_ast::TableMember::Field { name, .. } = member
                 && !declared_fields.insert(name.clone())
             {
                 diagnostics.push(diag(
@@ -2532,14 +2533,16 @@ fn check_table_item(check: TableCheck<'_>, diagnostics: &mut Vec<Diagnostic>) {
     }
     validate_non_overlapping_implementations(
         members.iter().filter_map(|member| match member {
-            orna_syntax::TableMember::Implementation { implementation, .. } => Some(implementation),
+            orna_syntax_ast::TableMember::Implementation { implementation, .. } => {
+                Some(implementation)
+            }
             _ => None,
         }),
         scope,
         diagnostics,
     );
     for member in members {
-        if let orna_syntax::TableMember::Implementation { implementation, .. } = member {
+        if let orna_syntax_ast::TableMember::Implementation { implementation, .. } = member {
             validate_nested_implementation_members(
                 implementation,
                 &scope.local_protocols,
@@ -2553,7 +2556,7 @@ fn check_table_item(check: TableCheck<'_>, diagnostics: &mut Vec<Diagnostic>) {
     }
     for (source_order, member) in members.iter().enumerate() {
         match member {
-            orna_syntax::TableMember::Assertion { value, .. } => {
+            orna_syntax_ast::TableMember::Assertion { value, .. } => {
                 let inferred = infer_table_assertion(value, name, &row, scope, diagnostics);
                 assertion(
                     AssertionInput {
@@ -2571,7 +2574,7 @@ fn check_table_item(check: TableCheck<'_>, diagnostics: &mut Vec<Diagnostic>) {
                     diagnostics,
                 );
             }
-            orna_syntax::TableMember::Field {
+            orna_syntax_ast::TableMember::Field {
                 initializer: None,
                 ty,
                 ..
@@ -2579,7 +2582,7 @@ fn check_table_item(check: TableCheck<'_>, diagnostics: &mut Vec<Diagnostic>) {
                 validate_type_annotation(ty, scope, &BTreeSet::new(), diagnostics);
                 validate_stored_field_type(ty, scope, diagnostics);
             }
-            orna_syntax::TableMember::Field {
+            orna_syntax_ast::TableMember::Field {
                 initializer: Some(initializer),
                 ty,
                 ..
@@ -2739,7 +2742,7 @@ fn check_nominal_type_item(
 /// Validates a `From` implementation: source type, the single `fn from(value)`
 /// member and its body's result.
 fn validate_from_implementation(
-    implementation: &orna_syntax::Implementation,
+    implementation: &orna_syntax_ast::Implementation,
     arguments: &[TypeExpr],
     target: &Type,
     target_shape: Option<&Type>,
@@ -2769,7 +2772,7 @@ fn validate_from_implementation(
     if let Some(from) = implementation.members.as_slice().first()
         && implementation.members.len() == 1
     {
-        let orna_syntax::ImplMember::Function {
+        let orna_syntax_ast::ImplMember::Function {
             signature, body, ..
         } = from
         else {
@@ -3253,9 +3256,9 @@ fn bind_record_pattern(
 }
 
 fn bind_constructor_pattern(
-    path: &[orna_syntax::NameSegment],
+    path: &[orna_syntax_ast::NameSegment],
     arguments: &[Pattern],
-    fields: &[orna_syntax::PatternField],
+    fields: &[orna_syntax_ast::PatternField],
     ty: &Type,
     scope: &Scope,
     into: &mut BTreeMap<String, Symbol>,
@@ -4139,7 +4142,7 @@ struct ControlParts<'a> {
     binding: Option<&'a Pattern>,
     condition: Option<&'a Expr>,
     body: Option<&'a Expr>,
-    arms: &'a [orna_syntax::CaseArm],
+    arms: &'a [orna_syntax_ast::CaseArm],
     alternate: Option<&'a Expr>,
 }
 
@@ -4187,7 +4190,7 @@ struct DynamicParameters<'a> {
     formal_parameters: &'a [Type],
     default_parameters: &'a BTreeSet<usize>,
     parameter_names: Option<&'a [String]>,
-    arguments: &'a [orna_syntax::Argument],
+    arguments: &'a [orna_syntax_ast::Argument],
     argument_types: &'a [Type],
     local: &'a BTreeMap<String, Symbol>,
     call_span: &'a SyntaxSpan,
@@ -4313,7 +4316,7 @@ fn specialize_dynamic_parameter_snapshot_contexts(ty: &Type, call: DynamicParame
 #[derive(Clone, Copy)]
 struct SpecializationCall<'a> {
     parameter_names: Option<&'a [String]>,
-    arguments: &'a [orna_syntax::Argument],
+    arguments: &'a [orna_syntax_ast::Argument],
     argument_types: &'a [Type],
     local: &'a BTreeMap<String, Symbol>,
     call_span: &'a SyntaxSpan,
@@ -5508,7 +5511,7 @@ fn money_generic_constructor_currency(
 
 fn infer_money_constructor(
     currency: Type,
-    arguments: &[orna_syntax::Argument],
+    arguments: &[orna_syntax_ast::Argument],
     scope: &Scope,
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
@@ -5640,7 +5643,7 @@ fn is_secret_sensitive_presentation_path(path: &[&str]) -> bool {
 
 fn infer_ui_action_call(
     path: &[&str],
-    arguments: &[orna_syntax::Argument],
+    arguments: &[orna_syntax_ast::Argument],
     scope: &Scope,
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,

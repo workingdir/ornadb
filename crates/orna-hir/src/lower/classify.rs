@@ -11,7 +11,7 @@
 
 use std::collections::BTreeMap;
 
-use orna_syntax::SyntaxSpan;
+use orna_syntax_ast::SourceSpan as SyntaxSpan;
 
 use crate::{
     Arg, ArgValue, Callee, DefId, DefKind, ExprId, Idx, IntrinsicForm, ModuleId, ModuleOrigin,

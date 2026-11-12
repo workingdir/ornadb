@@ -4,7 +4,9 @@
 //! regressions close the confirmed parser findings without broadening legacy
 //! syntax. ORNA source is kept in reviewable `.orna` fixtures.
 
-use orna_syntax::{Declaration, Expr, LiteralKind, parse_module};
+use orna_syntax::parse_module;
+
+use orna_syntax_ast::{Declaration, Expr, LiteralKind};
 
 fn fixture_case(name: &str) -> &str {
     include_str!("fixtures/v1_review_alias_cases.orna")

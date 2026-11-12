@@ -16,7 +16,8 @@ use orna_evaluator::{
     RelationPage, StepBudget, evaluate_expression_ovb2_with_effects,
     invoke_named_with_context_effects, invoke_named_with_effects,
 };
-use orna_syntax::{Expr, parse_expression};
+use orna_syntax::parse_expression;
+use orna_syntax_ast::Expr;
 use orna_sys::{
     DependencyConfidence, DependencyInput, DependencyKind, FunctionPlanDescription, ObjectRef,
     QueryPlanDescription, SnapshotRef, explain_function, explain_query,

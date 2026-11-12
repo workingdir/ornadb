@@ -5,7 +5,7 @@ use orna_evaluator::{
     evaluate_expression_ovb2, evaluate_expression_ovb2_with_effects,
     evaluate_expression_with_effects,
 };
-use orna_syntax::Expr;
+use orna_syntax_ast::Expr;
 use orna_value::CanonicalValue;
 use orna_value::{Blob, ContextValue, OVB2_BLOB_TAG, Raw, ValueFormat};
 

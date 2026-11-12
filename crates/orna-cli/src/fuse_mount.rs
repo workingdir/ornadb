@@ -45,7 +45,8 @@ use orna_runtime::{
     },
 };
 use orna_storage::COMPACT_FILE_BOUND_BYTES;
-use orna_syntax::{Expr, LiteralKind, parse_row};
+use orna_syntax::parse_row;
+use orna_syntax_ast::{Expr, LiteralKind};
 use orna_value::{
     Format3Context, Raw, SchemaDescriptor, blob_metadata_from_raw, decode_canonical_storage_value,
 };

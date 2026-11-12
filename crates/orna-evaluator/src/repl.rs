@@ -4,8 +4,10 @@ use std::collections::{BTreeMap, BTreeSet};
 #[cfg(feature = "system-host-bindings")]
 use std::sync::Arc;
 
-use orna_syntax::{
-    AssignmentTarget, Declaration, Expr, Pattern, ReplInput, Statement, UseTail, parse_repl,
+use orna_syntax::parse_repl;
+
+use orna_syntax_ast::{
+    AssignmentTarget, Declaration, Expr, Pattern, ReplInput, Statement, UseTail,
 };
 use orna_value::CanonicalValue;
 use orna_value::{ContextValue, Format3Context, Raw, ValueFormat};
@@ -854,7 +856,7 @@ fn ambiguous_expr(
         Expr::Name { text, .. } => ambiguities.contains_key(text) && !shadowed.contains(text),
         Expr::Literal { .. } | Expr::ReplBinding { .. } => false,
         Expr::InterpolatedString { segments, .. } => segments.iter().any(|segment| {
-            matches!(segment, orna_syntax::StringSegment::Expression { value, .. }
+            matches!(segment, orna_syntax_ast::StringSegment::Expression { value, .. }
                 if ambiguous_expr(value, ambiguities, shadowed))
         }),
         Expr::Unary { rhs, .. } | Expr::Group { inner: rhs, .. } => {
@@ -941,7 +943,7 @@ fn ambiguous_expr(
                 return true;
             }
             let mut body_scope = shadowed.clone();
-            if *kind == orna_syntax::ControlKind::For
+            if *kind == orna_syntax_ast::ControlKind::For
                 && let Some(binding) = binding
             {
                 body_scope.extend(pattern_names(binding));

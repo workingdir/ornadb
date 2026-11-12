@@ -8,7 +8,8 @@ use std::rc::Rc;
 use num_bigint::BigInt;
 use num_traits::Zero;
 use orna_hir::{DefKind, Ty, TyKind};
-use orna_syntax::{Expr, LiteralKind, RecordField, unescape_string_literal};
+use orna_syntax::unescape_string_literal;
+use orna_syntax_ast::{Expr, LiteralKind, RecordField};
 
 use super::encode::uuid_text;
 use crate::calendar::parse_date_text;

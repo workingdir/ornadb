@@ -44,7 +44,9 @@ mod units;
 
 use std::collections::BTreeMap;
 
-use orna_syntax::{SyntaxSpan, SyntaxTree};
+use orna_syntax_ast::SourceSpan as SyntaxSpan;
+
+use orna_syntax_ast::SyntaxTree;
 
 use crate::{
     Body, BodyId, DefId, EffectSet, Expr, ExprId, IndexVec, Local, LocalId, ModuleId, ModulePath,

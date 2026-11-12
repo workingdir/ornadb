@@ -35,9 +35,9 @@ use orna_hir::{
     lower, lower_with_admission,
 };
 use orna_standard_sources::reference_standard_sources_v1;
-use orna_syntax::{
+use orna_syntax::{parse_expression_with_file, parse_module_with_file};
+use orna_syntax_ast::{
     Declaration, EntryPoint, FunctionSignature, Item, ItemKind, SyntaxTree, Visibility,
-    parse_expression_with_file, parse_module_with_file,
 };
 
 use crate::Route;
@@ -361,7 +361,7 @@ fn lower_expression_case(case: &Case) -> Result<LoweredProgram, String> {
         .first()
         .ok_or_else(|| format!("{}: case has no source", case.id))?;
     let parsed = parse_expression_with_file(&source.text, source.logical_path.clone());
-    let span = orna_syntax::SyntaxSpan::new(0, source.text.len());
+    let span = orna_syntax_ast::SourceSpan::new(0, source.text.len());
     let tree = SyntaxTree {
         entry: EntryPoint::Module,
         items: vec![Item {
@@ -379,7 +379,7 @@ fn lower_expression_case(case: &Case) -> Result<LoweredProgram, String> {
                 body: parsed.value,
             },
             docs: Vec::new(),
-            clauses: orna_syntax::InterfaceClauses::default(),
+            clauses: orna_syntax_ast::InterfaceClauses::default(),
         }],
         span,
     };

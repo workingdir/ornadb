@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use orna_syntax::SyntaxSpan;
+use orna_syntax_ast::SourceSpan as SyntaxSpan;
 
 use super::declare::Builder;
 use crate::ModuleId;

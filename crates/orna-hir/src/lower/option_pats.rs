@@ -2,7 +2,7 @@
 //! a definition: a present option is its payload (decision D3), so the pattern
 //! matches any non-null value and matches `p` against that same value.
 
-use orna_syntax::{NameSegment, Pattern as AstPattern, PatternField};
+use orna_syntax_ast::{NameSegment, Pattern as AstPattern, PatternField};
 
 use crate::{ModuleId, Name, NameTarget, Pat, PatId, UseContext};
 

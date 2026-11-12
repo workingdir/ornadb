@@ -3,9 +3,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use num_traits::{Signed, Zero};
-use orna_syntax::{
+use orna_syntax_ast::SourceSpan as SyntaxSpan;
+use orna_syntax_ast::{
     AssignmentOperator, AssignmentTarget, ControlKind, Expr, LambdaParameter, LiteralKind, Pattern,
-    Statement, SyntaxSpan, TypeExpr,
+    Statement, TypeExpr,
 };
 use orna_value::Diagnostic;
 
@@ -16,7 +17,7 @@ impl<'a> ControlParts<'a> {
         binding: Option<&'a Pattern>,
         condition: Option<&'a Expr>,
         body: Option<&'a Expr>,
-        arms: &'a [orna_syntax::CaseArm],
+        arms: &'a [orna_syntax_ast::CaseArm],
         alternate: Option<&'a Expr>,
     ) -> Self {
         Self {
@@ -309,7 +310,7 @@ pub(crate) fn infer_lambda(
 
 pub(crate) fn infer_call(
     callee: &Expr,
-    arguments: &[orna_syntax::Argument],
+    arguments: &[orna_syntax_ast::Argument],
     span: &SyntaxSpan,
     scope: &Scope,
     local: &BTreeMap<String, Symbol>,
@@ -577,7 +578,7 @@ pub(crate) fn cross_database_write(callee: &Expr, scope: &Scope) -> bool {
 pub(crate) fn infer_generic_call(
     callee: &Expr,
     type_arguments: &[TypeExpr],
-    arguments: &[orna_syntax::Argument],
+    arguments: &[orna_syntax_ast::Argument],
     scope: &Scope,
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
@@ -1534,7 +1535,7 @@ pub(crate) fn lambda_numeric_parameter_usage(expression: &Expr, name: &str) -> b
 
 pub(crate) fn inferred_function_parameter_type(
     body: &Expr,
-    parameter: &orna_syntax::Parameter,
+    parameter: &orna_syntax_ast::Parameter,
 ) -> Option<Type> {
     let Pattern::Name(name, _) = &parameter.pattern else {
         return None;
@@ -2243,7 +2244,7 @@ pub(crate) fn check_call_arguments(
     parameters: &[Type],
     parameter_names: Option<&[String]>,
     default_parameters: &BTreeSet<usize>,
-    arguments: &[orna_syntax::Argument],
+    arguments: &[orna_syntax_ast::Argument],
     values: &[Type],
     input: Option<&Type>,
     diagnostics: &mut Vec<Diagnostic>,
@@ -2322,7 +2323,7 @@ pub(crate) fn check_call_arguments(
 pub(crate) fn expected_call_parameter<'a>(
     parameters: &'a [Type],
     parameter_names: Option<&'a [String]>,
-    arguments: &[orna_syntax::Argument],
+    arguments: &[orna_syntax_ast::Argument],
     index: usize,
 ) -> Option<&'a Type> {
     let argument = arguments.get(index)?;
@@ -2681,7 +2682,7 @@ pub(crate) fn insert_case_binding(
 }
 
 pub(crate) fn infer_case_arm_body(
-    arm: &orna_syntax::CaseArm,
+    arm: &orna_syntax_ast::CaseArm,
     local: &BTreeMap<String, Symbol>,
     scope: &Scope,
     diagnostics: &mut Vec<Diagnostic>,
@@ -3145,8 +3146,8 @@ pub(crate) fn checkpoint_snapshot_maps_are_valid(ty: &Type) -> bool {
 }
 
 pub(crate) fn infer_nominal(
-    path: &[orna_syntax::NameSegment],
-    fields: &[orna_syntax::RecordField],
+    path: &[orna_syntax_ast::NameSegment],
+    fields: &[orna_syntax_ast::RecordField],
     scope: &Scope,
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,

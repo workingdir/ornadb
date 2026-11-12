@@ -19,7 +19,7 @@ pub struct Call {
     /// The H1 classification proof keys the old evaluator's route trace by the
     /// callee span (design section 6.3), so the span is kept beside the
     /// classification instead of being recomputed from the call's extent.
-    pub callee_span: orna_syntax::SyntaxSpan,
+    pub callee_span: orna_syntax_ast::SourceSpan,
     /// One entry per parameter, in parameter order.
     pub args: Box<[Arg]>,
     /// Whether argument 0 is the piped value.

@@ -1,4 +1,5 @@
-use orna_syntax::{Declaration, Expr, StringSegment, parse_module};
+use orna_syntax::parse_module;
+use orna_syntax_ast::{Declaration, Expr, StringSegment};
 
 #[test]
 fn nested_type_trailing_comma_keeps_annotated_interpolated_closure_tail() {

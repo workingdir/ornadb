@@ -13,6 +13,7 @@ test-support = []
 [dependencies]
 orna-base = { path = "../orna-base" }
 orna-syntax = { path = "../orna-syntax" }
+orna-syntax-ast = { path = "../orna-syntax-ast" }
 orna-value = { path = "../orna-value" }
 sha1 = "0.10.7"
 sha2 = "0.11.0"

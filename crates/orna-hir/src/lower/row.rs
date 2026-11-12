@@ -4,7 +4,7 @@
 //! sibling fields `first` and `last` directly. The body's `self` slot is that row, so a bare sibling name
 //! lowers to a field selection on it, exactly as `self.first` would.
 
-use orna_syntax::SyntaxSpan;
+use orna_syntax_ast::SourceSpan as SyntaxSpan;
 
 use crate::{
     DefId, DefKind, ExprId, ExprKind, FieldRef, Idx, LocalId, Name, NameTarget, Ty, UseContext,

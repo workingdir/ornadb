@@ -100,7 +100,7 @@ pub(crate) struct Scope {
     /// Local generic function signatures. Imported generic functions are
     /// intentionally absent because their declaration-level bounds are not
     /// part of this source-local semantic scope.
-    pub(crate) generic_functions: BTreeMap<String, orna_syntax::FunctionSignature>,
+    pub(crate) generic_functions: BTreeMap<String, orna_syntax_ast::FunctionSignature>,
     /// Bounds available for generic parameters in the function currently
     /// being checked.
     pub(crate) generic_type_bounds: BTreeMap<String, Vec<TypeExpr>>,

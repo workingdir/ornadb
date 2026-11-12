@@ -9,7 +9,8 @@ use std::fmt;
 use std::ptr;
 
 use orna_check::{Catalogue, ModuleInput, SystemProviders, analyze_with_providers};
-use orna_syntax::{Declaration, parse_module_with_file};
+use orna_syntax::parse_module_with_file;
+use orna_syntax_ast::Declaration;
 use orna_value::CanonicalValue;
 
 use crate::{Environment, EvaluationError, Functions, Limits, PureFunction, invoke_named};

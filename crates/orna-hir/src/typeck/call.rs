@@ -1,7 +1,7 @@
 //! Call checking: source/native/sys, constructors, first-class values, table
 //! operations, relation stages and intrinsic forms.
 
-use orna_syntax::SyntaxSpan;
+use orna_syntax_ast::SourceSpan as SyntaxSpan;
 
 use crate::{
     Arg, ArgValue, Body, BodyId, Callee, DefId, DefKind, ExprId, ExprKind, FieldRef, FnBody, FnTy,

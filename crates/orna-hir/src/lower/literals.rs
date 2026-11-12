@@ -7,7 +7,7 @@
 //! `None`, and lowering reports one diagnostic instead of guessing.
 
 use num_bigint::{BigInt, Sign};
-use orna_syntax::LiteralKind;
+use orna_syntax_ast::LiteralKind;
 
 use crate::Lit;
 
@@ -258,7 +258,7 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
 mod tests {
     use super::{days_from_civil, lower_literal};
     use crate::Lit;
-    use orna_syntax::LiteralKind;
+    use orna_syntax_ast::LiteralKind;
 
     #[test]
     fn float_literals_lower_with_their_suffix_and_bits() {

@@ -1,4 +1,5 @@
-use orna_syntax::{ParseContext, SourceDocumentId, SyntaxAdmissionError, SyntaxSpan, admit_span};
+use orna_syntax::{ParseContext, SourceDocumentId, SyntaxAdmissionError, admit_span};
+use orna_syntax_ast::SourceSpan as SyntaxSpan;
 use orna_value::{CanonicalSnapshot, FileRef, OvbRaw, RowRef};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 

@@ -23,7 +23,7 @@ pub enum SyntaxAdmissionError {
 /// Converts a parser-local span only when its context supplies a real FileRef.
 pub fn admit_span(
     context: &ParseContext,
-    span: &super::parser::SourceSpan,
+    span: &orna_syntax_ast::SourceSpan,
 ) -> Result<SourceSpan, SyntaxAdmissionError> {
     let SourceDocumentId::Pinned(file) = &context.document else {
         return Err(SyntaxAdmissionError::NotPinned);
@@ -34,7 +34,7 @@ pub fn admit_span(
 /// Produces the protocol source observation; ephemeral buffers never cross it.
 pub fn admit_diagnostic(
     context: &ParseContext,
-    span: &super::parser::SourceSpan,
+    span: &orna_syntax_ast::SourceSpan,
     message: &str,
 ) -> Result<(DiagnosticSpan, SafeText), SyntaxAdmissionError> {
     let SourceDocumentId::Pinned(_) = &context.document else {

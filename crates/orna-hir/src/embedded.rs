@@ -7,7 +7,9 @@
 //! loads them ahead of every caller's sources, so a native call always has a
 //! signature to type against.
 
-use orna_syntax::{SyntaxTree, parse_interface_with_file};
+use orna_syntax::parse_interface_with_file;
+
+use orna_syntax_ast::SyntaxTree;
 
 use crate::{ModulePath, Name, NativeAbi, SourceId};
 

@@ -3,7 +3,9 @@
 //! The REPL's `$_` is not Orna syntax, so every occurrence is rewritten to the parameter [`LAST`] before lowering.
 
 use orna_syntax::visit::{Visit, walk_declaration, walk_expr};
-use orna_syntax::{Declaration, Expr, Item, SyntaxSpan as SourceSpan, TokenKind, lex};
+use orna_syntax::{TokenKind, lex};
+use orna_syntax_ast::SourceSpan;
+use orna_syntax_ast::{Declaration, Expr, Item};
 
 use crate::error::ReplError;
 

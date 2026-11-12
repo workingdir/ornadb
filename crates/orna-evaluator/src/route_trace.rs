@@ -17,7 +17,9 @@
 
 use std::cell::RefCell;
 
-use orna_syntax::{Expr, SyntaxSpan};
+use orna_syntax_ast::SourceSpan as SyntaxSpan;
+
+use orna_syntax_ast::Expr;
 
 /// Which branch of the evaluator's call cascade served one call, in the order
 /// the cascade tries them.

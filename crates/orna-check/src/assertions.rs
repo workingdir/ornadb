@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use orna_syntax::{
+use orna_syntax_ast::{
     ControlKind, Declaration, Expr, FieldInitializer, Item, Pattern, Statement, SyntaxTree,
     TypeMember, TypeRepresentation, UseTail,
 };
@@ -688,7 +688,7 @@ pub(crate) fn declared_table_schema(item: &Item) -> Option<TableSchema> {
         }
     }
     for member in members {
-        if let orna_syntax::TableMember::Field {
+        if let orna_syntax_ast::TableMember::Field {
             name, initializer, ..
         } = member
         {
@@ -713,7 +713,7 @@ pub(crate) fn declared_table_schema(item: &Item) -> Option<TableSchema> {
             _ => None,
         })
         .chain(members.iter().filter_map(|member| match member {
-            orna_syntax::TableMember::Field { name, .. } => Some(name.clone()),
+            orna_syntax_ast::TableMember::Field { name, .. } => Some(name.clone()),
             _ => None,
         }))
         .collect();
@@ -765,7 +765,7 @@ pub(crate) fn table_row_type(item: &Item) -> Type {
         }
     }
     for member in members {
-        if let orna_syntax::TableMember::Field { name, ty, .. } = member {
+        if let orna_syntax_ast::TableMember::Field { name, ty, .. } = member {
             fields.insert(name.clone(), type_of(ty));
         }
     }

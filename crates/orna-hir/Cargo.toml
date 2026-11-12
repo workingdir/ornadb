@@ -9,6 +9,7 @@ description = "Typed, resolved intermediate representation for the Orna 1.1.0 la
 [dependencies]
 num-bigint = "0.4.6"
 orna-syntax = { path = "../orna-syntax" }
+orna-syntax-ast = { path = "../orna-syntax-ast" }
 orna-value = { path = "../orna-value" }
 unicode-normalization = "=0.1.24"
 unicode-casefold = "0.2.0"

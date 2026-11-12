@@ -5,9 +5,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use orna_syntax::{
+use orna_syntax::parse_interface;
+
+use orna_syntax_ast::{
     Declaration, Expr, GenericParameter, Item, LiteralKind, NativeEffectSet, Pattern, TypeExpr,
-    TypeMember, TypeRepresentation, parse_interface,
+    TypeMember, TypeRepresentation,
 };
 
 use crate::{
@@ -147,7 +149,7 @@ fn label_head(label: &str) -> &str {
 /// Renders a `pub native fn` into the JSON `signature` grammar under the JSON head of its label.
 pub fn render_native(
     label: &str,
-    signature: &orna_syntax::FunctionSignature,
+    signature: &orna_syntax_ast::FunctionSignature,
     declared: &BTreeSet<String>,
 ) -> String {
     let parameters: Vec<String> = signature
@@ -356,7 +358,7 @@ impl Collected {
         match &item.declaration {
             Declaration::Enum { name, variants, .. }
                 if item.clauses.removed.is_none()
-                    && matches!(item.visibility, orna_syntax::Visibility::Public { .. }) =>
+                    && matches!(item.visibility, orna_syntax_ast::Visibility::Public { .. }) =>
             {
                 let variants = variants
                     .iter()

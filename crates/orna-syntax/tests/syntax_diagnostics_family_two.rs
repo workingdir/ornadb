@@ -1,4 +1,5 @@
-use orna_syntax::{Declaration, Expr, StringSegment, parse_module};
+use orna_syntax::parse_module;
+use orna_syntax_ast::{Declaration, Expr, StringSegment};
 
 fn assert_trailing_comma_diagnostic(source: &str, marker: &str) {
     let parsed = parse_module(source);

@@ -7,7 +7,7 @@ use num_traits::ToPrimitive;
 use orna_repository::{
     CapturedBlobCandidate, GraphError, OrpBlobBinding, RepositoryCaptureCapability,
 };
-use orna_syntax::Expr;
+use orna_syntax_ast::Expr;
 use orna_sys::{
     CaptureFileError, ClockProvider, EnvironmentDispatchValue, EnvironmentProvider,
     EnvironmentProviderError, FailureCode, FilesystemProvider, HostHttpResponse, HostOperation,

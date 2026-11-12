@@ -9,7 +9,7 @@ use unicode_normalization::UnicodeNormalization;
 
 use super::Found;
 use crate::{DefKind, HirDiagnostic, ModuleId, ModuleOrigin, Program, diag};
-use orna_syntax::SyntaxSpan;
+use orna_syntax_ast::SourceSpan as SyntaxSpan;
 
 /// Per-parent map from a folded sibling key to the first spelling seen.
 type Siblings = BTreeMap<Vec<String>, BTreeMap<String, String>>;

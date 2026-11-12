@@ -27,10 +27,8 @@ use orna_repository::{
 };
 use orna_runtime::vfs::{VfsComponent, project_key_component, unproject_component};
 use orna_runtime::{TableMutation, TableObjectId};
-use orna_syntax::{
-    Declaration, Expr, FieldInitializer, TableMember, parse_module, parse_module_with_file,
-    parse_row, parse_row_with_file,
-};
+use orna_syntax::{parse_module, parse_module_with_file, parse_row, parse_row_with_file};
+use orna_syntax_ast::{Declaration, Expr, FieldInitializer, TableMember};
 
 use orna_value::{
     ContextValue, Format3Context, ROV3_BLOB_TAG, Raw, SchemaDescriptor, Snapshot, Value,

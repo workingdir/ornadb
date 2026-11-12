@@ -16,6 +16,7 @@ orna-project = { path = "../orna-project" }
 orna-repository = { path = "../orna-repository" }
 orna-check = { path = "../orna-check" }
 orna-syntax = { path = "../orna-syntax" }
+orna-syntax-ast = { path = "../orna-syntax-ast" }
 orna-value = { path = "../orna-value" }
 sha2 = "0.10.9"
 

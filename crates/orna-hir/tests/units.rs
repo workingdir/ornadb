@@ -8,7 +8,8 @@ use orna_hir::{
     ArgValue, Callee, DefId, DefKind, ExprKind, ModulePath, Name, Program, SourceId, SourceUnit,
     lower,
 };
-use orna_syntax::{SyntaxTree, parse_module_with_file};
+use orna_syntax::parse_module_with_file;
+use orna_syntax_ast::SyntaxTree;
 
 fn parse(source: &str) -> SyntaxTree {
     let parsed = parse_module_with_file(source, "test.orna");

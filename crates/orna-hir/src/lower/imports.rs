@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 
-use orna_syntax::UseTail;
+use orna_syntax_ast::UseTail;
 
 use crate::Idx;
 use crate::resolve::PathKind;
@@ -20,11 +20,11 @@ impl Builder {
     /// Resolves every `use` declaration into the importing module's scope.
     pub(crate) fn resolve_imports(&mut self) {
         let uses = std::mem::take(&mut self.uses);
-        let mut globs: Vec<(ModuleId, ModuleId, orna_syntax::SyntaxSpan)> = Vec::new();
+        let mut globs: Vec<(ModuleId, ModuleId, orna_syntax_ast::SourceSpan)> = Vec::new();
         for pending in &uses {
             self.apply_use(pending, &mut globs);
         }
-        let mut importers: Vec<(ModuleId, orna_syntax::SyntaxSpan)> = Vec::new();
+        let mut importers: Vec<(ModuleId, orna_syntax_ast::SourceSpan)> = Vec::new();
         for (importer, target, span) in globs {
             self.collect_glob(importer, target);
             if !importers.iter().any(|(seen, _)| *seen == importer) {
@@ -40,7 +40,7 @@ impl Builder {
     fn apply_use(
         &mut self,
         pending: &PendingUse,
-        globs: &mut Vec<(ModuleId, ModuleId, orna_syntax::SyntaxSpan)>,
+        globs: &mut Vec<(ModuleId, ModuleId, orna_syntax_ast::SourceSpan)>,
     ) {
         let importer = pending.module;
         let target_path =
@@ -192,7 +192,7 @@ impl Builder {
         importer: ModuleId,
         name: Name,
         target: ModuleId,
-        span: orna_syntax::SyntaxSpan,
+        span: orna_syntax_ast::SourceSpan,
     ) {
         let conflict = {
             let scope = &self.scopes[importer.index()];
@@ -222,7 +222,7 @@ impl Builder {
         importer: ModuleId,
         name: Name,
         def: DefId,
-        span: orna_syntax::SyntaxSpan,
+        span: orna_syntax_ast::SourceSpan,
     ) {
         let conflict = {
             let scope = &self.scopes[importer.index()];
@@ -263,7 +263,7 @@ impl Builder {
     }
 
     /// Decides every wildcard-import candidate once all imports are collected.
-    fn finalize_glob(&mut self, importer: ModuleId, span: orna_syntax::SyntaxSpan) {
+    fn finalize_glob(&mut self, importer: ModuleId, span: orna_syntax_ast::SourceSpan) {
         let candidates = std::mem::take(&mut self.scopes[importer.index()].glob_candidates);
         let mut single: Vec<(Name, DefId)> = Vec::new();
         let mut twice: Vec<Name> = Vec::new();
@@ -328,7 +328,7 @@ impl Builder {
         importer: ModuleId,
         target_path: ModulePath,
         target: ModuleId,
-        span: orna_syntax::SyntaxSpan,
+        span: orna_syntax_ast::SourceSpan,
     ) {
         self.record_import(importer, target_path.clone(), ImportTarget::Module(target));
         let Some(names) = self.prelude.names(&target_path).cloned() else {

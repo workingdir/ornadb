@@ -27,6 +27,7 @@
     "orna-storage",
     "orna-stream",
     "orna-syntax",
+    "orna-syntax-ast",
     "orna-sys-macros",
     "orna-sys",
     "orna-sys-codegen",

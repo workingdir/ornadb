@@ -16,7 +16,7 @@
 //! replaces each solved variable with its solution and the type pass reports and
 //! rejects every variable that is still unbound.
 
-use orna_syntax::SyntaxSpan;
+use orna_syntax_ast::SourceSpan as SyntaxSpan;
 
 use crate::{ParamIdx, Ty, TyInterner, TyKind, TyVar};
 
@@ -362,7 +362,7 @@ impl InferCtxt {
 mod tests {
     use super::{Conflict, InferCtxt};
     use crate::{ParamIdx, TyInterner, TyKind};
-    use orna_syntax::SyntaxSpan;
+    use orna_syntax_ast::SourceSpan as SyntaxSpan;
 
     fn span() -> SyntaxSpan {
         SyntaxSpan::new(0, 1)

@@ -5,7 +5,9 @@
 //! or the miss of one. The field-access lowering in `exprs` asks this module
 //! first, so the module-export decision lives in one place.
 
-use orna_syntax::{Expr as AstExpr, SyntaxSpan};
+use orna_syntax_ast::SourceSpan as SyntaxSpan;
+
+use orna_syntax_ast::Expr as AstExpr;
 
 use crate::{DefId, ExprId, Name, NameTarget};
 

@@ -2,7 +2,7 @@ use unicode_ident::{is_xid_continue, is_xid_start};
 use unicode_normalization::UnicodeNormalization;
 
 use crate::budget::NestingBudget;
-use crate::parser::SourceSpan;
+use orna_syntax_ast::SourceSpan;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Keyword {

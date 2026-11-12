@@ -11,7 +11,7 @@
 use std::collections::BTreeSet;
 
 use orna_evaluator::Functions;
-use orna_syntax::{
+use orna_syntax_ast::{
     Argument, AssignmentTarget, CaseArm, Expr, LambdaParameter, NameSegment, Pattern, RecordField,
     Statement, StringSegment, TypeExpr,
 };

@@ -22,6 +22,7 @@ orna-repository = { path = "../orna-repository" }
 orna-security = { path = "../orna-security" }
 orna-check = { path = "../orna-check" }
 orna-syntax = { path = "../orna-syntax" }
+orna-syntax-ast = { path = "../orna-syntax-ast" }
 orna-runtime = { path = "../orna-runtime" }
 orna-stream = { path = "../orna-stream" }
 orna-sys-id = { path = "../orna-sys-id" }

@@ -167,7 +167,7 @@ fn suppressed_paired_rebind_keeps_same_named_tuple_pins_distinct() {
         ),
     ]));
     let call_span = SyntaxSpan::new(40, 72);
-    let arguments = vec![orna_syntax::Argument {
+    let arguments = vec![orna_syntax_ast::Argument {
         name: None,
         value: Expr::Name {
             text: "pins".into(),
@@ -251,7 +251,7 @@ fn unknown_direct_pair_sibling_suppresses_valid_pin_promotion() {
         ("right".into(), right.clone()),
     ]));
     let arguments = (0..2)
-        .map(|index| orna_syntax::Argument {
+        .map(|index| orna_syntax_ast::Argument {
             name: None,
             value: Expr::Name {
                 text: format!("pair_pin_{index}"),
@@ -324,7 +324,7 @@ fn unknown_nested_paired_width_suppresses_sibling_identity_promotion() {
         result: Box::new(Type::Text),
     };
     let arguments = (0..2)
-        .map(|index| orna_syntax::Argument {
+        .map(|index| orna_syntax_ast::Argument {
             name: None,
             value: Expr::Name {
                 text: format!("argument_{index}"),
@@ -405,7 +405,7 @@ fn omitted_sibling_keeps_same_named_captured_and_live_slots_distinct() {
             Type::Named("selector:parameter:pin".into()),
         ],
     };
-    let arguments = vec![orna_syntax::Argument {
+    let arguments = vec![orna_syntax_ast::Argument {
         name: None,
         value: Expr::Name {
             text: "supplied_pin".into(),

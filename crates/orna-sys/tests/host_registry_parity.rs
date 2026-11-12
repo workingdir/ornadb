@@ -1,6 +1,8 @@
 use std::{collections::BTreeMap, path::Path};
 
-use orna_syntax::{Declaration, parse_module};
+use orna_syntax::parse_module;
+
+use orna_syntax_ast::Declaration;
 use orna_sys::{
     CaptureFileError, ClockProviderError, EnvironmentDispatchValue, EnvironmentProvider,
     EnvironmentProviderError, FilesystemProviderError, HttpProviderError, ProcessProviderError,

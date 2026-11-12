@@ -2,7 +2,9 @@
 
 use std::collections::BTreeSet;
 
-use orna_syntax::{Declaration, parse_interface};
+use orna_syntax::parse_interface;
+
+use orna_syntax_ast::Declaration;
 use orna_sys_interface::{SYS_ORNA, native_label, native_raw_document};
 
 /// Every `formerly` clause names a retired name whose `removed_names` entry carries the same replacement label and

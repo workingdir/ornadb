@@ -9,9 +9,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use orna_syntax::{
-    AssignmentTarget, ControlKind, Expr, LambdaParameter, Pattern, Statement, SyntaxSpan,
-};
+use orna_syntax_ast::SourceSpan as SyntaxSpan;
+
+use orna_syntax_ast::{AssignmentTarget, ControlKind, Expr, LambdaParameter, Pattern, Statement};
 
 /// The free names of `expr`, each with the first span it was written at.
 pub(crate) fn free_names(expr: &Expr) -> BTreeMap<String, SyntaxSpan> {
@@ -82,7 +82,7 @@ fn walk(expr: &Expr, bound: &mut Vec<BTreeSet<String>>, found: &mut BTreeMap<Str
         Expr::Literal { .. } | Expr::ReplBinding { .. } => {}
         Expr::InterpolatedString { segments, .. } => {
             for segment in segments {
-                if let orna_syntax::StringSegment::Expression { value, .. } = segment {
+                if let orna_syntax_ast::StringSegment::Expression { value, .. } = segment {
                     walk(value, bound, found);
                 }
             }
@@ -217,7 +217,7 @@ fn walk_control(
     binding: Option<&Pattern>,
     condition: Option<&Expr>,
     body: Option<&Expr>,
-    arms: &[orna_syntax::CaseArm],
+    arms: &[orna_syntax_ast::CaseArm],
     alternate: Option<&Expr>,
     bound: &mut Vec<BTreeSet<String>>,
     found: &mut BTreeMap<String, SyntaxSpan>,
