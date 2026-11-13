@@ -609,3 +609,9 @@ reason = "stage 03 moves the portable 1.0 contract module whole from orna-founda
 bead = "ornadb-7603h.3"
 
 
+
+[[raise]]
+path = "crates/orna-cli-testkit/src/format3.rs::format3_repository_parts"
+new_limit = 178
+reason = "pure move of format3_repository_parts from crates/orna-cli/tests/support/format3.rs into the orna-cli-testkit crate; body unchanged"
+bead = "ornadb-g9d7z.5"

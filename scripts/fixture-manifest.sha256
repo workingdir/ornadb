@@ -4934,6 +4934,7 @@ e135e88ea724373eded488eca7b9aef9e871b22379d5aa456b1af647db94c424  crates/orna-re
 5075d2e2d2ea0ceedb49a53ad8daf559c89cb9c3f86b11853bcc1586907cf3d1  crates/orna-repository/tests/fixtures/foundation-adapter-main.orna
 5075d2e2d2ea0ceedb49a53ad8daf559c89cb9c3f86b11853bcc1586907cf3d1  crates/orna-repository/tests/fixtures/git-repository-main.orna
 abe8d8d34d5b65d1556e2e286cc6d6649b29b7fd9f5fb78d028f6853e364371c  crates/orna-repository/tests/fixtures/git-repository-nested-tool.orna
+87f1e75d48c9f4d0e1ffbdb5df55e69daf95c1bbbb53a8a43f0d55fd256595b3  crates/orna-repository/tests/fixtures/media/empty-media-main.orna
 c3a9237224f5d1f5d26acb76c80c9618dcd53b2f4ff295f0c4c0c2a7f553d891  crates/orna-repository/tests/fixtures/media/tone.wav
 f4343261af4a130f83991fab9b5cce452b00734918b536fbeef0ead2850511c1  crates/orna-repository/tests/fixtures/offline-complete-copy/dependency.orna
 d873d96d9910b5472067cce8b64fa40a60a0901a1d1f0d005769e606f77354ff  crates/orna-repository/tests/fixtures/orp1-vectors/README.md
