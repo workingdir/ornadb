@@ -32,13 +32,15 @@ use sha2::{Digest, Sha256};
 
 use crate::hex::hex_encode;
 
-mod cbor;
+mod node_decode;
 mod ordered;
 mod pins;
+mod value;
 
-use cbor::{CborReader, array, bytes, decode_node, null, uint, validate_canonical_value};
+use node_decode::decode_node;
+use value::{array, bytes, null, read_canonical_item, uint, validate_canonical_value};
 
-pub(crate) use cbor::{
+pub(crate) use value::{
     CborValue, canonical_value_bytes, decode_canonical_cbor, decode_canonical_content,
 };
 
@@ -5966,11 +5968,7 @@ impl NodeData {
         if bytes.len() > NODE_DATA_LIMIT {
             return Err(GraphError::NodeDataTooLarge(bytes.len()));
         }
-        let mut reader = CborReader::new(bytes);
-        let value = reader.value()?;
-        if !reader.is_finished() {
-            return Err(GraphError::NonCanonicalData);
-        }
+        let value = read_canonical_item(bytes)?;
         let data = decode_node(value, algorithm)?;
         if let NodeData::OrderedBranch {
             domain, entries, ..
