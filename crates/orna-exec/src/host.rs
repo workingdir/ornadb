@@ -12,6 +12,10 @@ use orna_value::{Raw, Snapshot};
 
 use crate::store::{MemoryStore, TableStore};
 
+#[path = "host/catalog.rs"]
+mod catalog;
+pub use catalog::{HostInfo, HostRuntimeMode, ProgramCatalog};
+
 /// The code a host answers for a member, or a capability, it does not provide.
 pub(crate) const UNSUPPORTED: &str = "ORNA-EVAL-UNSUPPORTED";
 
@@ -188,7 +192,7 @@ pub trait Host {
         &mut self,
         slot: SysSlot,
         at: Option<&Snapshot>,
-    ) -> Result<Box<dyn RowSource + '_>, HostFailure>;
+    ) -> Result<Box<dyn RowSource>, HostFailure>;
 }
 
 /// The host of a run that needs only tables: a table store, a clock fixed at the epoch, no entropy, no snapshots and
@@ -260,8 +264,128 @@ impl Host for StoreHost {
         &mut self,
         _slot: SysSlot,
         _at: Option<&Snapshot>,
-    ) -> Result<Box<dyn RowSource + '_>, HostFailure> {
+    ) -> Result<Box<dyn RowSource>, HostFailure> {
         Err(HostFailure { code: UNSUPPORTED })
+    }
+}
+
+/// A host for tests: a [`StoreHost`] plus the `sys` members a test registers, each with the rows, static value or call
+/// result it answers with. A member the test does not register is unlinked, as on [`StoreHost`].
+#[cfg(feature = "test-support")]
+pub struct FixtureHost {
+    inner: StoreHost,
+    relations: HashMap<SysSlot, Vec<Raw>>,
+    statics: HashMap<SysSlot, Raw>,
+    calls: HashMap<SysSlot, SysCall>,
+}
+
+/// A fixture `sys` callable: canonical arguments in, a canonical result or the host's failure out.
+#[cfg(feature = "test-support")]
+pub type SysCall = fn(Vec<Raw>) -> Result<Raw, HostFailure>;
+
+#[cfg(feature = "test-support")]
+impl FixtureHost {
+    /// A fixture host over `store`, with no `sys` member registered.
+    pub fn new(store: Box<dyn TableStore>) -> Self {
+        Self {
+            inner: StoreHost::new(store),
+            relations: HashMap::new(),
+            statics: HashMap::new(),
+            calls: HashMap::new(),
+        }
+    }
+
+    /// Registers the relation `name` with its canonical rows.
+    #[must_use]
+    pub fn with_relation(mut self, name: &str, rows: Vec<Raw>) -> Self {
+        let slot = self.inner.manifest.register(name);
+        self.relations.insert(slot, rows);
+        self
+    }
+
+    /// Registers the static `name` with its canonical value.
+    #[must_use]
+    pub fn with_static(mut self, name: &str, value: Raw) -> Self {
+        let slot = self.inner.manifest.register(name);
+        self.statics.insert(slot, value);
+        self
+    }
+
+    /// Registers the callable `name` with its fixture implementation.
+    #[must_use]
+    pub fn with_call(mut self, name: &str, call: SysCall) -> Self {
+        let slot = self.inner.manifest.register(name);
+        self.calls.insert(slot, call);
+        self
+    }
+}
+
+/// The rows of one fixture relation, owned, so the cursor borrows nothing from the host.
+#[cfg(feature = "test-support")]
+struct VecRows(std::vec::IntoIter<Raw>);
+
+#[cfg(feature = "test-support")]
+impl RowSource for VecRows {
+    fn next(&mut self) -> Result<Option<Raw>, HostFailure> {
+        Ok(self.0.next())
+    }
+}
+
+#[cfg(feature = "test-support")]
+impl Host for FixtureHost {
+    fn manifest(&self) -> &HostManifest {
+        self.inner.manifest()
+    }
+
+    fn store(&mut self) -> &mut dyn TableStore {
+        self.inner.store()
+    }
+
+    fn store_at(&mut self, at: &Snapshot) -> Result<Box<dyn TableStore + '_>, HostFailure> {
+        self.inner.store_at(at)
+    }
+
+    fn now(&self) -> HostInstant {
+        self.inner.now()
+    }
+
+    fn entropy(&mut self, out: &mut [u8]) -> Result<(), HostFailure> {
+        self.inner.entropy(out)
+    }
+
+    fn activation(&self) -> Option<&ActivationContext> {
+        self.inner.activation()
+    }
+
+    fn sys_call(&mut self, slot: SysSlot, args: Vec<Raw>) -> Result<Raw, HostFailure> {
+        match self.calls.get(&slot) {
+            Some(call) => call(args),
+            None => Err(HostFailure { code: UNSUPPORTED }),
+        }
+    }
+
+    fn sys_static(&mut self, slot: SysSlot) -> Result<Raw, HostFailure> {
+        self.statics
+            .get(&slot)
+            .cloned()
+            .ok_or(HostFailure { code: UNSUPPORTED })
+    }
+
+    fn sys_relation(
+        &mut self,
+        slot: SysSlot,
+        at: Option<&Snapshot>,
+    ) -> Result<Box<dyn RowSource>, HostFailure> {
+        if at.is_some() {
+            return Err(HostFailure {
+                code: SNAPSHOT_NOT_FOUND,
+            });
+        }
+        let rows = self
+            .relations
+            .get(&slot)
+            .ok_or(HostFailure { code: UNSUPPORTED })?;
+        Ok(Box::new(VecRows(rows.clone().into_iter())))
     }
 }
 

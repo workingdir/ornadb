@@ -1412,6 +1412,7 @@ dependencies = [
  "orna-evaluator",
  "orna-intrinsics",
  "orna-live",
+ "orna-live-lease",
  "orna-project",
  "orna-project-repl",
  "orna-protocol",
@@ -1559,6 +1560,7 @@ dependencies = [
  "orna-cursor",
  "orna-evaluator",
  "orna-live",
+ "orna-live-lease",
  "orna-project",
  "orna-project-repl",
  "orna-protocol",
@@ -1600,6 +1602,7 @@ dependencies = [
  "orna-exec",
  "orna-hir",
  "orna-project-repl",
+ "orna-repl",
  "orna-standard-sources",
  "orna-syntax",
  "orna-syntax-ast",
@@ -1746,6 +1749,7 @@ dependencies = [
  "orna-base",
  "orna-evaluator",
  "orna-live",
+ "orna-live-lease",
  "orna-protocol",
  "orna-repository",
  "orna-runtime",
@@ -1754,6 +1758,13 @@ dependencies = [
  "orna-stream",
  "orna-sys-id",
  "orna-value",
+]
+
+[[package]]
+name = "orna-live-lease"
+version = "1.0.0"
+dependencies = [
+ "futures",
 ]
 
 [[package]]
@@ -1833,13 +1844,11 @@ dependencies = [
 name = "orna-repl"
 version = "1.0.0"
 dependencies = [
- "orna-evaluator",
  "orna-exec",
  "orna-hir",
  "orna-standard-sources",
  "orna-syntax",
  "orna-syntax-ast",
- "orna-value",
 ]
 
 [[package]]
@@ -1851,6 +1860,7 @@ dependencies = [
  "libc",
  "num-bigint 0.4.8",
  "orna-base",
+ "orna-cbor",
  "orna-check",
  "orna-cli-support",
  "orna-conformance",

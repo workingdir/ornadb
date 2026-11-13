@@ -168,7 +168,7 @@ name = "orna-evolution"
 [[crate]]
 name = "orna-live"
 [crate.files]
-"src/lib.rs" = 12208
+"src/lib.rs" = 11714
 "src/live_presentation.rs" = 1623
 [crate.functions]
 "src/lib.rs::complete_application" = 232

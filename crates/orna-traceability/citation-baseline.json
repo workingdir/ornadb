@@ -16,6 +16,7 @@
     "orna-hir",
     "orna-intrinsics",
     "orna-live",
+    "orna-live-lease",
     "orna-link",
     "orna-lsp",
     "orna-project",

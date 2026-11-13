@@ -773,7 +773,8 @@ pub struct KeyValue {
 
 impl KeyValue {
     fn from_cbor(value: &CborValue) -> Result<Self, RowStoreError> {
-        let canonical = canonical_value_bytes(value);
+        let canonical =
+            canonical_value_bytes(value).map_err(|_| RowStoreError::InvalidCanonicalKey)?;
         let value = Value::decode(&canonical).map_err(|_| RowStoreError::InvalidCanonicalKey)?;
         let admitted = match value.raw() {
             // Ints inside the 64-bit heads are spelled `Int` or `UInt`.

@@ -282,7 +282,7 @@ impl Host for FixtureHost {
         &mut self,
         slot: SysSlot,
         at: Option<&Snapshot>,
-    ) -> Result<Box<dyn RowSource + '_>, HostFailure> {
+    ) -> Result<Box<dyn RowSource>, HostFailure> {
         self.inner.sys_relation(slot, at)
     }
 }

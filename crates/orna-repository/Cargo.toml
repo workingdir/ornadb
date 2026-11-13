@@ -17,6 +17,7 @@ fs2 = "0.4.3"
 libc = "0.2.180"
 num-bigint = "0.4.6"
 orna-base = { path = "../orna-base" }
+orna-cbor = { path = "../orna-cbor" }
 orna-format3 = { path = "../orna-format3" }
 orna-value = { path = "../orna-value" }
 orna-syntax = { path = "../orna-syntax" }
