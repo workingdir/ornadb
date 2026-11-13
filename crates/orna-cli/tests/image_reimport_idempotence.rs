@@ -5,13 +5,11 @@ use orna_runtime::{RuntimeIdentity, RuntimeState};
 use orna_sys::{EnvironmentProvider, FilesystemProvider};
 use tempfile::TempDir;
 
-#[path = "support/format3.rs"]
-mod format3;
 use format3::*;
+use orna_cli_testkit::format3;
 
-#[path = "support/media_commit.rs"]
-mod media_commit;
 use media_commit::commit_capture;
+use orna_cli_testkit::media_commit;
 
 const MEDIA_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/media");
 const REIMPORT_FIXTURE: &str = concat!(
@@ -22,7 +20,8 @@ const MEDIA_ROOT_PLACEHOLDER: &str = "__MEDIA_ROOT__";
 
 #[tokio::test]
 async fn reimporting_the_same_image_capture_leaves_the_committed_row_unchanged() {
-    let (directory, repository, relation_id) = empty_format3_repository();
+    let (directory, repository, relation_id) =
+        empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let source = TempDir::new().unwrap();
     std::fs::copy(
         Path::new(MEDIA_FIXTURES).join("pixel.png"),

@@ -13,8 +13,7 @@ use std::{
     process::{Command, Output},
 };
 
-#[path = "support/format3.rs"]
-mod format3;
+use orna_cli_testkit::format3;
 
 const SOURCE: &str = "pub table music(id: Str) { title: Str, artist: Str, }\npub fn main() {}\n";
 

@@ -24,7 +24,7 @@ use orna_runtime::{
 use orna_storage::RuntimePublicationCoordinator;
 use orna_value::{ContextValue, Raw, ValueFormat};
 
-#[path = "../../orna-cli/tests/support/format3.rs"]
+#[path = "../../orna-cli-testkit/src/format3.rs"]
 mod format3;
 
 const NOTE_SOURCE: &str = "pub table Note(id: Str) { title: Str, body: Str, }\n";

@@ -14,10 +14,8 @@ use orna_evaluator::SysHostBindingRegistry;
 use orna_runtime::RuntimeState;
 use orna_sys::{EnvironmentProvider, FilesystemProvider};
 
-#[path = "support/format3.rs"]
-mod format3;
-#[path = "support/media_commit.rs"]
-mod media_commit;
+use orna_cli_testkit::format3;
+use orna_cli_testkit::media_commit;
 
 struct MountedFuse {
     child: Child,

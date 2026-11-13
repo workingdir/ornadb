@@ -2471,9 +2471,9 @@ fn orp1_index_churn_multi_page() {
     });
 }
 
-#[path = "../../orna-cli/tests/support/format3.rs"]
+#[path = "../../orna-cli-testkit/src/format3.rs"]
 mod format3;
-#[path = "../../orna-cli/tests/support/media_commit.rs"]
+#[path = "../../orna-cli-testkit/src/media_commit.rs"]
 mod media_commit;
 
 /// Production-path publication fixture: the repository, the media directory,
@@ -2508,7 +2508,8 @@ fn production_rows() -> u64 {
 /// Admits ten rows into a fresh empty format-3 repository and freezes the
 /// admitted prefix. Publication is left to the caller.
 async fn admit_ten_production_rows() -> AdmittedProductionRows {
-    let (repository_dir, repository, relation_id) = format3::empty_format3_repository();
+    let (repository_dir, repository, relation_id) =
+        format3::empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     admit_production_rows_into(repository_dir, repository, relation_id).await
 }
 
@@ -3360,7 +3361,8 @@ async fn orp1_production_publication_race() {
 /// of the history missing; the warm clone hydrates it before the race. Both
 /// must settle like the in-process race.
 async fn run_partial_clone_publication_race(hydrate_head: bool) {
-    let (source_dir, _source, source_relation_id) = format3::empty_format3_repository();
+    let (source_dir, _source, source_relation_id) =
+        format3::empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let (clone_holder, clone_path, _) = clone_promisor(source_dir.path(), &[]);
     // The clone is a fresh repository without the fixture's local identity, and
     // global config is isolated, so the publisher could not commit without it.

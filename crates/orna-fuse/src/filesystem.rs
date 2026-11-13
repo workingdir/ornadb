@@ -10,7 +10,7 @@ pub(crate) const ENTRY_TTL: Duration = Duration::ZERO;
 // already-open draft.
 pub(crate) const EDITABLE_OPEN_FLAGS: fuser::FopenFlags = fuser::FopenFlags::FOPEN_DIRECT_IO;
 pub(crate) const EDITOR_INIT_CAPABILITIES: fuser::InitFlags = fuser::InitFlags::FUSE_ATOMIC_O_TRUNC;
-pub(crate) fn spawn_read_only(
+pub fn spawn_read_only(
     repository: &Repository,
     commit: &GitCommitRef,
     context: &HistoricalFormatContext,
@@ -32,7 +32,7 @@ pub(crate) fn spawn_read_only(
 /// The editor mount omits `AllowOther`, so the kernel admits only the mounting
 /// uid. The owner's control handler therefore does not check the caller uid
 /// (`_request` is unused): same-user access is the access boundary.
-pub(crate) fn spawn_editor(
+pub fn spawn_editor(
     repository: &Repository,
     commit: &GitCommitRef,
     context: &HistoricalFormatContext,
@@ -58,7 +58,7 @@ pub(crate) fn spawn_editor(
 /// `draft` names the retained candidate so the CLI can report its location by
 /// default (ORNA-UX-004; profiles/vfs-1.md:101-102).
 #[derive(Debug)]
-pub(crate) enum EditError {
+pub enum EditError {
     Stale {
         message: String,
         draft: PathBuf,
@@ -111,10 +111,7 @@ impl PreparedEdit {
 #[allow(clippy::items_after_statements)]
 /// Writes `initial` to a new explicit editor draft, runs `$EDITOR` on it and
 /// returns the draft path. The draft is retained on every failure.
-pub(crate) fn run_editor_on_draft(
-    runtime_root: &Path,
-    initial: &[u8],
-) -> Result<PathBuf, EditError> {
+pub fn run_editor_on_draft(runtime_root: &Path, initial: &[u8]) -> Result<PathBuf, EditError> {
     let (mut file, draft_path) = create_editor_draft(runtime_root)
         .map_err(|error| format!("explicit edit draft could not be created: {error}"))?;
     use std::io::Write as _;
@@ -535,7 +532,7 @@ impl WorkspaceFilesystem {
 
 /// The digest an explicit edit carries from its read to its save (41-vfs.md:75-77): the
 /// lowercase hex SHA-256 of the mounted bytes the editor was seeded from.
-pub(crate) fn edit_view_digest(bytes: &[u8]) -> String {
+pub fn edit_view_digest(bytes: &[u8]) -> String {
     hex(&Sha256::digest(bytes))
 }
 
@@ -565,7 +562,7 @@ pub(crate) fn read_regular_draft(draft: &Path) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-pub(crate) fn edit_path(
+pub fn edit_path(
     repository: &Repository,
     commit: &GitCommitRef,
     context: &HistoricalFormatContext,
@@ -587,14 +584,14 @@ pub(crate) fn edit_path(
     prepared.commit(&candidate, &draft_path, grouped_row)
 }
 #[derive(Debug)]
-pub(crate) enum UnmountPreparationError {
+pub enum UnmountPreparationError {
     UnresolvedDrafts,
     ReadOnlyMount,
     Disconnected,
     Operation(String),
 }
 
-pub(crate) fn begin_unmount(mountpoint: &Path) -> Result<(), UnmountPreparationError> {
+pub fn begin_unmount(mountpoint: &Path) -> Result<(), UnmountPreparationError> {
     rustix::fs::setxattr(
         mountpoint,
         XATTR_UNMOUNT_QUIESCE,
@@ -614,7 +611,7 @@ pub(crate) fn begin_unmount(mountpoint: &Path) -> Result<(), UnmountPreparationE
     })
 }
 
-pub(crate) fn cancel_unmount(mountpoint: &Path) -> Result<(), String> {
+pub fn cancel_unmount(mountpoint: &Path) -> Result<(), String> {
     rustix::fs::setxattr(
         mountpoint,
         XATTR_UNMOUNT_QUIESCE,
@@ -623,7 +620,7 @@ pub(crate) fn cancel_unmount(mountpoint: &Path) -> Result<(), String> {
     )
     .map_err(|error| format!("could not resume Orna mount after failed unmount: {error}"))
 }
-pub(crate) fn has_unresolved_drafts(mountpoint: &Path) -> Result<bool, String> {
+pub fn has_unresolved_drafts(mountpoint: &Path) -> Result<bool, String> {
     let mut value = [0_u8; 1];
     let length = rustix::fs::getxattr(mountpoint, XATTR_UNRESOLVED_DRAFTS, &mut value)
         .map_err(|error| format!("could not read Orna mount draft state: {error}"))?;
@@ -669,18 +666,18 @@ pub(crate) fn read_draft_xattr(mountpoint: &Path, name: &str) -> Result<String, 
 
 /// The unresolved drafts of a live mount, one `path<TAB>detail` line each, for
 /// an unmount refusal that names what blocks it (W15-03).
-pub(crate) fn unresolved_draft_list(mountpoint: &Path) -> Result<String, rustix::io::Errno> {
+pub fn unresolved_draft_list(mountpoint: &Path) -> Result<String, rustix::io::Errno> {
     read_draft_xattr(mountpoint, XATTR_UNRESOLVED_DRAFT_LIST)
 }
 
 /// The unresolved drafts of a live mount, one `path<TAB>code<TAB>draft<TAB>detail`
 /// line each, for `mount status`.
-pub(crate) fn unresolved_draft_fields(mountpoint: &Path) -> Result<String, rustix::io::Errno> {
+pub fn unresolved_draft_fields(mountpoint: &Path) -> Result<String, rustix::io::Errno> {
     read_draft_xattr(mountpoint, XATTR_UNRESOLVED_DRAFT_FIELDS)
 }
 
 /// Why stop-time draft retention did not finish (ORNA-VFS-024).
-pub(crate) enum DraftRetentionStop {
+pub enum DraftRetentionStop {
     /// Recovery storage could not keep a draft; the mount stays up and the stop retries.
     Retention(String),
     /// The mount could not be quiesced for retention; the stop unmounts and reports it.
@@ -692,7 +689,7 @@ pub(crate) enum DraftRetentionStop {
 /// (recovery storage, or the scratch store for scratch files) and to report
 /// them, so stopping never silently discards a draft (ORNA-VFS-024). Returns
 /// whether any draft was unresolved.
-pub(crate) fn retain_drafts_for_shutdown(mountpoint: &Path) -> Result<bool, DraftRetentionStop> {
+pub fn retain_drafts_for_shutdown(mountpoint: &Path) -> Result<bool, DraftRetentionStop> {
     match begin_unmount(mountpoint) {
         Ok(())
         | Err(UnmountPreparationError::ReadOnlyMount | UnmountPreparationError::Disconnected) => {
@@ -715,7 +712,7 @@ pub(crate) fn retain_drafts_for_shutdown(mountpoint: &Path) -> Result<bool, Draf
 /// Unmounts a FUSE mount whose daemon is gone (its kernel mount answers
 /// ENOTCONN). A plain unmount is tried first; a dead mount that a process
 /// still references is detached lazily so the mountpoint can be reused.
-pub(crate) fn unmount_dead_mountpoint(mountpoint: &Path) -> Result<(), String> {
+pub fn unmount_dead_mountpoint(mountpoint: &Path) -> Result<(), String> {
     let Err(first) = unmount_mountpoint(mountpoint) else {
         return Ok(());
     };
@@ -734,7 +731,7 @@ pub(crate) fn unmount_dead_mountpoint(mountpoint: &Path) -> Result<(), String> {
     }
 }
 
-pub(crate) fn unmount_mountpoint(mountpoint: &Path) -> Result<(), String> {
+pub fn unmount_mountpoint(mountpoint: &Path) -> Result<(), String> {
     let output = Command::new(fusermount_program())
         .args(["-u", "--"])
         .arg(mountpoint)

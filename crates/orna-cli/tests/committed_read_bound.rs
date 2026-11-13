@@ -18,8 +18,7 @@ use orna_project::{CommittedReadError, CommittedReadLimits, committed_tables};
 use orna_repository::Repository;
 use orna_runtime::TableObjectId;
 
-#[path = "support/format3.rs"]
-mod format3;
+use orna_cli_testkit::format3;
 
 const SOURCE: &str = "pub table music(id: Str) { title: Str, artist: Str, }\n\
 pub fn main() = music | count();\n";

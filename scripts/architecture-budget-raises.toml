@@ -74,97 +74,97 @@ reason = "pure split of the cli_history/cli_query god functions along parse/vali
 bead = "ornadb-mankj"
 
 [[raise]]
-path = "crates/orna-cli/src/fuse_mount/builder.rs"
+path = "crates/orna-fuse/src/builder.rs"
 new_limit = 1692
 reason = "pure split of fuse_mount.rs along its implementation seams; the 12008-line parent shrank to 203 lines"
 bead = "ornadb-ahzrn"
 
 [[raise]]
-path = "crates/orna-cli/src/fuse_mount/builder.rs::project_row_files"
+path = "crates/orna-fuse/src/builder.rs::project_row_files"
 new_limit = 294
 reason = "pure split of fuse_mount.rs along its implementation seams; the 12008-line parent shrank to 203 lines"
 bead = "ornadb-ahzrn"
 
 [[raise]]
-path = "crates/orna-cli/src/fuse_mount/filesystem.rs"
-new_limit = 4595
+path = "crates/orna-fuse/src/filesystem.rs"
+new_limit = 4596
 reason = "pure split of fuse_mount.rs along its implementation seams; the 12008-line parent shrank to 203 lines"
 bead = "ornadb-ahzrn"
 
 [[raise]]
-path = "crates/orna-cli/src/fuse_mount/filesystem.rs::commit_blob_candidate"
+path = "crates/orna-fuse/src/filesystem.rs::commit_blob_candidate"
 new_limit = 169
 reason = "pure split of fuse_mount.rs along its implementation seams; the 12008-line parent shrank to 203 lines"
 bead = "ornadb-ahzrn"
 
 [[raise]]
-path = "crates/orna-cli/src/fuse_mount/filesystem.rs::create"
+path = "crates/orna-fuse/src/filesystem.rs::create"
 new_limit = 139
 reason = "pure split of fuse_mount.rs along its implementation seams; the 12008-line parent shrank to 203 lines"
 bead = "ornadb-ahzrn"
 
 [[raise]]
-path = "crates/orna-cli/src/fuse_mount/filesystem.rs::from_snapshot"
+path = "crates/orna-fuse/src/filesystem.rs::from_snapshot"
 new_limit = 173
 reason = "pure split of fuse_mount.rs along its implementation seams; the 12008-line parent shrank to 203 lines"
 bead = "ornadb-ahzrn"
 
 [[raise]]
-path = "crates/orna-cli/src/fuse_mount/filesystem.rs::open"
+path = "crates/orna-fuse/src/filesystem.rs::open"
 new_limit = 346
 reason = "pure split of fuse_mount.rs along its implementation seams; the 12008-line parent shrank to 203 lines"
 bead = "ornadb-ahzrn"
 
 [[raise]]
-path = "crates/orna-cli/src/fuse_mount/filesystem.rs::prepare_edit"
+path = "crates/orna-fuse/src/filesystem.rs::prepare_edit"
 new_limit = 176
 reason = "pure split of fuse_mount.rs along its implementation seams; the 12008-line parent shrank to 203 lines"
 bead = "ornadb-ahzrn"
 
 [[raise]]
-path = "crates/orna-cli/src/fuse_mount/filesystem.rs::read"
+path = "crates/orna-fuse/src/filesystem.rs::read"
 new_limit = 162
 reason = "pure split of fuse_mount.rs along its implementation seams; the 12008-line parent shrank to 203 lines"
 bead = "ornadb-ahzrn"
 
 [[raise]]
-path = "crates/orna-cli/src/fuse_mount/filesystem.rs::rename"
+path = "crates/orna-fuse/src/filesystem.rs::rename"
 new_limit = 338
 reason = "pure split of fuse_mount.rs along its implementation seams; the 12008-line parent shrank to 203 lines"
 bead = "ornadb-ahzrn"
 
 [[raise]]
-path = "crates/orna-cli/src/fuse_mount/filesystem.rs::retain_all_drafts"
+path = "crates/orna-fuse/src/filesystem.rs::retain_all_drafts"
 new_limit = 280
 reason = "pure split of fuse_mount.rs along its implementation seams; the 12008-line parent shrank to 203 lines"
 bead = "ornadb-ahzrn"
 
 [[raise]]
-path = "crates/orna-cli/src/fuse_mount/filesystem.rs::setattr"
+path = "crates/orna-fuse/src/filesystem.rs::setattr"
 new_limit = 132
 reason = "pure split of fuse_mount.rs along its implementation seams; the 12008-line parent shrank to 203 lines"
 bead = "ornadb-ahzrn"
 
 [[raise]]
-path = "crates/orna-cli/src/fuse_mount/filesystem.rs::unresolved_drafts_of"
+path = "crates/orna-fuse/src/filesystem.rs::unresolved_drafts_of"
 new_limit = 131
 reason = "pure split of fuse_mount.rs along its implementation seams; the 12008-line parent shrank to 203 lines"
 bead = "ornadb-ahzrn"
 
 [[raise]]
-path = "crates/orna-cli/src/fuse_mount/projection.rs"
+path = "crates/orna-fuse/src/projection.rs"
 new_limit = 1339
 reason = "pure split of fuse_mount.rs along its implementation seams; the 12008-line parent shrank to 203 lines"
 bead = "ornadb-ahzrn"
 
 [[raise]]
-path = "crates/orna-cli/src/fuse_mount/retained.rs::retain"
+path = "crates/orna-fuse/src/retained.rs::retain"
 new_limit = 124
 reason = "pure split of fuse_mount.rs along its implementation seams; the 12008-line parent shrank to 203 lines"
 bead = "ornadb-ahzrn"
 
 [[raise]]
-path = "crates/orna-cli/src/fuse_mount/writer.rs::candidate"
+path = "crates/orna-fuse/src/writer.rs::candidate"
 new_limit = 230
 reason = "pure split of fuse_mount.rs along its implementation seams; the 12008-line parent shrank to 203 lines"
 bead = "ornadb-ahzrn"
@@ -200,13 +200,13 @@ reason = "pure split: inline test modules moved to sibling files; the parent fil
 bead = "ornadb-qwog6"
 
 [[raise]]
-path = "crates/orna-cli/src/fuse_mount/tests.rs::mount_blob_window_reads_charge_only_intersecting_chunks"
+path = "crates/orna-fuse/src/tests.rs::mount_blob_window_reads_charge_only_intersecting_chunks"
 new_limit = 134
 reason = "pure split: inline test modules moved to sibling files; the parent files shrank"
 bead = "ornadb-qwog6"
 
 [[raise]]
-path = "crates/orna-cli/src/fuse_mount/tests.rs::workspace_readdir_uses_lazy_indexed_pages"
+path = "crates/orna-fuse/src/tests.rs::workspace_readdir_uses_lazy_indexed_pages"
 new_limit = 127
 reason = "pure split: inline test modules moved to sibling files; the parent files shrank"
 bead = "ornadb-qwog6"
@@ -613,3 +613,9 @@ path = "crates/orna-syntax/src/parser.rs"
 new_limit = 6300
 reason = "stage N1 adds the native declaration production, its parameter and effect-clause parsers and the ORNA-NATIVE-003 placement rejections; parser.rs already carries every module production and splitting the native form out is follow-up work on the bead"
 bead = "ornadb-3brdo.1"
+
+[[raise]]
+path = "crates/orna-cli-testkit/src/format3.rs::format3_repository_parts"
+new_limit = 178
+reason = "pure move of format3_repository_parts from crates/orna-cli/tests/support/format3.rs into the orna-cli-testkit crate; body unchanged"
+bead = "ornadb-g9d7z.5"

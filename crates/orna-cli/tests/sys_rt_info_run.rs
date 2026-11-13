@@ -14,8 +14,7 @@ use orna_runtime::RuntimeState;
 use orna_value::{OvbRaw, Value};
 use tempfile::TempDir;
 
-#[path = "support/format3.rs"]
-mod format3;
+use orna_cli_testkit::format3;
 
 const RUNTIME_INFO_SOURCE: &str = r#"pub table RuntimeEvidence(id: Int) {
     language_version: Str,

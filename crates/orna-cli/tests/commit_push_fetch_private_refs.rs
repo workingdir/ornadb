@@ -25,8 +25,7 @@ use std::{
 
 use tempfile::TempDir;
 
-#[path = "support/format3.rs"]
-mod format3;
+use orna_cli_testkit::format3;
 
 const CONTACT_SOURCE: &str = "pub table Contact(id: Str) {\n    name: Str,\n}\n";
 

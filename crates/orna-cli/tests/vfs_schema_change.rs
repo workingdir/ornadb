@@ -16,10 +16,8 @@
 
 #[path = "support/editor_mount.rs"]
 mod editor_mount;
-#[path = "support/format3.rs"]
-mod format3;
-#[path = "support/media_commit.rs"]
-mod media_commit;
+use orna_cli_testkit::format3;
+use orna_cli_testkit::media_commit;
 #[path = "support/product.rs"]
 mod product;
 

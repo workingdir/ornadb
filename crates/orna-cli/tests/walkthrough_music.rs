@@ -5,8 +5,10 @@ use std::{
     process::{Command, Output, Stdio},
 };
 
+use format3::*;
 use orna_application::{ApplicationAuthority, CommittedTableIdentity};
 use orna_check::Catalogue;
+use orna_cli_testkit::format3;
 use orna_evaluator::{
     Environment, Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects,
 };
@@ -20,9 +22,6 @@ use orna_value::{
 };
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
-#[path = "support/format3.rs"]
-mod format3;
-use format3::*;
 
 const MUSIC_SOURCE: &str = "pub table music(id: Str) { title: Str, artist: Str, content: Blob, cover: Blob?, }\npub fn main() {}\n";
 

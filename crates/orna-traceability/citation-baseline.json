@@ -11,6 +11,7 @@
     "orna-exec",
     "orna-evolution",
     "orna-format3",
+    "orna-fuse",
     "orna-hir",
     "orna-intrinsics",
     "orna-live",

@@ -1466,9 +1466,11 @@ dependencies = [
  "orna-base",
  "orna-check",
  "orna-cli-support",
+ "orna-cli-testkit",
  "orna-conformance",
  "orna-evaluator",
  "orna-exec",
+ "orna-fuse",
  "orna-hir",
  "orna-live",
  "orna-project",
@@ -1497,6 +1499,23 @@ name = "orna-cli-support"
 version = "0.1.0"
 dependencies = [
  "orna-base",
+ "orna-project",
+ "orna-repository",
+ "orna-runtime",
+ "orna-value",
+ "sha2 0.10.9",
+ "tempfile",
+]
+
+[[package]]
+name = "orna-cli-testkit"
+version = "0.1.0"
+dependencies = [
+ "orna-base",
+ "orna-check",
+ "orna-cli-support",
+ "orna-conformance",
+ "orna-evaluator",
  "orna-project",
  "orna-repository",
  "orna-runtime",
@@ -1639,6 +1658,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "orna-fuse"
+version = "0.1.0"
+dependencies = [
+ "fuser",
+ "getrandom 0.3.4",
+ "libc",
+ "orna-base",
+ "orna-check",
+ "orna-cli-support",
+ "orna-cli-testkit",
+ "orna-conformance",
+ "orna-evaluator",
+ "orna-project",
+ "orna-repository",
+ "orna-runtime",
+ "orna-storage",
+ "orna-syntax",
+ "orna-sys",
+ "orna-sys-id",
+ "orna-value",
+ "rustix 0.38.44",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "orna-hir"
 version = "1.0.0"
 dependencies = [
@@ -1775,6 +1821,7 @@ dependencies = [
  "num-bigint 0.4.8",
  "orna-base",
  "orna-check",
+ "orna-cli-support",
  "orna-conformance",
  "orna-evaluator",
  "orna-format3",
