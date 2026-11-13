@@ -427,34 +427,36 @@ fn lower_path_value(
     value
 }
 
-/// Attaches written type arguments to a callee that carries them.
+/// Attaches written type arguments to a callee that carries them, and returns them lowered. A nominal `Money<GBP>`
+/// constructor carries none in its callee; its arguments type the call expression instead.
 pub(crate) fn attach_type_arguments(
     builder: &mut Builder,
     state: &mut BodyState,
     callee: Callee,
     type_arguments: &[TypeExpr],
-) -> Callee {
+) -> (Callee, Box<[crate::Ty]>) {
     if type_arguments.is_empty() {
-        return callee;
+        return (callee, Box::new([]));
     }
     let lowered = type_arguments
         .iter()
         .map(|argument| super::types::lower_type(builder, state.module, &[], argument))
         .collect::<Vec<_>>()
         .into_boxed_slice();
-    match callee {
+    let callee = match callee {
         Callee::Source { def, .. } => Callee::Source {
             def,
-            targs: lowered,
+            targs: lowered.clone(),
         },
         Callee::Native { def, .. } => Callee::Native {
             def,
-            targs: lowered,
+            targs: lowered.clone(),
         },
         Callee::Sys { def, .. } => Callee::Sys {
             def,
-            targs: lowered,
+            targs: lowered.clone(),
         },
         other => other,
-    }
+    };
+    (callee, lowered)
 }
