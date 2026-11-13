@@ -36,6 +36,7 @@ mod effect_pass;
 mod effects;
 mod embedded;
 pub mod engine_display;
+pub mod engine_codes;
 pub mod engine_money;
 pub mod engine_order;
 mod ids;

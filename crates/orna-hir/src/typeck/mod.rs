@@ -59,6 +59,8 @@ mod expr;
 mod family;
 #[cfg(test)]
 mod generics_tests;
+#[cfg(test)]
+mod money_tests;
 mod nominal;
 #[cfg(test)]
 mod null_compare_tests;
@@ -893,6 +895,25 @@ impl<'a> BodyCheck<'a> {
     ) -> Result<Ty, NotYetReason> {
         let left = self.infer_expr(body, lhs, None)?;
         let right = self.infer_expr(body, rhs, None)?;
+        let resolved_left = self.resolved(left);
+        let resolved_right = self.resolved(right);
+        if let Some(code) = crate::engine_codes::operator_rejection(
+            self.program,
+            op,
+            resolved_left,
+            resolved_right,
+        ) {
+            // The published code is kernel-owned (hir-host.md B5); it is decided before the generic message.
+            self.conflicts += 1;
+            let message = format!(
+                "the operator is not defined for {} and {}",
+                crate::print::print_type(self.program, resolved_left),
+                crate::print::print_type(self.program, resolved_right)
+            );
+            self.diagnostics
+                .push(HirDiagnostic::new(code, Box::<str>::from(message), span.clone()));
+            return Ok(self.error());
+        }
         if let Some(result) = self.quantity_binary(body, op, left, right, rhs, span.clone()) {
             return Ok(result);
         }

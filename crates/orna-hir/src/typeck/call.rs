@@ -682,7 +682,11 @@ impl<'a> BodyCheck<'a> {
         for (index, field) in fields.iter().enumerate() {
             let field_ty = self.field_in(result, *field)?;
             if call.args.get(index).is_some() {
-                self.check_slot(body, call, index, Some(field_ty), span.clone())?;
+                if index == 0 && crate::engine_money::is_money_def(self.program, def) {
+                    self.check_money_amount(body, def, call, field_ty, span.clone())?;
+                } else {
+                    self.check_slot(body, call, index, Some(field_ty), span.clone())?;
+                }
             }
         }
         if call.args.len() > fields.len() {
@@ -692,6 +696,36 @@ impl<'a> BodyCheck<'a> {
             );
         }
         Ok(result)
+    }
+
+    /// Types the amount of `Money<C>(value)`. A `Float` amount is the `E5004` class (hir-host.md B5); any other
+    /// amount is checked against the field as `check_slot` checks it.
+    fn check_money_amount(
+        &mut self,
+        body: &mut Body,
+        def: DefId,
+        call: &crate::Call,
+        field_ty: Ty,
+        span: SyntaxSpan,
+    ) -> Result<(), NotYetReason> {
+        let Some(argument) = call.args.first() else {
+            return Ok(());
+        };
+        let ArgValue::Expr(id) = argument.value else {
+            return Ok(());
+        };
+        let ty = self.infer_expr(body, id, None)?;
+        if let Some(code) = crate::engine_codes::construction_rejection(self.program, def, ty) {
+            self.conflicts += 1;
+            self.diagnostics.push(crate::HirDiagnostic::new(
+                code,
+                Box::<str>::from("a Money amount must be a Decimal, not a Float"),
+                span,
+            ));
+            return Ok(());
+        }
+        self.coerce_at(body, id, ty, field_ty, span);
+        Ok(())
     }
 
     /// Types a nominal or variant construction.
