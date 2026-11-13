@@ -1003,6 +1003,15 @@ impl<'a> BodyCheck<'a> {
         }
     }
 
+    /// Whether a definition is a `sys` relation: a key-bearing type declared in the `sys` module.
+    fn is_sys_relation(&self, def: DefId) -> bool {
+        let Some(definition) = self.program.defs.get(def) else {
+            return false;
+        };
+        let origin = self.program.modules[definition.module].origin;
+        origin == crate::ModuleOrigin::Sys && !definition.clauses.key.is_empty()
+    }
+
     /// The value type of a definition reference.
     pub(super) fn def_value_ty(
         &mut self,
@@ -1047,6 +1056,10 @@ impl<'a> BodyCheck<'a> {
                 Ok(self.intern(TyKind::Relation(row)))
             }
             Some(DefKind::Enum(_)) => Ok(self.intern(TyKind::Adt(def, Box::new([])))),
+            Some(DefKind::Type(_)) if self.is_sys_relation(def) => {
+                let row = self.intern(TyKind::Adt(def, Box::new([])));
+                Ok(self.intern(TyKind::Relation(row)))
+            }
             Some(DefKind::Type(_) | DefKind::NativeType(_)) => {
                 let args = self.fresh_nominal_args(def, &span);
                 Ok(self.intern(TyKind::Adt(def, args)))
