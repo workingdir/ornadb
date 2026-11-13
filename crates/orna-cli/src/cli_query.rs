@@ -31,8 +31,8 @@ use super::{Diagnostic, Endpoint, cli_legacy, local_project_path};
 use crate::cli_row_key::{
     self, check_bound_type, check_point_key_type, composite_bound_error, key_candidates, render_key,
 };
-use crate::encoding::hex;
 use orna_application::read_legacy_table_rows;
+use orna_base::hex;
 use orna_repository::{
     AdmittedRow, KeyRange, NativeGraphContext, Repository, RepositoryFormatContext,
     RepositoryReadScope, TypedKey,

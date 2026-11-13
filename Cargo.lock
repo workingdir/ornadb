@@ -1465,6 +1465,7 @@ dependencies = [
  "orna-application",
  "orna-base",
  "orna-check",
+ "orna-cli-support",
  "orna-conformance",
  "orna-evaluator",
  "orna-exec",
@@ -1492,6 +1493,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "orna-cli-support"
+version = "0.1.0"
+dependencies = [
+ "orna-base",
+ "orna-project",
+ "orna-repository",
+ "orna-runtime",
+ "orna-value",
+ "sha2 0.10.9",
+ "tempfile",
+]
+
+[[package]]
 name = "orna-compat-v1"
 version = "1.0.0"
 dependencies = [
@@ -1516,6 +1530,7 @@ dependencies = [
  "orna-base",
  "orna-check",
  "orna-compat-v1",
+ "orna-cursor",
  "orna-evaluator",
  "orna-live",
  "orna-project",
@@ -1540,6 +1555,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "orna-cursor"
+version = "1.0.0"
+dependencies = [
+ "num-bigint 0.4.8",
+ "orna-value",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "orna-differential"
 version = "1.0.0"
 dependencies = [
@@ -1551,6 +1575,7 @@ dependencies = [
  "orna-project-repl",
  "orna-standard-sources",
  "orna-syntax",
+ "orna-sys",
  "orna-value",
  "serde",
  "serde_json",
@@ -1574,6 +1599,7 @@ dependencies = [
  "orna-standard-sources",
  "orna-syntax",
  "orna-sys",
+ "orna-unicode",
  "orna-value",
  "serde",
  "serde_json",
@@ -1709,6 +1735,7 @@ dependencies = [
  "orna-repository",
  "orna-runtime",
  "orna-syntax",
+ "orna-unicode",
  "orna-value",
  "tempfile",
  "unicode-normalization",
@@ -1941,6 +1968,13 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+]
+
+[[package]]
+name = "orna-unicode"
+version = "1.0.0"
+dependencies = [
+ "unicode-normalization",
 ]
 
 [[package]]

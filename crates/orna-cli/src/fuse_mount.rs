@@ -10,14 +10,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
-use crate::cli_source_edit::{
-    checked_project_source_path, restore_source_after_failed_write, write_source_atomically,
-};
-use crate::encoding::hex;
 use fuser::{
     Config, Errno, FileAttr, FileType, Filesystem, Generation, INodeNo, MountOption, RenameFlags,
     ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen,
     ReplyWrite, ReplyXattr, Request,
+};
+use orna_base::hex;
+use orna_cli_support::source_edit::{
+    checked_project_source_path, restore_source_after_failed_write, write_source_atomically,
 };
 use orna_conformance::transactional_loaded_project_candidate_validator;
 use orna_evaluator::Limits as EvaluatorLimits;
@@ -62,7 +62,7 @@ mod row_save;
 mod scratch;
 mod writer;
 
-pub(crate) use crate::{invocation_owner_id, runtime_identity};
+pub(crate) use crate::runtime_identity;
 pub(crate) use builder::*;
 pub(crate) use filesystem::*;
 pub(crate) use historical::*;

@@ -32,7 +32,7 @@ use std::sync::LazyLock;
 
 use orna_hir::{
     Callee, ExprKind, Idx, ModulePath, Name, NameTarget, Program, RelOp, SourceId, SourceUnit,
-    lower, lower_with_admission,
+    lower, lower_with_admission, lower_with_attached,
 };
 use orna_standard_sources::reference_standard_sources_v1;
 use orna_syntax::{
@@ -236,10 +236,23 @@ pub struct LoweredProgram {
     pub parse_diagnostics: usize,
 }
 
-/// Lowers one case, or explains why the stage cannot.
+/// Lowers one case for the typed and diagnostic observers, or explains why the stage cannot.
+///
+/// Every `sys` member is linked here (the admission `lower` uses), so the observers see the
+/// declared program. The executor reads [`lower_case_admitted`] instead.
 pub fn lower_case(case: &Case) -> Result<LoweredProgram, String> {
+    lower_case_as(case, false)
+}
+
+/// Lowers one case as the executor does, with each `sys` reference checked against the production
+/// catalogue (ORNA-SYS-008), or explains why the stage cannot.
+pub fn lower_case_admitted(case: &Case) -> Result<LoweredProgram, String> {
+    lower_case_as(case, true)
+}
+
+fn lower_case_as(case: &Case, admitted: bool) -> Result<LoweredProgram, String> {
     match case.kind {
-        CaseKind::Module | CaseKind::StandardBundle => lower_module_case(case),
+        CaseKind::Module | CaseKind::StandardBundle => lower_module_case(case, admitted),
         CaseKind::Expression => lower_expression_case(case),
         CaseKind::Repl => Err(format!(
             "{}: a REPL session is an incremental module and stage H8 lowers it",
@@ -265,7 +278,7 @@ fn import_fixture_units(tree: &mut SyntaxTree, attached_roots: &[&str]) {
     tree.items.splice(0..0, import.items);
 }
 
-fn lower_module_case(case: &Case) -> Result<LoweredProgram, String> {
+fn lower_module_case(case: &Case, admitted: bool) -> Result<LoweredProgram, String> {
     let attached_roots = if case.family == Family::Reference {
         attached_databases(case)
     } else {
@@ -327,8 +340,12 @@ fn lower_module_case(case: &Case) -> Result<LoweredProgram, String> {
     let prelude =
         orna_check::hir_check::prelude_of_profile(&orna_evaluator::reference_standard_profile());
     let attached: Vec<Name> = attached_roots.iter().copied().map(Name::new).collect();
-    let admission = std::sync::Arc::new(orna_check::hir_check::CatalogueAdmission);
-    let program = lower_with_admission(&units, &prelude, &attached, admission);
+    let program = if admitted {
+        let admission = std::sync::Arc::new(orna_check::hir_check::CatalogueAdmission);
+        lower_with_admission(&units, &prelude, &attached, admission)
+    } else {
+        lower_with_attached(&units, &prelude, &attached)
+    };
     let (logical_paths, owned) = bookkeeping(&program, &logical_paths, &owned);
     Ok(LoweredProgram {
         program,

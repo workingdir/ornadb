@@ -43,7 +43,6 @@ mod committed_store;
 mod object_identity;
 mod table_storage;
 mod typed_row;
-mod unicode16;
 
 pub use committed_store::CommittedTableStore;
 
@@ -3135,7 +3134,7 @@ fn portable_component(component: &str) -> bool {
 
 /// Host-independent NFKC case-fold key for portable sibling ownership.
 fn unicode_sibling_key(component: &str) -> String {
-    unicode16::to_nfkc_casefold(component)
+    orna_unicode::casefold::to_nfkc_casefold(component)
 }
 
 #[cfg(test)]

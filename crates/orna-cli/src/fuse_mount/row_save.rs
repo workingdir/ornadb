@@ -391,7 +391,7 @@ impl RowSaveContext {
     /// The committed schema identity of the row's table right now. Operations capture it when
     /// they open their handle or scratch and pass that captured value to the commit (ORNA-VFS-019).
     pub(crate) fn live_schema_identity(&self) -> Result<TableSchemaIdentity, String> {
-        crate::table_schema::committed_table_schema_identity(
+        orna_cli_support::table_schema::committed_table_schema_identity(
             &self.writer.repository,
             self.table.object_id(),
         )

@@ -164,7 +164,7 @@ const CASED: &[(u32, u32)] = &[
     (0x1F170, 0x1F189),
 ];
 
-pub(super) fn is_cased(value: char) -> bool {
+pub fn is_cased(value: char) -> bool {
     contains(CASED, value)
 }
 const CASE_IGNORABLE: &[(u32, u32)] = &[
@@ -622,7 +622,7 @@ const CASE_IGNORABLE: &[(u32, u32)] = &[
     (0xE0100, 0xE01EF),
 ];
 
-pub(super) fn is_case_ignorable(value: char) -> bool {
+pub fn is_case_ignorable(value: char) -> bool {
     contains(CASE_IGNORABLE, value)
 }
 

@@ -30,8 +30,8 @@ into `orna-base` and `orna-value` in stage 03.
 | layer | name | crates |
 |---|---|---|
 | 0 | primitives | orna-base |
-| 1 | value | orna-value, orna-sys-model |
-| 2 | syntax | orna-syntax, orna-intrinsics, orna-sys-codegen |
+| 1 | value | orna-value, orna-sys-model, orna-unicode |
+| 2 | syntax | orna-syntax, orna-intrinsics, orna-sys-codegen, orna-cursor |
 | 3 | identity and IR | orna-hir, orna-sys-id, orna-standard-sources, orna-sys-macros |
 | 4 | analysis | orna-check |
 | 5 | evaluation | orna-evaluator |

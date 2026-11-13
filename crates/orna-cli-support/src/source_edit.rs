@@ -3,17 +3,23 @@
 //! only when its bytes are still the expected ones, and restore it when a later
 //! step of the same operation fails.
 
-use super::*;
+use crate::request_nonce;
 use std::{
     fs::{self, OpenOptions},
     io::{self, Write as _},
     path::{Component, Path, PathBuf},
 };
 
-pub(crate) fn checked_project_source_path(
+/// A logical source path that is absent, unsafe, or not a regular file under the
+/// project root. The refusal carries no detail: each caller reports it in its own
+/// terms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourcePathError;
+
+pub fn checked_project_source_path(
     root: &Path,
     logical_path: &str,
-) -> Result<PathBuf, Diagnostic> {
+) -> Result<PathBuf, SourcePathError> {
     let relative = Path::new(logical_path);
     let component_count = relative.components().count();
     if relative.is_absolute()
@@ -22,31 +28,27 @@ pub(crate) fn checked_project_source_path(
             .components()
             .all(|component| matches!(component, Component::Normal(_)))
     {
-        return Err(mv_source_path_error());
+        return Err(SourcePathError);
     }
-    let root_metadata = fs::symlink_metadata(root).map_err(|_| mv_source_path_error())?;
+    let root_metadata = fs::symlink_metadata(root).map_err(|_| SourcePathError)?;
     if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
-        return Err(mv_source_path_error());
+        return Err(SourcePathError);
     }
     let mut path = root.to_path_buf();
     for (index, component) in relative.components().enumerate() {
         path.push(component);
-        let metadata = fs::symlink_metadata(&path).map_err(|_| mv_source_path_error())?;
+        let metadata = fs::symlink_metadata(&path).map_err(|_| SourcePathError)?;
         if metadata.file_type().is_symlink()
             || (index + 1 == component_count && !metadata.is_file())
             || (index + 1 != component_count && !metadata.is_dir())
         {
-            return Err(mv_source_path_error());
+            return Err(SourcePathError);
         }
     }
     Ok(path)
 }
 
-pub(crate) fn write_source_atomically(
-    path: &Path,
-    expected: &[u8],
-    replacement: &[u8],
-) -> io::Result<()> {
+pub fn write_source_atomically(path: &Path, expected: &[u8], replacement: &[u8]) -> io::Result<()> {
     write_source_atomically_before_replace(path, expected, replacement, || Ok(()))
 }
 
@@ -66,7 +68,7 @@ fn write_source_atomically_before_replace(
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::other("source has no parent directory"))?;
-    let temp = parent.join(format!(".orna-mv-{:032x}.tmp", cli_request_nonce()));
+    let temp = parent.join(format!(".orna-mv-{:032x}.tmp", request_nonce()));
     let mut temp_created = false;
     let result = (|| {
         let mut file = OpenOptions::new()
@@ -104,11 +106,7 @@ fn write_source_atomically_before_replace(
     result
 }
 
-pub(crate) fn restore_source_after_failed_write(
-    path: &Path,
-    original: &[u8],
-    updated: &[u8],
-) -> bool {
+pub fn restore_source_after_failed_write(path: &Path, original: &[u8], updated: &[u8]) -> bool {
     let Ok(current) = fs::symlink_metadata(path) else {
         return false;
     };
@@ -120,13 +118,6 @@ pub(crate) fn restore_source_after_failed_write(
         Ok(bytes) if bytes == updated => write_source_atomically(path, updated, original).is_ok(),
         _ => false,
     }
-}
-fn mv_source_path_error() -> Diagnostic {
-    Diagnostic::target(
-        "E2100",
-        "table source path is unavailable or unsafe",
-        "restore the source module as a regular worktree file, then retry `mv`",
-    )
 }
 
 #[cfg(test)]

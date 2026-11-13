@@ -76,7 +76,7 @@ name = "orna-conformance"
 [crate.files]
 "src/lib.rs" = 2962
 "src/main.rs" = 1981
-"src/semantic_adapter.rs" = 14479
+"src/semantic_adapter.rs" = 13779
 [crate.functions]
 "src/lib.rs::execute_reference_project_runtime_adapter" = 208
 "src/lib.rs::run_fixture" = 123
@@ -192,7 +192,6 @@ name = "orna-project"
 "src/lib.rs" = 3232
 "src/object_identity.rs" = 4560
 "src/typed_row.rs" = 1222
-"src/unicode16.rs" = 1636
 [crate.functions]
 "src/attachments.rs::nested_pin_closure_keeps_revision_specific_pins_through_terminal_edges" = 154
 "src/attachments.rs::nested_pin_cycle_keeps_equal_alias_routes_distinct_to_historical_terminals" = 157
