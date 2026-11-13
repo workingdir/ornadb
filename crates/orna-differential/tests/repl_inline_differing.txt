@@ -1,4 +1,4 @@
-# repl-inline fixtures that are runnable but differ from the old REPL. Read by repl_inline_differential.rs.
+# repl-inline fixtures that are runnable but differ from the old REPL. Read by tests/common/repl_inline.rs (tests/repl_inline_differential.rs and tests/shadow_report.rs).
 # Format: each line in the `## expected` section is `<fixture path> <one-line reason>`; `#` lines and blanks are ignored.
 # The test fails on any disagreement not listed here and on any listed fixture that now agrees (stale entry).
 

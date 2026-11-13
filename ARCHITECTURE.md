@@ -41,7 +41,7 @@ into `orna-base` and `orna-value` in stage 03.
 | 9 | durable state | orna-runtime |
 | 9 | projected files | orna-vfs |
 | 10 | publication | orna-storage |
-| 11 | project | orna-project, orna-project-repl |
+| 11 | project and live lease | orna-project, orna-project-repl, orna-live-lease |
 | 12 | presentation | orna-protocol, orna-serving, orna-live |
 | 13 | engine | orna-application |
 | 14 | edges | orna-cli, orna-differential, orna-lsp, orna-conformance, orna-traceability, orna-table |

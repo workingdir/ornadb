@@ -157,7 +157,7 @@ impl<'a, S: OverflowStore> OverflowWriter<'a, S> {
             return Err(GraphError::NonCanonicalData);
         }
         let (stored, semantic) = self.lower_children(tuple)?;
-        let encoded = canonical_value_bytes(&stored);
+        let encoded = canonical_value_bytes(&stored)?;
         if fits_inline(&stored, encoded.len())? {
             let mut dependencies = BTreeMap::new();
             collect_row_dependencies(&stored, &mut dependencies)?;
@@ -177,7 +177,7 @@ impl<'a, S: OverflowStore> OverflowWriter<'a, S> {
     /// itself when it still does not fit inline.
     fn lower_value(&mut self, value: CborValue) -> Result<Lowered, GraphError> {
         let (stored, semantic) = self.lower_children(value)?;
-        let encoded = canonical_value_bytes(&stored);
+        let encoded = canonical_value_bytes(&stored)?;
         if fits_inline(&stored, encoded.len())? {
             return Ok((stored, semantic));
         }
@@ -346,7 +346,7 @@ impl<'a, S: OverflowStore> OverflowWriter<'a, S> {
             return Err(GraphError::InvalidLength(encoded.len() as u64));
         }
         let encoded_length = encoded.len() as u64;
-        let semantic_digest: [u8; 32] = Sha256::digest(canonical_value_bytes(semantic)).into();
+        let semantic_digest: [u8; 32] = Sha256::digest(canonical_value_bytes(semantic)?).into();
         let mut dependencies = BTreeMap::new();
         collect_row_dependencies(stored, &mut dependencies)?;
         let dependency_root = self.write_dependency_index(dependencies.into_keys().collect())?;
