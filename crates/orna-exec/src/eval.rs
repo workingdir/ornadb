@@ -7,7 +7,7 @@ use num_traits::ToPrimitive;
 use orna_hir::{
     Arg, ArgValue, Arm, AssignOp, BinOp, Body, BodyId, Call, Callee, DefId, DefKind, ExprId,
     ExprKind, FieldRef, FnBody, InterpPart, IntrinsicForm, Lit, LocalId, LogicOp, Name, ParamDef,
-    Pat, PatId, Place, Stmt, TyKind,
+    Pat, PatId, Place, Program, Stmt, TyKind,
 };
 
 use crate::binders;
@@ -99,15 +99,19 @@ impl<'p> Machine<'p> {
 
     /// The slot the host registers for the `sys` member `def`, looked up by its qualified name (`sys.storage.Storage`).
     fn sys_slot(&self, def: DefId) -> Option<SysSlot> {
+        self.host.manifest().slot(&self.sys_qualified(def))
+    }
+
+    /// The name the host registers for the `sys` member `def`: its spelling, or its module path and name.
+    fn sys_qualified(&self, def: DefId) -> String {
         let definition = &self.program.defs[def];
-        let qualified = match &definition.clauses.spelling {
+        match &definition.clauses.spelling {
             Some(spelling) => spelling.text.clone(),
             None => {
                 let path = &self.program.modules[definition.module].path;
                 format!("{path}.{}", definition.name)
             }
-        };
-        self.host.manifest().slot(&qualified)
+        }
     }
 
     /// Whether `def` is a `sys` type or static named as a value.
@@ -120,23 +124,64 @@ impl<'p> Machine<'p> {
     /// The value of the `sys` member `def`: a static the host answers now, or a relation handle the pipeline reads
     /// one row at a time. A member the host does not register is UNSUPPORTED (hir-host.md A3).
     fn sys_member(&mut self, def: DefId) -> Result<Value, Stop> {
+        let program = self.program;
+        let kind = match &program.defs[def].kind {
+            DefKind::NativeStatic(native) => program.tys.kind(native.ty),
+            _ => None,
+        };
+        match kind {
+            Some(TyKind::Adt(type_def, _)) if has_relation_field(program, *type_def) => {
+                self.sys_record_static(def, *type_def)
+            }
+            Some(TyKind::Relation(_)) => self.sys_handle(def),
+            _ if matches!(program.defs[def].kind, DefKind::NativeStatic(_)) => {
+                self.sys_scalar_static(def)
+            }
+            _ => self.sys_handle(def),
+        }
+    }
+
+    /// The relation handle of the `sys` member `def`.
+    fn sys_handle(&self, def: DefId) -> Result<Value, Stop> {
         let Some(slot) = self.sys_slot(def) else {
             return Err(Stop::Error(UNSUPPORTED));
         };
-        let is_scalar_static = match &self.program.defs[def].kind {
-            DefKind::NativeStatic(native) => {
-                !matches!(self.program.tys.kind(native.ty), Some(TyKind::Relation(_)))
-            }
-            _ => false,
-        };
-        if is_scalar_static {
-            let raw = self
-                .host
-                .sys_static(slot)
-                .map_err(|failure| Stop::Error(failure.code))?;
-            return raw_value::from_raw(&raw);
-        }
         Ok(Value::Rel(Rc::new(RelHandle::Sys { slot })))
+    }
+
+    /// A scalar `sys` static: the host's canonical value for it.
+    fn sys_scalar_static(&mut self, def: DefId) -> Result<Value, Stop> {
+        let Some(slot) = self.sys_slot(def) else {
+            return Err(Stop::Error(UNSUPPORTED));
+        };
+        let raw = self
+            .host
+            .sys_static(slot)
+            .map_err(|failure| Stop::Error(failure.code))?;
+        raw_value::from_raw(&raw)
+    }
+
+    /// A `sys` record static with relation fields (design A4): its scalar fields come from the host's canonical
+    /// record; each relation field is a relation handle to the host slot `<static>.<field>`.
+    fn sys_record_static(&mut self, def: DefId, type_def: DefId) -> Result<Value, Stop> {
+        let Value::Record(scalars) = self.sys_scalar_static(def)? else {
+            return Err(Stop::Error(UNSUPPORTED));
+        };
+        let base = self.sys_qualified(def);
+        let relations = relation_field_names(self.program, type_def);
+        let mut fields: Vec<(Name, Value)> = scalars
+            .iter()
+            .filter(|(name, _)| !relations.contains(name))
+            .cloned()
+            .collect();
+        for name in relations {
+            let Some(slot) = self.host.manifest().slot(&format!("{base}.{name}")) else {
+                return Err(Stop::Error(UNSUPPORTED));
+            };
+            fields.push((name, Value::Rel(Rc::new(RelHandle::Sys { slot }))));
+        }
+        fields.sort_by(|left, right| left.0.cmp(&right.0));
+        Ok(Value::Record(fields.into()))
     }
 
     /// Calls the `sys` callable `def` with canonical arguments; the host answers with a canonical value.
@@ -1093,4 +1138,28 @@ fn kind_name(kind: &ExprKind) -> &'static str {
         ExprKind::Error => "error expression",
         _ => "expression kind",
     }
+}
+
+/// The names of the relation-typed fields of the `sys` record type `type_def`, in declaration order.
+fn relation_field_names(program: &Program, type_def: DefId) -> Vec<Name> {
+    let DefKind::Type(record) = &program.defs[type_def].kind else {
+        return Vec::new();
+    };
+    record
+        .members
+        .iter()
+        .filter_map(|&member| {
+            let definition = &program.defs[member];
+            let DefKind::Field(field) = &definition.kind else {
+                return None;
+            };
+            matches!(program.tys.kind(field.ty), Some(TyKind::Relation(_)))
+                .then(|| definition.name.clone())
+        })
+        .collect()
+}
+
+/// Whether the `sys` record type `type_def` declares a relation-typed field.
+fn has_relation_field(program: &Program, type_def: DefId) -> bool {
+    !relation_field_names(program, type_def).is_empty()
 }
