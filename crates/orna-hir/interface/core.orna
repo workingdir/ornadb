@@ -37,3 +37,8 @@ pub native fn uuid7(): Uuid effect randomness;
 
 // core.error
 pub native fn error(code: Str, message: Str, cause: Error? = null): Error effect none;
+
+// core.CWD and core.HEAD: the context-bound snapshot selectors (language reference section 9). Host-supplied from the
+// activation context; they are not wall-clock values. `HEAD` fails in an unborn repository (sys.git.unborn_head).
+pub native static CWD: sys.SnapshotRef effect none;
+pub native static HEAD: sys.SnapshotRef effect none;

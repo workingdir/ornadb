@@ -10,10 +10,10 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use num_bigint::BigInt;
-use orna_hir::{BodyId, Name, Ty};
+use orna_hir::{BodyId, DefId, Name, Ty};
 use orna_value::{
-    CanonicalValue, DIGEST_TAG, DURATION_TAG, INSTANT_TAG, MONEY_TAG, OPTION_TAG, Raw, TUPLE_TAG,
-    UNIT_TAG, UUID_TAG,
+    CanonicalValue, DIGEST_TAG, DURATION_TAG, INSTANT_TAG, MONEY_TAG, OPTION_TAG, Raw, Snapshot,
+    TUPLE_TAG, UNIT_TAG, UUID_TAG,
 };
 
 use crate::calendar;
@@ -82,6 +82,9 @@ pub enum Value {
     Closure(Rc<Closure>),
     /// A relation not read yet: a handle a pipeline reads one row at a time. It has no canonical form.
     Rel(Rc<RelHandle>),
+    /// A snapshot selector (`CWD`, `HEAD`, or the value a `sys` snapshot reference names). It has the canonical form of
+    /// the snapshot it names.
+    Snapshot(Rc<Snapshot>),
     /// A failure, delivered to a recovery handler. It carries the canonical
     /// code the failure reports.
     Error(&'static str),
@@ -126,6 +129,13 @@ pub enum RelHandle {
         /// The slot the host gives the relation.
         slot: SysSlot,
     },
+    /// The rows of a table as of `at`, read from the host's store for that snapshot when a pipeline runs.
+    Table {
+        /// The table's definition.
+        table: DefId,
+        /// The snapshot the rows are read as of.
+        at: Snapshot,
+    },
 }
 
 impl Value {
@@ -138,6 +148,7 @@ impl Value {
     /// The canonical error code of the failure that prevents the encoding.
     pub fn to_raw(&self) -> Result<Raw, &'static str> {
         match self {
+            Self::Snapshot(snapshot) => Ok(snapshot.raw()),
             Self::Unit => Ok(unit_raw()),
             Self::Bool(value) => Ok(Raw::Bool(*value)),
             Self::Int(value) => Ok(Raw::Int(value.clone())),

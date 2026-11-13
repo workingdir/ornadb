@@ -10,6 +10,8 @@
 mod read;
 mod write;
 
+use std::rc::Rc;
+
 use orna_hir::{
     ArgValue, Body, Call, DefId, DefKind, FieldInitializer, Name, Program, TableDef, TableOp,
 };
@@ -17,10 +19,11 @@ use orna_value::{CanonicalValue, Raw};
 
 use crate::error::Stop;
 use crate::frame::Frame;
+use crate::host::UNSUPPORTED;
 use crate::machine::Machine;
 use crate::raw_value;
 use crate::store::{Expect, StoreError};
-use crate::value::Value;
+use crate::value::{RelHandle, Value};
 
 impl<'p> Machine<'p> {
     /// Runs one table operation of `table`. The reads run in slice C of H6.
@@ -65,7 +68,16 @@ impl<'p> Machine<'p> {
             TableOp::Count => read::count(self, table),
             TableOp::First => read::first(self, table),
             TableOp::One => read::one(self, table),
-            TableOp::AsOf => Err(Stop::NotYet("as_of needs the activation snapshot (H5)")),
+            TableOp::AsOf => {
+                let [at]: [Value; 1] = self.table_arguments(body, frame, call)?;
+                let Value::Snapshot(at) = at else {
+                    return Err(Stop::Error(UNSUPPORTED));
+                };
+                Ok(Value::Rel(Rc::new(RelHandle::Table {
+                    table,
+                    at: (*at).clone(),
+                })))
+            }
         }
     }
 
