@@ -38,6 +38,7 @@ orna-storage = { path = "../orna-storage" }
 orna-sys = { path = "../orna-sys" }
 orna-sys-id = { path = "../orna-sys-id" }
 orna-syntax = { path = "../orna-syntax" }
+orna-syntax-ast = { path = "../orna-syntax-ast" }
 orna-value = { path = "../orna-value" }
 
 [dev-dependencies]

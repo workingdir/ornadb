@@ -66,16 +66,17 @@ mod row_save;
 mod scratch;
 mod writer;
 
-#[allow(clippy::wildcard_imports)] // the crate root is the test-visible facade over module internals
+#[allow(clippy::wildcard_imports)]
+// the crate root is the test-visible facade over module internals
 pub(crate) use builder::*;
 #[allow(clippy::wildcard_imports)]
 pub(crate) use filesystem::*;
- pub use filesystem::{
-     DraftRetentionStop, EditError, UnmountPreparationError, begin_unmount, cancel_unmount,
-     edit_path, edit_view_digest, has_unresolved_drafts, retain_drafts_for_shutdown,
-     run_editor_on_draft, spawn_editor, spawn_read_only, unmount_dead_mountpoint,
-     unmount_mountpoint, unresolved_draft_fields, unresolved_draft_list,
- };
+pub use filesystem::{
+    DraftRetentionStop, EditError, UnmountPreparationError, begin_unmount, cancel_unmount,
+    edit_path, edit_view_digest, has_unresolved_drafts, retain_drafts_for_shutdown,
+    run_editor_on_draft, spawn_editor, spawn_read_only, unmount_dead_mountpoint,
+    unmount_mountpoint, unresolved_draft_fields, unresolved_draft_list,
+};
 #[allow(clippy::wildcard_imports)]
 pub(crate) use historical::*;
 pub(crate) use orna_cli_support::runtime_identity::repository_runtime_identity as runtime_identity;
