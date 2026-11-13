@@ -59,6 +59,9 @@ mod expr;
 mod family;
 #[cfg(test)]
 mod generics_tests;
+mod money;
+#[cfg(test)]
+mod money_tests;
 mod nominal;
 #[cfg(test)]
 mod null_compare_tests;
@@ -893,6 +896,9 @@ impl<'a> BodyCheck<'a> {
     ) -> Result<Ty, NotYetReason> {
         let left = self.infer_expr(body, lhs, None)?;
         let right = self.infer_expr(body, rhs, None)?;
+        if let Some(error) = self.money_operator_rejection(op, left, right, span.clone()) {
+            return Ok(error);
+        }
         if let Some(result) = self.quantity_binary(body, op, left, right, rhs, span.clone()) {
             return Ok(result);
         }

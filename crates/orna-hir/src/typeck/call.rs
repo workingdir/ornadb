@@ -682,7 +682,11 @@ impl<'a> BodyCheck<'a> {
         for (index, field) in fields.iter().enumerate() {
             let field_ty = self.field_in(result, *field)?;
             if call.args.get(index).is_some() {
-                self.check_slot(body, call, index, Some(field_ty), span.clone())?;
+                if index == 0 && crate::engine_money::is_money_def(self.program, def) {
+                    self.check_money_amount(body, def, call, field_ty, span.clone())?;
+                } else {
+                    self.check_slot(body, call, index, Some(field_ty), span.clone())?;
+                }
             }
         }
         if call.args.len() > fields.len() {

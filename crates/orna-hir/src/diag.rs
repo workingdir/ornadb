@@ -56,6 +56,17 @@ pub const ARGUMENT: &str = "ORNA-EVAL-ARGUMENT";
 /// source spans" (ORNA-INFER-011).
 pub const INFER_CONFLICT: &str = "ORNA-INFER-011";
 
+/// Two `Money` values of different currencies meet in one `+`, `-` or ordering operator (hir-host.md B5).
+///
+/// Published by the kernel (kernel-and-library.md 4.7); the library supplies only the text.
+pub const MONEY_CURRENCY_MISMATCH: &str = "E5003";
+
+/// A `Money` value is built from a `Float` (hir-host.md B5; the old checker's `E5004`).
+pub const MONEY_FROM_FLOAT: &str = "E5004";
+
+/// A `Money` value and a `Float` meet in one arithmetic or comparison operator (hir-host.md B5; `E5103`).
+pub const MONEY_BINARY_FLOAT: &str = "E5103";
+
 /// An inference variable is still unsolved after its body was checked.
 ///
 /// The classification is the requirement that asks inference to name the
