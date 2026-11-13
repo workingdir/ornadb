@@ -171,6 +171,12 @@ pub(crate) fn in_parameter_order(
 }
 
 impl Machine<'_> {
+    /// Whether the engine registry implements `def`, so a call to it runs the engine native rather than the host.
+    pub(crate) fn is_native(&mut self, def: DefId) -> bool {
+        let natives = self.natives.get_or_init(|| link::bind(self.program));
+        natives.contains_key(&def)
+    }
+
     /// Runs the engine native bound to `def` on `arguments`, which are in parameter order. `targs` are the call's
     /// generic arguments. A declaration the registry does not implement stops the run as not yet ported.
     pub(crate) fn native(

@@ -31,6 +31,7 @@
 #   typed and diagnostic observers lower all linked sys calls; only the executor
 #   takes CatalogueAdmission (observe_new::lower_case_admitted).
 # - Re-measured at origin/main 7ba836797 merged with csenl.33 (core.money root environment, fixture currencies): 54 of 104 typed. The Money root environment types one more corpus case.
+# - Re-measured at HA2 (csenl.26): 55 of 104 typed. A sys relation type with a key clause now types as a relation, adding one typed corpus case.
 #
 # The typed count is exact: it must equal the measured count in both directions.
 # A fall is a typing or lowering regression. A rise is typed corpus work, and
@@ -46,5 +47,5 @@
 # and the checker's special cases (H3).
 
 [[typed-share]]
-typed = 54
+typed = 55
 lowered = 104

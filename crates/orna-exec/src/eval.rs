@@ -14,11 +14,13 @@ use crate::binders;
 use crate::decimal::Decimal;
 use crate::error::Stop;
 use crate::frame::{Frame, TypeEnv, type_args};
+use crate::host::{SysSlot, UNSUPPORTED};
 use crate::machine::Machine;
 use crate::natives;
 use crate::ops;
+use crate::raw_value;
 use crate::relation;
-use crate::value::{Closure, Payload, Value};
+use crate::value::{Closure, Payload, RelHandle, Value};
 
 impl<'p> Machine<'p> {
     /// Evaluates one expression of `body` in `frame`.
@@ -83,6 +85,7 @@ impl<'p> Machine<'p> {
             ExprKind::Def(def) if matches!(self.program.defs[*def].kind, DefKind::Let(_)) => {
                 self.global(*def)
             }
+            ExprKind::Def(def) if self.is_sys_member(*def) => self.sys_member(*def),
             ExprKind::Construct { def, fields }
                 if matches!(self.program.defs[*def].kind, DefKind::Type(_)) =>
             {
@@ -91,6 +94,54 @@ impl<'p> Machine<'p> {
             ExprKind::Interp(parts) => self.interpolate(body, frame, parts),
             _ => Err(Stop::NotYet(kind_name(&body.exprs[id].kind))),
         }
+    }
+
+    /// The slot the host registers for the `sys` member `def`, looked up by its qualified name (`sys.storage.Storage`).
+    fn sys_slot(&self, def: DefId) -> Option<SysSlot> {
+        let definition = &self.program.defs[def];
+        let path = &self.program.modules[definition.module].path;
+        self.host
+            .manifest()
+            .slot(&format!("{path}.{}", definition.name))
+    }
+
+    /// Whether `def` is a `sys` type or static named as a value.
+    fn is_sys_member(&self, def: DefId) -> bool {
+        let definition = &self.program.defs[def];
+        self.program.modules[definition.module].origin == orna_hir::ModuleOrigin::Sys
+            && matches!(definition.kind, DefKind::Type(_) | DefKind::NativeStatic(_))
+    }
+
+    /// The value of the `sys` member `def`: a static the host answers now, or a relation handle the pipeline reads
+    /// one row at a time. A member the host does not register is UNSUPPORTED (hir-host.md A3).
+    fn sys_member(&mut self, def: DefId) -> Result<Value, Stop> {
+        let Some(slot) = self.sys_slot(def) else {
+            return Err(Stop::Error(UNSUPPORTED));
+        };
+        if matches!(self.program.defs[def].kind, DefKind::NativeStatic(_)) {
+            let raw = self
+                .host
+                .sys_static(slot)
+                .map_err(|failure| Stop::Error(failure.code))?;
+            return raw_value::from_raw(&raw);
+        }
+        Ok(Value::Rel(Rc::new(RelHandle::Sys { slot })))
+    }
+
+    /// Calls the `sys` callable `def` with canonical arguments; the host answers with a canonical value.
+    fn sys_call(&mut self, def: DefId, values: Vec<Value>) -> Result<Value, Stop> {
+        let Some(slot) = self.sys_slot(def) else {
+            return Err(Stop::Error(UNSUPPORTED));
+        };
+        let args = values
+            .iter()
+            .map(|value| value.to_raw().map_err(Stop::Error))
+            .collect::<Result<Vec<_>, _>>()?;
+        let raw = self
+            .host
+            .sys_call(slot, args)
+            .map_err(|failure| Stop::Error(failure.code))?;
+        raw_value::from_raw(&raw)
     }
 
     /// Runs an interpolation: each expression part is a `Display` call yielding its text, and the parts concatenate
@@ -243,7 +294,11 @@ impl<'p> Machine<'p> {
                 let arguments =
                     self.arguments(body, frame, call, &function.params, &callee_targs)?;
                 let values = natives::in_parameter_order(arguments, function.params.len())?;
-                self.native(*def, type_args(&callee_targs), values)
+                if matches!(call.callee, Callee::Sys { .. }) && !self.is_native(*def) {
+                    self.sys_call(*def, values)
+                } else {
+                    self.native(*def, type_args(&callee_targs), values)
+                }
             }
             Callee::TableOp { table, op } => self.table_op(body, frame, call, *table, *op),
             Callee::Relational { op } => relation::relational(self, body, frame, call, *op),
