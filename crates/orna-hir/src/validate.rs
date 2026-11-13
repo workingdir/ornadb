@@ -900,7 +900,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use num_bigint::BigInt;
-    use orna_syntax::SyntaxSpan as SourceSpan;
+    use orna_syntax_ast::SourceSpan;
 
     use super::ValidationError;
     use crate::{
@@ -952,7 +952,7 @@ mod tests {
             vis: Visibility::Public,
             span: span(0),
             docs: Vec::new(),
-            clauses: orna_syntax::InterfaceClauses::default(),
+            clauses: orna_syntax_ast::InterfaceClauses::default(),
             kind: DefKind::Fn(FnDef {
                 generics: Vec::new(),
                 params: Vec::new(),

@@ -18,7 +18,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use orna_evaluator::{Environment, Limits};
-use orna_syntax::{Declaration, SyntaxTree, Visibility, parse_module_with_file};
+use orna_syntax::parse_module_with_file;
+use orna_syntax_ast::{Declaration, SyntaxTree, Visibility};
 use serde::Deserialize;
 
 use crate::{differential_dir, read_file, repository_root, toml_lite};

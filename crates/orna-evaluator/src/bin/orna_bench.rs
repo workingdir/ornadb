@@ -39,7 +39,8 @@ use orna_evaluator::{
     EffectHandler, Environment, Functions, Limits, PureFunction, RelationPage, StepBudget,
     invoke_named_with_effects_and_budget, route_trace,
 };
-use orna_syntax::{Declaration, Expr, Parameter, parse_module_with_file};
+use orna_syntax::parse_module_with_file;
+use orna_syntax_ast::{Declaration, Expr, Parameter};
 use orna_value::{CanonicalValue, Raw};
 
 /// B1, recursion: 242,785 calls at `n = 25`.

@@ -8,8 +8,9 @@
 //! is guessed from arithmetic or from function bodies.
 
 use lsp_types::{InlayHint, InlayHintKind, InlayHintLabel, Position, Range};
-use orna_syntax::{
-    Argument, Declaration, Expr, LiteralKind, Pattern, Statement, StringSegment, SyntaxSpan,
+use orna_syntax_ast::SourceSpan as SyntaxSpan;
+use orna_syntax_ast::{
+    Argument, Declaration, Expr, LiteralKind, Pattern, Statement, StringSegment,
 };
 
 use crate::analysis;

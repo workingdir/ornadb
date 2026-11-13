@@ -1,4 +1,5 @@
-use orna_syntax::{Expr, parse_expression};
+use orna_syntax::parse_expression;
+use orna_syntax_ast::Expr;
 
 const EXPRESSIONS: &str = include_str!("fixtures/unary-postfix-precedence.orna");
 

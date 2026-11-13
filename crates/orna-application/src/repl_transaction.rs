@@ -6,7 +6,7 @@ use orna_project::{
     runtime_key_from_evaluator,
 };
 use orna_repository::{OrpBlobBinding, Repository, RepositoryFormatContext};
-use orna_syntax::Expr;
+use orna_syntax_ast::Expr;
 
 /// Borrowed repository and runtime authority for one trusted local REPL input.
 pub struct ReplTransactionScope<'a> {

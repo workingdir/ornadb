@@ -12,7 +12,9 @@ use orna_hir::{
     Idx, ModuleOrigin, ModulePath, Name, PreludeExports, Program, SourceId, SourceUnit,
     SysAdmission, SysMemberStatus, lower_with_admission, typeck,
 };
-use orna_syntax::{SyntaxSpan, SyntaxTree, parse_module_with_file};
+use orna_syntax::parse_module_with_file;
+use orna_syntax_ast::SourceSpan as SyntaxSpan;
+use orna_syntax_ast::SyntaxTree;
 use orna_value::Diagnostic;
 
 use crate::StandardDependencyProfile;

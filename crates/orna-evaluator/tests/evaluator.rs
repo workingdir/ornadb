@@ -10,9 +10,11 @@ use orna_evaluator::{
     invoke_named_with_effects, invoke_named_with_effects_and_budget, invoke_named_with_nominals,
 };
 use orna_project_repl::AdmittedReplSession;
-use orna_syntax::{
+use orna_syntax::{TokenKind, lex};
+use orna_syntax_ast::SourceSpan as SyntaxSpan;
+use orna_syntax_ast::{
     AssignmentOperator, AssignmentTarget, Expr, LambdaParameter, NameSegment, Pattern, RecordField,
-    Statement, SyntaxSpan, TokenKind, lex,
+    Statement,
 };
 use orna_value::{CANONICAL_NAN_BITS, Raw, Value};
 
@@ -206,7 +208,8 @@ fn money_rows(values: Vec<Raw>) -> Value {
 fn invoke(source: &str, arguments: &Environment, limits: Limits) -> Result<Value, EvaluationError> {
     let parsed = orna_syntax::parse_module(source);
     assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
-    let orna_syntax::Declaration::Function { signature, body } = &parsed.value.items[0].declaration
+    let orna_syntax_ast::Declaration::Function { signature, body } =
+        &parsed.value.items[0].declaration
     else {
         panic!("function expected");
     };
@@ -227,7 +230,8 @@ fn functions_from_source(source: &str) -> orna_evaluator::Functions {
         .items
         .into_iter()
         .map(|item| {
-            let orna_syntax::Declaration::Function { signature, body } = item.declaration else {
+            let orna_syntax_ast::Declaration::Function { signature, body } = item.declaration
+            else {
                 panic!("function expected")
             };
             (
@@ -259,8 +263,8 @@ fn relation_span() -> SyntaxSpan {
     SyntaxSpan::new(0, 0)
 }
 
-fn relation_argument(value: Expr, span: &SyntaxSpan) -> orna_syntax::Argument {
-    orna_syntax::Argument {
+fn relation_argument(value: Expr, span: &SyntaxSpan) -> orna_syntax_ast::Argument {
+    orna_syntax_ast::Argument {
         name: None,
         value,
         span: span.clone(),
@@ -294,7 +298,7 @@ fn relation_source_expression(source: &str) -> Expr {
         arguments: vec![relation_argument(
             Expr::Literal {
                 text: format!("{source:?}"),
-                kind: orna_syntax::LiteralKind::String,
+                kind: orna_syntax_ast::LiteralKind::String,
                 span: span.clone(),
             },
             &span,
@@ -331,7 +335,7 @@ fn relation_integer(value: i64) -> Expr {
     let span = relation_span();
     Expr::Literal {
         text: value.to_string(),
-        kind: orna_syntax::LiteralKind::Integer,
+        kind: orna_syntax_ast::LiteralKind::Integer,
         span,
     }
 }
@@ -379,19 +383,19 @@ fn relation_window_direct(source: Expr, size: Expr, step: Option<Expr>) -> Expr 
 fn relation_named_window_direct(source: Expr, size: Expr, step: Option<Expr>) -> Expr {
     let span = relation_span();
     let mut arguments = vec![
-        orna_syntax::Argument {
+        orna_syntax_ast::Argument {
             name: Some("rows".into()),
             value: source,
             span: span.clone(),
         },
-        orna_syntax::Argument {
+        orna_syntax_ast::Argument {
             name: Some("size".into()),
             value: size,
             span: span.clone(),
         },
     ];
     if let Some(step) = step {
-        arguments.push(orna_syntax::Argument {
+        arguments.push(orna_syntax_ast::Argument {
             name: Some("step".into()),
             value: step,
             span: span.clone(),
@@ -409,13 +413,13 @@ fn relation_named_window_direct(source: Expr, size: Expr, step: Option<Expr>) ->
 
 fn relation_named_window_pipeline(input: Expr, size: Expr, step: Option<Expr>) -> Expr {
     let span = relation_span();
-    let mut arguments = vec![orna_syntax::Argument {
+    let mut arguments = vec![orna_syntax_ast::Argument {
         name: Some("size".into()),
         value: size,
         span: span.clone(),
     }];
     if let Some(step) = step {
-        arguments.push(orna_syntax::Argument {
+        arguments.push(orna_syntax_ast::Argument {
             name: Some("step".into()),
             value: step,
             span: span.clone(),
@@ -1486,7 +1490,7 @@ fn nominal_supplied_fields_evaluate_in_written_order_before_canonical_serializat
         op: "+".into(),
         rhs: Box::new(Expr::Literal {
             text: "1".into(),
-            kind: orna_syntax::LiteralKind::Integer,
+            kind: orna_syntax_ast::LiteralKind::Integer,
             span: span.clone(),
         }),
         span: span.clone(),
@@ -1510,7 +1514,7 @@ fn nominal_supplied_fields_evaluate_in_written_order_before_canonical_serializat
             annotation: None,
             value: Expr::Literal {
                 text: "0".into(),
-                kind: orna_syntax::LiteralKind::Integer,
+                kind: orna_syntax_ast::LiteralKind::Integer,
                 span: span.clone(),
             },
             span: span.clone(),
@@ -5863,7 +5867,7 @@ fn malformed_date_is_rejected_lexically_before_evaluator_execution() {
 
     let malformed_ast = Expr::Literal {
         text: "0000-01-01".into(),
-        kind: orna_syntax::LiteralKind::Date,
+        kind: orna_syntax_ast::LiteralKind::Date,
         span: SyntaxSpan::new(0, 10),
     };
     assert_eq!(
@@ -6021,7 +6025,7 @@ fn malformed_instant_literals_and_canonical_components_fail_closed() {
 
     let malformed_ast = Expr::Literal {
         text: "2024-02-29T12:00:60Z".into(),
-        kind: orna_syntax::LiteralKind::Instant,
+        kind: orna_syntax_ast::LiteralKind::Instant,
         span: SyntaxSpan::new(0, 20),
     };
     assert_eq!(
@@ -8505,7 +8509,7 @@ fn relation_named_stage(input: Expr, name: &str, argument_name: &str) -> Expr {
             text: name.into(),
             span: span.clone(),
         }),
-        arguments: vec![orna_syntax::Argument {
+        arguments: vec![orna_syntax_ast::Argument {
             name: Some(argument_name.into()),
             value: input,
             span: span.clone(),
@@ -8666,12 +8670,12 @@ fn relation_named_flat_map_stage(input: Expr, transform: Expr) -> Expr {
             span: span.clone(),
         }),
         arguments: vec![
-            orna_syntax::Argument {
+            orna_syntax_ast::Argument {
                 name: Some("transform".into()),
                 value: transform,
                 span: span.clone(),
             },
-            orna_syntax::Argument {
+            orna_syntax_ast::Argument {
                 name: Some("rows".into()),
                 value: input,
                 span: span.clone(),
@@ -9651,12 +9655,12 @@ fn relation_predicate_named(input: Expr, name: &str, predicate: Expr) -> Expr {
             span: span.clone(),
         }),
         arguments: vec![
-            orna_syntax::Argument {
+            orna_syntax_ast::Argument {
                 name: Some("predicate".into()),
                 value: predicate,
                 span: span.clone(),
             },
-            orna_syntax::Argument {
+            orna_syntax_ast::Argument {
                 name: Some("rows".into()),
                 value: input,
                 span: span.clone(),
@@ -10228,7 +10232,7 @@ fn relation_bucket_by(input: Expr, period: Expr, zone: Option<Expr>) -> Expr {
         relation_argument(period, &span),
     ];
     if let Some(zone) = zone {
-        arguments.push(orna_syntax::Argument {
+        arguments.push(orna_syntax_ast::Argument {
             name: Some("zone".into()),
             value: zone,
             span: span.clone(),
@@ -10248,7 +10252,7 @@ fn relation_bucket_by_pipeline(input: Expr, period: Expr, zone: Option<Expr>) ->
     let span = relation_span();
     let mut arguments = vec![relation_argument(period, &span)];
     if let Some(zone) = zone {
-        arguments.push(orna_syntax::Argument {
+        arguments.push(orna_syntax_ast::Argument {
             name: Some("zone".into()),
             value: zone,
             span: span.clone(),
@@ -10272,19 +10276,19 @@ fn relation_bucket_by_pipeline(input: Expr, period: Expr, zone: Option<Expr>) ->
 fn relation_bucket_by_named(input: Expr, period: Expr, zone: Option<Expr>) -> Expr {
     let span = relation_span();
     let mut arguments = vec![
-        orna_syntax::Argument {
+        orna_syntax_ast::Argument {
             name: Some("rows".into()),
             value: input,
             span: span.clone(),
         },
-        orna_syntax::Argument {
+        orna_syntax_ast::Argument {
             name: Some("period".into()),
             value: period,
             span: span.clone(),
         },
     ];
     if let Some(zone) = zone {
-        arguments.push(orna_syntax::Argument {
+        arguments.push(orna_syntax_ast::Argument {
             name: Some("zone".into()),
             value: zone,
             span: span.clone(),
@@ -10721,7 +10725,7 @@ fn admitted_eval_producer_stages_effectful_source_without_publishing() {
 
     assert!(matches!(
         staged.input(),
-        orna_syntax::ReplInput::Expression(_)
+        orna_syntax_ast::ReplInput::Expression(_)
     ));
     assert!(staged.result_type().is_some());
     assert!(

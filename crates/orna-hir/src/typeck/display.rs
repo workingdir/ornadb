@@ -3,7 +3,7 @@
 //! any other type needs an `impl Display` in its own module. An interpolation of a type with no instance is a
 //! diagnostic that names the type.
 
-use orna_syntax::SyntaxSpan;
+use orna_syntax_ast::SourceSpan as SyntaxSpan;
 
 use crate::diag::GENERIC_OVERLAP;
 use crate::{

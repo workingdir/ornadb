@@ -14,7 +14,7 @@ use orna_evaluator::{
     RelationReadScope, StepBudget, invoke_named_with_context_effects,
 };
 use orna_runtime::RuntimeTableRows;
-use orna_syntax::Expr;
+use orna_syntax_ast::Expr;
 use orna_value::{CanonicalValue, compare_primary_keys};
 use orna_value::{ContextValue, Format3Context, ValueFormat};
 

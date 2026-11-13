@@ -1200,7 +1200,7 @@ fn generic_type_graph_fixture_resolves_through_the_published_inventory() {
         .items
         .iter()
         .map(|item| match &item.declaration {
-            orna_syntax::Declaration::Function { signature, .. } => signature.name.as_str(),
+            orna_syntax_ast::Declaration::Function { signature, .. } => signature.name.as_str(),
             declaration => panic!("fixture entry must be a function: {declaration:?}"),
         })
         .collect::<Vec<_>>();

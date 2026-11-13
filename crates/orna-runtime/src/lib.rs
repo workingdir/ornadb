@@ -6767,10 +6767,10 @@ mod tests {
         scans: usize,
     }
 
-    fn static_query_table(expression: &orna_syntax::Expr) -> Option<String> {
+    fn static_query_table(expression: &orna_syntax_ast::Expr) -> Option<String> {
         match expression {
-            orna_syntax::Expr::Name { text, .. } => Some(text.clone()),
-            orna_syntax::Expr::Field { base, name, .. } => {
+            orna_syntax_ast::Expr::Name { text, .. } => Some(text.clone()),
+            orna_syntax_ast::Expr::Field { base, name, .. } => {
                 Some(format!("{}.{}", static_query_table(base)?, name))
             }
             _ => None,
@@ -6796,7 +6796,7 @@ mod tests {
 
         fn handle(
             &mut self,
-            callee: &orna_syntax::Expr,
+            callee: &orna_syntax_ast::Expr,
             arguments: &[CanonicalValue],
         ) -> Result<Option<CanonicalValue>, orna_evaluator::EvaluationError> {
             let failure = |code| {
@@ -6804,7 +6804,7 @@ mod tests {
                     SafeText::new(code).expect("static diagnostic code"),
                 )
             };
-            let orna_syntax::Expr::Field { base, name, .. } = callee else {
+            let orna_syntax_ast::Expr::Field { base, name, .. } = callee else {
                 return Ok(None);
             };
             let Some(table) = static_query_table(base) else {

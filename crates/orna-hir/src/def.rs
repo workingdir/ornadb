@@ -5,7 +5,9 @@
 //! it: [`FnBody::Source`] points at an Orna body, [`FnBody::Native`] records
 //! how the link step binds it: the engine registry or a shared library.
 
-use orna_syntax::{InterfaceClauses, SyntaxSpan as SourceSpan};
+use orna_syntax_ast::SourceSpan;
+
+use orna_syntax_ast::InterfaceClauses;
 
 use crate::{BodyId, DefId, ModuleId, ModulePath, Name, PatId, Ty};
 

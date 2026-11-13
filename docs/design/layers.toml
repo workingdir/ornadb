@@ -62,6 +62,10 @@ name = "orna-sys-model"
 layer = 1
 
 [[crate]]
+name = "orna-syntax-ast"
+layer = 1
+
+[[crate]]
 name = "orna-syntax"
 layer = 2
 

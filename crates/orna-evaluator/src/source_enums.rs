@@ -5,7 +5,7 @@
 //! project's enums through this one builder, so payload-free references,
 //! payload construction and `case` patterns agree on one identity.
 
-use orna_syntax::{Declaration, Item};
+use orna_syntax_ast::{Declaration, Item};
 use orna_value::{enum_type_id, enum_variant_id, qualified_name};
 
 use crate::{NominalDefinition, NominalDefinitions, NominalVariant};

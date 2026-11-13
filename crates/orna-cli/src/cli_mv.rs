@@ -605,7 +605,7 @@ fn apply_store_rename(
 }
 
 /// The source with the name at `span` replaced by `new_leaf`.
-fn renamed_name_source(source: &str, span: &orna_syntax::SyntaxSpan, new_leaf: &str) -> String {
+fn renamed_name_source(source: &str, span: &orna_syntax_ast::SourceSpan, new_leaf: &str) -> String {
     let mut updated = String::with_capacity(source.len() + new_leaf.len());
     updated.push_str(&source[..span.start]);
     updated.push_str(new_leaf);
@@ -620,7 +620,7 @@ fn declaration_name_span(
     modules: &[orna_check::ModuleInput],
     kind: orna_project::ObjectKind,
     qualified: &str,
-) -> Option<(usize, orna_syntax::SyntaxSpan)> {
+) -> Option<(usize, orna_syntax_ast::SourceSpan)> {
     use orna_project::ObjectKind;
     let segments = qualified.split('.').collect::<Vec<_>>();
     let members = match kind {
@@ -654,15 +654,16 @@ fn declaration_name_span(
 
 /// The byte span of `declaration`'s own name, or of its member `leaf` under it.
 fn name_span_in_items(
-    items: &[orna_syntax::Item],
+    items: &[orna_syntax_ast::Item],
     tokens: &[orna_syntax::Token],
     kind: orna_project::ObjectKind,
     declaration: &str,
     leaf: &str,
     following: Option<&str>,
-) -> Option<orna_syntax::SyntaxSpan> {
+) -> Option<orna_syntax_ast::SourceSpan> {
     use orna_project::ObjectKind;
-    use orna_syntax::{Declaration, Keyword, TableMember, TypeMember, TypeRepresentation};
+    use orna_syntax::Keyword;
+    use orna_syntax_ast::{Declaration, TableMember, TypeMember, TypeRepresentation};
     items
         .iter()
         .find_map(|item| match (&item.declaration, kind) {
@@ -688,7 +689,7 @@ fn name_span_in_items(
             ) if name == declaration => keys
                 .iter()
                 .find_map(|key| match &key.pattern {
-                    orna_syntax::Pattern::Name(key_name, span) if key_name == leaf => {
+                    orna_syntax_ast::Pattern::Name(key_name, span) if key_name == leaf => {
                         Some(span.clone())
                     }
                     _ => None,
@@ -739,10 +740,10 @@ fn name_span_in_items(
 /// identifier `name` inside `span` when no keyword introduces it.
 fn name_in(
     tokens: &[orna_syntax::Token],
-    span: &orna_syntax::SyntaxSpan,
+    span: &orna_syntax_ast::SourceSpan,
     keyword: Option<orna_syntax::Keyword>,
     name: &str,
-) -> Option<orna_syntax::SyntaxSpan> {
+) -> Option<orna_syntax_ast::SourceSpan> {
     let inside = tokens
         .iter()
         .filter(|token| token.span.start >= span.start && token.span.end <= span.end)
@@ -788,7 +789,7 @@ fn renamed_table_source(
             .filter(|item| {
                 matches!(
                     &item.declaration,
-                    orna_syntax::Declaration::Table { name, .. } if name == leaf
+                    orna_syntax_ast::Declaration::Table { name, .. } if name == leaf
                 )
             })
             .collect::<Vec<_>>()
@@ -883,9 +884,9 @@ fn module_namespace_matches(path: &str, expected: &str) -> bool {
 
 fn table_declaration_name_span(
     source: &str,
-    item_span: &orna_syntax::SyntaxSpan,
+    item_span: &orna_syntax_ast::SourceSpan,
     expected_name: &str,
-) -> Option<orna_syntax::SyntaxSpan> {
+) -> Option<orna_syntax_ast::SourceSpan> {
     let tokens = orna_syntax::lex(source).ok()?;
     let keyword = tokens.iter().position(|token| {
         token.span.start >= item_span.start

@@ -5,7 +5,7 @@
 //! read is an array index, not a scope-map lookup.
 
 use num_bigint::BigInt;
-use orna_syntax::SyntaxSpan as SourceSpan;
+use orna_syntax_ast::SourceSpan;
 
 use crate::{BodyId, Call, DefId, ExprId, LocalId, Pat, PatId, Ty};
 

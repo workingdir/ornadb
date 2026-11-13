@@ -5,7 +5,9 @@
 //! `orna-syntax`, never scanned as text. A variant spells its code with `__` for each dot, so `object__not_found` is
 //! `sys.object.not_found`. The test then requires the variants, in source order, to equal the frozen catalogue lists.
 
-use orna_syntax::{Declaration, parse_interface_with_file};
+use orna_syntax::parse_interface_with_file;
+
+use orna_syntax_ast::Declaration;
 use serde_json::Value;
 
 const SYS_ORNA: &str = include_str!("../../orna-hir/interface/sys.orna");

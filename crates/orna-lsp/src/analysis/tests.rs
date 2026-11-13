@@ -52,7 +52,8 @@ fn in_crate_fixtures_parse_with_the_frozen_1_0_frontend() {
 fn nested_document_symbol_model_keeps_enum_variants_and_payload_fields() {
     let parse = orna_syntax::parse_module(DOCUMENT_SYMBOLS_SOURCE);
     assert!(parse.diagnostics.is_empty(), "{:#?}", parse.diagnostics);
-    let orna_syntax::Declaration::Enum { variants, .. } = &parse.value.items[0].declaration else {
+    let orna_syntax_ast::Declaration::Enum { variants, .. } = &parse.value.items[0].declaration
+    else {
         panic!("first fixture declaration must be an enum")
     };
     assert_eq!(

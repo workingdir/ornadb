@@ -2,7 +2,7 @@
 //! fresh type arguments for the declared parameters, and a field's declared
 //! type is read at the type arguments of the owner it is accessed through.
 
-use orna_syntax::SyntaxSpan;
+use orna_syntax_ast::SourceSpan as SyntaxSpan;
 
 use crate::{DefId, DefKind, Name, Ty, TyKind};
 

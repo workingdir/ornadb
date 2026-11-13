@@ -38,7 +38,8 @@ fn functions(source: &str) -> Functions {
         .items
         .into_iter()
         .map(|item| {
-            let orna_syntax::Declaration::Function { signature, body } = item.declaration else {
+            let orna_syntax_ast::Declaration::Function { signature, body } = item.declaration
+            else {
                 panic!("function expected")
             };
             (

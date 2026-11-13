@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
-use orna_syntax::{
+use orna_syntax_ast::{
     Declaration, Item, ProtocolMember, SyntaxTree, TypeExpr, TypeMember, TypeRepresentation,
     UseTail,
 };
@@ -448,7 +448,7 @@ pub(crate) fn import_prelude_exports(
 
 pub(crate) fn import_named_symbols(
     module: &ModuleHeader,
-    names: &[orna_syntax::ImportSegment],
+    names: &[orna_syntax_ast::ImportSegment],
     explicit: &mut BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
@@ -694,7 +694,7 @@ pub(crate) fn collect_protocol_implementations(scope: &mut Scope, tree: &SyntaxT
                 members
                     .iter()
                     .filter_map(|member| match member {
-                        orna_syntax::TableMember::Implementation { implementation, .. } => {
+                        orna_syntax_ast::TableMember::Implementation { implementation, .. } => {
                             Some(implementation)
                         }
                         _ => None,
@@ -771,7 +771,7 @@ pub(crate) fn collect_nominal_conversion_effects(scope: &mut Scope, tree: &Synta
                 members
                     .iter()
                     .filter_map(|member| match member {
-                        orna_syntax::TableMember::Implementation { implementation, .. } => {
+                        orna_syntax_ast::TableMember::Implementation { implementation, .. } => {
                             Some(implementation)
                         }
                         _ => None,
@@ -794,7 +794,7 @@ pub(crate) fn collect_nominal_conversion_effects(scope: &mut Scope, tree: &Synta
             let Some(source) = valid_static_type(&arguments[0], scope) else {
                 continue;
             };
-            let Some(orna_syntax::ImplMember::Function {
+            let Some(orna_syntax_ast::ImplMember::Function {
                 signature, body, ..
             }) = implementation.members.as_slice().first()
             else {

@@ -5,7 +5,9 @@
 //! keyword uses; lowering reads exactly those fields for that keyword and never
 //! enumerates illegal combinations at run time.
 
-use orna_syntax::{ControlKind, Expr as AstExpr, SyntaxSpan};
+use orna_syntax_ast::SourceSpan as SyntaxSpan;
+
+use orna_syntax_ast::{ControlKind, Expr as AstExpr};
 
 use crate::{Arm, ExprId, ExprKind};
 
@@ -98,7 +100,7 @@ fn lower_if(
 fn lower_for(
     builder: &mut Builder,
     state: &mut BodyState,
-    binding: Option<&orna_syntax::Pattern>,
+    binding: Option<&orna_syntax_ast::Pattern>,
     iter: Option<&AstExpr>,
     body: Option<&AstExpr>,
     span: &SyntaxSpan,
@@ -129,7 +131,7 @@ fn lower_case(
     builder: &mut Builder,
     state: &mut BodyState,
     scrutinee: Option<&AstExpr>,
-    arms: &[orna_syntax::CaseArm],
+    arms: &[orna_syntax_ast::CaseArm],
     span: &SyntaxSpan,
 ) -> ExprId {
     let scrutinee = match scrutinee {

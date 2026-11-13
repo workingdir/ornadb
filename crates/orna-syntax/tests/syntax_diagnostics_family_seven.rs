@@ -1,4 +1,5 @@
-use orna_syntax::{Declaration, Expr, Pattern, StringSegment, parse_module};
+use orna_syntax::parse_module;
+use orna_syntax_ast::{Declaration, Expr, Pattern, StringSegment};
 
 fn assert_nested_list_pattern(pattern: &Pattern, remaining: usize) {
     if remaining == 0 {

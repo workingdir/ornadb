@@ -4,7 +4,8 @@
 //! legal only in an engine-embedded interface module and only on the declaration forms that the clause table
 //! names. The clauses sit between a declaration's head and its `;` or `{` (sys-as-native section 2.4).
 
-use super::{NameSegment, Parser, SourceSpan, TokenKind};
+use super::{Parser, TokenKind};
+use orna_syntax_ast::*;
 
 /// The declaration form that a clause is written on. A clause word outside its form's table is an error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14,58 +15,6 @@ pub(super) enum ClauseTarget {
     NativeType,
     Type,
     Enum,
-}
-
-/// A string literal value of a clause, with its quotes removed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ClauseString {
-    pub text: String,
-    pub span: SourceSpan,
-}
-
-/// `removed "version" [use "path"] [reason "text"]`: the declaration is gone from `version`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RemovedClause {
-    pub version: ClauseString,
-    pub replacement: Option<ClauseString>,
-    pub reason: Option<ClauseString>,
-    pub span: SourceSpan,
-}
-
-/// `formerly "name" [diagnostic "code"]`: the name that this declaration replaced.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FormerlyClause {
-    pub name: ClauseString,
-    pub diagnostic: Option<ClauseString>,
-    pub span: SourceSpan,
-}
-
-/// `deprecated "version" [use "path"]`: the declaration still works, and tools warn.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeprecatedClause {
-    pub version: ClauseString,
-    pub replacement: Option<ClauseString>,
-    pub span: SourceSpan,
-}
-
-/// The clauses that one declaration carries. Every field is empty or `None` when the clause is absent.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct InterfaceClauses {
-    /// `class read|invoke|admin`: the catalogue class of a native function.
-    pub class: Option<NameSegment>,
-    /// `fails a, b`: the failure codes a native function may raise, as enum names.
-    pub fails: Vec<NameSegment>,
-    /// `since "version"`: the first language version that has a native function.
-    pub since: Option<ClauseString>,
-    pub removed: Option<RemovedClause>,
-    pub formerly: Option<FormerlyClause>,
-    pub deprecated: Option<DeprecatedClause>,
-    /// `spelling "sys.name(Type)"`: the 1.1 label of an overload member.
-    pub spelling: Option<ClauseString>,
-    /// `key a, b`: the key columns of a relation row type.
-    pub key: Vec<NameSegment>,
-    /// `availability "word"`: one of the five availability words of a relation row type.
-    pub availability: Option<ClauseString>,
 }
 
 /// Every clause word, so that the parser can tell a clause from the next declaration.

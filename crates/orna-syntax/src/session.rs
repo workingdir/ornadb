@@ -1,7 +1,9 @@
 //! The REPL session's module form: the definitions a session accumulates, where a top-level `let`
 //! is admitted as an item. A module unit still rejects a top-level `let`.
 
-use crate::parser::{Parse, SyntaxTree, annotate_tree, located, parse_items};
+use crate::parser::{Parse, annotate_tree, located, parse_items};
+
+use orna_syntax_ast::SyntaxTree;
 
 /// Parses one session module: definitions plus top-level `let` bindings, located in `file`.
 pub fn parse_session_module_with_file(source: &str, file: impl Into<String>) -> Parse<SyntaxTree> {
@@ -17,7 +19,8 @@ pub fn parse_session_module_with_file(source: &str, file: impl Into<String>) -> 
 #[cfg(test)]
 mod tests {
     use super::parse_session_module_with_file;
-    use crate::{ItemKind, parse_module_with_file};
+    use crate::parse_module_with_file;
+    use orna_syntax_ast::ItemKind;
 
     #[test]
     fn a_top_level_let_is_an_item_of_a_session_module() {

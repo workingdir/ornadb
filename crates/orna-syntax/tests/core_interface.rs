@@ -2,7 +2,9 @@
 //! declaration grammar. Every declaration is a
 //! body-less `native fn` with an effect clause.
 
-use orna_syntax::{Declaration, parse_module};
+use orna_syntax::parse_module;
+
+use orna_syntax_ast::Declaration;
 
 const CORE_FILES: &[(&str, &str)] = &[
     (

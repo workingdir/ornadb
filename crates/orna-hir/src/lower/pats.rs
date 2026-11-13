@@ -10,7 +10,9 @@
 //! pass of stage H2 has an expected type for the initializer without keeping a
 //! second, syntax-side annotation table.
 
-use orna_syntax::{Pattern as AstPattern, SyntaxSpan};
+use orna_syntax_ast::SourceSpan as SyntaxSpan;
+
+use orna_syntax_ast::Pattern as AstPattern;
 
 use crate::Idx;
 use crate::resolve::PathKind;
@@ -192,9 +194,9 @@ fn field_definition(builder: &Builder, owner: DefId, name: &str) -> Option<Ty> {
 fn lower_constructor(
     builder: &mut Builder,
     state: &mut BodyState,
-    path: &[orna_syntax::NameSegment],
+    path: &[orna_syntax_ast::NameSegment],
     arguments: &[AstPattern],
-    fields: &[orna_syntax::PatternField],
+    fields: &[orna_syntax_ast::PatternField],
     span: &SyntaxSpan,
 ) -> PatId {
     if super::option_pats::is_option_some(builder, state.module, path, arguments, fields) {

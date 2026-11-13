@@ -2,7 +2,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use orna_syntax::{Expr, LiteralKind, SyntaxSpan};
+use orna_syntax_ast::SourceSpan as SyntaxSpan;
+
+use orna_syntax_ast::{Expr, LiteralKind};
 
 use super::*;
 
@@ -247,7 +249,7 @@ pub(crate) fn specialize_dynamic_parameter_snapshot_contexts_scoped(
 pub(crate) fn call_argument_index_for_position(
     parameter_names: Option<&[String]>,
     parameter_index: usize,
-    arguments: &[orna_syntax::Argument],
+    arguments: &[orna_syntax_ast::Argument],
 ) -> Option<usize> {
     if parameter_names.is_some() {
         return call_argument_index_for_parameter(parameter_names, parameter_index, arguments);
@@ -389,7 +391,7 @@ pub(crate) fn contains_snapshot_context_key(ty: &Type, key: &str) -> bool {
 pub(crate) fn call_argument_index_for_parameter(
     parameter_names: Option<&[String]>,
     parameter_index: usize,
-    arguments: &[orna_syntax::Argument],
+    arguments: &[orna_syntax_ast::Argument],
 ) -> Option<usize> {
     let names = parameter_names?;
     names.get(parameter_index)?;
@@ -492,7 +494,7 @@ pub(crate) fn specialize_snapshot_ref_parameter(
 pub(crate) fn specialize_historical_database_result(
     result: &Type,
     argument_types: &[Type],
-    arguments: &[orna_syntax::Argument],
+    arguments: &[orna_syntax_ast::Argument],
     local: &BTreeMap<String, Symbol>,
 ) -> Option<Type> {
     let Type::Applied {

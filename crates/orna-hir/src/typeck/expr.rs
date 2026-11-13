@@ -1,7 +1,7 @@
 //! Expression type inference, grouped into functions below the budget's
 //! function-size cap.
 
-use orna_syntax::SyntaxSpan;
+use orna_syntax_ast::SourceSpan as SyntaxSpan;
 
 use crate::{Arm, AssignOp, BinOp, Body, DefId, DefKind, ExprId, ExprKind, Ty, TyKind};
 

@@ -8,7 +8,9 @@
 
 use std::{fmt, str::FromStr};
 
-use orna_syntax::{Declaration, Expr, LiteralKind, RecordField, parse_module, parse_row};
+use orna_syntax::{parse_module, parse_row};
+
+use orna_syntax_ast::{Declaration, Expr, LiteralKind, RecordField};
 use sha2::{Digest, Sha256};
 
 use crate::native_graph::{

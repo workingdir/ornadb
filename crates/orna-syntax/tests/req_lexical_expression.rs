@@ -1,6 +1,5 @@
-use orna_syntax::{
-    Expr, UseTail, parse_expression, parse_module, parse_module_with_file, parse_row_with_file,
-};
+use orna_syntax::{parse_expression, parse_module, parse_module_with_file, parse_row_with_file};
+use orna_syntax_ast::{Expr, UseTail};
 
 /// ORNA-LEX-002: source spans retain UTF-8 byte offsets and scalar line/column locations.
 #[test]
@@ -110,7 +109,7 @@ fn record_pattern_shorthand_is_a_binding() {
     let Expr::Control { arms, .. } = parsed.value else {
         panic!("expected case expression")
     };
-    let orna_syntax::Pattern::Record { fields, .. } = &arms[0].pattern else {
+    let orna_syntax_ast::Pattern::Record { fields, .. } = &arms[0].pattern else {
         panic!("expected record-pattern arm")
     };
     assert_eq!(fields[0].0, "count");
@@ -148,7 +147,7 @@ fn currency_constructor_remains_an_ordinary_qualified_call() {
         matches!(
             *base,
             Expr::Literal {
-                kind: orna_syntax::LiteralKind::Decimal,
+                kind: orna_syntax_ast::LiteralKind::Decimal,
                 ..
             }
         ),
@@ -161,6 +160,6 @@ fn aliased_import_is_preserved_in_the_syntax_tree() {
     let parsed = parse_module("use a.b as x; fn run(): Int = 1;");
     assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
     assert!(
-        matches!(&parsed.value.items[0].declaration, orna_syntax::Declaration::Use { tail: UseTail::Alias { name, .. }, .. } if name == "x")
+        matches!(&parsed.value.items[0].declaration, orna_syntax_ast::Declaration::Use { tail: UseTail::Alias { name, .. }, .. } if name == "x")
     );
 }

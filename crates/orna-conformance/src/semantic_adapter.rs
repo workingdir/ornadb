@@ -58,9 +58,9 @@ use orna_stream::{
     DiagnosticCode, FailureIdentity, FailureRecord, FailureStatus, LeasePurpose, Position,
     SafeDiagnostic,
 };
-use orna_syntax::{
-    Declaration, Expr, Pattern, Statement, SyntaxSpan, TypeMember, TypeRepresentation,
-    parse_expression, parse_module,
+use orna_syntax::{parse_expression, parse_module};
+use orna_syntax_ast::{
+    Declaration, Expr, Pattern, SourceSpan, Statement, TypeMember, TypeRepresentation,
 };
 use orna_sys::{
     AdmissionError, AdmissionRequest, ExecutionBoundary, FunctionDescriptor, InvocationCompletion,
@@ -940,7 +940,7 @@ impl BoundedEvaluator {
         parsed.is_ok() && Self::supports_pure_declarations(&parsed.value.items)
     }
 
-    fn supports_pure_declarations(items: &[orna_syntax::Item]) -> bool {
+    fn supports_pure_declarations(items: &[orna_syntax_ast::Item]) -> bool {
         items.iter().all(|item| match &item.declaration {
             Declaration::Function { .. } | Declaration::Use { .. } => true,
             Declaration::Type {
@@ -1102,15 +1102,15 @@ fn bind_standard_function_aliases(
                 .collect::<Vec<_>>()
                 .join(".");
             let names = match tail {
-                orna_syntax::UseTail::None => continue,
-                orna_syntax::UseTail::Names(names) => names,
-                orna_syntax::UseTail::Glob { .. } => {
+                orna_syntax_ast::UseTail::None => continue,
+                orna_syntax_ast::UseTail::Names(names) => names,
+                orna_syntax_ast::UseTail::Glob { .. } => {
                     return Err(StageOutcome::Failed(standard_import_diagnostic(
                         DIAG_IMPORT,
                         "standard glob imports are not supported by the bounded runtime; import names explicitly",
                     )));
                 }
-                orna_syntax::UseTail::Alias { .. } => {
+                orna_syntax_ast::UseTail::Alias { .. } => {
                     return Err(StageOutcome::Failed(standard_import_diagnostic(
                         DIAG_IMPORT,
                         "standard module aliases are not supported by the bounded runtime; import names explicitly",
@@ -3956,7 +3956,7 @@ fn evaluate_function_assertion(
     let span = assertion.span();
     let body = Expr::Call {
         callee: Box::new(assertion.clone()),
-        arguments: vec![orna_syntax::Argument {
+        arguments: vec![orna_syntax_ast::Argument {
             name: None,
             value: relation_source_expression(table, span.clone()),
             span: span.clone(),
@@ -4073,7 +4073,7 @@ pub fn project_declares_assertions(loaded: &orna_project::LoadedProject) -> bool
                 Declaration::Assertion { .. } => true,
                 Declaration::Table { members, .. } => members
                     .iter()
-                    .any(|member| matches!(member, orna_syntax::TableMember::Assertion { .. })),
+                    .any(|member| matches!(member, orna_syntax_ast::TableMember::Assertion { .. })),
                 _ => false,
             })
     })
@@ -5168,7 +5168,7 @@ fn literal_list_source(body: &Expr) -> Option<(&[Expr], String)> {
         Some(name),
         Expr::Literal {
             text: source_identity,
-            kind: orna_syntax::LiteralKind::String,
+            kind: orna_syntax_ast::LiteralKind::String,
             ..
         },
     ) = (&identity.name, &identity.value)
@@ -5333,7 +5333,7 @@ fn literal_stream_pipeline(body: &Expr) -> Option<(&[Expr], String, String, Stri
     else {
         return None;
     };
-    let [orna_syntax::Statement::Expression { value, .. }] = statements.as_slice() else {
+    let [orna_syntax_ast::Statement::Expression { value, .. }] = statements.as_slice() else {
         return None;
     };
     let Expr::Binary { lhs, op, rhs, .. } = value else {
@@ -5361,7 +5361,7 @@ fn literal_stream_pipeline(body: &Expr) -> Option<(&[Expr], String, String, Stri
         Some(name),
         Expr::Literal {
             text: source_identity,
-            kind: orna_syntax::LiteralKind::String,
+            kind: orna_syntax_ast::LiteralKind::String,
             ..
         },
     ) = (&identity.name, &identity.value)
@@ -5404,7 +5404,8 @@ fn literal_stream_pipeline(body: &Expr) -> Option<(&[Expr], String, String, Stri
     else {
         return None;
     };
-    let [orna_syntax::Statement::Expression { value: insert, .. }] = statements.as_slice() else {
+    let [orna_syntax_ast::Statement::Expression { value: insert, .. }] = statements.as_slice()
+    else {
         return None;
     };
     let Expr::Call {
@@ -5449,13 +5450,13 @@ fn qualified_expr_path(expr: &Expr) -> Option<Vec<&str>> {
 fn literal_value(expr: &Expr) -> Option<Value> {
     match expr {
         Expr::Literal { text, kind, .. } => match kind {
-            orna_syntax::LiteralKind::Integer => text.parse::<BigInt>().ok().map(Value::int),
-            orna_syntax::LiteralKind::Decimal => literal_decimal(text),
-            orna_syntax::LiteralKind::String => {
+            orna_syntax_ast::LiteralKind::Integer => text.parse::<BigInt>().ok().map(Value::int),
+            orna_syntax_ast::LiteralKind::Decimal => literal_decimal(text),
+            orna_syntax_ast::LiteralKind::String => {
                 literal_string(text).and_then(|text| Value::new(OvbRaw::Text(text)).ok())
             }
-            orna_syntax::LiteralKind::Boolean => Value::new(OvbRaw::Bool(text == "true")).ok(),
-            orna_syntax::LiteralKind::Null => Value::new(OvbRaw::Null).ok(),
+            orna_syntax_ast::LiteralKind::Boolean => Value::new(OvbRaw::Bool(text == "true")).ok(),
+            orna_syntax_ast::LiteralKind::Null => Value::new(OvbRaw::Null).ok(),
             _ => None,
         },
         Expr::Tuple { elements, .. } | Expr::List { elements, .. } => elements
@@ -6272,7 +6273,7 @@ impl TableEffectHandler<'_, '_> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct AdmittedAssertion {
     expression: Expr,
-    declaration_span: SyntaxSpan,
+    declaration_span: SourceSpan,
     owner_kind: AssertionOwnerKind,
     owner_name: String,
     source_order: usize,
@@ -6581,7 +6582,7 @@ fn admit_transaction_project_with(
         for item in parsed.value.items {
             let Declaration::Use {
                 path,
-                tail: orna_syntax::UseTail::Names(names),
+                tail: orna_syntax_ast::UseTail::Names(names),
             } = item.declaration
             else {
                 continue;
@@ -6783,7 +6784,7 @@ impl ProjectGraph {
             let mut tables = BTreeSet::new();
             let mut functions = BTreeSet::new();
             for item in parse_module(&unit.source).value.items {
-                if !matches!(item.visibility, orna_syntax::Visibility::Public { .. }) {
+                if !matches!(item.visibility, orna_syntax_ast::Visibility::Public { .. }) {
                     continue;
                 }
                 match item.declaration {
@@ -6827,7 +6828,11 @@ struct ModuleReferences<'a> {
 }
 
 impl<'a> ModuleReferences<'a> {
-    fn new(namespace: &Namespace, items: &[orna_syntax::Item], graph: &'a ProjectGraph) -> Self {
+    fn new(
+        namespace: &Namespace,
+        items: &[orna_syntax_ast::Item],
+        graph: &'a ProjectGraph,
+    ) -> Self {
         let mut declared = BTreeSet::new();
         let mut local_tables = BTreeSet::new();
         let mut tables = BTreeMap::new();
@@ -6865,16 +6870,16 @@ impl<'a> ModuleReferences<'a> {
             let target = Namespace(path.iter().map(|segment| segment.name.clone()).collect());
             let module = graph.modules.get(&target);
             match tail {
-                orna_syntax::UseTail::None => {
+                orna_syntax_ast::UseTail::None => {
                     if let Some(last) = target.0.last() {
                         modules.insert(last.clone(), target.clone());
                     }
                 }
-                orna_syntax::UseTail::Alias { name, .. } if name != "_" => {
+                orna_syntax_ast::UseTail::Alias { name, .. } if name != "_" => {
                     modules.insert(name.clone(), target.clone());
                 }
-                orna_syntax::UseTail::Alias { .. } => {}
-                orna_syntax::UseTail::Names(names) => {
+                orna_syntax_ast::UseTail::Alias { .. } => {}
+                orna_syntax_ast::UseTail::Names(names) => {
                     let Some(module) = module else { continue };
                     for import in names {
                         if module.tables.contains(&import.name) {
@@ -6891,7 +6896,7 @@ impl<'a> ModuleReferences<'a> {
                         }
                     }
                 }
-                orna_syntax::UseTail::Glob { .. } => {
+                orna_syntax_ast::UseTail::Glob { .. } => {
                     let Some(module) = module else { continue };
                     for name in &module.tables {
                         glob_tables
@@ -7076,7 +7081,7 @@ impl<'a> ModuleReferences<'a> {
             Expr::Name { .. } | Expr::Literal { .. } | Expr::ReplBinding { .. } => {}
             Expr::InterpolatedString { segments, .. } => {
                 for segment in segments {
-                    if let orna_syntax::StringSegment::Expression { value, .. } = segment {
+                    if let orna_syntax_ast::StringSegment::Expression { value, .. } = segment {
                         self.expression(value, shadowed);
                     }
                 }
@@ -7172,8 +7177,12 @@ impl<'a> ModuleReferences<'a> {
         }
     }
 
-    fn statement(&self, statement: &mut orna_syntax::Statement, shadowed: &mut BTreeSet<String>) {
-        use orna_syntax::Statement;
+    fn statement(
+        &self,
+        statement: &mut orna_syntax_ast::Statement,
+        shadowed: &mut BTreeSet<String>,
+    ) {
+        use orna_syntax_ast::Statement;
         match statement {
             Statement::Let { pattern, value, .. } => {
                 self.expression(value, shadowed);
@@ -7197,15 +7206,15 @@ impl<'a> ModuleReferences<'a> {
 
     fn assignment_target(
         &self,
-        target: &mut orna_syntax::AssignmentTarget,
+        target: &mut orna_syntax_ast::AssignmentTarget,
         shadowed: &BTreeSet<String>,
     ) {
         match target {
-            orna_syntax::AssignmentTarget::Name { .. } => {}
-            orna_syntax::AssignmentTarget::Field { base, .. } => {
+            orna_syntax_ast::AssignmentTarget::Name { .. } => {}
+            orna_syntax_ast::AssignmentTarget::Field { base, .. } => {
                 self.assignment_target(base, shadowed);
             }
-            orna_syntax::AssignmentTarget::Index { base, index, .. } => {
+            orna_syntax_ast::AssignmentTarget::Index { base, index, .. } => {
                 self.assignment_target(base, shadowed);
                 self.expression(index, shadowed);
             }
@@ -7253,7 +7262,7 @@ fn durable_activation_digest(previous: [u8; 32], mutations: &[TableMutation]) ->
 }
 
 fn admitted_transaction_module(
-    items: &[orna_syntax::Item],
+    items: &[orna_syntax_ast::Item],
     namespace: Option<&str>,
     module_owner_name: Option<&str>,
     tolerant_keys: bool,
@@ -7330,7 +7339,7 @@ fn admitted_transaction_module(
                     members
                         .iter()
                         .filter_map(|member| match member {
-                            orna_syntax::TableMember::Field { name, .. } => Some(name.clone()),
+                            orna_syntax_ast::TableMember::Field { name, .. } => Some(name.clone()),
                             _ => None,
                         })
                         .collect(),
@@ -7340,9 +7349,9 @@ fn admitted_transaction_module(
                     members
                         .iter()
                         .filter_map(|member| match member {
-                            orna_syntax::TableMember::Field {
+                            orna_syntax_ast::TableMember::Field {
                                 name,
-                                ty: orna_syntax::TypeExpr::Name { path, .. },
+                                ty: orna_syntax_ast::TypeExpr::Name { path, .. },
                                 ..
                             } if path.len() == 1 && path[0] == "Float" => Some(name.clone()),
                             _ => None,
@@ -7354,9 +7363,9 @@ fn admitted_transaction_module(
                     members
                         .iter()
                         .filter_map(|member| match member {
-                            orna_syntax::TableMember::Field {
+                            orna_syntax_ast::TableMember::Field {
                                 name,
-                                ty: orna_syntax::TypeExpr::Name { path, .. },
+                                ty: orna_syntax_ast::TypeExpr::Name { path, .. },
                                 ..
                             } if path.len() == 1 && path[0] == "Decimal" => Some(name.clone()),
                             _ => None,
@@ -7367,7 +7376,7 @@ fn admitted_transaction_module(
                     .iter()
                     .enumerate()
                     .filter_map(|(source_order, member)| match member {
-                        orna_syntax::TableMember::Assertion { value, span } => {
+                        orna_syntax_ast::TableMember::Assertion { value, span } => {
                             Some(AdmittedAssertion {
                                 expression: value.clone(),
                                 declaration_span: span.clone(),
@@ -7871,7 +7880,7 @@ impl<'a> RelationLowering<'a> {
                 text: "filter".into(),
                 span: span.clone(),
             }),
-            arguments: vec![orna_syntax::Argument {
+            arguments: vec![orna_syntax_ast::Argument {
                 name: None,
                 value: callback,
                 span: predicate_span.clone(),
@@ -7889,11 +7898,11 @@ impl<'a> RelationLowering<'a> {
                 text: "take".into(),
                 span: span.clone(),
             }),
-            arguments: vec![orna_syntax::Argument {
+            arguments: vec![orna_syntax_ast::Argument {
                 name: None,
                 value: Expr::Literal {
                     text: "1".into(),
-                    kind: orna_syntax::LiteralKind::Integer,
+                    kind: orna_syntax_ast::LiteralKind::Integer,
                     span: span.clone(),
                 },
                 span: span.clone(),
@@ -7928,7 +7937,7 @@ impl<'a> RelationLowering<'a> {
             },
             rhs: Box::new(Expr::Literal {
                 text: "0".into(),
-                kind: orna_syntax::LiteralKind::Integer,
+                kind: orna_syntax_ast::LiteralKind::Integer,
                 span: span.clone(),
             }),
             span,
@@ -8015,22 +8024,22 @@ impl<'a> RelationLowering<'a> {
 
         let table = Expr::Literal {
             text: format!("{table:?}"),
-            kind: orna_syntax::LiteralKind::String,
+            kind: orna_syntax_ast::LiteralKind::String,
             span: table_span.clone(),
         };
         let field = Expr::Literal {
             text: format!("{field:?}"),
-            kind: orna_syntax::LiteralKind::String,
+            kind: orna_syntax_ast::LiteralKind::String,
             span: body.span(),
         };
         let operation = Expr::Literal {
             text: format!("{operation:?}"),
-            kind: orna_syntax::LiteralKind::String,
+            kind: orna_syntax_ast::LiteralKind::String,
             span: rhs.span(),
         };
         let kind = Expr::Literal {
             text: format!("{kind:?}"),
-            kind: orna_syntax::LiteralKind::String,
+            kind: orna_syntax_ast::LiteralKind::String,
             span: body.span(),
         };
         Some(Expr::Call {
@@ -8043,22 +8052,22 @@ impl<'a> RelationLowering<'a> {
                 span: expression.span(),
             }),
             arguments: vec![
-                orna_syntax::Argument {
+                orna_syntax_ast::Argument {
                     name: None,
                     span: table.span(),
                     value: table,
                 },
-                orna_syntax::Argument {
+                orna_syntax_ast::Argument {
                     name: None,
                     span: field.span(),
                     value: field,
                 },
-                orna_syntax::Argument {
+                orna_syntax_ast::Argument {
                     name: None,
                     span: operation.span(),
                     value: operation,
                 },
-                orna_syntax::Argument {
+                orna_syntax_ast::Argument {
                     name: None,
                     span: kind.span(),
                     value: kind,
@@ -8328,7 +8337,7 @@ impl<'a> RelationLowering<'a> {
             }),
             arguments: arguments
                 .into_iter()
-                .map(|value| orna_syntax::Argument {
+                .map(|value| orna_syntax_ast::Argument {
                     name: None,
                     span: value.span(),
                     value,
@@ -8371,7 +8380,7 @@ fn lower_relation_bindings(
     materialized
 }
 
-fn relation_source_expression(table: &str, span: orna_syntax::SyntaxSpan) -> Expr {
+fn relation_source_expression(table: &str, span: orna_syntax_ast::SourceSpan) -> Expr {
     Expr::Call {
         callee: Box::new(Expr::Field {
             base: Box::new(Expr::ReplBinding {
@@ -8381,11 +8390,11 @@ fn relation_source_expression(table: &str, span: orna_syntax::SyntaxSpan) -> Exp
             name: "source".into(),
             span: span.clone(),
         }),
-        arguments: vec![orna_syntax::Argument {
+        arguments: vec![orna_syntax_ast::Argument {
             name: None,
             value: Expr::Literal {
                 text: format!("{table:?}"),
-                kind: orna_syntax::LiteralKind::String,
+                kind: orna_syntax_ast::LiteralKind::String,
                 span: span.clone(),
             },
             span: span.clone(),
@@ -8474,7 +8483,7 @@ impl FilteredTerminal {
 /// relation lowering recognises.
 struct EqualityFilter<'a> {
     table: &'a String,
-    table_span: &'a orna_syntax::SyntaxSpan,
+    table_span: &'a orna_syntax_ast::SourceSpan,
     field: &'a String,
     /// The `row.field` side of the comparison, for its span.
     field_expr: &'a Expr,
@@ -8485,19 +8494,19 @@ struct EqualityFilter<'a> {
 
 /// `$__orna_relation.<method>("Table", "field", expected)`.
 fn filtered_relation_call(method: &str, filter: &EqualityFilter<'_>, expression: &Expr) -> Expr {
-    let positional = |value: Expr| orna_syntax::Argument {
+    let positional = |value: Expr| orna_syntax_ast::Argument {
         name: None,
         span: value.span(),
         value,
     };
     let table = Expr::Literal {
         text: format!("{:?}", filter.table),
-        kind: orna_syntax::LiteralKind::String,
+        kind: orna_syntax_ast::LiteralKind::String,
         span: filter.table_span.clone(),
     };
     let field = Expr::Literal {
         text: format!("{:?}", filter.field),
-        kind: orna_syntax::LiteralKind::String,
+        kind: orna_syntax_ast::LiteralKind::String,
         span: filter.field_expr.span(),
     };
     Expr::Call {
@@ -8940,7 +8949,7 @@ fn evaluate_module_assertion_continuation(
             }
         }
         Expr::Control {
-            kind: orna_syntax::ControlKind::If,
+            kind: orna_syntax_ast::ControlKind::If,
             binding: None,
             condition: Some(condition),
             body: Some(body),
@@ -9178,7 +9187,7 @@ fn evaluate_module_assertion_rows_continuation(
             }
         }
         Expr::Control {
-            kind: orna_syntax::ControlKind::If,
+            kind: orna_syntax_ast::ControlKind::If,
             binding: None,
             condition: Some(condition),
             body: Some(body),
@@ -9600,9 +9609,9 @@ fn replace_record_fields(
 }
 
 fn transaction_key_type_from_syntax(
-    ty: &orna_syntax::TypeExpr,
+    ty: &orna_syntax_ast::TypeExpr,
 ) -> Result<TransactionKeyType, String> {
-    let orna_syntax::TypeExpr::Name {
+    let orna_syntax_ast::TypeExpr::Name {
         path, arguments, ..
     } = ty
     else {
@@ -11087,7 +11096,8 @@ mod durable_tests {
         RuntimeIdentity, RuntimeState, TableMutation, TerminalOutcome, WriterLease,
     };
     use orna_stream::{AssertionOwnerKind, DiagnosticClass, DiagnosticCode, SafeDiagnostic};
-    use orna_syntax::{Expr, parse_expression, parse_module};
+    use orna_syntax::{parse_expression, parse_module};
+    use orna_syntax_ast::Expr;
     use orna_value::{OvbRaw, Value};
     use std::{
         collections::BTreeMap,

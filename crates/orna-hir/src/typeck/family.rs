@@ -6,7 +6,7 @@
 
 use std::mem;
 
-use orna_syntax::SyntaxSpan;
+use orna_syntax_ast::SourceSpan as SyntaxSpan;
 
 use super::BodyCheck;
 use super::quantity::{Fail, Num, budget, scaled};
