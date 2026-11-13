@@ -1,4 +1,4 @@
-use super::*;
+use super::Diagnostic;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct DiagnosticDocumentation {

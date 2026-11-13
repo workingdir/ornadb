@@ -52,18 +52,55 @@ mod ui_render;
 
 use cli_args::{Command, Invocation, Parsed, StatusFormat, parse_cli_reporting};
 use cli_dispatch::execute;
-use committed::*;
-use diagnostic_docs::*;
-use endpoint::*;
-use invoke::*;
+use committed::{
+    CommittedRowsError, PinnedCommittedTables, ReplRuntime, ReplTransactions,
+    admitted_table_schemas, committed_rows_at, committed_storage_orders,
+    committed_table_identities, committed_table_object_ids, evaluate_over_committed_tables,
+    legacy_bare_module_candidates, legacy_bare_module_table, refuse_legacy_bare_module_rows,
+    run_committed_table_invocation, table_identities_from_manifest,
+};
+use diagnostic_docs::{diagnostic_documentation, explain_diagnostic};
+use endpoint::{Endpoint, local_project_path, pure_sys_host_context};
+#[cfg(test)]
+use invoke::{durable_invocation_failed, stream_delivery_failed};
+use invoke::{
+    run_default_project_main, run_project_invocation, run_project_invocation_with_arguments,
+    run_project_stream_invocation, run_public_project_function, run_pure_invocation,
+};
 use orna_base::hex_digit;
-use project_run::*;
+use project_run::{
+    check_project, execution_project, load_project, load_project_without_standard_rejection,
+    pure_execution_project, runtime_identity, semantic_catalogue,
+};
 use repl::{AnsiColor, write_rendered_error, write_styled, write_styled_display};
-use repl_request::*;
-use repl_run::*;
-use repl_session::*;
-use repo_sync::*;
-use status_run::*;
+#[cfg(test)]
+use repl_request::FIRST_SYS_DISPATCH_RUNNING;
+use repl_request::{ReplWriter, ReplWriterInputs, Reserved, ensure_writer};
+use repl_run::{
+    REPL_EFFECT_UNCERTAIN, repl_effect_cancelled, repl_effect_uncertain, run_repl,
+    settlement_cause, stage_outcome_cause,
+};
+#[cfg(test)]
+use repl_run::{repl_evaluation_failure, run_repl_input, run_repl_submission_with};
+#[cfg(test)]
+use repl_session::repl_runtime;
+use repl_session::{
+    ReplSnapshotSessionLoader, admitted_project_tables, repl_effect_failure, repl_lease_failure,
+    repl_request_fingerprint, repl_session,
+};
+#[cfg(test)]
+use repo_sync::{fetch_continuity_diagnostic, repository_init_diagnostic};
+use repo_sync::{initialize_repository, run_fetch, run_push};
+#[cfg(test)]
+use status_run::{
+    append_unpublished_count_json, file_url_for_status_path, osc8_terminal_supports,
+    write_human_status, write_short_status, write_unpublished_summary,
+};
+use status_run::{
+    discover_worktree, run_status, run_status_human, run_status_json, run_status_short,
+    runtime_publication_metadata_rows, source_unpublished_mutation_count,
+    unpublished_mutation_count,
+};
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};

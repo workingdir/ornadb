@@ -1,9 +1,15 @@
-use super::*;
+use super::{
+    EnvironmentProvider, FilesystemProvider, REPL_EFFECT_UNCERTAIN, Rc, RefCell,
+    RequestAdmissionCapability, RequestIdentity, RuntimeIdentity, RuntimeState,
+    RuntimeTableIdentity, SysHostBindingRegistry, TerminalOutcome, WriterLease,
+    legacy_bare_module_candidates, legacy_bare_module_table, repl, repl_effect_cancelled,
+    repl_effect_failure, repl_effect_uncertain, repl_lease_failure, settlement_cause,
+};
 
 #[cfg(test)]
 thread_local! {
     /// Running request rows counted when the first sys binding dispatches.
-    static FIRST_SYS_DISPATCH_RUNNING: std::cell::Cell<Option<usize>> =
+    pub(crate) static FIRST_SYS_DISPATCH_RUNNING: std::cell::Cell<Option<usize>> =
         const { std::cell::Cell::new(None) };
 }
 

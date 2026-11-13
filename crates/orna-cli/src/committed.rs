@@ -1,4 +1,11 @@
-use super::*;
+use super::{
+    AdmittedApplication, AdmittedReplSession, ApplicationAuthority, Arc, BTreeMap, BTreeSet,
+    CommittedTableIdentity, Diagnostic, Endpoint, Environment, FaultInjector, PinnedCommittedRows,
+    Rc, RefCell, ReplWriter, RuntimeError, RuntimeIdentity, RuntimeMode,
+    RuntimePublicationMetadataRows, RuntimeState, RuntimeTableActivationSnapshot,
+    RuntimeTableIdentity, RuntimeTableRows, StagedActivation, StdSnapshotPin,
+    SysHostBindingRegistry, TableObjectId, local_project_path, runtime_identity, sys_host,
+};
 
 /// Runtime authority retained by one CLI REPL session.
 ///
