@@ -34,7 +34,9 @@ pub(crate) fn run(program: &mut Program) {
         let owner = body.owner.index();
         for expr in body.exprs.iter() {
             if let ExprKind::Def(def) = &expr.kind
-                && matches!(program.defs[*def].kind, DefKind::Table(_))
+                && (matches!(program.defs[*def].kind, DefKind::Table(_))
+                    || (matches!(program.defs[*def].kind, DefKind::Type(_))
+                        && program.is_sys_relation(*def)))
             {
                 direct[owner] = direct[owner].join(table_scan());
                 continue;

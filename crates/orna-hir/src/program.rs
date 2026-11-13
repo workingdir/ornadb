@@ -103,6 +103,17 @@ impl Program {
         }
     }
 
+    /// Whether `def` is a `sys` relation: a key-bearing type declared in the `sys` module. A bare reference to it
+    /// is a row source, typed as a relation and scanned like a table.
+    #[must_use]
+    pub fn is_sys_relation(&self, def: DefId) -> bool {
+        let Some(definition) = self.defs.get(def) else {
+            return false;
+        };
+        let origin = self.modules[definition.module].origin;
+        origin == ModuleOrigin::Sys && !definition.clauses.key.is_empty()
+    }
+
     /// Whether the program holds nothing.
     #[must_use]
     pub fn is_empty(&self) -> bool {
