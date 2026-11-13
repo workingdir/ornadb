@@ -11,6 +11,7 @@ use orna_hir::{
 };
 
 use crate::binders;
+use crate::engine_money::{currency_name, is_money_type};
 use crate::decimal::Decimal;
 use crate::error::Stop;
 use crate::frame::{Frame, TypeEnv, type_args};
@@ -46,7 +47,7 @@ impl<'p> Machine<'p> {
                 ops::binary(*op, lhs, rhs, &self.limits)
             }
             ExprKind::Logic { op, lhs, rhs } => self.logic(body, frame, *op, *lhs, *rhs),
-            ExprKind::Call(call) => self.call(body, frame, call),
+            ExprKind::Call(call) => self.call(body, frame, id, call),
             ExprKind::Block { stmts, tail } => self.block(body, frame, stmts, *tail),
             ExprKind::If { cond, then, els } => self.conditional(body, frame, *cond, *then, *els),
             ExprKind::While {
@@ -252,7 +253,7 @@ impl<'p> Machine<'p> {
         }
     }
 
-    fn call(&mut self, body: &'p Body, frame: &mut Frame, call: &Call) -> Result<Value, Stop> {
+    fn call(&mut self, body: &'p Body, frame: &mut Frame, id: ExprId, call: &Call) -> Result<Value, Stop> {
         match &call.callee {
             Callee::Source { def, targs } => {
                 let program = self.program;
@@ -322,7 +323,7 @@ impl<'p> Machine<'p> {
             }
             Callee::Intrinsic(_) => Err(Stop::NotYet("intrinsic form (H4)")),
             Callee::Pending { .. } => Err(Stop::NotYet("member call awaiting the type pass (H2)")),
-            Callee::Ctor { def } => self.construct(body, frame, call, *def),
+            Callee::Ctor { def } => self.construct(body, frame, id, call, *def),
         }
     }
 
@@ -635,9 +636,13 @@ impl<'p> Machine<'p> {
         &mut self,
         body: &'p Body,
         frame: &mut Frame,
+        id: ExprId,
         call: &Call,
         variant: DefId,
     ) -> Result<Value, Stop> {
+        if is_money_type(self.program, variant) {
+            return self.money(body, frame, id, call);
+        }
         let Some(ids) = self.variant_ids_of(variant) else {
             return Err(Stop::NotYet("money or type constructor (H4)"));
         };
@@ -760,6 +765,38 @@ impl<'p> Machine<'p> {
         }
     }
 
+    /// `Money<C>(amount)`: the amount is the one argument; the currency is the id of `C`, which the expression's type
+    /// names. A type parameter in `C` resolves through the caller's environment, as a call's type arguments do.
+    fn money(
+        &mut self,
+        body: &'p Body,
+        frame: &mut Frame,
+        id: ExprId,
+        call: &Call,
+    ) -> Result<Value, Stop> {
+        let program = self.program;
+        let Some(TyKind::Adt(_, args)) = program.tys.kind(body.exprs[id].ty) else {
+            return Err(Stop::Error("ORNA-EVAL-TYPE"));
+        };
+        let [currency] = &args[..] else {
+            return Err(Stop::Error("ORNA-EVAL-TYPE"));
+        };
+        let currency = self.resolve_ty(*currency, frame.env_slice())?;
+        let Some(name) = currency_name(program, currency) else {
+            return Err(Stop::Error("ORNA-EVAL-TYPE"));
+        };
+        let currency = self.host.nominal_type_id(&name);
+        let [argument] = &call.args[..] else {
+            return Err(Stop::Error("ORNA-EVAL-ARGUMENT"));
+        };
+        let env = frame.env();
+        let (_, value) = self.argument(body, frame, argument, &[], &env)?;
+        let Value::Decimal(amount) = value else {
+            return Err(Stop::Error("ORNA-EVAL-TYPE"));
+        };
+        Ok(Value::Money { amount, currency })
+    }
+
     fn field(
         &mut self,
         body: &'p Body,
@@ -767,7 +804,12 @@ impl<'p> Machine<'p> {
         base: ExprId,
         field: &FieldRef,
     ) -> Result<Value, Stop> {
-        let Value::Record(fields) = self.eval(body, frame, base)? else {
+        let base = self.eval(body, frame, base)?;
+        // `Money<C>.amount` is the only field of the engine's `Money`; its amount is the exact decimal it holds.
+        if let Value::Money { amount, .. } = base {
+            return Ok(Value::Decimal(amount));
+        }
+        let Value::Record(fields) = base else {
             return Err(Stop::NotYet(
                 "field access on a value the type pass rejects (H2)",
             ));

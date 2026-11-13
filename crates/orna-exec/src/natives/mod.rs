@@ -13,6 +13,7 @@ mod hash;
 mod json;
 mod order;
 mod orna;
+mod money;
 mod ovb;
 #[cfg(test)]
 mod registry_test;
@@ -52,6 +53,12 @@ pub(crate) type NativeFn = fn(&mut Machine<'_>, &[Ty], Vec<Value>) -> Result<Val
 pub(crate) fn lookup(key: &NativeKey) -> Option<NativeFn> {
     let module = key.module.to_string();
     Some(match (module.as_str(), key.name.as_str()) {
+        ("core.money", "money_add") => money::add,
+        ("core.money", "money_sub") => money::sub,
+        ("core.money", "money_scale") => money::scale,
+        ("core.money", "money_divide") => money::divide,
+        ("core.money", "money_negate") => money::negate,
+        ("core.money", "money_compare") => money::compare,
         ("core.decimal", "divide") => decimal_divide::divide,
         ("core.encoding.base64", "encode") => base64::encode,
         ("core.encoding.base64", "decode") => base64::decode,

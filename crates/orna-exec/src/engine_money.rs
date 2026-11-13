@@ -1,16 +1,43 @@
-//! The engine's `core.money.Money` registry entry and the currency identity it depends on (hir-host.md B6).
+//! The engine's `core.money.Money` registry entry (hir-host.md B6): which declaration is the `Money` value, and the
+//! currency a `Money` value names.
 //!
-//! Slice HB6 step 1 (recorded here, before any value is built): the old pipeline assigns a currency's object id from
-//! the application's trusted `NominalDefinition` (`orna-evaluator/src/lib.rs`), and the conformance adapter derives that
-//! id as `SHA-256(identity)[..16]` (`orna-conformance/src/semantic_adapter.rs::nominal_type_id`). The executor's
-//! `orna_value::enum_type_id` uses domain separation and length prefixes, so it does not reproduce that id. The test
-//! below records the difference; it is a stop condition for the slice, reported to `ornadb-csenl.38`.
+//! The currency of a value is the 16-byte id the host gives the currency's module-qualified declaration name
+//! (`Host::nominal_type_id`). The default is `orna_value::enum_type_id`; the application may override it with its
+//! database-scoped identity. Step 1 of HB6 found that the default does not equal the old conformance adapter's
+//! `SHA-256(identity)`, and no golden bytes exist to demand it; the test below pins the default and records that
+//! difference.
+
+use orna_hir::{DefId, DefKind, Program, Ty, TyKind};
+
+/// Whether `def` is the engine's `core.money.Money` type, the declaration the `Money` value is registered under.
+pub(crate) fn is_money_type(program: &Program, def: DefId) -> bool {
+    let definition = &program.defs[def];
+    matches!(definition.kind, DefKind::Type(_))
+        && definition.name.as_str() == "Money"
+        && program.modules[definition.module].path.to_string() == "core.money"
+}
+
+/// The module-qualified declaration name of the currency `ty` names (`Money<C>`'s `C`), or `None` when `ty` is not a
+/// nominal type. A declaration in the unnamed root module keeps its bare name.
+pub(crate) fn currency_name(program: &Program, ty: Ty) -> Option<String> {
+    let Some(TyKind::Adt(def, _)) = program.tys.kind(ty) else {
+        return None;
+    };
+    let definition = &program.defs[*def];
+    let module = program.modules[definition.module].path.to_string();
+    Some(orna_value::qualified_name(
+        Some(&module),
+        definition.name.as_str(),
+    ))
+}
 
 #[cfg(test)]
 mod tests {
     use sha2::{Digest as _, Sha256};
 
-    /// The old adapter's derivation, copied from `orna-conformance/src/semantic_adapter.rs::nominal_type_id`.
+    use crate::host::{Host, StoreHost};
+
+    /// The old conformance adapter's derivation (`orna-conformance/src/semantic_adapter.rs::nominal_type_id`).
     fn old_adapter_currency_id(identity: &str) -> [u8; 16] {
         Sha256::digest(identity.as_bytes())[..16]
             .try_into()
@@ -18,13 +45,18 @@ mod tests {
     }
 
     #[test]
-    fn enum_type_id_does_not_reproduce_the_old_currency_id() {
-        for identity in ["GBP", "core.money.GBP", "fixture.currencies.GBP"] {
-            let derived = orna_value::enum_type_id(identity);
-            let old = old_adapter_currency_id(identity);
+    fn the_host_default_currency_id_is_enum_type_id_of_the_qualified_name() {
+        let host = StoreHost::empty();
+        for name in ["main.GBP", "core.money.GBP", "GBP"] {
+            assert_eq!(
+                host.nominal_type_id(name),
+                orna_value::enum_type_id(name),
+                "the default must derive from the module-qualified name {name:?}"
+            );
             assert_ne!(
-                derived, old,
-                "enum_type_id({identity:?}) now equals the old adapter id; the HB6 stop condition no longer holds"
+                host.nominal_type_id(name),
+                old_adapter_currency_id(name),
+                "the default does not reproduce the old adapter id (step-1 finding, pinned)"
             );
         }
     }
