@@ -12,7 +12,3 @@ orna-hir = { path = "../orna-hir" }
 orna-syntax = { path = "../orna-syntax" }
 orna-syntax-ast = { path = "../orna-syntax-ast" }
 orna-standard-sources = { path = "../orna-standard-sources" }
-
-[dev-dependencies]
-orna-evaluator = { path = "../orna-evaluator" }
-orna-value = { path = "../orna-value" }

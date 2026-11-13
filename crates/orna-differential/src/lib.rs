@@ -41,8 +41,10 @@
 
 pub mod case;
 pub mod compare;
+pub mod diagnostics_parity;
 pub mod effects;
 pub mod environment;
+pub mod exec_allowance;
 pub mod fixture_environment;
 pub mod observe_checker;
 pub mod observe_exec;
