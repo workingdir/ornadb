@@ -30,7 +30,27 @@ fn lower_one(source: &str) -> Program {
         path: ModulePath::new([Name::new("main")]),
     }]);
     assert_eq!(program.validate(), Ok(()), "lowered program must validate");
+    assert_eq!(
+        user_diagnostics(&program),
+        Vec::<String>::new(),
+        "the suffix must resolve against the real core.money"
+    );
     program
+}
+
+/// The diagnostics of the user module `main`, as code and message.
+fn user_diagnostics(program: &Program) -> Vec<String> {
+    program
+        .modules
+        .iter()
+        .filter(|module| module.path == ModulePath::new([Name::new("main")]))
+        .flat_map(|module| {
+            module
+                .diagnostics
+                .iter()
+                .map(|diagnostic| format!("{} {}", diagnostic.code, diagnostic.message))
+        })
+        .collect()
 }
 
 fn defined(program: &Program, name: &str) -> DefId {
@@ -152,7 +172,13 @@ fn a_money_constructor_call_takes_its_currency_from_the_type_argument() {
 
 #[test]
 fn a_suffix_that_names_no_type_is_still_unresolved() {
-    let program = lower_one("pub fn run(): Int = 10.Nope;\n");
+    let tree = parse("pub fn run(): Int = 10.Nope;\n");
+    let program = lower(&[SourceUnit {
+        source: SourceId::new(0),
+        tree: &tree,
+        path: ModulePath::new([Name::new("main")]),
+    }]);
+    // The unknown name is reported by the checker, not here; HB2 only refuses to make it a `Money` call.
     let run = defined(&program, "run");
     let (root, _) = root_of(&program, run);
     assert!(!matches!(root.kind, ExprKind::Call(_)));
