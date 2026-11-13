@@ -40,6 +40,8 @@ mod variants;
 
 pub use error::ExecError;
 pub use globals::{Globals, evaluate_global};
+#[cfg(feature = "test-support")]
+pub use host::FixtureHost;
 pub use host::{
     ActivationContext, Host, HostFailure, HostInstant, HostManifest, RowSource, StoreHost, SysSlot,
 };
