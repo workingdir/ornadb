@@ -35,14 +35,14 @@ use orna_hir::{
     lower, lower_with_admission, lower_with_attached,
 };
 use orna_standard_sources::reference_standard_sources_v1;
-use orna_syntax::{
+use orna_syntax::{parse_expression_with_file, parse_module_with_file};
+use orna_syntax_ast::{
     Declaration, EntryPoint, FunctionSignature, Item, ItemKind, SyntaxTree, Visibility,
-    parse_expression_with_file, parse_module_with_file,
 };
 
 use crate::Route;
 use crate::case::{Case, CaseKind, Family};
-use crate::fixture_environment::{ATTACHED_SUPPORT, DATABASE_SUPPORT};
+use crate::fixture_environment::{ATTACHED_SUPPORT, CURRENCY_SUPPORT, DATABASE_SUPPORT};
 
 /// The repository's standard modules, parsed once per test process.
 struct StandardModule {
@@ -76,6 +76,16 @@ static FIXTURE_UNITS: LazyLock<StandardModule> = LazyLock::new(|| {
     StandardModule {
         path: module_path_of(&logical),
         tree: parse_module_with_file(orna_check::FIXTURE_UNIT_SUPPORT, logical.clone()).value,
+        logical,
+    }
+});
+
+/// The fixture currencies (`fixture_environment::CURRENCY_SUPPORT`), reached through `use fixture.currencies.*;`.
+static FIXTURE_CURRENCIES: LazyLock<StandardModule> = LazyLock::new(|| {
+    let logical = "fixture/currencies.orna".to_owned();
+    StandardModule {
+        path: module_path_of(&logical),
+        tree: parse_module_with_file(CURRENCY_SUPPORT, logical.clone()).value,
         logical,
     }
 });
@@ -259,7 +269,8 @@ fn lower_case_as(case: &Case, admitted: bool) -> Result<LoweredProgram, String> 
 /// catalogue supplies implicitly. The spliced item carries the snippet's spans,
 /// which hold no call or diagnostic.
 fn import_fixture_units(tree: &mut SyntaxTree, attached_roots: &[&str]) {
-    let mut text = String::from("use fixture.units.*;\nuse fixture.attached.*;\n");
+    let mut text =
+        String::from("use fixture.units.*;\nuse fixture.currencies.*;\nuse fixture.attached.*;\n");
     if attached_roots.contains(&"contacts") {
         text.push_str("use contacts.*;\n");
     }
@@ -291,6 +302,7 @@ fn lower_module_case(case: &Case, admitted: bool) -> Result<LoweredProgram, Stri
     let mut standard: Vec<&StandardModule> = STANDARD_MODULES.iter().collect();
     if case.family == Family::Reference {
         standard.push(&FIXTURE_UNITS);
+        standard.push(&FIXTURE_CURRENCIES);
         standard.push(&FIXTURE_ATTACHED);
         standard.extend(FIXTURE_DATABASES.iter().filter(|module| {
             module
@@ -378,7 +390,7 @@ fn lower_expression_case(case: &Case) -> Result<LoweredProgram, String> {
         .first()
         .ok_or_else(|| format!("{}: case has no source", case.id))?;
     let parsed = parse_expression_with_file(&source.text, source.logical_path.clone());
-    let span = orna_syntax::SyntaxSpan::new(0, source.text.len());
+    let span = orna_syntax_ast::SourceSpan::new(0, source.text.len());
     let tree = SyntaxTree {
         entry: EntryPoint::Module,
         items: vec![Item {
@@ -396,7 +408,7 @@ fn lower_expression_case(case: &Case) -> Result<LoweredProgram, String> {
                 body: parsed.value,
             },
             docs: Vec::new(),
-            clauses: orna_syntax::InterfaceClauses::default(),
+            clauses: orna_syntax_ast::InterfaceClauses::default(),
         }],
         span,
     };

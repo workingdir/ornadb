@@ -1,7 +1,7 @@
 //! Call checking: source/native/sys, constructors, first-class values, table
 //! operations, relation stages and intrinsic forms.
 
-use orna_syntax::SyntaxSpan;
+use orna_syntax_ast::SourceSpan as SyntaxSpan;
 
 use crate::{
     Arg, ArgValue, Body, BodyId, Callee, DefId, DefKind, ExprId, ExprKind, FieldRef, FnBody, FnTy,
@@ -1047,6 +1047,10 @@ impl<'a> BodyCheck<'a> {
                 Ok(self.intern(TyKind::Relation(row)))
             }
             Some(DefKind::Enum(_)) => Ok(self.intern(TyKind::Adt(def, Box::new([])))),
+            Some(DefKind::Type(_)) if self.program.is_sys_relation(def) => {
+                let row = self.intern(TyKind::Adt(def, Box::new([])));
+                Ok(self.intern(TyKind::Relation(row)))
+            }
             Some(DefKind::Type(_) | DefKind::NativeType(_)) => {
                 let args = self.fresh_nominal_args(def, &span);
                 Ok(self.intern(TyKind::Adt(def, args)))

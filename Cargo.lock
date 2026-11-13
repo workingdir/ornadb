@@ -1419,6 +1419,7 @@ dependencies = [
  "orna-runtime",
  "orna-security",
  "orna-syntax",
+ "orna-syntax-ast",
  "orna-sys-id",
  "orna-value",
  "sha2 0.10.9",
@@ -1434,6 +1435,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "orna-cbor"
+version = "1.0.0"
+
+[[package]]
 name = "orna-check"
 version = "1.0.0"
 dependencies = [
@@ -1442,6 +1447,7 @@ dependencies = [
  "orna-hir",
  "orna-intrinsics",
  "orna-syntax",
+ "orna-syntax-ast",
  "orna-sys",
  "orna-sys-interface",
  "orna-value",
@@ -1481,6 +1487,7 @@ dependencies = [
  "orna-storage",
  "orna-stream",
  "orna-syntax",
+ "orna-syntax-ast",
  "orna-sys",
  "orna-sys-id",
  "orna-value",
@@ -1543,6 +1550,7 @@ dependencies = [
  "orna-storage",
  "orna-stream",
  "orna-syntax",
+ "orna-syntax-ast",
  "orna-sys",
  "orna-sys-id",
  "orna-table",
@@ -1576,6 +1584,7 @@ dependencies = [
  "orna-repl",
  "orna-standard-sources",
  "orna-syntax",
+ "orna-syntax-ast",
  "orna-sys",
  "orna-value",
  "serde",
@@ -1599,6 +1608,7 @@ dependencies = [
  "orna-repository",
  "orna-standard-sources",
  "orna-syntax",
+ "orna-syntax-ast",
  "orna-sys",
  "orna-unicode",
  "orna-value",
@@ -1631,6 +1641,7 @@ dependencies = [
  "num-traits",
  "orna-hir",
  "orna-syntax",
+ "orna-syntax-ast",
  "orna-value",
  "sha2 0.10.9",
  "unicode-case-mapping",
@@ -1643,6 +1654,7 @@ version = "1.0.0"
 dependencies = [
  "orna-base",
  "orna-syntax",
+ "orna-syntax-ast",
  "orna-value",
  "serde_json",
  "sha1",
@@ -1656,6 +1668,7 @@ version = "1.0.0"
 dependencies = [
  "num-bigint 0.4.8",
  "orna-syntax",
+ "orna-syntax-ast",
  "orna-value",
  "unicode-casefold",
  "unicode-normalization",
@@ -1672,6 +1685,7 @@ dependencies = [
  "orna-base",
  "orna-hir",
  "orna-syntax",
+ "orna-syntax-ast",
  "sha2 0.10.9",
  "tempfile",
  "toml_edit",
@@ -1710,6 +1724,7 @@ dependencies = [
  "orna-repository",
  "orna-standard-sources",
  "orna-syntax",
+ "orna-syntax-ast",
  "serde_json",
  "tempfile",
  "url",
@@ -1736,6 +1751,7 @@ dependencies = [
  "orna-repository",
  "orna-runtime",
  "orna-syntax",
+ "orna-syntax-ast",
  "orna-unicode",
  "orna-value",
  "tempfile",
@@ -1751,6 +1767,7 @@ dependencies = [
  "orna-project",
  "orna-repository",
  "orna-syntax",
+ "orna-syntax-ast",
  "orna-value",
  "sha2 0.10.9",
  "tempfile",
@@ -1774,6 +1791,7 @@ dependencies = [
  "orna-hir",
  "orna-standard-sources",
  "orna-syntax",
+ "orna-syntax-ast",
 ]
 
 [[package]]
@@ -1793,6 +1811,7 @@ dependencies = [
  "orna-runtime",
  "orna-storage",
  "orna-syntax",
+ "orna-syntax-ast",
  "orna-sys",
  "orna-value",
  "parquet",
@@ -1817,6 +1836,7 @@ dependencies = [
  "orna-repository",
  "orna-stream",
  "orna-syntax",
+ "orna-syntax-ast",
  "orna-sys",
  "orna-value",
  "serde_json",
@@ -1863,6 +1883,7 @@ dependencies = [
  "orna-runtime",
  "orna-storage",
  "orna-syntax",
+ "orna-syntax-ast",
  "orna-value",
  "parquet",
  "sha2 0.10.9",
@@ -1881,6 +1902,7 @@ dependencies = [
 name = "orna-syntax"
 version = "1.0.0"
 dependencies = [
+ "orna-syntax-ast",
  "orna-value",
  "serde_json",
  "syntect",
@@ -1889,12 +1911,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "orna-syntax-ast"
+version = "1.0.0"
+
+[[package]]
 name = "orna-sys"
 version = "1.1.0"
 dependencies = [
  "orna-base",
  "orna-security",
  "orna-syntax",
+ "orna-syntax-ast",
  "orna-sys-codegen",
  "orna-sys-id",
  "orna-sys-macros",
@@ -1927,6 +1954,7 @@ version = "1.0.0"
 dependencies = [
  "orna-base",
  "orna-syntax",
+ "orna-syntax-ast",
  "orna-sys-interface",
  "serde_json",
 ]
@@ -1936,6 +1964,7 @@ name = "orna-sys-interface"
 version = "1.0.0"
 dependencies = [
  "orna-syntax",
+ "orna-syntax-ast",
  "serde_json",
 ]
 
@@ -1984,6 +2013,7 @@ dependencies = [
  "num-integer",
  "num-traits",
  "orna-base",
+ "orna-cbor",
  "orna-conformance",
  "orna-repository",
  "orna-syntax",

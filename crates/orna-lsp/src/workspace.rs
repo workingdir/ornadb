@@ -21,7 +21,9 @@ use orna_hir::{
     BodyId, DefId, DefKind, LocalId, ModuleId as HirModuleId, Name, NameTarget, NameUse, Program,
     SourceId, SourceUnit, TyKind, UseContext, lower_with_prelude,
 };
-use orna_syntax::{Declaration, Keyword, SyntaxSpan, Token, TokenKind, UseTail, lex, parse_module};
+use orna_syntax::{Keyword, Token, TokenKind, lex, parse_module};
+use orna_syntax_ast::SourceSpan as SyntaxSpan;
+use orna_syntax_ast::{Declaration, UseTail};
 
 use crate::analysis::{self, EditorParse, EditorSymbol};
 use crate::documents::Document;

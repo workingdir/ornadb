@@ -7,7 +7,8 @@ use orna_hir::{
     diag::{UNIT_CYCLE, UNIT_UNRESOLVED},
     lower,
 };
-use orna_syntax::{SyntaxTree, parse_module_with_file};
+use orna_syntax::parse_module_with_file;
+use orna_syntax_ast::SyntaxTree;
 
 fn parse(source: &str) -> SyntaxTree {
     let parsed = parse_module_with_file(source, "test.orna");

@@ -29,5 +29,6 @@ sha2 = "0.10.9"
 orna-storage = { path = ".", features = ["compact-writer-fixtures"] }
 orna-repository = { path = "../orna-repository", features = ["legacy-fixture-writer"] }
 orna-syntax = { path = "../orna-syntax" }
+orna-syntax-ast = { path = "../orna-syntax-ast" }
 tempfile = "3.23.0"
 tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread"] }

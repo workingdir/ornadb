@@ -1,7 +1,8 @@
 use orna_syntax::{
-    Declaration, parse_expression, parse_expression_with_file, parse_module,
-    parse_module_with_file, parse_repl_with_file, parse_row,
+    parse_expression, parse_expression_with_file, parse_module, parse_module_with_file,
+    parse_repl_with_file, parse_row,
 };
+use orna_syntax_ast::Declaration;
 
 const LIMIT_ERROR: &str = "maximum syntax nesting exceeded";
 

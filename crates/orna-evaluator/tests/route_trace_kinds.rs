@@ -16,7 +16,8 @@ use orna_evaluator::{
     EffectHandler, Environment, Functions, Limits, PureFunction, RelationPage, StepBudget,
     evaluate_expression_with_functions, invoke_named_with_effects,
 };
-use orna_syntax::{Argument, Expr, LiteralKind, SyntaxSpan};
+use orna_syntax_ast::SourceSpan as SyntaxSpan;
+use orna_syntax_ast::{Argument, Expr, LiteralKind};
 use orna_value::CanonicalValue;
 
 fn span() -> SyntaxSpan {

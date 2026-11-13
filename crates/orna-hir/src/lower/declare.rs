@@ -11,10 +11,12 @@
 
 use std::collections::BTreeMap;
 
-use orna_syntax::{
+use orna_syntax_ast::SourceSpan as SyntaxSpan;
+
+use orna_syntax_ast::{
     Declaration, EnumVariant, Expr, FunctionSignature, GenericParameter, Implementation,
-    InterfaceClauses, Item, NativeEffectSet, Parameter, Pattern, ProtocolMember, SyntaxSpan,
-    TableMember, TypeExpr, TypeRepresentation, UnitDefinition, UseTail,
+    InterfaceClauses, Item, NativeEffectSet, Parameter, Pattern, ProtocolMember, TableMember,
+    TypeExpr, TypeRepresentation, UnitDefinition, UseTail,
 };
 
 use crate::Idx;
@@ -35,7 +37,7 @@ pub(crate) struct PendingUse {
     /// The importing module.
     pub(crate) module: ModuleId,
     /// The written path.
-    pub(crate) path: Vec<orna_syntax::ImportSegment>,
+    pub(crate) path: Vec<orna_syntax_ast::ImportSegment>,
     /// The written tail.
     pub(crate) tail: UseTail,
     /// The declaration's span.
@@ -712,10 +714,10 @@ fn item_name(declaration: &Declaration) -> Option<&str> {
 }
 
 /// The visibility an item declares.
-fn visibility(visibility: &orna_syntax::Visibility) -> Visibility {
+fn visibility(visibility: &orna_syntax_ast::Visibility) -> Visibility {
     match visibility {
-        orna_syntax::Visibility::Public { .. } => Visibility::Public,
-        orna_syntax::Visibility::Private => Visibility::Private,
+        orna_syntax_ast::Visibility::Public { .. } => Visibility::Public,
+        orna_syntax_ast::Visibility::Private => Visibility::Private,
     }
 }
 

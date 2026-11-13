@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use orna_syntax::{Expr, Statement, StringSegment};
+use orna_syntax_ast::{Expr, Statement, StringSegment};
 use orna_value::{Decimal, path_decode_key_components};
 use orna_value::{Diagnostic, DiagnosticSeverity, SafeText};
 use unicode_normalization::is_nfc;

@@ -16,7 +16,7 @@
 use std::collections::BTreeMap;
 
 use orna_intrinsics::{Intrinsic, IntrinsicId, Module, Param, SigType};
-use orna_syntax::{Argument, Expr};
+use orna_syntax_ast::{Argument, Expr};
 use orna_value::Diagnostic;
 
 use super::*;

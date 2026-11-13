@@ -11,6 +11,7 @@ orna-base = { path = "../orna-base" }
 orna-repository = { path = "../orna-repository" }
 orna-check = { path = "../orna-check" }
 orna-syntax = { path = "../orna-syntax" }
+orna-syntax-ast = { path = "../orna-syntax-ast" }
 orna-value = { path = "../orna-value" }
 orna-unicode = { path = "../orna-unicode" }
 num-bigint = "0.4.6"

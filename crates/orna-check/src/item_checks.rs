@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use orna_syntax::{
+use orna_syntax_ast::{
     AssignmentTarget, Expr, LambdaParameter, Pattern, ProtocolMember, Statement, StringSegment,
     TypeExpr,
 };
@@ -50,7 +50,7 @@ pub(crate) fn resolve_local_protocol_name(name: &str, scope: &Scope) -> Option<S
 /// Default compatibility uses the conservative proof described below for
 /// expression behaviour; arbitrary semantic default equivalence is residual.
 pub(crate) fn validate_nested_implementation_members(
-    implementation: &orna_syntax::Implementation,
+    implementation: &orna_syntax_ast::Implementation,
     local_protocols: &BTreeMap<String, Vec<ProtocolMember>>,
     scope: &Scope,
     target: &Type,
@@ -112,8 +112,8 @@ pub(crate) fn validate_nested_implementation_members(
     let mut implemented_names = BTreeSet::new();
     for member in &implementation.members {
         let name = match member {
-            orna_syntax::ImplMember::Function { signature, .. } => &signature.name,
-            orna_syntax::ImplMember::Static { name, .. } => name,
+            orna_syntax_ast::ImplMember::Function { signature, .. } => &signature.name,
+            orna_syntax_ast::ImplMember::Static { name, .. } => name,
         };
         if !implemented_names.insert(name.clone()) {
             diagnostics.push(diag(DIAG_TYPE, "duplicate protocol implementation member"));
@@ -124,14 +124,14 @@ pub(crate) fn validate_nested_implementation_members(
             .find(|required| match (required, member) {
                 (
                     ProtocolMember::Function { signature, .. },
-                    orna_syntax::ImplMember::Function {
+                    orna_syntax_ast::ImplMember::Function {
                         signature: implementation_signature,
                         ..
                     },
                 ) => signature.name == implementation_signature.name,
                 (
                     ProtocolMember::Static { name, .. },
-                    orna_syntax::ImplMember::Static {
+                    orna_syntax_ast::ImplMember::Static {
                         name: implementation_name,
                         ..
                     },
@@ -146,7 +146,7 @@ pub(crate) fn validate_nested_implementation_members(
         match (required, member) {
             (
                 ProtocolMember::Function { signature, .. },
-                orna_syntax::ImplMember::Function {
+                orna_syntax_ast::ImplMember::Function {
                     signature: implementation_signature,
                     body,
                     ..
@@ -177,7 +177,7 @@ pub(crate) fn validate_nested_implementation_members(
             }
             (
                 ProtocolMember::Static { ty, .. },
-                orna_syntax::ImplMember::Static {
+                orna_syntax_ast::ImplMember::Static {
                     ty: implementation_ty,
                     value,
                     ..
@@ -207,14 +207,14 @@ pub(crate) fn validate_nested_implementation_members(
             .any(|member| match (required, member) {
                 (
                     ProtocolMember::Function { signature, .. },
-                    orna_syntax::ImplMember::Function {
+                    orna_syntax_ast::ImplMember::Function {
                         signature: implementation_signature,
                         ..
                     },
                 ) => signature.name == implementation_signature.name,
                 (
                     ProtocolMember::Static { name, .. },
-                    orna_syntax::ImplMember::Static {
+                    orna_syntax_ast::ImplMember::Static {
                         name: implementation_name,
                         ..
                     },
@@ -233,7 +233,7 @@ pub(crate) fn validate_nested_implementation_members(
 /// private field access remains usable; that structural view must not admit a
 /// raw record as a conversion result.
 pub(crate) fn infer_from_nominal_target(
-    body: &orna_syntax::Expr,
+    body: &orna_syntax_ast::Expr,
     target: &Type,
     target_shape: Option<&Type>,
     scope: &Scope,
@@ -354,9 +354,9 @@ pub(crate) fn static_type_is_known(ty: &Type, scope: &Scope) -> bool {
 }
 
 pub(crate) fn validate_nested_implementation_function(
-    required: &orna_syntax::FunctionSignature,
-    implementation: &orna_syntax::FunctionSignature,
-    body: &orna_syntax::Expr,
+    required: &orna_syntax_ast::FunctionSignature,
+    implementation: &orna_syntax_ast::FunctionSignature,
+    body: &orna_syntax_ast::Expr,
     scope: &Scope,
     target: &Type,
     target_shape: Option<&Type>,
@@ -475,7 +475,7 @@ pub(crate) fn nested_member_type(
 }
 
 pub(crate) fn validate_default_expression(
-    expression: &orna_syntax::Expr,
+    expression: &orna_syntax_ast::Expr,
     expected: Option<&Type>,
     scope: &Scope,
     local: &BTreeMap<String, Symbol>,
@@ -494,13 +494,13 @@ pub(crate) fn validate_default_expression(
     }
 }
 
-pub(crate) fn is_self_pattern(pattern: &orna_syntax::Pattern) -> bool {
-    matches!(pattern, orna_syntax::Pattern::Name(name, _) if name == "self")
+pub(crate) fn is_self_pattern(pattern: &orna_syntax_ast::Pattern) -> bool {
+    matches!(pattern, orna_syntax_ast::Pattern::Name(name, _) if name == "self")
 }
 
 pub(crate) fn compatible_protocol_function_signature(
-    required: &orna_syntax::FunctionSignature,
-    implementation: &orna_syntax::FunctionSignature,
+    required: &orna_syntax_ast::FunctionSignature,
+    implementation: &orna_syntax_ast::FunctionSignature,
     scope: &Scope,
 ) -> bool {
     if required.generics.len() != implementation.generics.len()
@@ -582,8 +582,8 @@ pub(crate) fn compatible_protocol_function_signature(
 /// equivalence; semantically equal but differently written expressions remain
 /// rejected.
 pub(crate) fn compatible_protocol_defaults(
-    required: Option<&orna_syntax::Expr>,
-    implementation: Option<&orna_syntax::Expr>,
+    required: Option<&orna_syntax_ast::Expr>,
+    implementation: Option<&orna_syntax_ast::Expr>,
 ) -> bool {
     match (required, implementation) {
         (None, None) => true,
@@ -886,8 +886,8 @@ pub(crate) fn same_default_string_segments(
 }
 
 pub(crate) fn same_default_arguments(
-    left: &[orna_syntax::Argument],
-    right: &[orna_syntax::Argument],
+    left: &[orna_syntax_ast::Argument],
+    right: &[orna_syntax_ast::Argument],
 ) -> bool {
     left.len() == right.len()
         && left.iter().zip(right).all(|(left, right)| {
@@ -896,8 +896,8 @@ pub(crate) fn same_default_arguments(
 }
 
 pub(crate) fn same_default_record_fields(
-    left: &[orna_syntax::RecordField],
-    right: &[orna_syntax::RecordField],
+    left: &[orna_syntax_ast::RecordField],
+    right: &[orna_syntax_ast::RecordField],
 ) -> bool {
     left.len() == right.len()
         && left.iter().zip(right).all(|(left, right)| {
@@ -1022,8 +1022,8 @@ pub(crate) fn same_default_pattern(left: &Pattern, right: &Pattern) -> bool {
 }
 
 pub(crate) fn same_default_case_arm(
-    left: &orna_syntax::CaseArm,
-    right: &orna_syntax::CaseArm,
+    left: &orna_syntax_ast::CaseArm,
+    right: &orna_syntax_ast::CaseArm,
 ) -> bool {
     same_default_pattern(&left.pattern, &right.pattern)
         && same_default_expression_options(left.guard.as_ref(), right.guard.as_ref())
@@ -1139,7 +1139,7 @@ pub(crate) fn compatible_protocol_type_annotation(
 }
 
 pub(crate) fn validate_implementation_restrictions(
-    implementation: &orna_syntax::Implementation,
+    implementation: &orna_syntax_ast::Implementation,
     scope: &Scope,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
@@ -1166,15 +1166,15 @@ pub(crate) fn validate_implementation_restrictions(
 }
 
 pub(crate) fn compatible_parameter_pattern(
-    required: &orna_syntax::Pattern,
-    implementation: &orna_syntax::Pattern,
+    required: &orna_syntax_ast::Pattern,
+    implementation: &orna_syntax_ast::Pattern,
 ) -> bool {
     match (required, implementation) {
         (
-            orna_syntax::Pattern::Name(required, _),
-            orna_syntax::Pattern::Name(implementation, _),
+            orna_syntax_ast::Pattern::Name(required, _),
+            orna_syntax_ast::Pattern::Name(implementation, _),
         ) => required == implementation,
-        (orna_syntax::Pattern::Wildcard(_), orna_syntax::Pattern::Wildcard(_)) => true,
+        (orna_syntax_ast::Pattern::Wildcard(_), orna_syntax_ast::Pattern::Wildcard(_)) => true,
         _ => false,
     }
 }
@@ -1183,7 +1183,7 @@ pub(crate) fn compatible_parameter_pattern(
 /// protocol identity is the portion of overlap that this closed semantic
 /// catalogue can prove without inventing generic dispatch or specialization.
 pub(crate) fn validate_non_overlapping_implementations<'a>(
-    implementations: impl IntoIterator<Item = &'a orna_syntax::Implementation>,
+    implementations: impl IntoIterator<Item = &'a orna_syntax_ast::Implementation>,
     scope: &Scope,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
@@ -1209,18 +1209,18 @@ pub(crate) fn validate_non_overlapping_implementations<'a>(
 }
 
 pub(crate) fn implementation_has_write(
-    implementation: &orna_syntax::Implementation,
+    implementation: &orna_syntax_ast::Implementation,
     scope: &Scope,
 ) -> bool {
     implementation.members.iter().any(|member| match member {
-        orna_syntax::ImplMember::Function {
+        orna_syntax_ast::ImplMember::Function {
             signature, body, ..
         } => {
             let local = signature
                 .parameters
                 .iter()
                 .filter_map(|parameter| match &parameter.pattern {
-                    orna_syntax::Pattern::Name(name, _) => Some((
+                    orna_syntax_ast::Pattern::Name(name, _) => Some((
                         name.clone(),
                         Symbol {
                             table_schema: None,
@@ -1237,7 +1237,7 @@ pub(crate) fn implementation_has_write(
                 .collect();
             expr_has_write_in_implementation_body(body, scope, &local)
         }
-        orna_syntax::ImplMember::Static { value: body, .. } => {
+        orna_syntax_ast::ImplMember::Static { value: body, .. } => {
             expr_has_write(body, scope, &BTreeMap::new())
         }
     })
@@ -1398,7 +1398,7 @@ pub(crate) fn statement_has_write(
 }
 
 pub(crate) fn validate_function_signature_annotations(
-    signature: &orna_syntax::FunctionSignature,
+    signature: &orna_syntax_ast::FunctionSignature,
     scope: &Scope,
     diagnostics: &mut Vec<Diagnostic>,
 ) {

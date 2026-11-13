@@ -3,7 +3,8 @@
 //! lowers to.
 
 use orna_hir::{Lowering, ModulePath, Name, PreludeExports, Program, SourceId, SourceUnit, lower};
-use orna_syntax::{SyntaxTree, parse_module_with_file};
+use orna_syntax::parse_module_with_file;
+use orna_syntax_ast::SyntaxTree;
 
 const LIB: &str = "pub fn increment(x: Int): Int = x + 1;\n";
 const CLIENT: &str = "use lib.{increment};\npub fn run(): Int = increment(41);\n";

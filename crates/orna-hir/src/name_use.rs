@@ -16,7 +16,7 @@
 //! inside a body records the body it belongs to in [`NameUse::body`]. Editor
 //! queries use it to tell apart same-numbered slots of different bodies.
 
-use orna_syntax::SyntaxSpan as SourceSpan;
+use orna_syntax_ast::SourceSpan;
 
 use crate::{BodyId, DefId, LocalId, ModuleId, Name};
 

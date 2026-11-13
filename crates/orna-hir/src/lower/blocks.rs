@@ -3,7 +3,9 @@
 //! A block lowers its statements in order and its tail as its value. An assignment target
 //! lowers to a [`Place`], the slot or field an assignment writes.
 
-use orna_syntax::{AssignmentOperator, AssignmentTarget, Expr as AstExpr, Statement, SyntaxSpan};
+use orna_syntax_ast::SourceSpan as SyntaxSpan;
+
+use orna_syntax_ast::{AssignmentOperator, AssignmentTarget, Expr as AstExpr, Statement};
 
 use crate::{AssignOp, ExprId, ExprKind, FieldRef, Name, NameTarget, Place, Stmt};
 

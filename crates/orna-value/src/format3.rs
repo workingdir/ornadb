@@ -4,15 +4,15 @@ use crate::blob::{
     Blob, BlobResolver, ContentIdentity, ContentReference, MAX_BLOB_LENGTH, MAX_BLOB_READ,
     NativeOid, decode_blob_raw, raw_suffix,
 };
-use crate::cbor::{Reader, encode_raw, head, write_raw};
 use crate::error::Error;
 use crate::identity::bytes32;
 use crate::media::MimeRegistry;
-use crate::raw::{Raw, Value, array, int_u64};
+use crate::raw::{Raw, Value, array, decode_raw, encode_raw, int_u64, write_raw};
 use crate::snapshot::{GitHash, Snapshot, snapshot_database};
 use crate::tags::{OVB2_BLOB_TAG, ROV3_BLOB_TAG, ROV3_OVERFLOW_TAG, SOV3_BLOB_TAG};
 use crate::validation::{validate_raw, validate_tag};
 use crate::{MAX_DEPTH, Result};
+use orna_cbor::head;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -591,11 +591,7 @@ impl ContextValue {
         format: ValueFormat,
         context: Option<Format3Context>,
     ) -> Result<Self> {
-        let mut reader = Reader::new(bytes);
-        let raw = reader.raw(0)?;
-        if reader.at != bytes.len() {
-            return Err(Error::TrailingBytes);
-        }
+        let raw = decode_raw(bytes)?;
         let value = Self::new_with_context(format, raw, context)?;
         if value.encode()? != bytes {
             return Err(Error::NonCanonical);

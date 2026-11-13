@@ -1,7 +1,9 @@
 //! Parser conformance for the W27 grammar audit against `grammar/orna.ebnf`.
 //! Each test pins one audited divergence and states the production it follows.
 
-use orna_syntax::{Expr, Pattern, parse_expression, parse_module};
+use orna_syntax::{parse_expression, parse_module};
+
+use orna_syntax_ast::{Expr, Pattern};
 
 fn expression_is_accepted(source: &str) {
     let parsed = parse_expression(source);

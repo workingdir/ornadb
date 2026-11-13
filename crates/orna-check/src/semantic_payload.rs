@@ -1221,7 +1221,7 @@ impl Producer<'_> {
     fn constructor_pattern_shape(
         &self,
         key: &Key,
-        path: &[orna_syntax::NameSegment],
+        path: &[orna_syntax_ast::NameSegment],
         ty: &Type,
         scope: &Scope,
     ) -> Result<(Vec<Type>, BTreeMap<String, Type>)> {
@@ -1267,7 +1267,7 @@ impl Producer<'_> {
     fn constructor_target(
         &mut self,
         key: &Key,
-        path: &[orna_syntax::NameSegment],
+        path: &[orna_syntax_ast::NameSegment],
         ty: &Type,
         scope: &Scope,
     ) -> Result<Raw> {
@@ -1703,11 +1703,11 @@ mod tests {
 
     #[test]
     fn structured_patterns_are_admitted_and_encoded_recursively() {
-        fn span() -> orna_syntax::SyntaxSpan {
-            orna_syntax::SyntaxSpan::new(0, 0)
+        fn span() -> orna_syntax_ast::SourceSpan {
+            orna_syntax_ast::SourceSpan::new(0, 0)
         }
-        fn name(text: &str) -> orna_syntax::NameSegment {
-            orna_syntax::NameSegment {
+        fn name(text: &str) -> orna_syntax_ast::NameSegment {
+            orna_syntax_ast::NameSegment {
                 text: text.to_owned(),
                 span: span(),
             }
@@ -1795,7 +1795,7 @@ mod tests {
                 &Pattern::Constructor {
                     path: vec![name("Point")],
                     arguments: Vec::new(),
-                    fields: vec![orna_syntax::PatternField {
+                    fields: vec![orna_syntax_ast::PatternField {
                         name: "x".into(),
                         pattern: Some(Pattern::Wildcard(span())),
                         span: span(),

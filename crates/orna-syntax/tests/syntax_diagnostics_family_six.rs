@@ -1,4 +1,5 @@
-use orna_syntax::{Declaration, Expr, Pattern, StringSegment, parse_module};
+use orna_syntax::parse_module;
+use orna_syntax_ast::{Declaration, Expr, Pattern, StringSegment};
 
 #[test]
 fn nested_interpolation_recovery_keeps_self_and_compound_suffixes() {

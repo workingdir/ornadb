@@ -18,6 +18,7 @@ use orna_value::{
 
 use crate::calendar;
 use crate::decimal::Decimal;
+use crate::host::SysSlot;
 
 /// One runtime value.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -79,6 +80,8 @@ pub enum Value {
     Record(Rc<[(Name, Value)]>),
     /// A lambda with the values it captured.
     Closure(Rc<Closure>),
+    /// A relation not read yet: a handle a pipeline reads one row at a time. It has no canonical form.
+    Rel(Rc<RelHandle>),
     /// A failure, delivered to a recovery handler. It carries the canonical
     /// code the failure reports.
     Error(&'static str),
@@ -113,6 +116,16 @@ pub struct Closure {
     pub captured: Box<[Cell]>,
     /// The type environment the lambda was created in, which its body runs with.
     pub env: Option<Rc<[Ty]>>,
+}
+
+/// Where the rows of a relation value come from. A `sys` handle names a member the host registers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RelHandle {
+    /// The rows of the `sys` relation in `slot`, read from the host when a pipeline runs.
+    Sys {
+        /// The slot the host gives the relation.
+        slot: SysSlot,
+    },
 }
 
 impl Value {
@@ -175,7 +188,7 @@ impl Value {
             Self::Tuple(values) => Ok(Raw::Tag(TUPLE_TAG, Box::new(array(values)?))),
             Self::List(values) => array(values),
             Self::Record(fields) => record_raw(fields),
-            Self::Closure(_) | Self::Enum { .. } => Err("ORNA-EVAL-UNSUPPORTED"),
+            Self::Closure(_) | Self::Rel(_) | Self::Enum { .. } => Err("ORNA-EVAL-UNSUPPORTED"),
             Self::Error(code) => Err(code),
         }
     }

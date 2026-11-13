@@ -6,9 +6,9 @@
 //! parameter of their entry function.
 
 use orna_exec::Value;
-use orna_syntax::{
-    Declaration, Expr, Item, Pattern, ReplInput, SyntaxSpan as SourceSpan, parse_repl,
-};
+use orna_syntax::parse_repl;
+use orna_syntax_ast::SourceSpan;
+use orna_syntax_ast::{Declaration, Expr, Item, Pattern, ReplInput};
 
 use crate::base::{Base, Definition};
 use crate::check::{self, Evaluated};

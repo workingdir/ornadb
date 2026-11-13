@@ -1,6 +1,6 @@
 //! Native declarations: the C symbol a native key exports and the effects its clause declares.
 
-use orna_syntax::NativeEffectSet;
+use orna_syntax_ast::NativeEffectSet;
 
 /// The C symbol a shared library exports for a native key (library document
 /// section 4): `orna_` followed by the module path segments and the name joined

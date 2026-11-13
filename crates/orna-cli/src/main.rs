@@ -1908,7 +1908,7 @@ fn multi_module_declares_tables(project: &orna_project::LoadedProject) -> bool {
                 .value
                 .items
                 .iter()
-                .any(|item| matches!(item.declaration, orna_syntax::Declaration::Table { .. }))
+                .any(|item| matches!(item.declaration, orna_syntax_ast::Declaration::Table { .. }))
         })
 }
 
@@ -2372,7 +2372,7 @@ fn refuse_legacy_bare_module_rows(
     let mut declared = Vec::new();
     for (module, module_identity) in project.modules().iter().zip(project.identities()) {
         for item in orna_syntax::parse_module(&module.source).value.items {
-            if let orna_syntax::Declaration::Table { name, .. } = item.declaration {
+            if let orna_syntax_ast::Declaration::Table { name, .. } = item.declaration {
                 let mut qualified = module_identity.namespace().to_vec();
                 qualified.push(name);
                 declared.push(qualified.join("."));

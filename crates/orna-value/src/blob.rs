@@ -1,7 +1,6 @@
 //! Content identity, Blob representations and the OVB-2/ROV-3/SOV-3 Blob codecs.
 
 use crate::Result;
-use crate::cbor::{Reader, head};
 use crate::error::Error;
 use crate::format3::{
     ContextValue, Format3Context, Format3ContextInner, ValueFormat, oid_matches_algorithm,
@@ -9,9 +8,11 @@ use crate::format3::{
 };
 use crate::identity::bytes32;
 use crate::media::{MediaAnnotation, MimeRegistry};
+use crate::raw::decode_raw;
 use crate::raw::{Raw, array, int_u64, tag};
 use crate::tags::{OVB2_BLOB_TAG, ROV3_BLOB_TAG, SOV3_BLOB_TAG};
 use num_bigint::BigInt;
+use orna_cbor::head;
 use sha2::{Digest as _, Sha256};
 use std::cmp::Ordering;
 use std::fmt;
@@ -948,11 +949,7 @@ pub fn decode_ovb2(bytes: &[u8]) -> Result<Blob> {
 /// carries length, SHA-256 and annotation directly, so listings need neither a
 /// format context nor a content read; `hydrated` is always false here.
 pub fn decode_rov3_blob_metadata(bytes: &[u8]) -> Result<BlobMetadata> {
-    let mut reader = Reader::new(bytes);
-    let raw = reader.raw(0)?;
-    if reader.at != bytes.len() {
-        return Err(Error::TrailingBytes);
-    }
+    let raw = decode_raw(bytes)?;
     blob_metadata_from_raw(&raw)
 }
 

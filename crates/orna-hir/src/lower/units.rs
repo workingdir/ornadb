@@ -5,7 +5,9 @@
 //! factors. Nothing is evaluated here: coefficients and exponents stay as written, and the dimension
 //! of a derived family is computed by the checker.
 
-use orna_syntax::{EnumVariant, Expr as AstExpr, LiteralKind, SyntaxSpan, UnitExpr, UnitTerm};
+use orna_syntax_ast::SourceSpan as SyntaxSpan;
+
+use orna_syntax_ast::{EnumVariant, Expr as AstExpr, LiteralKind, UnitExpr, UnitTerm};
 
 use super::BodyState;
 use super::declare::{Builder, PendingKind, UnitLookup};

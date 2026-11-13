@@ -2,7 +2,8 @@ use orna_evaluator::{
     EffectHandler, Environment, EvaluationError, Functions, Limits, PureFunction, RelationPage,
     StepBudget, evaluate_expression_with_effects, invoke_named_with_effects,
 };
-use orna_syntax::{Expr, LambdaParameter, LiteralKind, Pattern, SyntaxSpan};
+use orna_syntax_ast::SourceSpan as SyntaxSpan;
+use orna_syntax_ast::{Expr, LambdaParameter, LiteralKind, Pattern};
 use orna_value::CanonicalValue;
 use orna_value::{Raw, Value};
 
@@ -49,8 +50,8 @@ fn span() -> SyntaxSpan {
     SyntaxSpan::new(0, 0)
 }
 
-fn argument(value: Expr, span: &SyntaxSpan) -> orna_syntax::Argument {
-    orna_syntax::Argument {
+fn argument(value: Expr, span: &SyntaxSpan) -> orna_syntax_ast::Argument {
+    orna_syntax_ast::Argument {
         name: None,
         value,
         span: span.clone(),

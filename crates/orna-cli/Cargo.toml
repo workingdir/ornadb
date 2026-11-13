@@ -40,6 +40,7 @@ orna-check = { path = "../orna-check" }
 orna-serving = { path = "../orna-serving" }
 orna-storage = { path = "../orna-storage" }
 orna-syntax = { path = "../orna-syntax" }
+orna-syntax-ast = { path = "../orna-syntax-ast" }
 orna-sys-id = { path = "../orna-sys-id" }
 orna-sys = { path = "../orna-sys" }
 orna-value = { path = "../orna-value" }

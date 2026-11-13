@@ -6,7 +6,8 @@ use orna_evaluator::{
     StreamPage, StreamSourceCursor, evaluate_expression_with_functions_and_effects,
     evaluate_expression_with_functions_and_effects_and_cancellation,
 };
-use orna_syntax::{Expr, parse_expression};
+use orna_syntax::parse_expression;
+use orna_syntax_ast::Expr;
 use orna_value::Raw;
 use orna_value::{CanonicalValue, SafeText};
 

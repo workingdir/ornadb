@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use orna_syntax::SyntaxSpan;
+use orna_syntax_ast::SourceSpan as SyntaxSpan;
 
 /// The stable code of one link failure (docs/design/native-libraries.md, section 11).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

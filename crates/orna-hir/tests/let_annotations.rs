@@ -4,7 +4,8 @@
 use orna_hir::{
     DefKind, ModulePath, Name, Program, SourceId, SourceUnit, lower, print_type, typeck,
 };
-use orna_syntax::{EntryPoint, ReplInput, SyntaxTree, parse_repl};
+use orna_syntax::parse_repl;
+use orna_syntax_ast::{EntryPoint, ReplInput, SyntaxTree};
 
 /// Lowers one session-style `let` item the way the REPL session does: parsed as an item, then
 /// wrapped as the only item of a module.

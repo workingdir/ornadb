@@ -1,33 +1,10 @@
 //! Unit families: the `= unit_expr` variant form and the `impl Unit {}` marker
 //! (docs/design/units.md section 2, C13 and C16).
 
-use super::{
-    Diagnostic, EnumVariant, Implementation, Parser, SourceLines, SourceSpan, TypeExpr,
-    annotate_span,
-};
+use super::{Diagnostic, Parser, SourceLines, annotate_span};
 use crate::lexer::TokenKind;
-
-/// The unit expression of a unit variant: `unit_term ( ('*' | '/') unit_term )*`, evaluated left to right.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UnitExpr {
-    pub terms: Vec<UnitTerm>,
-    pub span: SourceSpan,
-}
-
-/// One factor of a unit expression. `divide` is the operator written before the term; the first term
-/// of an expression always has `divide == false`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UnitTerm {
-    pub divide: bool,
-    /// The `RATIONAL` coefficient exactly as written, such as `1000` or `0.125`.
-    pub coefficient: Option<String>,
-    /// The family of a family-qualified name: `Length` in `Length.kilometre`.
-    pub family: Option<String>,
-    pub name: String,
-    /// The exponent after `^`, exactly as written (`unit_term := RATIONAL? unit_name ('^' INT)?`).
-    pub exponent: Option<String>,
-    pub span: SourceSpan,
-}
+use orna_syntax_ast::*;
+use orna_syntax_ast::{EnumVariant, Implementation, TypeExpr};
 
 impl Parser {
     /// Parses the `unit_expr` that follows the `=` of a unit variant.

@@ -15,7 +15,9 @@
 //! A path the language cannot resolve is a diagnostic and
 //! [`crate::ExprKind::Error`]; it is never a silent guess.
 
-use orna_syntax::{Expr as AstExpr, SyntaxSpan, TypeExpr};
+use orna_syntax_ast::SourceSpan as SyntaxSpan;
+
+use orna_syntax_ast::{Expr as AstExpr, TypeExpr};
 
 use crate::{Callee, DefId, ExprId, ExprKind, FieldRef, Name, NameTarget, TableOp};
 

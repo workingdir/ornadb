@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use orna_syntax::{Expr, LiteralKind};
+use orna_syntax_ast::{Expr, LiteralKind};
 use orna_value::{Decimal, Raw, Value};
 
 use super::{

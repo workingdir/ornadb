@@ -9,7 +9,7 @@
 
 use std::collections::BTreeSet;
 
-use orna_syntax::SyntaxSpan;
+use orna_syntax_ast::SourceSpan as SyntaxSpan;
 
 use crate::diag::CASE_COVERAGE;
 use crate::{Arm, Body, DefId, DefKind, EnumDef, HirDiagnostic, Lit, Pat, Program, Ty, TyKind};

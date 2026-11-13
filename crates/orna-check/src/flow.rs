@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use orna_syntax::{
+use orna_syntax_ast::{
     ControlKind, Declaration, Expr, Item, Pattern, Statement, StringSegment, TypeExpr,
 };
 use orna_value::Diagnostic;
@@ -728,7 +728,7 @@ pub(crate) fn qualified_export<'a>(scope: &'a Scope, name: &str) -> Option<&'a S
 pub(crate) fn infer_local_generic_call(
     callee: &Expr,
     explicit_type_arguments: Option<&[TypeExpr]>,
-    arguments: &[orna_syntax::Argument],
+    arguments: &[orna_syntax_ast::Argument],
     scope: &Scope,
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
@@ -928,7 +928,7 @@ pub(crate) fn infer_local_generic_call(
 /// parameters and use it as the call result type.
 pub(crate) fn infer_codec_decode_call(
     callee: &Expr,
-    arguments: &[orna_syntax::Argument],
+    arguments: &[orna_syntax_ast::Argument],
     scope: &Scope,
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,

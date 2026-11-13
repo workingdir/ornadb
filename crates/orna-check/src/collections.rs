@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use orna_intrinsics::IntrinsicId;
-use orna_syntax::Expr;
+use orna_syntax_ast::Expr;
 use orna_value::Diagnostic;
 
 use super::*;
@@ -71,8 +71,8 @@ pub(crate) fn infer_enum_variant_reference(
 /// payload-free variant accepts no field. Returns `None` when the path does
 /// not name an enum, leaving nominal record construction unchanged.
 pub(crate) fn infer_enum_payload_construction(
-    path: &[orna_syntax::NameSegment],
-    fields: &[orna_syntax::RecordField],
+    path: &[orna_syntax_ast::NameSegment],
+    fields: &[orna_syntax_ast::RecordField],
     scope: &Scope,
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
@@ -177,7 +177,7 @@ pub(crate) fn diagnostic_field_name(name: &str) -> &str {
 /// the runtime contract.
 pub(crate) fn infer_stream_from_list(
     callee: &Expr,
-    arguments: &[orna_syntax::Argument],
+    arguments: &[orna_syntax_ast::Argument],
     scope: &Scope,
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,

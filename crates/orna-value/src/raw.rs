@@ -1,7 +1,6 @@
 //! The canonical CBOR data model, its validated wrapper, raw accessors and
 //! IEEE-754 float ordering.
 
-use crate::cbor::{Reader, encode_raw};
 use crate::codec::ErrorValue;
 use crate::decimal::Decimal;
 use crate::error::Error;
@@ -12,9 +11,11 @@ use crate::tags::{
     SYS_VALUE_BOX_TAG, UNIT_TAG, UUID_TAG,
 };
 use crate::validation::validate_raw;
-use crate::{CANONICAL_NAN_BITS, MAX_DEPTH, Result};
+use crate::{CANONICAL_NAN_BITS, MAX_DEPTH, MAX_ITEMS, Result};
 use num_bigint::BigInt;
 use num_bigint::Sign;
+use num_traits::ToPrimitive;
+use orna_cbor::{Build, Encode, Limits, Reader, View, is_nan_bits};
 use std::cmp::Ordering;
 use std::fmt;
 
@@ -134,11 +135,7 @@ impl Value {
         Self::new(redact_trace_values(&self.0, 0, false)?)
     }
     pub fn decode(bytes: &[u8]) -> Result<Self> {
-        let mut r = Reader::new(bytes);
-        let raw = r.raw(0)?;
-        if r.at != bytes.len() {
-            return Err(Error::TrailingBytes);
-        }
+        let raw = decode_raw(bytes)?;
         validate_raw(&raw, 0)?;
         if encode_raw(&raw)? != bytes {
             return Err(Error::NonCanonical);
@@ -296,8 +293,143 @@ pub(crate) fn tag(n: u64, raw: Raw) -> Raw {
     Raw::Tag(n, Box::new(raw))
 }
 
-pub(crate) fn is_nan_bits(bits: u64) -> bool {
-    bits & 0x7ff0_0000_0000_0000 == 0x7ff0_0000_0000_0000 && bits & 0x000f_ffff_ffff_ffff != 0
+/// Canonical encoding of a validated tree: validation first, then the bytes.
+pub(crate) fn encode_raw(v: &Raw) -> Result<Vec<u8>> {
+    validate_raw(v, 0)?;
+    let mut out = Vec::new();
+    write_raw(v, &mut out)?;
+    Ok(out)
+}
+
+/// Appends the canonical bytes of `v`. Each map is checked first, in the
+/// order the byte writer always used: keys are validated and encoded, the
+/// entries are sorted and duplicates rejected, and only then are the values
+/// checked, in sorted order.
+pub(crate) fn write_raw(v: &Raw, out: &mut Vec<u8>) -> Result<()> {
+    check_map_keys(v)?;
+    orna_cbor::encode_into(v, out)?;
+    Ok(())
+}
+
+fn check_map_keys(v: &Raw) -> Result<()> {
+    match v {
+        Raw::Null | Raw::Bool(_) | Raw::Int(_) | Raw::Float(_) | Raw::Bytes(_) | Raw::Text(_) => {}
+        Raw::Array(items) => {
+            for item in items {
+                check_map_keys(item)?;
+            }
+        }
+        Raw::Map(entries) => {
+            let mut keyed = Vec::with_capacity(entries.len());
+            for (key, value) in entries {
+                keyed.push((encode_raw(key)?, value));
+            }
+            keyed.sort_by(|left, right| left.0.cmp(&right.0));
+            if keyed.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+                return Err(Error::DuplicateOrUnorderedMapKey);
+            }
+            for (_, value) in keyed {
+                check_map_keys(value)?;
+            }
+        }
+        Raw::Tag(_, value) => check_map_keys(value)?,
+    }
+    Ok(())
+}
+
+/// Decodes exactly one canonical item filling `bytes`, under the value limits.
+pub(crate) fn decode_raw(bytes: &[u8]) -> Result<Raw> {
+    let limits = Limits {
+        max_depth: MAX_DEPTH,
+        max_items: MAX_ITEMS,
+    };
+    let mut reader = Reader::<RawModel>::new(bytes, limits);
+    let raw = reader.value()?;
+    if !reader.is_finished() {
+        return Err(Error::TrailingBytes);
+    }
+    Ok(raw)
+}
+
+/// The data model the canonical reader builds directly as `Raw`.
+struct RawModel;
+
+impl Build for RawModel {
+    type Value = Raw;
+
+    fn null() -> Raw {
+        Raw::Null
+    }
+    fn boolean(value: bool) -> Raw {
+        Raw::Bool(value)
+    }
+    fn unsigned(value: u64) -> Raw {
+        Raw::Int(BigInt::from(value))
+    }
+    fn negative(magnitude: u64) -> Raw {
+        Raw::Int(-BigInt::from(magnitude) - BigInt::from(1))
+    }
+    fn bignum(negative: bool, magnitude: &[u8]) -> Raw {
+        let magnitude = BigInt::from_bytes_be(Sign::Plus, magnitude);
+        if negative {
+            Raw::Int(-magnitude - BigInt::from(1))
+        } else {
+            Raw::Int(magnitude)
+        }
+    }
+    fn float(bits: u64) -> Raw {
+        Raw::Float(bits)
+    }
+    fn bytes(value: &[u8]) -> Raw {
+        Raw::Bytes(value.to_vec())
+    }
+    fn text(value: &str) -> Raw {
+        Raw::Text(value.to_owned())
+    }
+    fn array(values: Vec<Raw>) -> Raw {
+        Raw::Array(values)
+    }
+    fn map(entries: Vec<(Raw, Raw)>) -> Raw {
+        Raw::Map(entries)
+    }
+    fn tag(number: u64, value: Raw) -> Raw {
+        Raw::Tag(number, Box::new(value))
+    }
+}
+
+impl Encode for Raw {
+    fn view(&self) -> View<'_, Raw> {
+        match self {
+            Raw::Null => View::Null,
+            Raw::Bool(value) => View::Boolean(*value),
+            Raw::Int(value) => int_view(value),
+            Raw::Float(bits) => View::Float(*bits),
+            Raw::Bytes(value) => View::Bytes(value),
+            Raw::Text(value) => View::Text(value),
+            Raw::Array(values) => View::Array(values),
+            Raw::Map(entries) => View::Map(entries),
+            Raw::Tag(number, value) => View::Tag(*number, value),
+        }
+    }
+}
+
+/// An integer as the encoder sees it: a head when it fits 64 bits, a bignum
+/// otherwise. A negative integer is written from its magnitude `-1 - n`.
+fn int_view(value: &BigInt) -> View<'_, Raw> {
+    let negative = value.sign() == Sign::Minus;
+    let magnitude = if negative {
+        -value - BigInt::from(1)
+    } else {
+        value.clone()
+    };
+    match magnitude.to_u64() {
+        Some(number) if negative => View::Negative(number),
+        Some(number) => View::Unsigned(number),
+        None => View::Bignum {
+            negative,
+            magnitude: magnitude.to_bytes_be().1,
+        },
+    }
 }
 
 /// IEEE-754 `totalOrder` key, defined directly by FLOAT-TOTAL-1.

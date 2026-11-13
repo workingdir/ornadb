@@ -10,4 +10,5 @@ description = "Incremental REPL session over the Orna HIR and executor"
 orna-exec = { path = "../orna-exec" }
 orna-hir = { path = "../orna-hir" }
 orna-syntax = { path = "../orna-syntax" }
+orna-syntax-ast = { path = "../orna-syntax-ast" }
 orna-standard-sources = { path = "../orna-standard-sources" }

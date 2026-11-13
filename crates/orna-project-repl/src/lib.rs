@@ -15,9 +15,9 @@ use orna_check::{
     SymbolKind, SystemProviders, Type, analyze_with_providers, unresolved_member, unresolved_name,
 };
 use orna_project::{AttachedDatabaseSession, LoadedProject};
-use orna_syntax::{
-    Declaration, ImportSegment, ReplInput, SyntaxDiagnostic, TokenKind, TypeMember,
-    TypeRepresentation, UseTail, Visibility, lex, parse_module, parse_repl,
+use orna_syntax::{SyntaxDiagnostic, TokenKind, lex, parse_module, parse_repl};
+use orna_syntax_ast::{
+    Declaration, ImportSegment, ReplInput, TypeMember, TypeRepresentation, UseTail, Visibility,
 };
 use orna_value::{
     CanonicalValue, Diagnostic as FoundationDiagnostic, DiagnosticSeverity, SafeText,
