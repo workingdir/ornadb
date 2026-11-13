@@ -25,6 +25,7 @@ mod blocks;
 mod calls;
 mod classify;
 mod control;
+mod currency;
 mod declare;
 mod exprs;
 mod free_names;
