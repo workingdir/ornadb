@@ -211,3 +211,16 @@ fn escape(text: &str, out: &mut String) {
     }
     out.push('"');
 }
+
+#[cfg(test)]
+mod row_reference_tests {
+    use orna_value::Raw;
+
+    use super::is_unsupported_value;
+    use crate::value::Value;
+
+    #[test]
+    fn row_reference_is_refused_by_the_codec() {
+        assert!(is_unsupported_value(&Value::RowRef(Raw::Null)));
+    }
+}
