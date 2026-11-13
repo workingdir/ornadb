@@ -2,7 +2,8 @@
 //! A local declaration of the same name still wins.
 
 use orna_hir::{ModulePath, Name, Program, SourceId, SourceUnit, lower};
-use orna_syntax::{SyntaxTree, parse_module_with_file};
+use orna_syntax::parse_module_with_file;
+use orna_syntax_ast::SyntaxTree;
 
 fn parse(source: &str) -> SyntaxTree {
     let parsed = parse_module_with_file(source, "money.orna");
