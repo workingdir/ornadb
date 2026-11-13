@@ -7,7 +7,7 @@ use num_traits::ToPrimitive;
 use orna_hir::{
     Arg, ArgValue, Arm, AssignOp, BinOp, Body, BodyId, Call, Callee, DefId, DefKind, ExprId,
     ExprKind, FieldRef, FnBody, InterpPart, IntrinsicForm, Lit, LocalId, LogicOp, Name, ParamDef,
-    Pat, PatId, Place, Stmt,
+    Pat, PatId, Place, Stmt, TyKind,
 };
 
 use crate::binders;
@@ -99,10 +99,14 @@ impl<'p> Machine<'p> {
     /// The slot the host registers for the `sys` member `def`, looked up by its qualified name (`sys.storage.Storage`).
     fn sys_slot(&self, def: DefId) -> Option<SysSlot> {
         let definition = &self.program.defs[def];
-        let path = &self.program.modules[definition.module].path;
-        self.host
-            .manifest()
-            .slot(&format!("{path}.{}", definition.name))
+        let qualified = match &definition.clauses.spelling {
+            Some(spelling) => spelling.text.clone(),
+            None => {
+                let path = &self.program.modules[definition.module].path;
+                format!("{path}.{}", definition.name)
+            }
+        };
+        self.host.manifest().slot(&qualified)
     }
 
     /// Whether `def` is a `sys` type or static named as a value.
@@ -118,7 +122,13 @@ impl<'p> Machine<'p> {
         let Some(slot) = self.sys_slot(def) else {
             return Err(Stop::Error(UNSUPPORTED));
         };
-        if matches!(self.program.defs[def].kind, DefKind::NativeStatic(_)) {
+        let is_scalar_static = match &self.program.defs[def].kind {
+            DefKind::NativeStatic(native) => {
+                !matches!(self.program.tys.kind(native.ty), Some(TyKind::Relation(_)))
+            }
+            _ => false,
+        };
+        if is_scalar_static {
             let raw = self
                 .host
                 .sys_static(slot)

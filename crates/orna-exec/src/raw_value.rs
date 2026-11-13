@@ -8,7 +8,8 @@ use std::rc::Rc;
 use num_bigint::BigInt;
 use orna_hir::Name;
 use orna_value::{
-    DATE_TAG, DECIMAL_TAG, DIGEST_TAG, MONEY_TAG, OPTION_TAG, Raw, TUPLE_TAG, UNIT_TAG, UUID_TAG,
+    DATE_TAG, DECIMAL_TAG, DIGEST_TAG, ENUM_TAG, MONEY_TAG, OPTION_TAG, Raw, TUPLE_TAG, UNIT_TAG,
+    UUID_TAG,
 };
 
 use crate::calendar;
@@ -44,6 +45,7 @@ pub(crate) fn from_raw(raw: &Raw) -> Result<Value, Stop> {
         Raw::Tag(DIGEST_TAG, body) => digest_from(body),
         Raw::Tag(DECIMAL_TAG, body) => decimal_from(body),
         Raw::Tag(MONEY_TAG, body) => money_from(body),
+        Raw::Tag(ENUM_TAG, body) => enum_from(body),
         Raw::Null | Raw::Float(_) | Raw::Tag(..) => Err(Stop::NotYet("stored value shape (H6)")),
     }
 }
@@ -145,6 +147,36 @@ fn money_from(body: &Raw) -> Result<Value, Stop> {
     };
     let currency = object_id(currency_body).ok_or_else(value_error)?;
     Ok(Value::Money { amount, currency })
+}
+
+/// An enum variant: its type id, its variant id, then its payload record or none.
+fn enum_from(body: &Raw) -> Result<Value, Stop> {
+    let Raw::Array(parts) = body else {
+        return Err(value_error());
+    };
+    let [
+        Raw::Tag(UUID_TAG, type_body),
+        Raw::Tag(UUID_TAG, variant_body),
+        payload,
+    ] = parts.as_slice()
+    else {
+        return Err(value_error());
+    };
+    let type_id = object_id(type_body).ok_or_else(value_error)?;
+    let variant_id = object_id(variant_body).ok_or_else(value_error)?;
+    let payload = match payload {
+        Raw::Null => None,
+        Raw::Map(entries) => match record_from(entries)? {
+            Value::Record(fields) => Some(fields),
+            _ => return Err(value_error()),
+        },
+        _ => return Err(value_error()),
+    };
+    Ok(Value::Enum {
+        type_id,
+        variant_id,
+        payload,
+    })
 }
 
 /// The 16 bytes of an object id body.
