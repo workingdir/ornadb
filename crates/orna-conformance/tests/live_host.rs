@@ -2,8 +2,8 @@
 
 use orna_live::{
     ActionAuthority, ActionAuthorityRegistry, ActionBinding, ActionFuture, ActionHandler, Error,
-    LiveApplicationWorkLease,
 };
+use orna_live_lease::LiveApplicationWorkLease;
 use orna_runtime::RuntimeActivationContext;
 use orna_value::CanonicalValue;
 

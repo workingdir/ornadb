@@ -2,7 +2,8 @@ use futures::executor::block_on;
 use orna_application::{ApplicationAuthority, ApplicationLiveAdapter};
 use orna_check::Catalogue;
 use orna_evaluator::Limits as EvaluatorLimits;
-use orna_live::{LiveApplication, LiveApplicationWorkSupervisor, LiveEvalResponse};
+use orna_live::{LiveApplication, LiveEvalResponse};
+use orna_live_lease::LiveApplicationWorkSupervisor;
 use orna_protocol::{Envelope, Message, PresentationContext, ResultStatus};
 use orna_repository::Repository;
 use orna_runtime::{
