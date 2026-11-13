@@ -14,11 +14,12 @@ use orna_hir::{
 
 use crate::error::Stop;
 use crate::frame::Frame;
+use crate::host::SysSlot;
 use crate::machine::Machine;
 use crate::raw_value;
 use crate::store::{CursorId, Direction, KeyBounds};
 use crate::table::{decode_row, field_of_row, store_invariant};
-use crate::value::Value;
+use crate::value::{RelHandle, Value};
 
 /// The consumer of one row. It returns `false` to stop the pipeline.
 pub(super) type Sink<'a, 'p> = dyn FnMut(&mut Machine<'p>, Value) -> Result<bool, Stop> + 'a;
@@ -34,6 +35,8 @@ enum Source {
     Table(DefId),
     /// The elements of a list value.
     Rows(Rc<[Value]>),
+    /// The rows of a relation handle, read from the host one at a time.
+    Handle(Rc<RelHandle>),
 }
 
 /// One stage a row passes through.
@@ -121,6 +124,11 @@ impl Pipeline {
                 Ok(())
             }
             Source::Table(table) => scan_table(machine, *table, &self.stages, &mut counts, sink),
+            Source::Handle(handle) => match &**handle {
+                RelHandle::Sys { slot } => {
+                    scan_sys(machine, *slot, &self.stages, &mut counts, sink)
+                }
+            },
         }
     }
 }
@@ -218,6 +226,7 @@ fn evaluate_rows<'p>(
 ) -> Result<Source, Stop> {
     match machine.eval(body, frame, input)? {
         Value::List(items) => Ok(Source::Rows(items)),
+        Value::Rel(handle) => Ok(Source::Handle(handle)),
         _ => Err(Stop::Error("ORNA-EVAL-TYPE")),
     }
 }
@@ -281,6 +290,30 @@ fn scan_table<'p>(
     let outcome = walk_table(machine, cursor, stages, counts, sink);
     machine.host.store().close(cursor);
     outcome
+}
+
+/// Reads the rows of the `sys` relation in `slot` from the host, one at a time, until the pipeline stops.
+fn scan_sys<'p>(
+    machine: &mut Machine<'p>,
+    slot: SysSlot,
+    stages: &[Stage],
+    counts: &mut [usize],
+    sink: &mut Sink<'_, 'p>,
+) -> Result<(), Stop> {
+    let mut rows = machine
+        .host
+        .sys_relation(slot, None)
+        .map_err(|failure| Stop::Error(failure.code))?;
+    loop {
+        machine.tick(1)?;
+        let row = match rows.next().map_err(|failure| Stop::Error(failure.code))? {
+            None => return Ok(()),
+            Some(raw) => raw_value::from_raw(&raw)?,
+        };
+        if push(machine, stages, counts, 0, row, sink)? == Flow::Stop {
+            return Ok(());
+        }
+    }
 }
 
 /// Reads the rows of an open cursor one at a time, charging a step for each, until the pipeline stops.
