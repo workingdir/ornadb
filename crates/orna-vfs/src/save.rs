@@ -17,10 +17,10 @@ use orna_value::CwdCapture;
 
 use super::{ActivationCandidate, CandidateSnapshot, EditDraftError};
 use orna_runtime::{
-    FaultInjector, ProtectedContentTransferEvidence, RuntimeActivationContext,
-    RuntimeError, RuntimeQueryError, RuntimeState, RuntimeTableActivationSnapshot,
-    RuntimeTableIdentity, TableActivationCandidateValidator, TableActivationError,
-    TableMutation, TableSchemaIdentity, ValidatedTableActivationCommit, WriterLease,
+    FaultInjector, ProtectedContentTransferEvidence, RuntimeActivationContext, RuntimeError,
+    RuntimeQueryError, RuntimeState, RuntimeTableActivationSnapshot, RuntimeTableIdentity,
+    TableActivationCandidateValidator, TableActivationError, TableMutation, TableSchemaIdentity,
+    ValidatedTableActivationCommit, WriterLease,
 };
 
 /// One complete VFS row replacement routed into the runtime's validated table

@@ -35,20 +35,20 @@ use orna_repository::{
 use orna_runtime::{
     NoFault, RuntimeState, RuntimeTableActivationSnapshot, RuntimeTableIdentity, RuntimeTableRows,
     TableObjectId, TableSchemaIdentity,
-    vfs::{
-        CANDIDATE_CHUNK_BYTES, CandidateSnapshot, DraftQuota, EditDraft, EditDraftError,
-        FsyncFailure, ManagedFile, QuotaCharge, SnapshotPin, TemporaryRenameOutcome, TemporarySave,
-        VfsBlobReplacementError, VfsComponent, VfsDurableSave, VfsFileSnapshot, VfsRepositoryCache,
-        VfsRowProjection, VfsSaveCandidate, VfsSaveCoordinates, VfsSaveError, VfsStoredField,
-        VfsTableRowReplacement, project_colliding_table_component, project_component,
-        project_key_component, unproject_component,
-    },
 };
 use orna_storage::COMPACT_FILE_BOUND_BYTES;
 use orna_syntax::parse_row;
 use orna_syntax_ast::{Expr, LiteralKind};
 use orna_value::{
     Format3Context, Raw, SchemaDescriptor, blob_metadata_from_raw, decode_canonical_storage_value,
+};
+use orna_vfs::{
+    CANDIDATE_CHUNK_BYTES, CandidateSnapshot, DraftQuota, EditDraft, EditDraftError, FsyncFailure,
+    ManagedFile, QuotaCharge, SnapshotPin, TemporaryRenameOutcome, TemporarySave,
+    VfsBlobReplacementError, VfsComponent, VfsDurableSave, VfsFileSnapshot, VfsRepositoryCache,
+    VfsRowProjection, VfsSaveCandidate, VfsSaveCoordinates, VfsSaveError, VfsStoredField,
+    VfsTableRowReplacement, project_colliding_table_component, project_component,
+    project_key_component, unproject_component,
 };
 use sha2::{Digest, Sha256};
 

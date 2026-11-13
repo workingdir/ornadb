@@ -79,9 +79,7 @@ fn row_projection_rejects_escapes_and_classifies_unlink_targets() {
 #[tokio::test]
 /// ORNA-VFS-014, ORNA-VFS-017, and ORNA-VFS-022: private reads are copies and open handles/cursors remain pinned to their generation.
 async fn read_handles_and_readdir_cursors_keep_their_open_generation() {
-    use orna_vfs::{
-        SnapshotPin, SnapshotReaddirCursor, VfsFileSnapshot, VfsRepositoryCache,
-    };
+    use orna_vfs::{SnapshotPin, SnapshotReaddirCursor, VfsFileSnapshot, VfsRepositoryCache};
 
     let cache = VfsRepositoryCache::new();
     let image = Arc::new(VfsFileSnapshot::new(

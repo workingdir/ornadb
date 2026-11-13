@@ -893,12 +893,9 @@ impl FsBuilder {
                 blob_files.push((file_name, reference));
             } else if let Some(text) = large_text_payload(&value) {
                 let required = !is_optional_field(field_type);
-                let text_file =
-                    orna_vfs::project_text_name(field_name).map_err(|error| {
-                        format!(
-                            "stored Str field {field_name} cannot be projected as text: {error:?}"
-                        )
-                    })?;
+                let text_file = orna_vfs::project_text_name(field_name).map_err(|error| {
+                    format!("stored Str field {field_name} cannot be projected as text: {error:?}")
+                })?;
                 projected_fields.push(VfsStoredField::text(
                     field_name.clone(),
                     u64::try_from(text.len())

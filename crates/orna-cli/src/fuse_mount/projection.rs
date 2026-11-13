@@ -496,11 +496,9 @@ pub(crate) fn blob_rename_hint(
 ) -> Option<Option<String>> {
     newname.match_indices('.').find_map(|(index, _)| {
         let hint =
-            orna_vfs::classify_content_suffix(media_type, Some(&newname[index + 1..]))
-                .ok()?;
+            orna_vfs::classify_content_suffix(media_type, Some(&newname[index + 1..])).ok()?;
         let projected =
-            orna_vfs::project_content_name(field_name, media_type, hint.as_deref())
-                .ok()?;
+            orna_vfs::project_content_name(field_name, media_type, hint.as_deref()).ok()?;
         (projected == newname).then_some(hint)
     })
 }

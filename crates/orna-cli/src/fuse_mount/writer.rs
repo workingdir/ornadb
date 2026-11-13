@@ -40,16 +40,15 @@ pub(crate) struct MountWriter {
 #[cfg(feature = "test-seams")]
 pub(crate) fn mount_draft_quota() -> Result<Arc<orna_vfs::DraftQuota>, String> {
     const DRAFT_QUOTA_ENV: &str = "ORNA_DRAFT_QUOTA_BYTES";
-    static MOUNT_DRAFT_QUOTA: std::sync::LazyLock<
-        Result<Arc<orna_vfs::DraftQuota>, String>,
-    > = std::sync::LazyLock::new(|| match std::env::var(DRAFT_QUOTA_ENV) {
-        Err(std::env::VarError::NotPresent) => Ok(orna_vfs::default_draft_quota()),
-        Err(error) => Err(format!("{DRAFT_QUOTA_ENV} is not valid: {error}")),
-        Ok(value) => value
-            .parse::<u64>()
-            .map(|bytes| Arc::new(orna_vfs::DraftQuota::new(bytes)))
-            .map_err(|error| format!("{DRAFT_QUOTA_ENV} is not a byte count: {error}")),
-    });
+    static MOUNT_DRAFT_QUOTA: std::sync::LazyLock<Result<Arc<orna_vfs::DraftQuota>, String>> =
+        std::sync::LazyLock::new(|| match std::env::var(DRAFT_QUOTA_ENV) {
+            Err(std::env::VarError::NotPresent) => Ok(orna_vfs::default_draft_quota()),
+            Err(error) => Err(format!("{DRAFT_QUOTA_ENV} is not valid: {error}")),
+            Ok(value) => value
+                .parse::<u64>()
+                .map(|bytes| Arc::new(orna_vfs::DraftQuota::new(bytes)))
+                .map_err(|error| format!("{DRAFT_QUOTA_ENV} is not a byte count: {error}")),
+        });
     MOUNT_DRAFT_QUOTA.clone()
 }
 

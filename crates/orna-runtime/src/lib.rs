@@ -65,9 +65,9 @@ pub fn process_owner_id() -> [u8; 16] {
 
 mod activation;
 pub use activation::{
-    ActivationError, ActivationWork, run_admitted_table_activation, runtime_activation_active,
-    run_admitted_table_request_activation, run_table_activation, with_activation_scope,
-    with_terminal_admin_effect,
+    ActivationError, ActivationWork, run_admitted_table_activation,
+    run_admitted_table_request_activation, run_table_activation, runtime_activation_active,
+    with_activation_scope, with_terminal_admin_effect,
 };
 mod catalogue;
 mod checkpoint_bootstrap;

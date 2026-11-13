@@ -1817,6 +1817,7 @@ dependencies = [
  "orna-syntax-ast",
  "orna-sys",
  "orna-value",
+ "orna-vfs",
  "parquet",
  "rustix 0.38.44",
  "serde_json",

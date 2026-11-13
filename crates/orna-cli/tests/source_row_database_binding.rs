@@ -4,11 +4,11 @@ use orna_project::{
     KeyComponentText, ProjectLoadError, ProjectLoader, SourceRowRequest, admit_source_row,
 };
 use orna_repository::{GitCommitRef, TypedKey};
-use orna_vfs::project_key_component;
 use orna_value::{
     AvailabilityState, BlobResolver, ContentReference, Error as ValueError, Format3Context,
     Format3Quota, GitHash, NativeOid, OwnerLifetime, Snapshot,
 };
+use orna_vfs::project_key_component;
 
 #[path = "support/format3.rs"]
 mod format3;

@@ -128,8 +128,8 @@ fn aggregate_quota_refusal_at_save_is_edquot_on_every_commit_path() {
 
 #[test]
 fn temporary_commit_backing_io_failure_is_eio_and_malformed_draft_is_einval() {
-    use orna_vfs::{EditDraftError, VfsSaveError};
     use orna_runtime::{RuntimeError, TableActivationError};
+    use orna_vfs::{EditDraftError, VfsSaveError};
     let malformed = || {
         VfsSaveError::<TableActivationError>::Activation(TableActivationError::Runtime(
             RuntimeError::InvalidTableMutation,
@@ -161,8 +161,8 @@ use super::{
 };
 use orna_repository::TypedKey;
 use orna_runtime::{RuntimeTableIdentity, RuntimeTableRows, TableObjectId};
-use orna_vfs::project_component;
 use orna_value::{Raw, Value};
+use orna_vfs::project_component;
 fn encode_fields(fields: Vec<Raw>) -> Vec<u8> {
     Value::new(Raw::Array(fields)).unwrap().encode().unwrap()
 }

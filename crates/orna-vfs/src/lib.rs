@@ -1948,17 +1948,16 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
         let callback_snapshot = snapshot
             .duplicate()
             .map_err(|_| VfsSaveError::Backing(EditDraftError::BackingIo))?;
-        let candidate =
-            orna_runtime::with_activation_scope(runtime, writer, move || async move {
-                admit(coordinates, callback_snapshot).await
-            })
-            .await
-            .map_err(|error| VfsSaveError::Activation(TableActivationError::Runtime(error)))?
-            .map_err(|error| match error {
-                VfsSaveAdmissionError::BlobCapture(error) => VfsSaveError::BlobCapture(error),
-                VfsSaveAdmissionError::Activation(error) => VfsSaveError::Activation(error),
-                VfsSaveAdmissionError::Backing(error) => VfsSaveError::Backing(error),
-            })?;
+        let candidate = orna_runtime::with_activation_scope(runtime, writer, move || async move {
+            admit(coordinates, callback_snapshot).await
+        })
+        .await
+        .map_err(|error| VfsSaveError::Activation(TableActivationError::Runtime(error)))?
+        .map_err(|error| match error {
+            VfsSaveAdmissionError::BlobCapture(error) => VfsSaveError::BlobCapture(error),
+            VfsSaveAdmissionError::Activation(error) => VfsSaveError::Activation(error),
+            VfsSaveAdmissionError::Backing(error) => VfsSaveError::Backing(error),
+        })?;
         admission
             .validate_replacement(candidate.replacement())
             .map_err(VfsSaveError::Activation)?;
@@ -2130,12 +2129,12 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
 mod tests {
     use super::spool::{CandidateSource, DRAFT_SPOOL_DIRECTORY};
     use super::*;
+    use orna_repository::{ProtectedContentTransfer, Repository};
     use orna_runtime::{
         ProtectedContentTransferEvidence, RuntimeIdentity, RuntimeQueryError, RuntimeState,
         RuntimeTableIdentity, RuntimeTableRows, TableActivationCandidateValidator, TableMutation,
         TableObjectId, TableSchemaIdentity,
     };
-    use orna_repository::{ProtectedContentTransfer, Repository};
     use orna_stream::DiagnosticClass;
     use orna_value::{Raw, SchemaDescriptor};
     use sha2::{Digest, Sha256};

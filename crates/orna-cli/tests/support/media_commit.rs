@@ -22,9 +22,9 @@ use orna_repository::Repository;
 use orna_runtime::{
     NoFault, RequestIdentity, RequestState, RuntimeState, RuntimeTableIdentity, TableMutation,
     TableObjectId, TerminalOutcome, WriterLease,
-    vfs::{VfsDurableSave, VfsSaveAdmission, VfsSaveCandidate, VfsTableRowReplacement},
 };
 use orna_value::Format3Context;
+use orna_vfs::{VfsDurableSave, VfsSaveAdmission, VfsSaveCandidate, VfsTableRowReplacement};
 
 /// The production table schema identity (ORNA-VFS-019), shared with the mount.
 #[path = "../../../orna-cli-support/src/table_schema.rs"]
