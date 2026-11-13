@@ -18,6 +18,7 @@ members = [
     "crates/orna-hir",
     "crates/orna-lsp",
     "crates/orna-live",
+    "crates/orna-live-lease",
     "crates/orna-link",
     "crates/orna-native-loader",
     "crates/orna-protocol",

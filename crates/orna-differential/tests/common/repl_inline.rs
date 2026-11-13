@@ -1,11 +1,7 @@
-//! Differential check of the repl-inline fixtures against the old evaluator's REPL.
+//! The repl-inline fixtures run through the new REPL session and through the old `ReplSession`.
 //!
-//! The fixtures carry no expected-stdout files; their expectations are asserts in `orna-evaluator` and
-//! `orna-project-repl`. Each fixture that needs only a standalone session is run through the new session and
-//! through a fresh old `ReplSession`, and the canonical result or the error code must match. Fixtures that need
-//! a repository, a snapshot, a watch or persistence are listed in `repl_inline_exclusions.txt` with a reason.
-//! Runnable fixtures that disagree are listed with a reason in `repl_inline_differing.txt`; the disagreement set must
-//! match that list exactly. `AGREED_FLOOR` is a ratchet: the agreed count must not drop, and it is raised when it rises.
+//! The ratchet test (`tests/repl_inline_differential.rs`) and the shadow report both read the fixtures, the
+//! exclusion table and the expected-disagreement ledger through this module, so a disagreement is classified the same way.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -15,22 +11,31 @@ use orna_evaluator::{Limits, ReplSession};
 use orna_repl::{Session, submit};
 use orna_value::Raw;
 
-const FIXTURE_DIRS: [&str; 3] = [
+/// Directories, relative to the workspace `crates` directory, that hold repl-inline fixtures.
+pub const FIXTURE_DIRS: [&str; 3] = [
     "orna-evaluator/src/fixtures",
     "orna-evaluator/tests/fixtures",
     "orna-project-repl/src/fixtures",
 ];
-const EXCLUSIONS: &str = include_str!("repl_inline_exclusions.txt");
-const DIFFERING: &str = include_str!("repl_inline_differing.txt");
-const AGREED_FLOOR: usize = 15;
 
+/// Fixtures that need a repository, a snapshot, a watch, persistence or the host: `<path> <reason>` per line.
+pub const EXCLUSIONS: &str = include_str!("../repl_inline_exclusions.txt");
+
+/// Runnable fixtures that disagree with the old REPL, listed in the `## expected` section.
+pub const DIFFERING: &str = include_str!("../repl_inline_differing.txt");
+
+/// The result of submitting one fixture to a REPL.
 #[derive(Debug, PartialEq)]
-enum Outcome {
+pub enum Outcome {
+    /// The submission was accepted, with a canonical value or nothing.
     Accepted(Option<Raw>),
+    /// The submission was rejected with this error code.
     Rejected(String),
 }
 
-fn new_outcome(source: &str) -> Outcome {
+/// Submits `source` to the new REPL session.
+#[must_use]
+pub fn new_outcome(source: &str) -> Outcome {
     let mut session = Session::new();
     match submit(&mut session, source) {
         Ok(None) => Outcome::Accepted(None),
@@ -42,7 +47,9 @@ fn new_outcome(source: &str) -> Outcome {
     }
 }
 
-fn old_outcome(source: &str) -> Outcome {
+/// Submits `source` to a fresh old `ReplSession`.
+#[must_use]
+pub fn old_outcome(source: &str) -> Outcome {
     let mut session = ReplSession::new(Limits::default());
     match session.submit(source) {
         Ok(None) => Outcome::Accepted(None),
@@ -52,7 +59,8 @@ fn old_outcome(source: &str) -> Outcome {
 }
 
 /// Every repl-inline fixture, keyed by its path relative to the workspace `crates` directory.
-fn collect_fixtures() -> BTreeMap<String, String> {
+#[must_use]
+pub fn collect_fixtures() -> BTreeMap<String, String> {
     let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let mut fixtures = BTreeMap::new();
     for dir in FIXTURE_DIRS {
@@ -72,7 +80,8 @@ fn collect_fixtures() -> BTreeMap<String, String> {
 }
 
 /// The exclusion table: `<fixture path> <reason>` per line; blank lines and `#` comments are ignored.
-fn parse_exclusions() -> BTreeMap<String, String> {
+#[must_use]
+pub fn parse_exclusions() -> BTreeMap<String, String> {
     EXCLUSIONS
         .lines()
         .map(str::trim_end)
@@ -88,7 +97,8 @@ fn parse_exclusions() -> BTreeMap<String, String> {
 
 /// The expected-disagreement table: the `## expected` section of `repl_inline_differing.txt`, one
 /// `<fixture path> <reason>` per line. Blank lines and `#` comments are ignored.
-fn parse_expected() -> BTreeMap<String, String> {
+#[must_use]
+pub fn parse_expected() -> BTreeMap<String, String> {
     let section = DIFFERING
         .split_once("\n## expected\n")
         .expect("differing list has an expected section")
@@ -104,52 +114,4 @@ fn parse_expected() -> BTreeMap<String, String> {
             (path.to_owned(), reason.to_owned())
         })
         .collect()
-}
-
-#[test]
-fn repl_inline_fixtures_agree_with_the_old_repl() {
-    let fixtures = collect_fixtures();
-    let exclusions = parse_exclusions();
-    for path in exclusions.keys() {
-        assert!(fixtures.contains_key(path), "stale exclusion: {path}");
-    }
-
-    let expected = parse_expected();
-    let mut agreed = 0;
-    let mut disagreed = Vec::new();
-    for (path, source) in &fixtures {
-        if exclusions.contains_key(path) {
-            continue;
-        }
-        let (new, old) = (new_outcome(source), old_outcome(source));
-        if new == old {
-            agreed += 1;
-        } else {
-            eprintln!("disagree: {path}\n  new={new:?}\n  old={old:?}");
-            disagreed.push(path.clone());
-        }
-    }
-    for path in expected.keys() {
-        assert!(fixtures.contains_key(path), "stale expectation: {path}");
-        assert!(
-            disagreed.contains(path),
-            "stale expectation, now agrees with the old REPL: {path}"
-        );
-    }
-    for path in &disagreed {
-        assert!(
-            expected.contains_key(path),
-            "unclassified disagreement, add it to repl_inline_differing.txt with a reason: {path}"
-        );
-    }
-    let runnable = fixtures.len() - exclusions.len();
-    eprintln!(
-        "repl-inline differential: agreed {agreed} of {runnable} runnable, {} total, {} expected disagreements",
-        fixtures.len(),
-        expected.len()
-    );
-    assert!(
-        agreed >= AGREED_FLOOR,
-        "agreed {agreed} dropped below the ratchet floor {AGREED_FLOOR}"
-    );
 }

@@ -22,8 +22,9 @@ use orna_evaluator::{
 };
 use orna_live::{
     Error as LiveError, FirstPartyEffectTrust, LiveAdminEffectDispatcher, LiveApplication,
-    LiveApplicationWorkLease, LiveEvalResponse, LiveEvalTransaction,
+    LiveEvalResponse, LiveEvalTransaction,
 };
+use orna_live_lease::LiveApplicationWorkLease;
 use orna_project::{
     AdmittedSourceRow, CommittedReadLimits, LoadedProject, ProjectLimits, ResolvedTableSchema,
     admitted_table_schemas,
@@ -6077,7 +6078,7 @@ mod tests {
     #[test]
     fn effect_dispatch_routes_non_module_eval_through_the_repl() {
         use futures::executor::block_on;
-        use orna_live::LiveApplicationWorkSupervisor;
+        use orna_live_lease::LiveApplicationWorkSupervisor;
         use orna_repository::Repository;
         use orna_runtime::{RuntimeIdentity, RuntimeState};
 

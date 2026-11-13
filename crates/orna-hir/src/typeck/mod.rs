@@ -48,6 +48,9 @@ mod call;
 mod case;
 #[cfg(test)]
 mod case_tests;
+mod currency;
+#[cfg(test)]
+mod currency_tests;
 #[cfg(test)]
 mod diagnostics_tests;
 mod display;
@@ -324,6 +327,9 @@ impl TypeChecker<'_> {
     /// Attempts one top-level body.
     fn attempt(&mut self, body_id: BodyId) -> Attempt {
         let owner = self.program.bodies[body_id].owner;
+        if let Some(failed) = self.currency_signature_failure(owner) {
+            return failed;
+        }
         let owner_kind = self.program.defs[owner].kind.clone();
         let body_params = self.program.bodies[body_id].params.clone();
         let (expected, root_slot, omitted) = match self.expectation(body_id, &owner_kind) {

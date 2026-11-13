@@ -15,6 +15,7 @@
 /// `fixture.attached`. `Contact` is not here: the `contacts` database below owns it,
 /// and reference cases reach it by its bare name through `use contacts.*;`.
 pub const ATTACHED_SUPPORT: &str = "\
+use fixture.currencies.*;
 pub type Account {}
 pub type Customer {}
 pub type EmailHeader {
@@ -34,7 +35,7 @@ pub table Audit {
 }
 pub table Payment {
     order: Order,
-    amount: Int,
+    amount: Money<GBP>,
 }
 ";
 

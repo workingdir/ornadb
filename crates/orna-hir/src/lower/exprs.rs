@@ -206,6 +206,9 @@ fn lower_field(
         state.exprs[literal].weight = 2;
         return literal;
     }
+    if let Some(money) = super::currency::lower_currency_suffix(builder, state, base, name, span) {
+        return money;
+    }
     if let Some(path) = sys_field_path(state, base, name, span) {
         return super::namespace::lower_sys_value(builder, state, &path, span);
     }
@@ -826,7 +829,7 @@ fn lower_call(
     let witness_index = witness.as_ref().map(|(index, _)| *index);
     let witnessed = witness.map(|(_, ty)| vec![ty]);
     let type_arguments = witnessed.as_deref().unwrap_or(type_arguments);
-    let callee = attach_type_arguments(builder, state, callee, type_arguments);
+    let (callee, targs) = attach_type_arguments(builder, state, callee, type_arguments);
     let concurrent = super::calls::starts_concurrent_bodies(builder, &callee);
     let lowered = arguments
         .iter()
@@ -854,7 +857,7 @@ fn lower_call(
         placeholder,
         span,
     );
-    let ty = call_type(builder, &callee);
+    let ty = call_type(builder, &callee, &targs);
     push_typed(
         builder,
         state,
@@ -869,8 +872,9 @@ fn lower_call(
     )
 }
 
-/// The declared result type of a call, when the callee states one.
-fn call_type(builder: &mut Builder, callee: &crate::Callee) -> Ty {
+/// The declared result type of a call, when the callee states one. A nominal type constructor is typed by the type
+/// arguments written at the call (`Money<GBP>(5)` is `Money<GBP>`); a variant or unit takes none.
+fn call_type(builder: &mut Builder, callee: &crate::Callee, targs: &[Ty]) -> Ty {
     match callee {
         crate::Callee::Source { def, .. }
         | crate::Callee::Native { def, .. }
@@ -880,7 +884,18 @@ fn call_type(builder: &mut Builder, callee: &crate::Callee) -> Ty {
             _ => builder.program.tys.error(),
         },
         crate::Callee::Ctor { def } if !builder.is_unit(*def) => {
-            builder.program.tys.intern(TyKind::Adt(*def, Box::new([])))
+            let nominal = matches!(
+                builder
+                    .pending
+                    .get(def.index())
+                    .map(|pending| &pending.kind),
+                Some(super::declare::PendingKind::Built(DefKind::Type(_)))
+            );
+            let args = if nominal { targs.to_vec() } else { Vec::new() };
+            builder
+                .program
+                .tys
+                .intern(TyKind::Adt(*def, args.into_boxed_slice()))
         }
         _ => builder.program.tys.error(),
     }

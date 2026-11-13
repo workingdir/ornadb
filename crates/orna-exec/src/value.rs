@@ -95,6 +95,9 @@ pub enum Value {
         /// The payload fields, in name order.
         payload: Option<Rc<[(Name, Value)]>>,
     },
+    /// A pinned row reference (a `RunRef`, `SnapshotRef` and the like), held as its canonical
+    /// `PINNED_ROW_REFERENCE_TAG` form and carried unchanged. The codecs refuse it; no operation reads its fields.
+    RowRef(Raw),
 }
 
 impl From<i64> for Value {
@@ -188,6 +191,7 @@ impl Value {
             Self::Tuple(values) => Ok(Raw::Tag(TUPLE_TAG, Box::new(array(values)?))),
             Self::List(values) => array(values),
             Self::Record(fields) => record_raw(fields),
+            Self::RowRef(raw) => Ok(raw.clone()),
             Self::Closure(_) | Self::Rel(_) | Self::Enum { .. } => Err("ORNA-EVAL-UNSUPPORTED"),
             Self::Error(code) => Err(code),
         }
