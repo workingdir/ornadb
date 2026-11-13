@@ -110,7 +110,8 @@ fn collect_failures(program: &Program, ty: Ty, failures: &mut Vec<Ty>) {
 #[must_use]
 pub fn is_money_def(program: &Program, def: DefId) -> bool {
     let definition = &program.defs[def];
-    definition.name.as_str() == MONEY && program.modules[definition.module].path.to_string() == "core.money"
+    definition.name.as_str() == MONEY
+        && program.modules[definition.module].path.to_string() == "core.money"
 }
 
 /// The currency type argument of `ty` when `ty` is `core.money.Money<C>`.

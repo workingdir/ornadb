@@ -72,11 +72,7 @@ fn money_float_operator(op: BinOp) -> bool {
 
 /// The published code for a constructor call `Money<C>(value)` whose amount is a `Float` (hir-host.md B5).
 #[must_use]
-pub fn construction_rejection(
-    program: &Program,
-    def: DefId,
-    argument: Ty,
-) -> Option<&'static str> {
+pub fn construction_rejection(program: &Program, def: DefId, argument: Ty) -> Option<&'static str> {
     (engine_money::is_money_def(program, def) && is_float(program, argument))
         .then_some(MONEY_FROM_FLOAT)
 }
