@@ -22,7 +22,7 @@ pub(super) fn decode_node(
             relation_map: oid(bytes_field(fields.get(2))?, algorithm)?,
         }),
         NodeKind::OrderedLeaf => {
-            let domain = canonical_value_bytes(fields.get(2).ok_or(GraphError::NonCanonicalData)?);
+            let domain = canonical_value_bytes(fields.get(2).ok_or(GraphError::NonCanonicalData)?)?;
             check_domain(&domain)?;
             let entries =
                 array_fields(fields.get(3).cloned().ok_or(GraphError::NonCanonicalData)?)?
@@ -35,17 +35,17 @@ pub(super) fn decode_node(
                         Ok(OrderedLeafEntry {
                             key: canonical_value_bytes(
                                 fields.first().ok_or(GraphError::NonCanonicalData)?,
-                            ),
+                            )?,
                             value: canonical_value_bytes(
                                 fields.get(1).ok_or(GraphError::NonCanonicalData)?,
-                            ),
+                            )?,
                         })
                     })
                     .collect::<Result<Vec<_>, _>>()?;
             Ok(NodeData::OrderedLeaf { domain, entries })
         }
         NodeKind::OrderedBranch => {
-            let domain = canonical_value_bytes(fields.get(2).ok_or(GraphError::NonCanonicalData)?);
+            let domain = canonical_value_bytes(fields.get(2).ok_or(GraphError::NonCanonicalData)?)?;
             check_domain(&domain)?;
             let height = bounded_height(unsigned(fields.get(3))?)?;
             let entries =
@@ -61,7 +61,7 @@ pub(super) fn decode_node(
                         Ok(OrderedBranchEntry {
                             inclusive_max_key: canonical_value_bytes(
                                 fields.first().ok_or(GraphError::NonCanonicalData)?,
-                            ),
+                            )?,
                             child: oid(bytes_field(fields.get(1))?, algorithm)?,
                             row_count,
                         })

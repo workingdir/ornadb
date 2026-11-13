@@ -96,11 +96,10 @@ impl Encode for CborValue {
 }
 
 /// The canonical bytes of `value`. The encoder sorts map entries by encoded
-/// key. Callers build maps from distinct keys: values decoded by this module
-/// always have that property, and overflow expansion keeps keys distinct, so
-/// the encoder never refuses one.
-pub(crate) fn canonical_value_bytes(value: &CborValue) -> Vec<u8> {
-    orna_cbor::encode(value).expect("format-3 value has distinct map keys")
+/// key and refuses two keys that encode alike; that refusal is reported as
+/// non-canonical data, as the reader reports the same bytes.
+pub(crate) fn canonical_value_bytes(value: &CborValue) -> Result<Vec<u8>, GraphError> {
+    orna_cbor::encode(value).map_err(|_| GraphError::NonCanonicalData)
 }
 
 pub(super) fn validate_canonical_value(bytes: &[u8]) -> Result<(), GraphError> {
@@ -188,4 +187,36 @@ pub(super) fn uint(output: &mut Vec<u8>, value: u64) {
 
 pub(super) fn null(output: &mut Vec<u8>) {
     output.push(0xf6);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The pre-cutover writer panicked on duplicate keys; the writer now
+    /// reports the reader's error for the same bytes.
+    #[test]
+    fn duplicate_map_keys_are_refused_as_non_canonical() {
+        let value = CborValue::Map(vec![
+            (CborValue::Unsigned(1), CborValue::Null),
+            (CborValue::Unsigned(1), CborValue::Bool(true)),
+        ]);
+        assert_eq!(
+            canonical_value_bytes(&value),
+            Err(GraphError::NonCanonicalData)
+        );
+    }
+
+    /// Keys sort by their encoded bytes: unsigned 1 (0x01) before text "b" (0x61 0x62).
+    #[test]
+    fn map_keys_sort_by_encoded_bytes() {
+        let value = CborValue::Map(vec![
+            (CborValue::Text("b".to_owned()), CborValue::Null),
+            (CborValue::Unsigned(1), CborValue::Null),
+        ]);
+        assert_eq!(
+            canonical_value_bytes(&value),
+            Ok(vec![0xa2, 0x01, 0xf6, 0x61, 0x62, 0xf6])
+        );
+    }
 }

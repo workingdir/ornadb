@@ -871,7 +871,7 @@ impl NativeGraphContext {
         }
         let expected_count = version.row_count().ok_or(GraphError::ContextMismatch)?;
         let root = version.primary_root().clone();
-        let domain = rows_domain_for_version(version);
+        let domain = rows_domain_for_version(version)?;
         let entry = {
             let mut objects = ObjectBudget::new(
                 scope.max_objects.min(MAX_RANGE_GRAPH_OBJECTS),
@@ -936,7 +936,7 @@ impl NativeGraphContext {
         if database != *owner_version.database_id() {
             return Ok(None);
         }
-        let key = crate::row_store::TypedKey::decode_canonical(&canonical_value_bytes(key))
+        let key = crate::row_store::TypedKey::decode_canonical(&canonical_value_bytes(key)?)
             .map_err(|_| GraphError::NonCanonicalData)?;
         let target_version = if relation == *owner_version.relation_id() {
             owner_version.clone()
@@ -978,7 +978,7 @@ impl NativeGraphContext {
         let relations_domain = canonical_domain(vec![
             CborValue::Text("relations".to_owned()),
             CborValue::Bytes(database_id.to_vec()),
-        ]);
+        ])?;
         let relation_key = crate::row_store::TypedKey::Bytes(relation_id.to_vec());
         let relation_node = self.read_native_node(&relation_map, scope, &mut objects)?;
         let relation_entry = {
@@ -1061,7 +1061,7 @@ impl NativeGraphContext {
         let version = self.row_snapshot.version();
         let expected_count = version.row_count().ok_or(GraphError::ContextMismatch)?;
         let root = version.primary_root().clone();
-        let domain = rows_domain_for_version(version);
+        let domain = rows_domain_for_version(version)?;
         let entries = {
             let mut objects = ObjectBudget::new(
                 scope.max_objects.min(MAX_RANGE_GRAPH_OBJECTS),
@@ -1120,7 +1120,7 @@ impl NativeGraphContext {
         let version = self.row_snapshot.version();
         let expected_count = version.row_count().ok_or(GraphError::ContextMismatch)?;
         let root = version.primary_root().clone();
-        let domain = rows_domain_for_version(version);
+        let domain = rows_domain_for_version(version)?;
         let mut objects = ObjectBudget::new(
             scope.max_objects.min(MAX_RANGE_GRAPH_OBJECTS),
             scope.max_objects,
@@ -1189,7 +1189,7 @@ impl NativeGraphContext {
         let version = self.row_snapshot.version();
         let expected_count = version.row_count().ok_or(GraphError::ContextMismatch)?;
         let root = version.primary_root().clone();
-        let domain = rows_domain_for_version(version);
+        let domain = rows_domain_for_version(version)?;
         let mut objects = ObjectBudget::new(
             scope.max_objects.min(MAX_FULL_VERIFY_OBJECTS),
             scope.max_objects,
@@ -1311,7 +1311,7 @@ impl NativeGraphContext {
             let root = self.read_native_node(maintenance.primary_root(), scope, &mut objects)?;
             validate_ordered_root_node(
                 &root,
-                &rows_domain_for_version(version),
+                &rows_domain_for_version(version)?,
                 maintenance.row_count(),
             )?;
             store_root = self.replace_relation_primary_root(
@@ -1447,7 +1447,7 @@ impl NativeGraphContext {
         let domain = canonical_domain(vec![
             CborValue::Text("relations".to_owned()),
             CborValue::Bytes(database_id.to_vec()),
-        ]);
+        ])?;
         let root = reader.read_native_node(&relation_map)?;
         let count = match &root {
             NodeData::OrderedLeaf { entries, .. } => entries.len() as u64,
@@ -1575,7 +1575,7 @@ impl NativeGraphContext {
         let version = self.row_snapshot.version();
         let expected_count = version.row_count().ok_or(GraphError::ContextMismatch)?;
         let root = version.primary_root().clone();
-        let domain = rows_domain_for_version(version);
+        let domain = rows_domain_for_version(version)?;
         let entries = {
             let mut objects = ObjectBudget::new(
                 scope.max_objects.min(MAX_RANGE_GRAPH_OBJECTS),
@@ -1701,7 +1701,7 @@ impl NativeGraphContext {
         let version = self.row_snapshot.version();
         let expected_count = version.row_count().ok_or(GraphError::ContextMismatch)?;
         let root = version.primary_root().clone();
-        let domain = rows_domain_for_version(version);
+        let domain = rows_domain_for_version(version)?;
         let mut objects = ObjectBudget::new(
             scope.max_objects.min(MAX_FULL_VERIFY_OBJECTS),
             scope.max_objects,
@@ -1823,7 +1823,7 @@ impl NativeGraphContext {
             return Ok(encoded);
         }
         let expanded = self.expand_overflow(tuple, scope, &mut objects, &mut BTreeSet::new())?;
-        Ok(canonical_value_bytes(&expanded))
+        canonical_value_bytes(&expanded)
     }
 
     /// Replaces each overflow reference in `value` by the ROV-3 value its
@@ -1977,7 +1977,7 @@ impl NativeGraphContext {
             }
             let rov_value = decode_canonical_content(&encoded)?;
             let sov_value = self.to_sov_value(rov_value.clone(), scope, objects, active)?;
-            let semantic_bytes = canonical_value_bytes(&sov_value);
+            let semantic_bytes = canonical_value_bytes(&sov_value)?;
             let actual_digest: [u8; 32] = Sha256::digest(&semantic_bytes).into();
             if actual_digest != semantic_digest {
                 return Err(GraphError::ContentIdentityMismatch);
@@ -3214,7 +3214,7 @@ impl NativeGraphContext {
                     .map_or(CborValue::Null, |suffix| CborValue::Text(suffix.to_owned())),
                 CborValue::Bytes(pin.descriptor_oid.as_bytes().to_vec()),
             ])),
-        ));
+        ))?;
         Ok(OrpBlobBinding { encoded_value, pin })
     }
 
@@ -3244,7 +3244,7 @@ impl NativeGraphContext {
         let domain = canonical_value_bytes(&CborValue::Array(vec![
             CborValue::Text("relations".to_owned()),
             CborValue::Bytes(version.database_id().to_vec()),
-        ]));
+        ]))?;
         let key = crate::row_store::TypedKey::Bytes(version.relation_id().to_vec());
         let relation = {
             let mut read_node = |oid: &NativeOid| self.read_native_node(oid, scope, &mut objects);
@@ -3266,7 +3266,7 @@ impl NativeGraphContext {
             CborValue::Bytes(primary_root.as_bytes().to_vec()),
             CborValue::Null,
             CborValue::Unsigned(row_count),
-        ]));
+        ]))?;
         let mut written = BTreeSet::new();
         let new_relation_root = {
             let mut read_node = |oid: &NativeOid| self.read_native_node(oid, scope, &mut objects);
@@ -3448,7 +3448,7 @@ impl NativeGraphContext {
             scope.metadata_quota.min(MAX_RANGE_METADATA_BYTES),
             Arc::clone(&scope.metadata_used),
         );
-        let domain = rows_domain_for_parts(&candidate.relation_id, &candidate.schema_digest);
+        let domain = rows_domain_for_parts(&candidate.relation_id, &candidate.schema_digest)?;
         let node = self.read_native_node(&candidate.primary_root, scope, &mut objects)?;
         validate_ordered_root_node(&node, &domain, candidate.row_count)?;
         let mut read_node = |oid: &NativeOid| self.read_native_node(oid, scope, &mut objects);
@@ -6150,7 +6150,7 @@ pub(crate) fn load_format3_row_map(
     let relations_domain = canonical_domain(vec![
         CborValue::Text("relations".to_owned()),
         CborValue::Bytes(database_id.to_vec()),
-    ]);
+    ])?;
     let relation_key = crate::row_store::TypedKey::Bytes(relation_id.to_vec());
     let relation = reader
         .find_ordered_entry(&relation_map, &relations_domain, &relation_key)?
@@ -6182,7 +6182,7 @@ pub(crate) fn load_format3_row_map(
         CborValue::Text("rows".to_owned()),
         CborValue::Bytes(relation_id.to_vec()),
         CborValue::Bytes(schema_digest.to_vec()),
-    ]);
+    ])?;
     reader.validate_map_root(&primary_root, &rows_domain, row_count)?;
 
     let generation = u64::from_be_bytes(snapshot_id[..8].try_into().unwrap_or([0; 8]));
@@ -6238,7 +6238,7 @@ fn schema_relation_id(schema: &SchemaDescriptor) -> Result<[u8; 16], GraphError>
         .map_err(|_| GraphError::NonCanonicalData)
 }
 
-fn canonical_domain(fields: Vec<CborValue>) -> Vec<u8> {
+fn canonical_domain(fields: Vec<CborValue>) -> Result<Vec<u8>, GraphError> {
     canonical_value_bytes(&CborValue::Array(fields))
 }
 
@@ -6544,7 +6544,7 @@ impl PinnedNativeGraphReader {
     }
 }
 
-fn rows_domain(relation_id: &[u8; 16], schema_digest: &[u8; 32]) -> Vec<u8> {
+fn rows_domain(relation_id: &[u8; 16], schema_digest: &[u8; 32]) -> Result<Vec<u8>, GraphError> {
     canonical_domain(vec![
         CborValue::Text("rows".to_owned()),
         CborValue::Bytes(relation_id.to_vec()),
@@ -6606,7 +6606,7 @@ fn row_identity_v3(
     let payload = CborValue::Array(vec![uuid(database_id), uuid(relation_id), key, fields]);
     Ok(sov3_domain_digest(
         ROW_IDENTITY_DOMAIN,
-        &canonical_value_bytes(&payload),
+        &canonical_value_bytes(&payload)?,
     ))
 }
 
@@ -6776,6 +6776,14 @@ mod persisted_orp_tests {
     use crate::native_graph::pins::NativeGraphCoordinationLock;
     use crate::row_store::{RowValue, TypedKey};
     use std::future::Future;
+
+    fn canonical_value_bytes(value: &CborValue) -> Vec<u8> {
+        super::canonical_value_bytes(value).expect("canonical test value")
+    }
+
+    fn rows_domain_for_version(version: &crate::row_store::RowMapVersion) -> Vec<u8> {
+        super::rows_domain_for_version(version).expect("rows domain")
+    }
 
     fn block_on<F: Future>(future: F) -> F::Output {
         let mut context = std::task::Context::from_waker(std::task::Waker::noop());
@@ -7271,7 +7279,8 @@ mod persisted_orp_tests {
         let relations_domain = canonical_domain(vec![
             CborValue::Text("relations".to_owned()),
             CborValue::Bytes(database_id.to_vec()),
-        ]);
+        ])
+        .expect("relations domain");
         let relation_map = fixture_git_node(
             directory.path(),
             &NodeData::OrderedLeaf {
@@ -13567,11 +13576,16 @@ fn collect_blob_value_fields(
     }
 }
 
-fn rows_domain_for_version(version: &crate::row_store::RowMapVersion) -> Vec<u8> {
+fn rows_domain_for_version(
+    version: &crate::row_store::RowMapVersion,
+) -> Result<Vec<u8>, GraphError> {
     rows_domain(version.relation_id(), version.schema().schema_digest())
 }
 
-fn rows_domain_for_parts(relation_id: &[u8; 16], schema_digest: &[u8; 32]) -> Vec<u8> {
+fn rows_domain_for_parts(
+    relation_id: &[u8; 16],
+    schema_digest: &[u8; 32],
+) -> Result<Vec<u8>, GraphError> {
     rows_domain(relation_id, schema_digest)
 }
 
@@ -13759,7 +13773,7 @@ pub(crate) fn sov3_value(
                 .collect::<Result<Vec<_>, _>>()?,
         )),
         CborValue::Map(entries) => {
-            let mut transformed = entries
+            let transformed = entries
                 .into_iter()
                 .map(|(key, value)| {
                     Ok((
@@ -13768,14 +13782,20 @@ pub(crate) fn sov3_value(
                     ))
                 })
                 .collect::<Result<Vec<_>, GraphError>>()?;
-            transformed.sort_by_cached_key(|(key, _)| canonical_value_bytes(key));
-            if transformed
-                .windows(2)
-                .any(|pair| canonical_value_bytes(&pair[0].0) == canonical_value_bytes(&pair[1].0))
-            {
+            let mut keyed = transformed
+                .into_iter()
+                .map(|(key, value)| Ok((canonical_value_bytes(&key)?, key, value)))
+                .collect::<Result<Vec<_>, GraphError>>()?;
+            keyed.sort_by(|a, b| a.0.cmp(&b.0));
+            if keyed.windows(2).any(|pair| pair[0].0 == pair[1].0) {
                 return Err(GraphError::NonCanonicalData);
             }
-            Ok(CborValue::Map(transformed))
+            Ok(CborValue::Map(
+                keyed
+                    .into_iter()
+                    .map(|(_, key, value)| (key, value))
+                    .collect(),
+            ))
         }
         // OVB-2 and SOV-3 Blob tags never appear in a stored ROV-3 value.
         CborValue::Tag(60110 | 60112, _) => Err(GraphError::NonCanonicalData),
@@ -13920,7 +13940,7 @@ pub(crate) fn collect_row_dependencies(
             };
             stored_uuid(database)?;
             stored_uuid(relation)?;
-            crate::row_store::TypedKey::decode_canonical(&canonical_value_bytes(key))
+            crate::row_store::TypedKey::decode_canonical(&canonical_value_bytes(key)?)
                 .map_err(|_| GraphError::NonCanonicalData)?;
         }
         // OVB-2 and SOV-3 Blob tags never appear in a stored ROV-3 value.
@@ -14027,6 +14047,10 @@ fn validate_byte_entries(
 #[cfg(test)]
 mod option_value_tests {
     use super::*;
+
+    fn canonical_value_bytes(value: &CborValue) -> Vec<u8> {
+        super::canonical_value_bytes(value).expect("canonical test value")
+    }
 
     fn rov3_blob(descriptor: Vec<u8>) -> CborValue {
         CborValue::Tag(
