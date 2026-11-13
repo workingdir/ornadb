@@ -11,8 +11,8 @@ use orna_hir::{
 };
 
 use crate::binders;
-use crate::engine_money::{currency_name, is_money_type};
 use crate::decimal::Decimal;
+use crate::engine_money::{currency_name, is_money_type};
 use crate::error::Stop;
 use crate::frame::{Frame, TypeEnv, type_args};
 use crate::host::{SysSlot, UNSUPPORTED};
@@ -298,7 +298,13 @@ impl<'p> Machine<'p> {
         }
     }
 
-    fn call(&mut self, body: &'p Body, frame: &mut Frame, id: ExprId, call: &Call) -> Result<Value, Stop> {
+    fn call(
+        &mut self,
+        body: &'p Body,
+        frame: &mut Frame,
+        id: ExprId,
+        call: &Call,
+    ) -> Result<Value, Stop> {
         match &call.callee {
             Callee::Source { def, targs } => {
                 let program = self.program;

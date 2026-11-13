@@ -11,9 +11,9 @@ mod collection;
 mod decimal_divide;
 mod hash;
 mod json;
+mod money;
 mod order;
 mod orna;
-mod money;
 mod ovb;
 #[cfg(test)]
 mod registry_test;

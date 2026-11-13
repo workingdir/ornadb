@@ -251,13 +251,12 @@ impl BodyCheck<'_> {
             return Some(self.error());
         };
         self.unify_operands(&[container, value], &implementation.params, &span);
-        body.exprs[id].kind =
-            operator_call(
-                implementation.member,
-                implementation.targs,
-                &[container_expr, value_expr],
-                span,
-            );
+        body.exprs[id].kind = operator_call(
+            implementation.member,
+            implementation.targs,
+            &[container_expr, value_expr],
+            span,
+        );
         Some(implementation.output)
     }
 
@@ -290,7 +289,12 @@ impl BodyCheck<'_> {
             return Some(self.error());
         };
         self.unify_operands(&[operand_ty], &implementation.params, &span);
-        body.exprs[id].kind = operator_call(implementation.member, implementation.targs, &[operand], span);
+        body.exprs[id].kind = operator_call(
+            implementation.member,
+            implementation.targs,
+            &[operand],
+            span,
+        );
         Some(implementation.output)
     }
 
@@ -368,10 +372,10 @@ impl BodyCheck<'_> {
                 .map(|parameter| self.substitute(*parameter, receiver_args))
                 .collect();
             let output = self.substitute(declared_output, receiver_args);
-            let self_ty = self
-                .program
-                .tys
-                .intern(TyKind::Adt(owner, receiver_args.to_vec().into_boxed_slice()));
+            let self_ty = self.program.tys.intern(TyKind::Adt(
+                owner,
+                receiver_args.to_vec().into_boxed_slice(),
+            ));
             let targs = protocol_args
                 .iter()
                 .copied()
@@ -450,7 +454,12 @@ impl BodyCheck<'_> {
 }
 
 /// The source call an operator becomes once its implementation is selected.
-fn operator_call(member: DefId, targs: Box<[Ty]>, operands: &[ExprId], span: SyntaxSpan) -> ExprKind {
+fn operator_call(
+    member: DefId,
+    targs: Box<[Ty]>,
+    operands: &[ExprId],
+    span: SyntaxSpan,
+) -> ExprKind {
     let args = operands
         .iter()
         .enumerate()

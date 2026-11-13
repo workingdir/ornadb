@@ -69,16 +69,14 @@ fn money_parts(value: Value) -> ([u8; 16], Value) {
 
 #[test]
 fn a_sum_of_two_same_currency_amounts_is_their_exact_total() {
-    let sum = run("pub fn run(): Money<GBP> = gbp(12.34) + gbp(1.00);\n")
-        .expect("sum runs");
+    let sum = run("pub fn run(): Money<GBP> = gbp(12.34) + gbp(1.00);\n").expect("sum runs");
     let total = run("pub fn run(): Money<GBP> = gbp(13.34);\n").expect("literal runs");
     assert_eq!(money_parts(sum), money_parts(total));
 }
 
 #[test]
 fn the_amount_field_reads_the_exact_decimal() {
-    let value =
-        run("pub fn run(): Decimal = (gbp(12.34)).amount;\n").expect("amount runs");
+    let value = run("pub fn run(): Decimal = (gbp(12.34)).amount;\n").expect("amount runs");
     let literal = run("pub fn run(): Decimal = 12.34;\n").expect("literal runs");
     assert_eq!(value, literal);
 }
@@ -86,8 +84,7 @@ fn the_amount_field_reads_the_exact_decimal() {
 #[test]
 fn negate_and_subtract_keep_the_currency() {
     let negated = run("pub fn run(): Money<GBP> = -gbp(3.00);\n").expect("negate runs");
-    let minus_three = run("pub fn run(): Money<GBP> = gbp(0.00) - gbp(3.00);\n")
-        .expect("sub runs");
+    let minus_three = run("pub fn run(): Money<GBP> = gbp(0.00) - gbp(3.00);\n").expect("sub runs");
     assert_eq!(money_parts(negated), money_parts(minus_three));
 }
 
