@@ -243,7 +243,10 @@ mod tests {
     fn instant_rejects_out_of_range_nanoseconds() {
         let raw = Raw::Tag(
             INSTANT_TAG,
-            Box::new(Raw::Array(vec![Raw::Int(0.into()), Raw::Int(1_000_000_000.into())])),
+            Box::new(Raw::Array(vec![
+                Raw::Int(0.into()),
+                Raw::Int(1_000_000_000.into()),
+            ])),
         );
         assert!(from_raw(&raw).is_err());
     }
@@ -252,7 +255,10 @@ mod tests {
     fn row_reference_round_trips_byte_exact() {
         let raw = Raw::Tag(
             PINNED_ROW_REFERENCE_TAG,
-            Box::new(Raw::Array(vec![Raw::Text("run".to_owned()), Raw::Int(3.into())])),
+            Box::new(Raw::Array(vec![
+                Raw::Text("run".to_owned()),
+                Raw::Int(3.into()),
+            ])),
         );
         let value = from_raw(&raw).expect("reference decodes");
         assert!(matches!(value, Value::RowRef(_)));
