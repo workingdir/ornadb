@@ -57,13 +57,15 @@ fn order_test(op: BinOp) -> Option<(&'static str, BinOp, &'static str)> {
     }
 }
 
-/// One instance that can serve an operator: its member and that member's signature.
+/// One instance that can serve an operator: its member, that member's signature, and the type arguments the call
+/// records (protocol arguments, then `Self`, then the nominal's own arguments).
 struct Implementation {
     member: DefId,
     params: Vec<Ty>,
     output: Ty,
     /// The protocol's last type argument, which the member's result must equal.
     protocol_output: Option<Ty>,
+    targs: Box<[Ty]>,
 }
 
 impl BodyCheck<'_> {
@@ -104,7 +106,12 @@ impl BodyCheck<'_> {
             return Some(self.error());
         };
         self.unify_operands(&[left, right], &implementation.params, &span);
-        body.exprs[id].kind = operator_call(implementation.member, &[left_expr, right_expr], span);
+        body.exprs[id].kind = operator_call(
+            implementation.member,
+            implementation.targs,
+            &[left_expr, right_expr],
+            span,
+        );
         Some(implementation.output)
     }
 
@@ -148,7 +155,12 @@ impl BodyCheck<'_> {
         let variant = self.ordering_variant(variant)?;
         let node_span = body.exprs[id].span.clone();
         let call = body.exprs.push(crate::Expr {
-            kind: operator_call(implementation.member, &[left_expr, right_expr], span),
+            kind: operator_call(
+                implementation.member,
+                implementation.targs,
+                &[left_expr, right_expr],
+                span,
+            ),
             ty: ordering,
             span: node_span.clone(),
             weight: 1,
@@ -240,7 +252,12 @@ impl BodyCheck<'_> {
         };
         self.unify_operands(&[container, value], &implementation.params, &span);
         body.exprs[id].kind =
-            operator_call(implementation.member, &[container_expr, value_expr], span);
+            operator_call(
+                implementation.member,
+                implementation.targs,
+                &[container_expr, value_expr],
+                span,
+            );
         Some(implementation.output)
     }
 
@@ -273,7 +290,7 @@ impl BodyCheck<'_> {
             return Some(self.error());
         };
         self.unify_operands(&[operand_ty], &implementation.params, &span);
-        body.exprs[id].kind = operator_call(implementation.member, &[operand], span);
+        body.exprs[id].kind = operator_call(implementation.member, implementation.targs, &[operand], span);
         Some(implementation.output)
     }
 
@@ -351,11 +368,22 @@ impl BodyCheck<'_> {
                 .map(|parameter| self.substitute(*parameter, receiver_args))
                 .collect();
             let output = self.substitute(declared_output, receiver_args);
+            let self_ty = self
+                .program
+                .tys
+                .intern(TyKind::Adt(owner, receiver_args.to_vec().into_boxed_slice()));
+            let targs = protocol_args
+                .iter()
+                .copied()
+                .chain(std::iter::once(self_ty))
+                .chain(receiver_args.iter().copied())
+                .collect();
             found.push(Implementation {
                 member,
                 params,
                 output,
                 protocol_output: protocol_args.last().copied().filter(|_| operator.output),
+                targs,
             });
         }
         found
@@ -422,7 +450,7 @@ impl BodyCheck<'_> {
 }
 
 /// The source call an operator becomes once its implementation is selected.
-fn operator_call(member: DefId, operands: &[ExprId], span: SyntaxSpan) -> ExprKind {
+fn operator_call(member: DefId, targs: Box<[Ty]>, operands: &[ExprId], span: SyntaxSpan) -> ExprKind {
     let args = operands
         .iter()
         .enumerate()
@@ -432,10 +460,7 @@ fn operator_call(member: DefId, operands: &[ExprId], span: SyntaxSpan) -> ExprKi
         })
         .collect();
     ExprKind::Call(Box::new(Call {
-        callee: Callee::Source {
-            def: member,
-            targs: Box::new([]),
-        },
+        callee: Callee::Source { def: member, targs },
         callee_span: span,
         args,
         piped: false,
