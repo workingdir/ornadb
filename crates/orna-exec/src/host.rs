@@ -12,6 +12,10 @@ use orna_value::{Raw, Snapshot};
 
 use crate::store::{MemoryStore, TableStore};
 
+#[path = "host/catalog.rs"]
+mod catalog;
+pub use catalog::{HostInfo, HostRuntimeMode, ProgramCatalog};
+
 /// The code a host answers for a member, or a capability, it does not provide.
 pub(crate) const UNSUPPORTED: &str = "ORNA-EVAL-UNSUPPORTED";
 

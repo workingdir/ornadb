@@ -1,0 +1,10 @@
+[package]
+name = "orna-live-lease"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Application work supervisor and lease state machine for live sessions"
+
+[dependencies]
+futures = "0.3.31"

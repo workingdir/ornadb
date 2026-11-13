@@ -14,11 +14,11 @@
 
 use futures::executor::block_on;
 use orna_live::{
-    CreateRequest, Error, HttpConnection, Limits, LiveApplicationWorkLease,
-    LiveApplicationWorkSupervisor, LiveCredentialIssuer, LiveHost, LiveTransport, ResumeRequest,
-    TransportLimits, WebSocketApplicationPreparation, WebSocketOutput, WebSocketState, WireRequest,
-    WireResponse, encode_websocket_output,
+    CreateRequest, HttpConnection, Limits, LiveCredentialIssuer, LiveHost, LiveTransport,
+    ResumeRequest, TransportLimits, WebSocketApplicationPreparation, WebSocketOutput,
+    WebSocketState, WireRequest, WireResponse, encode_websocket_output,
 };
+use orna_live_lease::{LeaseError, LiveApplicationWorkLease, LiveApplicationWorkSupervisor};
 use orna_protocol::{Envelope, Message, PresentationContext};
 use orna_security::{BoundaryError, CredentialIssuer, Origin, OriginPolicy, SessionBoundary};
 use orna_serving::{Limits as ServingLimits, Serving};
@@ -80,8 +80,8 @@ fn assert_cancellation_delivered(lease: &mut LiveApplicationWorkLease) {
         Ok(Some(())),
         "cancellation must reach the worker notification receiver"
     );
-    assert_eq!(lease.check_active(), Err(Error::Closed));
-    assert!(matches!(lease.spawn_child(), Err(Error::Closed)));
+    assert_eq!(lease.check_active(), Err(LeaseError::Closed));
+    assert!(matches!(lease.spawn_child(), Err(LeaseError::Closed)));
 }
 
 /// ORNA-CONCUR-001; TASK-END-1 steps 1, 3, 4 and 7. A failed first session
@@ -107,7 +107,7 @@ fn cancel_and_join_all_signals_and_joins_later_sessions_after_failed_lease() {
     for session in [[1; 16], [2; 16], [3; 16]] {
         assert!(matches!(
             supervisor.admit(session, [4; 16]),
-            Err(Error::Closed)
+            Err(LeaseError::Closed)
         ));
     }
 
@@ -128,7 +128,7 @@ fn cancel_and_join_all_signals_and_joins_later_sessions_after_failed_lease() {
     last_probe.assert_notified();
     assert_eq!(
         last_probe.poll(drain.as_mut()),
-        Poll::Ready(Err(Error::DeletionFailed)),
+        Poll::Ready(Err(LeaseError::DeletionFailed)),
         "report the failed lease only after all other work has acknowledged"
     );
 }
@@ -148,7 +148,7 @@ fn cancel_and_join_all_waits_for_recursive_acknowledgements() {
     assert_cancellation_delivered(&mut descendant);
     assert!(matches!(
         supervisor.admit([1; 16], [2; 16]),
-        Err(Error::Closed)
+        Err(LeaseError::Closed)
     ));
 
     root.complete();
@@ -167,11 +167,11 @@ fn cancel_and_join_all_reports_an_unacknowledged_lease() {
     let mut drain = supervisor.cancel_and_join_all();
     assert_eq!(
         JoinProbe::new().poll(drain.as_mut()),
-        Poll::Ready(Err(Error::DeletionFailed))
+        Poll::Ready(Err(LeaseError::DeletionFailed))
     );
     assert!(matches!(
         supervisor.admit([1; 16], [2; 16]),
-        Err(Error::Closed)
+        Err(LeaseError::Closed)
     ));
 }
 

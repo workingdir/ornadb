@@ -5,9 +5,8 @@ use orna_application::{
 };
 use orna_check::Catalogue;
 use orna_evaluator::{Environment, Limits};
-use orna_live::{
-    LiveAdminEffectDispatcher, LiveApplication, LiveApplicationWorkSupervisor, LiveEvalResponse,
-};
+use orna_live::{LiveAdminEffectDispatcher, LiveApplication, LiveEvalResponse};
+use orna_live_lease::LiveApplicationWorkSupervisor;
 use orna_protocol::{DatabaseContext, Message, PresentationContext, ResultStatus};
 use orna_repository::Repository;
 use orna_runtime::{

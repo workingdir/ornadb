@@ -26,6 +26,7 @@ orna-value = { path = "../orna-value" }
 orna-syntax = { path = "../orna-syntax" }
 orna-syntax-ast = { path = "../orna-syntax-ast" }
 orna-live = { path = "../orna-live", features = ["first-party-effect-trust"] }
+orna-live-lease = { path = "../orna-live-lease" }
 orna-protocol = { path = "../orna-protocol" }
 orna-project = { path = "../orna-project" }
 num-bigint = "0.4.6"
