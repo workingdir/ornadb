@@ -2,10 +2,24 @@
 //! the staged inventory.
 
 use super::*;
-use crate::cli_source_edit::{
-    checked_project_source_path, restore_source_after_failed_write, write_source_atomically,
-};
+use orna_cli_support::source_edit::{restore_source_after_failed_write, write_source_atomically};
 use orna_repository::relation_admission::{RelationAdmissionError, StagedCandidate};
+
+fn checked_project_source_path(
+    root: &std::path::Path,
+    logical_path: &str,
+) -> Result<std::path::PathBuf, Diagnostic> {
+    orna_cli_support::source_edit::checked_project_source_path(root, logical_path)
+        .map_err(|_| mv_source_path_error())
+}
+
+fn mv_source_path_error() -> Diagnostic {
+    Diagnostic::target(
+        "E2100",
+        "table source path is unavailable or unsafe",
+        "restore the source module as a regular worktree file, then retry `mv`",
+    )
+}
 
 /// The worktree source after the declaration-name edit, with the bytes a later
 /// failure must put back. A run interrupted after the write leaves the

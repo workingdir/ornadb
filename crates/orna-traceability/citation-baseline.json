@@ -4,6 +4,7 @@
     "orna-application",
     "orna-base",
     "orna-cli",
+    "orna-cli-support",
     "orna-conformance",
     "orna-differential",
     "orna-evaluator",
@@ -34,7 +35,9 @@
     "orna-sys-interface",
     "orna-sys-model",
     "orna-table",
+    "orna-cursor",
     "orna-traceability",
+    "orna-unicode",
     "orna-value"
   ],
   "cited_ids": [

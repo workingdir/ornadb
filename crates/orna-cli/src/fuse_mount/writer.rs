@@ -70,7 +70,7 @@ impl MountWriter {
     ) -> Result<Arc<Self>, String> {
         let (identity, initial_digest) = super::runtime_identity(repository)
             .map_err(|error| format!("repository runtime identity is unavailable: {error}"))?;
-        let owner_id = super::invocation_owner_id();
+        let owner_id = orna_runtime::process_owner_id();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -527,7 +527,8 @@ impl MountWriter {
         })?;
         let live_repository = self.repository.clone();
         let live_table = row.table.object_id();
-        let mut live_identity = crate::table_schema::LiveTableSchemaIdentity::new(live_table);
+        let mut live_identity =
+            orna_cli_support::table_schema::LiveTableSchemaIdentity::new(live_table);
         let candidate = VfsSaveCandidate::new(replacement, validator)
             .with_protected_content_transfers(replacement_bytes.clone(), content_transfers)
             .with_live_schema_identity(move || live_identity.read(&live_repository));
