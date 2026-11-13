@@ -2,6 +2,7 @@
 members = [
     "crates/orna-base",
     "crates/orna-application",
+    "crates/orna-cbor",
     "crates/orna-cli",
     "crates/orna-cli-support",
     "crates/archive/orna-compat-v1",
@@ -35,6 +36,7 @@ members = [
     "crates/orna-storage",
     "crates/orna-stream",
     "crates/orna-syntax",
+    "crates/orna-syntax-ast",
     "crates/orna-sys",
     "crates/orna-sys-codegen",
     "crates/orna-sys-id",

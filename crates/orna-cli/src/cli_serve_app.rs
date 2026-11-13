@@ -816,10 +816,10 @@ fn media_response(reply: MediaReply, media_type: &str, descriptor: &NativeOid) -
 /// True when `source` declares `serve` as a `pub fn` (the only serving entry).
 fn serve_is_public(source: &str) -> bool {
     orna_syntax::parse_module(source).value.items.iter().any(|item| {
-        matches!(item.visibility, orna_syntax::Visibility::Public { .. })
+        matches!(item.visibility, orna_syntax_ast::Visibility::Public { .. })
             && matches!(
                 &item.declaration,
-                orna_syntax::Declaration::Function { signature, .. } if signature.name == SERVE_ENTRY
+                orna_syntax_ast::Declaration::Function { signature, .. } if signature.name == SERVE_ENTRY
             )
     })
 }

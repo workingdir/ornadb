@@ -7,7 +7,9 @@
 //! loads them ahead of every caller's sources, so a native call always has a
 //! signature to type against.
 
-use orna_syntax::{SyntaxTree, parse_interface_with_file};
+use orna_syntax::parse_interface_with_file;
+
+use orna_syntax_ast::SyntaxTree;
 
 use crate::{ModulePath, Name, NativeAbi, SourceId};
 
@@ -22,7 +24,7 @@ pub const ENGINE_NATIVE_ABI: NativeAbi = NativeAbi::new(1);
 pub(crate) const EMBEDDED_SOURCE_BASE: u32 = u32::MAX - 64;
 
 /// Every embedded interface file: its dotted module path and its text.
-const FILES: [(&str, &str); 24] = [
+const FILES: [(&str, &str); 25] = [
     ("core", include_str!("../interface/core.orna")),
     ("core.bits", include_str!("../interface/core/bits.orna")),
     ("core.ops", include_str!("../interface/core/ops.orna")),
@@ -30,6 +32,7 @@ const FILES: [(&str, &str); 24] = [
         "core.decimal",
         include_str!("../interface/core/decimal.orna"),
     ),
+    ("core.money", include_str!("../interface/core/money.orna")),
     ("core.range", include_str!("../interface/core/range.orna")),
     (
         "core.temperature",

@@ -7,7 +7,8 @@ use std::sync::LazyLock;
 
 use orna_hir::{Lowering, ModulePath, Name, PreludeExports, SourceId, SourceUnit};
 use orna_standard_sources::{REFERENCE_STANDARD_PRELUDE_EXPORTS_V1, reference_standard_sources_v1};
-use orna_syntax::{SyntaxTree, parse_module_with_file};
+use orna_syntax::parse_module_with_file;
+use orna_syntax_ast::SyntaxTree;
 
 /// One standard module: the path lowering registers it under and its parsed tree.
 struct StandardModule {

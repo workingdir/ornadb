@@ -14,6 +14,7 @@ description = "Link plan for Orna native declarations: project native-library ma
 orna-base = { path = "../orna-base" }
 orna-hir = { path = "../orna-hir" }
 orna-syntax = { path = "../orna-syntax" }
+orna-syntax-ast = { path = "../orna-syntax-ast" }
 sha2 = "0.10.9"
 toml_edit = { version = "0.25.17", default-features = false, features = ["parse"] }
 

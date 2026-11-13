@@ -3,7 +3,8 @@ use orna_evaluator::{
     EffectHandler, Environment, EvaluationError, Functions, Limits, PureFunction, RelationPage,
     StepBudget, invoke_named_with_effects,
 };
-use orna_syntax::{Expr, parse_expression};
+use orna_syntax::parse_expression;
+use orna_syntax_ast::Expr;
 use orna_value::CanonicalValue;
 use orna_value::Raw;
 

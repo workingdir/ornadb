@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use orna_syntax::{Expr, LiteralKind, Pattern, TypeExpr};
+use orna_syntax_ast::{Expr, LiteralKind, Pattern, TypeExpr};
 use orna_value::{Diagnostic, SafeText};
 
 use super::*;
@@ -1250,7 +1250,7 @@ pub(crate) fn infer_recovery_pipeline(
 }
 
 pub(crate) fn infer_fail_call(
-    arguments: &[orna_syntax::Argument],
+    arguments: &[orna_syntax_ast::Argument],
     scope: &Scope,
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
@@ -1292,7 +1292,7 @@ pub(crate) fn infer_fail_call(
 }
 
 pub(crate) fn infer_error_call(
-    arguments: &[orna_syntax::Argument],
+    arguments: &[orna_syntax_ast::Argument],
     scope: &Scope,
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
@@ -1412,7 +1412,7 @@ pub(crate) fn infer_lambda_pipeline_stage(
 pub(crate) fn infer_named_pipeline_stage(
     input: Inferred,
     callee: &Expr,
-    arguments: &[orna_syntax::Argument],
+    arguments: &[orna_syntax_ast::Argument],
     scope: &Scope,
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
@@ -1524,7 +1524,7 @@ pub(crate) fn infer_named_pipeline_stage(
 pub(crate) fn expected_pipeline_call_parameter<'a>(
     parameters: &'a [Type],
     parameter_names: Option<&'a [String]>,
-    arguments: &[orna_syntax::Argument],
+    arguments: &[orna_syntax_ast::Argument],
     index: usize,
 ) -> Option<&'a Type> {
     let argument = arguments.get(index)?;
@@ -1545,7 +1545,7 @@ pub(crate) fn infer_generic_pipeline_stage(
     input: Inferred,
     callee: &Expr,
     type_arguments: &[TypeExpr],
-    arguments: &[orna_syntax::Argument],
+    arguments: &[orna_syntax_ast::Argument],
     scope: &Scope,
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
@@ -1846,7 +1846,7 @@ pub(crate) fn infer_finite_list_callback(
 /// operation checks continue to use the table symbol directly.
 pub(crate) fn infer_relation_member_call(
     callee: &Expr,
-    arguments: &[orna_syntax::Argument],
+    arguments: &[orna_syntax_ast::Argument],
     scope: &Scope,
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
@@ -1900,7 +1900,7 @@ pub(crate) fn infer_relation_member_call(
 /// the row schema; mutation execution remains a separate runtime concern.
 pub(crate) fn infer_table_operation(
     callee: &Expr,
-    arguments: &[orna_syntax::Argument],
+    arguments: &[orna_syntax_ast::Argument],
     scope: &Scope,
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
@@ -2707,7 +2707,7 @@ pub(crate) fn intrinsic_value_type(name: &str) -> Option<Type> {
 
 pub(crate) fn infer_parallel_call(
     callee: &Expr,
-    arguments: &[orna_syntax::Argument],
+    arguments: &[orna_syntax_ast::Argument],
     scope: &Scope,
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
@@ -2756,7 +2756,7 @@ pub(crate) fn infer_parallel_call(
 
 pub(crate) fn infer_race_call(
     callee: &Expr,
-    arguments: &[orna_syntax::Argument],
+    arguments: &[orna_syntax_ast::Argument],
     scope: &Scope,
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
@@ -2802,7 +2802,7 @@ pub(crate) fn infer_race_call(
 
 pub(crate) fn infer_timeout_call(
     callee: &Expr,
-    arguments: &[orna_syntax::Argument],
+    arguments: &[orna_syntax_ast::Argument],
     scope: &Scope,
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,

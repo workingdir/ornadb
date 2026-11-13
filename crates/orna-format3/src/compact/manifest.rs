@@ -7,7 +7,9 @@
 
 use std::{cmp::Ordering, collections::BTreeSet};
 
-use orna_syntax::{Expr, LiteralKind, RecordField, parse_row};
+use orna_syntax::parse_row;
+
+use orna_syntax_ast::{Expr, LiteralKind, RecordField};
 use orna_value::{CanonicalValue, compare_primary_keys};
 use uuid::Uuid;
 

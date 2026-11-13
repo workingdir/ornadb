@@ -18,7 +18,8 @@ use orna_evaluator::{
 };
 use orna_intrinsics::{Dispatch, catalogue};
 use orna_project_repl::AdmittedReplSession;
-use orna_syntax::{Declaration, parse_module_with_file};
+use orna_syntax::parse_module_with_file;
+use orna_syntax_ast::Declaration;
 use orna_value::{CanonicalValue, Raw};
 
 const RATIO_LIMIT: u64 = 43; // 4.3x, compared as tenths
@@ -83,7 +84,7 @@ fn standard_functions() -> Functions {
     Functions::with_standard(Arc::new(layer))
 }
 
-fn body_for(expression: &str) -> orna_syntax::Expr {
+fn body_for(expression: &str) -> orna_syntax_ast::Expr {
     let source = format!("pub fn run() = {expression};\n");
     let parsed = parse_module_with_file(&source, "scale-run.orna");
     assert!(parsed.is_ok(), "{:#?}", parsed.diagnostics);

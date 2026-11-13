@@ -95,7 +95,7 @@ pub fn classify(case_id: &str, diagnostic: &str) -> Option<&'static str> {
     let name = unresolved_name(diagnostic)?;
     Some(match name {
         "mail" | "google" | "finance" | "energy" | "HEAD" | "CWD" | "work" => CONNECTOR_AND_HOST,
-        "Money" | "GBP" | "EUR" | "USD" | "kWh" | "mph" | "A" | "C" => CURRENCY_AND_UNIT,
+        "kWh" | "mph" | "A" | "C" => CURRENCY_AND_UNIT,
         "Contact" | "contacts" | "Message" | "Audit" | "Order" | "Note" | "Page" | "Customer"
         | "Account" | "Payment" | "Reading" | "Status" | "Locale" | "DisplayContext" | "Europe"
         | "vehicle" | "openbanking" | "bank" => FIXTURE_TABLES,
@@ -202,10 +202,7 @@ mod tests {
             Some(CONNECTOR_AND_HOST)
         );
         assert_eq!(
-            classify(
-                case,
-                "m: ORNA-S012-UNRESOLVED: `Money` is not a declared type"
-            ),
+            classify(case, "m: ORNA-S012-UNRESOLVED: `kWh` is not in scope"),
             Some(CURRENCY_AND_UNIT)
         );
         assert_eq!(

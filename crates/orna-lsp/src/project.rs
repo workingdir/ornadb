@@ -21,7 +21,9 @@ use orna_hir::{DefKind, FnBody, NativeBinding, NativeKey, SourceId, SourceUnit, 
 use orna_link::{EngineRegistry, LinkError, LinkProfile, ProjectManifest, host_target, plan};
 use orna_project::{LoadedProject, ProjectLoadError, ProjectLoader};
 use orna_repository::Repository;
-use orna_syntax::{Declaration, SyntaxSpan, SyntaxTree, parse_module};
+use orna_syntax::parse_module;
+use orna_syntax_ast::SourceSpan as SyntaxSpan;
+use orna_syntax_ast::{Declaration, SyntaxTree};
 
 use crate::analysis;
 use crate::documents::PositionMapper;

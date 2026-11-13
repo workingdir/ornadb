@@ -165,7 +165,7 @@ fn next_index(values: &[i64], strict: bool) -> Vec<usize> {
 mod tests {
     use super::*;
     use crate::lexer::{Keyword, TokenKind};
-    use crate::parser::SourceSpan;
+    use orna_syntax_ast::SourceSpan;
 
     /// The forward scans that `TokenLookahead` replaced, kept as the oracle.
     fn naive_terminated_initializer(tokens: &[Token], start: usize) -> bool {

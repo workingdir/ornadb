@@ -6,7 +6,7 @@
 
 use std::cmp::Ordering;
 
-use orna_syntax::SyntaxSpan;
+use orna_syntax_ast::SourceSpan as SyntaxSpan;
 
 use super::{BodyCheck, NotYetReason};
 use crate::diag::{INFER_CONFLICT, UNIT_DIM, UNIT_INEXACT, UNIT_LIMIT, UNIT_POW};

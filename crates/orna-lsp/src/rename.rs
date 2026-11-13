@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use orna_syntax::SyntaxSpan;
+use orna_syntax_ast::SourceSpan as SyntaxSpan;
 
 use crate::analysis::normalized_identifier;
 use crate::documents::Document;
@@ -164,7 +164,7 @@ pub(crate) fn valid_identifier(name: &str) -> bool {
             parse.value.items.as_slice(),
             [item] if matches!(
                 &item.declaration,
-                orna_syntax::Declaration::Function { signature, .. }
+                orna_syntax_ast::Declaration::Function { signature, .. }
                     if signature.name == name
                         && normalized_identifier(&signature.name) == normalized_identifier(name)
             )

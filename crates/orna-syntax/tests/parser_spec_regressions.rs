@@ -1,10 +1,9 @@
 //! Parser regressions for bead ornadb-5il1.118, the A01 syntax audit of the
 //! Orna 1.1.0 grammar. Each test pins one audited reproducer.
 
-use orna_syntax::{
-    ControlKind, Declaration, Expr, Statement, TableMember, TokenKind, lex, parse_expression,
-    parse_module, parse_repl,
-};
+use orna_syntax::{TokenKind, lex, parse_expression, parse_module, parse_repl};
+
+use orna_syntax_ast::{ControlKind, Declaration, Expr, Statement, TableMember};
 
 fn function_body(source: &str) -> Expr {
     let parsed = parse_module(source);

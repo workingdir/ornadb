@@ -1,11 +1,10 @@
 //! UUID text and byte identities, digests, and row/schema/argument identities.
 
 use crate::Result;
-use crate::cbor::encode_raw;
 use crate::error::Error;
 use crate::format3::{ContextValue, ValueFormat, encode_context_raw};
 use crate::media::MimeRegistry;
-use crate::raw::{Raw, bytes, tag};
+use crate::raw::{Raw, bytes, encode_raw, tag};
 use crate::schema::{SchemaDescriptor, validate_type, validate_value_as_type};
 use crate::tags::UUID_TAG;
 use sha2::{Digest as _, Sha256};

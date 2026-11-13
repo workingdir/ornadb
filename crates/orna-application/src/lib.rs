@@ -44,10 +44,10 @@ pub use orna_security::{
     RemoteAnalysisRecordError, RemoteAnalysisRequest, Reproducibility, RetainedArtifact,
     RetainedArtifactError,
 };
-use orna_syntax::{
+use orna_syntax::{parse_module_with_file, parse_repl};
+use orna_syntax_ast::{
     CaseArm, Declaration, Expr, FieldInitializer, FunctionSignature, Item, Pattern, Statement,
-    StringSegment, SyntaxTree, TableMember, UseTail, Visibility, parse_module_with_file,
-    parse_repl,
+    StringSegment, SyntaxTree, TableMember, UseTail, Visibility,
 };
 use orna_sys_id::{SysFailureCode, SysFunction, SysGroupedHandle, SysRelation};
 use orna_value::{CanonicalSnapshot, CanonicalValue, OvbRaw, SafeText};

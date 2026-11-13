@@ -38,6 +38,7 @@ orna-sys-codegen = { path = "../orna-sys-codegen" }
 orna-sys-codegen = { path = "../orna-sys-codegen" }
 orna-sys-model = { path = "../orna-sys-model" }
 orna-syntax = { path = "../orna-syntax" }
+orna-syntax-ast = { path = "../orna-syntax-ast" }
 serde_json = { version = "1.0.151", features = ["preserve_order"] }
 tempfile = "3.23.0"
 

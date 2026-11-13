@@ -5,7 +5,7 @@
 //! receiver is its first argument. Protocol dispatch is static (ORNA-GENERIC-002),
 //! so the selection is decided here rather than at run time.
 
-use orna_syntax::SyntaxSpan;
+use orna_syntax_ast::SourceSpan as SyntaxSpan;
 
 use crate::diag::GENERIC_OVERLAP;
 use crate::{Bound, Callee, DefId, DefKind, HirDiagnostic, Name, ParamIdx, Ty, TyKind};

@@ -608,8 +608,3 @@ new_limit = 2325
 reason = "stage 03 moves the portable 1.0 contract module whole from orna-foundation/src/lib.rs (recorded 2411 lines) into orna-value; splitting it into reference and diagnostic seams is later debt"
 bead = "ornadb-7603h.3"
 
-[[raise]]
-path = "crates/orna-syntax/src/parser.rs"
-new_limit = 6300
-reason = "stage N1 adds the native declaration production, its parameter and effect-clause parsers and the ORNA-NATIVE-003 placement rejections; parser.rs already carries every module production and splitting the native form out is follow-up work on the bead"
-bead = "ornadb-3brdo.1"

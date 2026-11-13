@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use num_bigint::BigInt;
 use num_traits::{One, ToPrimitive};
-use orna_syntax::{
+use orna_syntax_ast::{
     Declaration, Expr, Item, LiteralKind, Pattern, SyntaxTree, TypeExpr, TypeMember,
     TypeRepresentation, UnitDefinition, Visibility,
 };

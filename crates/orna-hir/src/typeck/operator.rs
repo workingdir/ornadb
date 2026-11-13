@@ -6,7 +6,7 @@
 //! `in` is the one operator whose receiver is its right operand: `value in container`
 //! selects the `Contains` instance of `container` and becomes `container.contains(value)`.
 
-use orna_syntax::SyntaxSpan;
+use orna_syntax_ast::SourceSpan as SyntaxSpan;
 
 use crate::diag::GENERIC_OVERLAP;
 use crate::{

@@ -38,6 +38,30 @@ pub table Payment {
 }
 ";
 
+/// The fixture currencies the old catalogue supplies to every reference module (`GBP`, `EUR`, `USD`,
+/// with `Money` from `core.money`'s root environment). Each is a nominal type implementing `Currency`
+/// with its code and minor digits, as ORNA-MONEY-004 requires. Reached through `use fixture.currencies.*;`.
+pub const CURRENCY_SUPPORT: &str = "\
+pub type GBP {
+    impl Currency {
+        static code = \"GBP\";
+        static minor_digits = 2;
+    }
+}
+pub type EUR {
+    impl Currency {
+        static code = \"EUR\";
+        static minor_digits = 2;
+    }
+}
+pub type USD {
+    impl Currency {
+        static code = \"USD\";
+        static minor_digits = 2;
+    }
+}
+";
+
 /// The attached database modules, as `(logical path, source)`. The old catalogue
 /// names each one by its module (`contacts`, `energy`, `mail`). The observer
 /// attaches a root only to a reference case that names it (see

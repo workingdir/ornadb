@@ -5,10 +5,16 @@
 //! the same otherwise-unresolved name are ambiguous (ORNA-S011), and `sys` is
 //! built in and never shadowed (ORNA-NS-006). Resolution runs once; every later
 //! question is a table lookup.
+//!
+//! Root-environment names (`Money` and `Currency` from `core.money`) are bound
+//! after the glob pass rather than through a `PreludeExports` table, so a local
+//! declaration or any import, explicit or wildcard, shadows them. This is a
+//! deliberate deviation from the design text, accepted by the orchestrator
+//! (hir-host.md B2); see `bind_root_environment`.
 
 use std::collections::BTreeMap;
 
-use orna_syntax::UseTail;
+use orna_syntax_ast::UseTail;
 
 use crate::Idx;
 use crate::resolve::PathKind;
@@ -20,11 +26,11 @@ impl Builder {
     /// Resolves every `use` declaration into the importing module's scope.
     pub(crate) fn resolve_imports(&mut self) {
         let uses = std::mem::take(&mut self.uses);
-        let mut globs: Vec<(ModuleId, ModuleId, orna_syntax::SyntaxSpan)> = Vec::new();
+        let mut globs: Vec<(ModuleId, ModuleId, orna_syntax_ast::SourceSpan)> = Vec::new();
         for pending in &uses {
             self.apply_use(pending, &mut globs);
         }
-        let mut importers: Vec<(ModuleId, orna_syntax::SyntaxSpan)> = Vec::new();
+        let mut importers: Vec<(ModuleId, orna_syntax_ast::SourceSpan)> = Vec::new();
         for (importer, target, span) in globs {
             self.collect_glob(importer, target);
             if !importers.iter().any(|(seen, _)| *seen == importer) {
@@ -34,13 +40,41 @@ impl Builder {
         for (importer, span) in importers {
             self.finalize_glob(importer, span);
         }
+        self.bind_root_environment();
+    }
+
+    /// Binds the root-environment names every module sees without an import: `Money` and `Currency`
+    /// from `core.money` (spec 09-standard-library.md; hir-host.md B2). A local declaration or an import
+    /// that already binds the name wins, so this only fills names the module does not otherwise bind.
+    fn bind_root_environment(&mut self) {
+        let path = ModulePath::new([Name::new("core"), Name::new("money")]);
+        let Some(money) = self.by_path.get(&path).copied() else {
+            return;
+        };
+        let exports = self.program.modules[money].exports.clone();
+        for name in ["Money", "Currency"] {
+            let name = Name::new(name);
+            let Some(def) = exports.get(&name).copied() else {
+                continue;
+            };
+            for scope in &mut self.scopes {
+                if scope.local_names.contains(&name)
+                    || scope.values.contains_key(&name)
+                    || scope.ambiguous.contains(&name)
+                    || scope.modules.contains_key(&name)
+                {
+                    continue;
+                }
+                scope.values.insert(name.clone(), def);
+            }
+        }
     }
 
     /// Applies one `use` declaration.
     fn apply_use(
         &mut self,
         pending: &PendingUse,
-        globs: &mut Vec<(ModuleId, ModuleId, orna_syntax::SyntaxSpan)>,
+        globs: &mut Vec<(ModuleId, ModuleId, orna_syntax_ast::SourceSpan)>,
     ) {
         let importer = pending.module;
         let target_path =
@@ -192,7 +226,7 @@ impl Builder {
         importer: ModuleId,
         name: Name,
         target: ModuleId,
-        span: orna_syntax::SyntaxSpan,
+        span: orna_syntax_ast::SourceSpan,
     ) {
         let conflict = {
             let scope = &self.scopes[importer.index()];
@@ -222,7 +256,7 @@ impl Builder {
         importer: ModuleId,
         name: Name,
         def: DefId,
-        span: orna_syntax::SyntaxSpan,
+        span: orna_syntax_ast::SourceSpan,
     ) {
         let conflict = {
             let scope = &self.scopes[importer.index()];
@@ -263,7 +297,7 @@ impl Builder {
     }
 
     /// Decides every wildcard-import candidate once all imports are collected.
-    fn finalize_glob(&mut self, importer: ModuleId, span: orna_syntax::SyntaxSpan) {
+    fn finalize_glob(&mut self, importer: ModuleId, span: orna_syntax_ast::SourceSpan) {
         let candidates = std::mem::take(&mut self.scopes[importer.index()].glob_candidates);
         let mut single: Vec<(Name, DefId)> = Vec::new();
         let mut twice: Vec<Name> = Vec::new();
@@ -328,7 +362,7 @@ impl Builder {
         importer: ModuleId,
         target_path: ModulePath,
         target: ModuleId,
-        span: orna_syntax::SyntaxSpan,
+        span: orna_syntax_ast::SourceSpan,
     ) {
         self.record_import(importer, target_path.clone(), ImportTarget::Module(target));
         let Some(names) = self.prelude.names(&target_path).cloned() else {

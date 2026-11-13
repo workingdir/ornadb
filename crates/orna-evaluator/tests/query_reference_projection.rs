@@ -67,7 +67,7 @@ struct ProjectionEffects {
 impl EffectHandler for ProjectionEffects {
     fn handle(
         &mut self,
-        _: &orna_syntax::Expr,
+        _: &orna_syntax_ast::Expr,
         _: &[CanonicalValue],
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
         Ok(None)
@@ -157,7 +157,7 @@ struct ReferenceEffects {
 impl EffectHandler for ReferenceEffects {
     fn handle(
         &mut self,
-        _: &orna_syntax::Expr,
+        _: &orna_syntax_ast::Expr,
         _: &[CanonicalValue],
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
         Ok(None)

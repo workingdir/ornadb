@@ -1,4 +1,5 @@
-use orna_syntax::{Declaration, Expr, StringSegment, parse_module};
+use orna_syntax::parse_module;
+use orna_syntax_ast::{Declaration, Expr, StringSegment};
 
 #[test]
 fn nested_case_recovery_inside_interpolation_keeps_suffix_arms_and_text() {

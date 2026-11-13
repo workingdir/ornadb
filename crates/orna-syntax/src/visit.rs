@@ -13,7 +13,7 @@
 //! only need structure leave it empty and override the typed hooks they care
 //! about; the default of a typed hook walks its children.
 
-use crate::parser::{
+use orna_syntax_ast::{
     Argument, AssignmentTarget, CaseArm, ControlKind, Declaration, DimensionExpr, EnumPayloadField,
     EnumVariant, Expr, FieldInitializer, FunctionSignature, GenericParameter, ImplMember,
     Implementation, ImportSegment, Item, LambdaParameter, NameSegment, NativeEffectSet, Parameter,

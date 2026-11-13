@@ -3,6 +3,7 @@
   "scanned_crates": [
     "orna-application",
     "orna-base",
+    "orna-cbor",
     "orna-cli",
     "orna-cli-support",
     "orna-conformance",
@@ -29,6 +30,7 @@
     "orna-storage",
     "orna-stream",
     "orna-syntax",
+    "orna-syntax-ast",
     "orna-sys-macros",
     "orna-sys",
     "orna-sys-codegen",

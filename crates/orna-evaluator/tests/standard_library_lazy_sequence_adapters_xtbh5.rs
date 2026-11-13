@@ -2,7 +2,8 @@ use orna_evaluator::{
     Environment, Functions, Limits, NominalDefinition, NominalDefinitions, NominalField,
     PureFunction, evaluate_with_functions_and_nominals,
 };
-use orna_syntax::{Declaration, parse_expression, parse_module};
+use orna_syntax::{parse_expression, parse_module};
+use orna_syntax_ast::Declaration;
 use orna_value::CanonicalValue;
 use orna_value::Raw;
 

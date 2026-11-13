@@ -22,7 +22,7 @@ fn pinned_functions() -> Functions {
             .expect("pinned std paths have a std/ prefix and .orna suffix")
             .replace('/', ".");
         for item in parsed.value.items {
-            if let orna_syntax::Declaration::Function { signature, body } = item.declaration {
+            if let orna_syntax_ast::Declaration::Function { signature, body } = item.declaration {
                 let name = format!("std.{module}.{}", signature.name);
                 assert!(
                     functions

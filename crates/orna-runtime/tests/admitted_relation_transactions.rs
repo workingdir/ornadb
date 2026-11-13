@@ -11,7 +11,8 @@ use orna_runtime::{
     TableMutation, TableObjectId, TerminalOutcome, WriterLease,
     run_admitted_table_request_activation,
 };
-use orna_syntax::{Declaration, parse_module};
+use orna_syntax::parse_module;
+use orna_syntax_ast::Declaration;
 use tempfile::TempDir;
 
 const SOURCE: &str = include_str!("fixtures/admitted-relation-transactions.orna");

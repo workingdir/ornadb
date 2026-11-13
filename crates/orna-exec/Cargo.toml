@@ -20,6 +20,7 @@ num-bigint = "0.4.6"
 orna-hir = { path = "../orna-hir" }
 orna-value = { path = "../orna-value" }
 orna-syntax = { path = "../orna-syntax" }
+orna-syntax-ast = { path = "../orna-syntax-ast" }
 
 [features]
 test-support = []

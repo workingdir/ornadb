@@ -108,12 +108,12 @@ reason = "the checker reports this legacy vocabulary under ORNA091-E-RESULT rath
 bead = "ornadb-csenl.18"
 
 [[difference]]
-case = "invalid/money-float.orna"
-field = "resolution-unresolved"
-first = "Money:0"
-second = "Money:1"
-reason = "the fixture-catalogue environment the reference corpus is admitted against supplies this name; the case carries no declaration for it and HIR lowering's environment is source-only, so carrying each case's environment is H0 corpus-fidelity work"
-bead = "ornadb-csenl.15"
+case = "valid/money-serialization.orna"
+field = "public-signature"
+first = "examples.valid.money-serialization::json=json(Money<GBP>) -> ByteStream"
+second = "examples.valid.money-serialization::json=json(Money<GBP>) -> Str"
+reason = "the same `std.encoding.orna.encode` cause as valid/codec-orna: the pinned std wrapper declares `: Str` and the HIR signature follows it, while the checker publishes `ByteStream`. Which result type is normative is a checker/H2a decision"
+bead = "ornadb-csenl.17"
 
 [[difference]]
 case = "invalid/secret-display.orna"
@@ -252,6 +252,22 @@ reason = "the checker resolves energy.daily from the fixture-catalogue environme
 bead = "ornadb-csenl.15"
 
 [[difference]]
+case = "valid/historical-program.orna"
+field = "resolution-unresolved"
+first = "snapshot:0"
+second = "snapshot:2"
+reason = "`sys.snapshot(...)` is a `sys` surface member; HIR has no sys interface declaration to resolve it to until stage H5 (D12)"
+bead = "ornadb-csenl.20"
+
+[[difference]]
+case = "valid/historical-query.orna"
+field = "resolution-unresolved"
+first = "snapshot:0"
+second = "snapshot:1"
+reason = "`sys.snapshot(...)` is a `sys` surface member; HIR has no sys interface declaration to resolve it to until stage H5 (D12)"
+bead = "ornadb-csenl.20"
+
+[[difference]]
 case = "valid/lambda.orna"
 field = "resolution-unresolved"
 first = "finance:0"
@@ -340,6 +356,14 @@ reason = "the name is a `sys` or engine-native `std` surface member; `core.orna`
 bead = "ornadb-csenl.20"
 
 [[difference]]
+case = "valid/presentation-watch.orna"
+field = "resolution-unresolved"
+first = "streams:0"
+second = "streams:1"
+reason = "`sys.rt.streams` is a `sys` runtime surface member; HIR has no sys interface declaration to resolve it to until stage H5 (D12)"
+bead = "ornadb-csenl.20"
+
+[[difference]]
 case = "valid/programmable-watch-expression.orna"
 field = "resolution-unresolved"
 first = "Reading:0"
@@ -370,6 +394,14 @@ first = "mail:0"
 second = "mail:1"
 reason = "the fixture-catalogue environment the reference corpus is admitted against supplies this name; the case carries no declaration for it and HIR lowering's environment is source-only, so carrying each case's environment is H0 corpus-fidelity work"
 bead = "ornadb-csenl.15"
+
+[[difference]]
+case = "valid/stream-admin-repl.orna"
+field = "resolution-unresolved"
+first = "streams:0"
+second = "streams:1"
+reason = "`sys.rt.streams` is a `sys` runtime surface member; HIR has no sys interface declaration to resolve it to until stage H5 (D12)"
+bead = "ornadb-csenl.20"
 
 [[difference]]
 case = "valid/sys-checkpoint.orna"
@@ -588,20 +620,12 @@ reason = "the fixture-catalogue environment the reference corpus is admitted aga
 bead = "ornadb-csenl.15"
 
 [[difference]]
-case = "valid/historical-program.orna"
+case = "invalid/legacy-sys-runtime.orna"
 field = "resolution-unresolved"
-first = "snapshot:0"
-second = "snapshot:2"
-reason = "the fixture-catalogue environment the reference corpus is admitted against supplies this name; the case carries no declaration for it and HIR lowering's environment is source-only, so carrying each case's environment is H0 corpus-fidelity work"
-bead = "ornadb-csenl.15"
-
-[[difference]]
-case = "valid/historical-query.orna"
-field = "resolution-unresolved"
-first = "snapshot:0"
-second = "snapshot:1"
-reason = "the fixture-catalogue environment the reference corpus is admitted against supplies this name; the case carries no declaration for it and HIR lowering's environment is source-only, so carrying each case's environment is H0 corpus-fidelity work"
-bead = "ornadb-csenl.15"
+first = "streams:0"
+second = "streams:1"
+reason = "sys.runtime.streams is a removed 1.0.0 path. The checker rejects it at resolve with ORNA100-E-SYS-RUNTIME (renamed to sys.rt), a legacy-rename diagnostic owned by the code parity tests. Since ornadb-csenl.25 lowers sys value paths, HIR now reaches the value and reports the unknown field streams as unresolved. Both sides reject the program; HIR does not carry the legacy rename code"
+bead = "ornadb-csenl.25"
 
 [[difference]]
 case = "valid/live-page-fallback.orna"
@@ -663,22 +687,6 @@ reason = "the sys.blob.capture_file spelling now resolves in HIR (lower/imports.
 bead = "ornadb-csenl.20"
 
 [[difference]]
-case = "valid/blob-writer.orna"
-field = "effects"
-first = "examples.valid.blob-writer::capture=TableRead+Opaque+MayFail"
-second = "examples.valid.blob-writer::capture=RuntimeAdmin+TableRead+MayFail"
-reason = "the sys.blob.begin spelling now resolves in HIR, so the call carries its declared runtime_admin clause; the old checker reports Opaque for the unresolved sys spelling. HIR is the more precise set"
-bead = "ornadb-csenl.20"
-
-[[difference]]
-case = "valid/reviewed-commit.orna"
-field = "effects"
-first = "examples.valid.reviewed-commit::publish=Opaque+MayFail"
-second = "examples.valid.reviewed-commit::publish=StorageAdmin+MayFail"
-reason = "the sys.admin.commit_reviewed spelling now resolves in HIR, so the call carries its declared storage_admin clause; the old checker reports Opaque for the unresolved sys spelling. HIR is the more precise set"
-bead = "ornadb-csenl.20"
-
-[[difference]]
 case = "invalid/assert-effectful-table.orna"
 field = "rules"
 first = "ORNA-A091-007: declaration assertion uses forbidden network effect"
@@ -735,8 +743,8 @@ bead = "ornadb-csenl.15"
 
 [[environment]]
 category = "currency-and-unit-names"
-count = 23
-reason = "currencies (Money, GBP, EUR, USD) exist only as a legacy parser construct (LegacyCheck::Currency) and have no HIR item; kWh and mph are fixture units the observer supplies through fixture.units only where the catalogue admits them. Each use is an H0 environment blocker until HIR carries currency and unit declarations"
+count = 3
+reason = "the legacy currency and unit names (kWh, mph and the currency names the fixture observer does not yet admit) exist only as a legacy parser construct (LegacyCheck::Currency) and have no HIR item. Money, GBP, EUR and USD are now declared as core.money and fixture currencies in the root environment; each remaining use is an H0 environment blocker until HIR carries currency and unit declarations"
 bead = "ornadb-csenl.15"
 
 [[environment]]
@@ -774,3 +782,27 @@ category = "unclassified-names"
 count = 3
 reason = "slug and disambiguate, imported by valid/table-key-default.orna from std.text. HIR does not yet declare std.text exports, so the named import is unavailable (ORNA-S010-IMPORT) and each use resolves to ORNA-S012-UNRESOLVED. The key default is now lowered (it was dropped before), so these names surface here. Per-name decision: declare std.text (or move these names to missing-import-names) when the std declaration lands. The third name, daily (valid/historical-program.orna, the energy.daily() namespace callee), appears because the case names energy and so its root is now attached; daily is not a declared export of the fixture energy database, so the miss is measured here rather than hidden at an unattached root"
 bead = "ornadb-csenl.16"
+
+[[difference]]
+case = "valid/blob-writer.orna"
+field = "effects"
+first = "examples.valid.blob-writer::capture=TableRead+Opaque+MayFail"
+second = "examples.valid.blob-writer::capture=RuntimeAdmin+TableRead+MayFail"
+reason = "HA1 lowers `sys` value paths through admission, so this case now types and reaches the effect comparison. The HIR does not yet represent the sys module call `sys.blob.begin(...)` (the callee is not lowered as a native call), so its effect is Opaque and the RuntimeAdmin effect the checker reads is absent. Closes when sys module calls are lowered with their admission effect (a later slice, after HA1 admission for calls)"
+bead = "ornadb-csenl.25"
+
+[[difference]]
+case = "valid/sys-definition-file.orna"
+field = "effects"
+first = "examples.valid.sys-definition-file::source_files=TableRead+MayFail"
+second = "examples.valid.sys-definition-file::source_files=pure"
+reason = "HA1 lowers `sys` value paths through admission, so this case now types and reaches the effect comparison. The HIR gives the sys declaration `source_files` a TableRead+MayFail effect; the checker reads the declared sys surface as pure. Closes when sys declaration bodies are lowered with their effects (stage H5, D12)"
+bead = "ornadb-csenl.25"
+
+[[difference]]
+case = "valid/reviewed-commit.orna"
+field = "effects"
+first = "examples.valid.reviewed-commit::publish=Opaque+MayFail"
+second = "examples.valid.reviewed-commit::publish=StorageAdmin+MayFail"
+reason = "HA1 lowers `sys` value paths through admission, so this case now types and reaches the effect comparison. The HIR does not yet represent the sys admin call `sys.admin.commit_reviewed(...)`, so its effect is Opaque and the StorageAdmin effect the checker reads is absent. Closes when sys module calls are lowered with their admission effect (a later slice)"
+bead = "ornadb-csenl.25"

@@ -3,7 +3,9 @@
 //! Each form and clause is accepted only where the spec's clause table names it, only in an
 //! engine-embedded module, and never becomes a keyword.
 
-use orna_syntax::{Declaration, Parse, SyntaxTree, TokenKind, lex, parse_interface, parse_module};
+use orna_syntax::{Parse, TokenKind, lex, parse_interface, parse_module};
+
+use orna_syntax_ast::{Declaration, SyntaxTree};
 
 const CLAUSE_DIAGNOSTIC: &str = "ORNA091-E-INTERFACE-CLAUSE";
 const PLACE_DIAGNOSTIC: &str = "ORNA091-E-NATIVE-PLACE";

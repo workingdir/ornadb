@@ -1,8 +1,10 @@
 //! Syntax-aware LSP folding and selection ranges.
 
 use lsp_types::{FoldingRange, FoldingRangeKind, SelectionRange};
+use orna_syntax::lex;
 use orna_syntax::visit::Visit;
-use orna_syntax::{Declaration, SyntaxSpan as SourceSpan, SyntaxTree, lex};
+use orna_syntax_ast::SourceSpan;
+use orna_syntax_ast::{Declaration, SyntaxTree};
 
 use crate::documents::PositionMapper;
 

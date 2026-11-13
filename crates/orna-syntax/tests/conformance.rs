@@ -1,6 +1,5 @@
-use orna_syntax::{
-    Declaration, Expr, TokenKind, lex, parse_expression, parse_module, parse_repl, parse_row,
-};
+use orna_syntax::{TokenKind, lex, parse_expression, parse_module, parse_repl, parse_row};
+use orna_syntax_ast::{Declaration, Expr};
 use std::path::Path;
 
 fn fixture(name: &str) -> String {
@@ -842,7 +841,7 @@ fn generic_type_constructor_is_admitted_as_a_call_callee() {
         } if matches!(callee.as_ref(), Expr::Name { text, .. } if text == "Money")
             && matches!(
                 type_arguments.as_slice(),
-                [orna_syntax::TypeExpr::Name { path, arguments, .. }]
+                [orna_syntax_ast::TypeExpr::Name { path, arguments, .. }]
                     if path == &["GBP".to_owned()] && arguments.is_empty()
             )
     ));
@@ -867,12 +866,12 @@ fn bare_generic_call_retains_type_arguments_structurally() {
     ));
     assert!(matches!(
         type_arguments.as_slice(),
-        [orna_syntax::TypeExpr::Name { path, arguments, .. }]
+        [orna_syntax_ast::TypeExpr::Name { path, arguments, .. }]
             if path == &["Int".to_owned()] && arguments.is_empty()
     ));
     assert!(matches!(
         arguments.as_slice(),
-        [orna_syntax::Argument { name: None, value: Expr::Name { text, .. }, .. }]
+        [orna_syntax_ast::Argument { name: None, value: Expr::Name { text, .. }, .. }]
             if text == "x"
     ));
 }
@@ -898,12 +897,12 @@ fn qualified_generic_call_retains_type_arguments_structurally() {
     ));
     assert!(matches!(
         type_arguments.as_slice(),
-        [orna_syntax::TypeExpr::Name { path, arguments, .. }]
+        [orna_syntax_ast::TypeExpr::Name { path, arguments, .. }]
             if path == &["Int".to_owned()] && arguments.is_empty()
     ));
     assert!(matches!(
         arguments.as_slice(),
-        [orna_syntax::Argument { name: None, value: Expr::Name { text, .. }, .. }]
+        [orna_syntax_ast::Argument { name: None, value: Expr::Name { text, .. }, .. }]
             if text == "job"
     ));
 }

@@ -11,7 +11,8 @@ use orna_evaluator::Environment;
 use orna_repository::Repository;
 use orna_runtime::{RuntimeIdentity, RuntimeState};
 use orna_stream::{Checkpoint, CheckpointKey, Component, ConsumerIdentity};
-use orna_syntax::{Declaration, Expr, Pattern, TableMember, TypeExpr, parse_module};
+use orna_syntax::parse_module;
+use orna_syntax_ast::{Declaration, Expr, Pattern, TableMember, TypeExpr};
 use orna_value::{OvbRaw, Value as CanonicalValue};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -1536,7 +1537,7 @@ fn reference_stream_checkpoint_key(
         .as_deref()
         .filter(|name| *name == "source_identity")
         .and_then(|_| match &source.value {
-            Expr::Literal { text, kind, .. } if *kind == orna_syntax::LiteralKind::String => {
+            Expr::Literal { text, kind, .. } if *kind == orna_syntax_ast::LiteralKind::String => {
                 reference_string(text)
             }
             _ => None,
@@ -1607,23 +1608,23 @@ fn reference_expr_path(expr: &Expr) -> Vec<&str> {
 fn reference_literal(expr: &Expr) -> Result<CanonicalValue, String> {
     match expr {
         Expr::Literal { text, kind, .. } => match kind {
-            orna_syntax::LiteralKind::Integer => text
+            orna_syntax_ast::LiteralKind::Integer => text
                 .parse::<BigInt>()
                 .map(CanonicalValue::int)
                 .map_err(|_| "reference integer literal is invalid".into()),
-            orna_syntax::LiteralKind::Decimal => {
+            orna_syntax_ast::LiteralKind::Decimal => {
                 reference_decimal(text).ok_or_else(|| "reference decimal literal is invalid".into())
             }
-            orna_syntax::LiteralKind::String => reference_string(text)
+            orna_syntax_ast::LiteralKind::String => reference_string(text)
                 .map(|text| {
                     CanonicalValue::new(OvbRaw::Text(text)).expect("reference text is canonical")
                 })
                 .ok_or_else(|| "reference string literal is invalid".into()),
-            orna_syntax::LiteralKind::Boolean => {
+            orna_syntax_ast::LiteralKind::Boolean => {
                 Ok(CanonicalValue::new(OvbRaw::Bool(text == "true"))
                     .expect("reference boolean is canonical"))
             }
-            orna_syntax::LiteralKind::Null => {
+            orna_syntax_ast::LiteralKind::Null => {
                 Ok(CanonicalValue::new(OvbRaw::Null).expect("reference null is canonical"))
             }
             _ => Err("reference literal kind is unsupported".into()),

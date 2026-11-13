@@ -10,7 +10,9 @@
 //! [`crate::ExprKind::Recover`]: the handler receives the failure through one
 //! synthetic slot, which is what the evaluator's `|?` does today.
 
-use orna_syntax::{Expr as AstExpr, SyntaxSpan, TypeExpr};
+use orna_syntax_ast::SourceSpan as SyntaxSpan;
+
+use orna_syntax_ast::{Expr as AstExpr, TypeExpr};
 
 use crate::{
     BinOp, Call, Capture, DefId, DefKind, Expr, ExprId, ExprKind, FieldRef, Idx, InterpPart,
@@ -75,7 +77,7 @@ fn lower_atom(builder: &mut Builder, state: &mut BodyState, expr: &AstExpr) -> O
             let mut parts = Vec::with_capacity(segments.len());
             for segment in segments {
                 match segment {
-                    orna_syntax::StringSegment::Text { text, .. } => {
+                    orna_syntax_ast::StringSegment::Text { text, .. } => {
                         match orna_syntax::unescape_string_body(text) {
                             Ok(text) => parts.push(InterpPart::Text(text.into_boxed_str())),
                             Err(_) => {
@@ -89,7 +91,7 @@ fn lower_atom(builder: &mut Builder, state: &mut BodyState, expr: &AstExpr) -> O
                             }
                         }
                     }
-                    orna_syntax::StringSegment::Expression { value, .. } => {
+                    orna_syntax_ast::StringSegment::Expression { value, .. } => {
                         parts.push(InterpPart::Expr(lower_expr(builder, state, value)));
                     }
                 }
@@ -204,10 +206,8 @@ fn lower_field(
         state.exprs[literal].weight = 2;
         return literal;
     }
-    if let Some(path) = sys_field_path(state, base, name)
-        && super::admission::reject_unlinked(builder, state.module, &path, span.clone())
-    {
-        return error_expr(builder, state, span.clone());
+    if let Some(path) = sys_field_path(state, base, name, span) {
+        return super::namespace::lower_sys_value(builder, state, &path, span);
     }
     if let Some((path, def)) = namespace_member(builder, state, base, name) {
         // `database.Table` and `namespace.export` name the export itself; the module base is not a value.
@@ -708,20 +708,27 @@ pub(crate) fn flatten_path<'a>(expr: &'a AstExpr, out: &mut Vec<(&'a str, Syntax
     }
 }
 
-/// The full `sys`-rooted path of `base.name`, when `base` is a dotted path whose
-/// root is the `sys` module and no local shadows it.
-fn sys_field_path<'a>(state: &BodyState, base: &'a AstExpr, name: &'a str) -> Option<Vec<&'a str>> {
+/// The `sys`-rooted path `base.name` names, with each segment's span, when `base` is a dotted path
+/// whose root is the `sys` module and no local shadows it.
+fn sys_field_path<'a>(
+    state: &BodyState,
+    base: &'a AstExpr,
+    name: &'a str,
+    span: &SyntaxSpan,
+) -> Option<Vec<(&'a str, SyntaxSpan)>> {
     let mut segments = Vec::new();
     if !flatten_path(base, &mut segments) {
         return None;
     }
     let (root, _) = segments.first()?;
-    if *root != "sys" || state.local(&Name::new(root)).is_some() {
+    if !super::namespace::is_sys_rooted(state, root) {
         return None;
     }
-    let mut path: Vec<&'a str> = segments.iter().map(|(text, _)| *text).collect();
-    path.push(name);
-    Some(path)
+    segments.push((
+        name,
+        SyntaxSpan::new(span.end.saturating_sub(name.len()), span.end),
+    ));
+    Some(segments)
 }
 
 /// Lowers one argument of a concurrent call. A lambda there, or a lambda in a
@@ -762,7 +769,7 @@ fn lower_concurrent_argument(
 fn as_witness_type(
     params: Option<&[ParamInfo]>,
     type_arguments: &[TypeExpr],
-    arguments: &[orna_syntax::Argument],
+    arguments: &[orna_syntax_ast::Argument],
 ) -> Option<(usize, TypeExpr)> {
     if !type_arguments.is_empty() || params?.iter().any(|param| param.name == Name::new("as")) {
         return None;
@@ -795,7 +802,7 @@ fn lower_call(
     state: &mut BodyState,
     callee: &AstExpr,
     type_arguments: &[TypeExpr],
-    arguments: &[orna_syntax::Argument],
+    arguments: &[orna_syntax_ast::Argument],
     input: Option<ExprId>,
     span: &SyntaxSpan,
 ) -> ExprId {
@@ -941,8 +948,8 @@ pub(crate) fn record_prefix_uses(
 fn lower_construct(
     builder: &mut Builder,
     state: &mut BodyState,
-    path: &[orna_syntax::NameSegment],
-    fields: &[orna_syntax::RecordField],
+    path: &[orna_syntax_ast::NameSegment],
+    fields: &[orna_syntax_ast::RecordField],
     span: &SyntaxSpan,
 ) -> ExprId {
     let module = state.module;
@@ -1054,7 +1061,7 @@ fn lower_construct(
 fn lower_lambda(
     builder: &mut Builder,
     state: &mut BodyState,
-    parameters: &[orna_syntax::LambdaParameter],
+    parameters: &[orna_syntax_ast::LambdaParameter],
     body: &AstExpr,
     span: &SyntaxSpan,
 ) -> ExprId {
@@ -1070,12 +1077,12 @@ fn lower_lambda(
             None => builder.program.tys.error(),
         };
         let name = match &parameter.pattern {
-            orna_syntax::Pattern::Name(name, _) => Name::new(name),
+            orna_syntax_ast::Pattern::Name(name, _) => Name::new(name),
             _ => Name::new(&format!("_arg{index}")),
         };
         let local = lambda.add_local(name.clone(), ty, parameter.span.clone());
         lambda.params.push(local);
-        if matches!(parameter.pattern, orna_syntax::Pattern::Name(..)) {
+        if matches!(parameter.pattern, orna_syntax_ast::Pattern::Name(..)) {
             super::record_binding_use(
                 &mut builder.program,
                 module,
@@ -1111,7 +1118,7 @@ fn lower_lambda(
     }
     let mut prologue = Vec::new();
     for (index, parameter) in parameters.iter().enumerate() {
-        if matches!(parameter.pattern, orna_syntax::Pattern::Name(..)) {
+        if matches!(parameter.pattern, orna_syntax_ast::Pattern::Name(..)) {
             continue;
         }
         let slot = lambda.params[index];

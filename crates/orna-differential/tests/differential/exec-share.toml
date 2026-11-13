@@ -13,7 +13,7 @@
 # are not part of `agreed`.
 
 [[exec-share]]
-agreed = 49
+agreed = 53
 evaluable = 110
 steps-exact = 48
 old-harness-environment = 9

@@ -3,7 +3,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
-use orna_syntax::{Expr, Pattern, TypeExpr};
+use orna_syntax_ast::{Expr, Pattern, TypeExpr};
 use orna_value::Diagnostic;
 
 use super::*;
@@ -180,7 +180,7 @@ pub(crate) fn descriptor_function_type(function: &system_api::FunctionDescriptor
 /// accepting a mixture of arguments that no portable overload permits.
 pub(crate) fn infer_descriptor_system_call(
     path: &[&str],
-    arguments: &[orna_syntax::Argument],
+    arguments: &[orna_syntax_ast::Argument],
     type_arguments: Option<&[TypeExpr]>,
     scope: &Scope,
     local: &BTreeMap<String, Symbol>,
@@ -344,7 +344,7 @@ pub(crate) fn infer_descriptor_system_call(
 /// nevertheless checked before any runtime activation can occur.
 pub(crate) fn infer_invoke_system_call(
     functions: &[system_api::FunctionDescriptor],
-    arguments: &[orna_syntax::Argument],
+    arguments: &[orna_syntax_ast::Argument],
     type_arguments: Option<&[TypeExpr]>,
     input: Option<&Type>,
     scope: &Scope,
@@ -527,7 +527,7 @@ pub(crate) fn invoke_typed_descriptor(function: &system_api::FunctionDescriptor)
 /// carries the witness into the returned handle type.
 pub(crate) fn infer_start_system_call(
     functions: &[system_api::FunctionDescriptor],
-    arguments: &[orna_syntax::Argument],
+    arguments: &[orna_syntax_ast::Argument],
     type_arguments: Option<&[TypeExpr]>,
     input: Option<&Type>,
     scope: &Scope,
@@ -724,7 +724,7 @@ pub(crate) fn descriptor_arguments_match_types(
     parameters: &[Type],
     parameter_names: &[String],
     default_parameters: &BTreeSet<usize>,
-    arguments: &[orna_syntax::Argument],
+    arguments: &[orna_syntax_ast::Argument],
     values: &[Type],
     input: Option<&Type>,
 ) -> bool {
@@ -769,7 +769,7 @@ pub(crate) fn descriptor_arguments_match_types(
 /// with an unsupported result.
 pub(crate) fn infer_unsupported_generic_system_call(
     functions: &[system_api::FunctionDescriptor],
-    arguments: &[orna_syntax::Argument],
+    arguments: &[orna_syntax_ast::Argument],
     type_arguments: &[TypeExpr],
     scope: &Scope,
     local: &BTreeMap<String, Symbol>,
@@ -885,7 +885,7 @@ pub(crate) fn substitute_generic_descriptor_type(
 /// the pinned catalogue snapshot.
 pub(crate) fn infer_query_explain_system_call(
     functions: &[system_api::FunctionDescriptor],
-    arguments: &[orna_syntax::Argument],
+    arguments: &[orna_syntax_ast::Argument],
     type_arguments: Option<&[TypeExpr]>,
     input: Option<&Type>,
     scope: &Scope,
@@ -1068,7 +1068,7 @@ pub(crate) fn infer_query_explain_system_call(
 /// runtime result witnesses and therefore remain outside this semantic slice.
 pub(crate) fn infer_meta_system_call(
     functions: &[system_api::FunctionDescriptor],
-    arguments: &[orna_syntax::Argument],
+    arguments: &[orna_syntax_ast::Argument],
     type_arguments: Option<&[TypeExpr]>,
     input: Option<&Type>,
     scope: &Scope,
@@ -1151,7 +1151,7 @@ pub(crate) fn infer_meta_system_call(
 
 pub(crate) fn infer_descriptor_system_call_with_input(
     path: &[&str],
-    arguments: &[orna_syntax::Argument],
+    arguments: &[orna_syntax_ast::Argument],
     type_arguments: &[TypeExpr],
     input: &Type,
     scope: &Scope,
@@ -1244,7 +1244,7 @@ pub(crate) fn cancel_descriptor(function: &system_api::FunctionDescriptor) -> bo
 /// overload cannot silently acquire this semantic admission path.
 pub(crate) fn infer_cancel_system_call(
     functions: &[system_api::FunctionDescriptor],
-    arguments: &[orna_syntax::Argument],
+    arguments: &[orna_syntax_ast::Argument],
     type_arguments: Option<&[TypeExpr]>,
     input: Option<&Type>,
     scope: &Scope,
@@ -1371,7 +1371,7 @@ pub(crate) fn infer_cancel_system_call(
 /// `sys.await<T>` binds its result type from the typed invocation handle.
 pub(crate) fn infer_await_system_call(
     functions: &[system_api::FunctionDescriptor],
-    arguments: &[orna_syntax::Argument],
+    arguments: &[orna_syntax_ast::Argument],
     type_arguments: Option<&[TypeExpr]>,
     input: Option<&Type>,
     scope: &Scope,
@@ -1548,7 +1548,7 @@ pub(crate) fn substitute_descriptor_type(
 
 pub(crate) fn descriptor_arguments_match(
     function: &system_api::FunctionDescriptor,
-    arguments: &[orna_syntax::Argument],
+    arguments: &[orna_syntax_ast::Argument],
     values: &[Type],
 ) -> bool {
     let mut used = vec![false; function.parameters.len()];
@@ -1702,7 +1702,7 @@ pub(crate) fn infer_system_path(
 
 pub(crate) fn infer_nominal_conversion_call(
     callee: &Expr,
-    arguments: &[orna_syntax::Argument],
+    arguments: &[orna_syntax_ast::Argument],
     scope: &Scope,
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
@@ -1888,7 +1888,7 @@ pub(crate) fn snapshot_selector_context(
     let selector = match expression {
         Expr::Literal {
             text,
-            kind: orna_syntax::LiteralKind::String,
+            kind: orna_syntax_ast::LiteralKind::String,
             ..
         } => serde_json::from_str::<String>(text)
             .unwrap_or_else(|_| text.trim_matches('"').to_owned()),

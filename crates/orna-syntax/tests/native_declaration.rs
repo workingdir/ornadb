@@ -6,8 +6,11 @@
 //! diagnostics: one fixture per admissible form and one per rejection.
 
 use orna_syntax::{
-    Declaration, EFFECT_CLASSES, FunctionSignature, ItemKind, NativeEffectSet, Pattern, ReplInput,
     SyntaxDiagnostic, TokenKind, lex, parse_expression, parse_module, parse_repl, parse_row,
+};
+
+use orna_syntax_ast::{
+    Declaration, EFFECT_CLASSES, FunctionSignature, ItemKind, NativeEffectSet, Pattern, ReplInput,
 };
 
 const TRIM: &str = include_str!("fixtures/native-trim.orna");
@@ -48,7 +51,7 @@ fn assert_rejected(observed: &[SyntaxDiagnostic], expected: &[(&str, &str)]) {
     assert_eq!(diagnostics(observed), expected);
 }
 
-fn module_items(source: &str) -> Vec<orna_syntax::Item> {
+fn module_items(source: &str) -> Vec<orna_syntax_ast::Item> {
     let parsed = parse_module(source);
     assert!(
         parsed.is_ok(),
@@ -380,7 +383,7 @@ fn native_declaration_is_top_level_only() {
     );
     assert!(matches!(
         parsed.value,
-        ReplInput::Expression(orna_syntax::Expr::Tuple { .. })
+        ReplInput::Expression(orna_syntax_ast::Expr::Tuple { .. })
     ));
 }
 
@@ -402,7 +405,7 @@ fn native_declaration_visibility_and_arity_follow_the_grammar() {
     assert!(parsed.is_ok(), "{:?}", diagnostics(&parsed.diagnostics));
     assert!(matches!(
         parsed.value.items[0].visibility,
-        orna_syntax::Visibility::Private
+        orna_syntax_ast::Visibility::Private
     ));
 
     let parsed = parse_module("pub native fn f(a: Int, b: Int,): Int effect none;");

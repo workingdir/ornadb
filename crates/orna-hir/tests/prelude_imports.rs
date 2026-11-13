@@ -7,7 +7,8 @@ use orna_hir::{
     ModulePath, Name, PreludeExports, Program, SourceId, SourceUnit, diag, lower,
     lower_with_prelude,
 };
-use orna_syntax::{SyntaxTree, parse_module_with_file};
+use orna_syntax::parse_module_with_file;
+use orna_syntax_ast::SyntaxTree;
 
 const LIB: &str = "pub fn increment(x: Int): Int = x + 1;\nfn hidden(x: Int): Int = x;\n";
 

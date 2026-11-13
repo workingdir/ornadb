@@ -1938,7 +1938,8 @@ fn validate_enum(
 mod tests {
     use super::*;
     use orna_repository::Uuid;
-    use orna_syntax::{Expr, LiteralKind, parse_row};
+    use orna_syntax::parse_row;
+    use orna_syntax_ast::{Expr, LiteralKind};
     use orna_value::OvbRaw;
 
     const TABLE: [u8; 16] = [0x10; 16];

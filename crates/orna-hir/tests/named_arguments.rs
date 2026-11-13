@@ -5,7 +5,8 @@
 //! still an argument diagnostic, and a call that omits a required parameter is too.
 
 use orna_hir::{ModulePath, Name, Program, SourceId, SourceUnit, lower};
-use orna_syntax::{SyntaxTree, parse_module_with_file};
+use orna_syntax::parse_module_with_file;
+use orna_syntax_ast::SyntaxTree;
 
 fn lower_source(source: &str) -> Program {
     let parsed = parse_module_with_file(source, "test.orna");
