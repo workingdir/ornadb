@@ -32,6 +32,7 @@
 #   takes CatalogueAdmission (observe_new::lower_case_admitted).
 # - Re-measured at origin/main 7ba836797 merged with csenl.33 (core.money root environment, fixture currencies): 54 of 104 typed. The Money root environment types one more corpus case.
 # - Re-measured at HA2 (csenl.26): 55 of 104 typed. A sys relation type with a key clause now types as a relation, adding one typed corpus case.
+# - Re-measured at HB2 (csenl.34): 58 of 104 typed. Integer currency suffixes lower to exact Decimal, matching core.money's Decimal amount, so the valid currency cases type.
 #
 # The typed count is exact: it must equal the measured count in both directions.
 # A fall is a typing or lowering regression. A rise is typed corpus work, and
@@ -47,5 +48,5 @@
 # and the checker's special cases (H3).
 
 [[typed-share]]
-typed = 55
+typed = 58
 lowered = 104

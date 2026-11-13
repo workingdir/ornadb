@@ -5,6 +5,7 @@
 //! carries the type `Money<GBP>`. Whether the named type implements `Currency` is checked by the type checker, because
 //! the `impl` may follow the use.
 
+use num_bigint::BigInt;
 use orna_syntax_ast::SourceSpan as SyntaxSpan;
 use orna_syntax_ast::{Expr as AstExpr, LiteralKind};
 
@@ -12,8 +13,8 @@ use super::BodyState;
 use super::declare::{Builder, PendingKind};
 use super::exprs::{lower_expr, push_typed};
 use crate::{
-    Arg, ArgValue, Call, Callee, DefId, DefKind, ExprId, ExprKind, Idx, Name, NameTarget, ParamIdx,
-    TyKind, UseContext,
+    Arg, ArgValue, Call, Callee, DefId, DefKind, ExprId, ExprKind, Idx, Lit, Name, NameTarget,
+    ParamIdx, TyKind, UseContext,
 };
 
 /// The `core.money` module path, where `Money` is declared.
@@ -81,6 +82,14 @@ pub(crate) fn lower_currency_suffix(
     // The literal is charged with the field access that names the currency, as a built-in postfix is (two steps).
     let literal = lower_expr(builder, state, base);
     state.exprs[literal].weight = 2;
+    // `core.money` takes a `Decimal` amount, so an integer base is the exact decimal of the same value.
+    if let ExprKind::Lit(Lit::Int(value)) = state.exprs[literal].kind.clone() {
+        state.exprs[literal].kind = ExprKind::Lit(Lit::Decimal {
+            coefficient: value,
+            exponent: BigInt::from(0),
+        });
+        state.exprs[literal].ty = builder.program.tys.intern(TyKind::Decimal);
+    }
     let currency_ty = builder
         .program
         .tys

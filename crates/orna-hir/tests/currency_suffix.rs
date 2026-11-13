@@ -139,14 +139,19 @@ fn a_decimal_suffix_lowers_to_an_exact_money_constructor() {
 }
 
 #[test]
-fn an_integer_suffix_keeps_the_integer_exact() {
+fn an_integer_suffix_is_an_exact_decimal_because_the_amount_is_decimal() {
     let program = lower_one(&format!("{GBP}pub fn run(): Money<GBP> = 10.GBP;\n"));
     let run = defined(&program, "run");
     let (_, lit, currency) = money_call(&program, run);
-    assert!(
-        matches!(lit, Lit::Int(value) if value.to_string() == "10"),
-        "got {lit:?}"
-    );
+    let Lit::Decimal {
+        coefficient,
+        exponent,
+    } = lit
+    else {
+        panic!("10 is kept as an exact decimal, got {lit:?}");
+    };
+    assert_eq!(coefficient.to_string(), "10");
+    assert_eq!(exponent.to_string(), "0");
     assert_eq!(currency.as_deref(), Some("GBP"));
 }
 
