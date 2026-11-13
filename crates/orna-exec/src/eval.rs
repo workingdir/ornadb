@@ -294,7 +294,7 @@ impl<'p> Machine<'p> {
                 let arguments =
                     self.arguments(body, frame, call, &function.params, &callee_targs)?;
                 let values = natives::in_parameter_order(arguments, function.params.len())?;
-                if matches!(call.callee, Callee::Sys { .. }) {
+                if matches!(call.callee, Callee::Sys { .. }) && !self.is_native(*def) {
                     self.sys_call(*def, values)
                 } else {
                     self.native(*def, type_args(&callee_targs), values)
