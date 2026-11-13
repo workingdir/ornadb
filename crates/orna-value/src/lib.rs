@@ -6,7 +6,7 @@
 //!
 //! The implementation is split along value seams rather than by line count:
 //! `error` (the payload-free taxonomy), `raw` (the CBOR data model and the
-//! validated [`Value`]), `cbor` (canonical encoders and decoders), `validation`
+//! validated [`Value`]), `validation`
 //! (the tag registry checks), `codec` (typed OVB-1 codecs), `decimal`,
 //! `snapshot`, `identity`, `primary_key`, `path`, `schema`, `blob`, `format3`
 //! (profiles and their context) and `media` (MIME-1 annotations). This module
@@ -26,7 +26,7 @@ pub use tags::*;
 mod format3_context_tests;
 
 pub const OVB_VERSION: &str = "OVB-1";
-pub const CANONICAL_NAN_BITS: u64 = 0x7ff8_0000_0000_0000;
+pub use orna_cbor::CANONICAL_NAN_BITS;
 const MAX_DEPTH: usize = 128;
 const MAX_ITEMS: usize = 1_000_000;
 
@@ -56,9 +56,6 @@ mod schema;
 pub use schema::*;
 mod path;
 pub use path::*;
-mod cbor;
-#[cfg(test)]
-pub(crate) use cbor::*;
 mod validation;
 
 mod contract;
@@ -80,6 +77,7 @@ use std::{
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orna_cbor::is_nan_bits;
     fn h(s: &str) -> Vec<u8> {
         s.as_bytes()
             .chunks(2)

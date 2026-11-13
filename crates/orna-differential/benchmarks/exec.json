@@ -16,14 +16,14 @@
     "b3_filter_100000": {
       "steps": 600005,
       "calls": 100001,
-      "allocations": 3524210,
+      "allocations": 3326212,
       "rows_read": 100000,
       "gated": true
     },
     "b3_take_10": {
       "steps": 14,
       "calls": 1,
-      "allocations": 289,
+      "allocations": 273,
       "rows_read": 10,
       "gated": true
     }
