@@ -25,7 +25,7 @@ use std::{
 
 use orna_differential::{
     case::{Case, Family, Source},
-    observe_new::lower_case,
+    observe_new::lower_case_admitted,
 };
 use orna_exec::{ExecLimits, Measured, MemoryStore, TableStore, Value, measure_entry_with_store};
 use orna_hir::{DefId, DefKind, Program};
@@ -127,7 +127,7 @@ fn lower_entry(id: &str, file: &str, text: &str, name: &str) -> Result<(Program,
         text: text.to_owned(),
     };
     let case = Case::module(id.to_owned(), Family::Expression, source);
-    let lowered = lower_case(&case)?;
+    let lowered = lower_case_admitted(&case)?;
     let entry = lowered
         .program
         .defs

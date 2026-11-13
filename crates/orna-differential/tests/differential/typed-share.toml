@@ -27,6 +27,9 @@
 #   33 was stale; the ratchet is raised to the measured value.
 # - Re-measured at af9a80627 (origin/main, with the pinned stdlib fdf63e87): 51
 #   of 104 typed. The recorded 35 was stale; the ratchet is raised to 51.
+# - Re-measured at HA1 (csenl.25): 52 of 104 typed. blob-writer types now that the
+#   typed and diagnostic observers lower all linked sys calls; only the executor
+#   takes CatalogueAdmission (observe_new::lower_case_admitted).
 #
 # The typed count is exact: it must equal the measured count in both directions.
 # A fall is a typing or lowering regression. A rise is typed corpus work, and
@@ -42,5 +45,5 @@
 # and the checker's special cases (H3).
 
 [[typed-share]]
-typed = 51
+typed = 52
 lowered = 104
