@@ -65,7 +65,7 @@ name = "orna-cli"
 "src/cli_query.rs" = 1252
 "src/cli_serve.rs" = 2354
 "src/cli_serve_app.rs" = 1270
-"src/main.rs" = 4340
+"src/main.rs" = 4317
 "src/repl.rs" = 1674
 [crate.functions]
 "src/cli_serve_app.rs::stage_at_head" = 128
@@ -155,7 +155,7 @@ name = "orna-compat-v1"
 [[crate]]
 name = "orna-evaluator"
 [crate.files]
-"src/lib.rs" = 15794
+"src/lib.rs" = 15793
 "src/relation.rs" = 1375
 "src/repl.rs" = 1766
 "src/sys_bindings.rs" = 2392
@@ -371,14 +371,10 @@ name = "orna-runtime"
 [[crate]]
 name = "orna-vfs"
 [crate.files]
-"src/draft.rs" = 633
-"src/lib.rs" = 4871
-"src/naming.rs" = 456
-"src/save.rs" = 583
-"src/spool.rs" = 487
+"src/lib.rs" = 4870
 [crate.functions]
 "src/lib.rs::accepted_rename_invalidates_shared_directory_attribute_and_handle_projections" = 135
-"src/lib.rs::commit_durable_save" = 178
+"src/lib.rs::commit_durable_save" = 177
 "src/lib.rs::durable_blob_temp_rename_cas_commits_canonical_media_and_pin" = 451
 "src/lib.rs::durable_temporary_rename_commits_and_refuses_changed_row_baseline" = 267
 "src/lib.rs::vfs_rejected_editor_saves_keep_row_store_and_expose_typed_diagnostic" = 140
