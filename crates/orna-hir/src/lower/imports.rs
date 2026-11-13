@@ -5,6 +5,12 @@
 //! the same otherwise-unresolved name are ambiguous (ORNA-S011), and `sys` is
 //! built in and never shadowed (ORNA-NS-006). Resolution runs once; every later
 //! question is a table lookup.
+//!
+//! Root-environment names (`Money` and `Currency` from `core.money`) are bound
+//! after the glob pass rather than through a `PreludeExports` table, so a local
+//! declaration or any import, explicit or wildcard, shadows them. This is a
+//! deliberate deviation from the design text, accepted by the orchestrator
+//! (hir-host.md B2); see `bind_root_environment`.
 
 use std::collections::BTreeMap;
 
@@ -33,6 +39,34 @@ impl Builder {
         }
         for (importer, span) in importers {
             self.finalize_glob(importer, span);
+        }
+        self.bind_root_environment();
+    }
+
+    /// Binds the root-environment names every module sees without an import: `Money` and `Currency`
+    /// from `core.money` (spec 09-standard-library.md; hir-host.md B2). A local declaration or an import
+    /// that already binds the name wins, so this only fills names the module does not otherwise bind.
+    fn bind_root_environment(&mut self) {
+        let path = ModulePath::new([Name::new("core"), Name::new("money")]);
+        let Some(money) = self.by_path.get(&path).copied() else {
+            return;
+        };
+        let exports = self.program.modules[money].exports.clone();
+        for name in ["Money", "Currency"] {
+            let name = Name::new(name);
+            let Some(def) = exports.get(&name).copied() else {
+                continue;
+            };
+            for scope in &mut self.scopes {
+                if scope.local_names.contains(&name)
+                    || scope.values.contains_key(&name)
+                    || scope.ambiguous.contains(&name)
+                    || scope.modules.contains_key(&name)
+                {
+                    continue;
+                }
+                scope.values.insert(name.clone(), def);
+            }
         }
     }
 

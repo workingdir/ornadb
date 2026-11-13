@@ -108,12 +108,12 @@ reason = "the checker reports this legacy vocabulary under ORNA091-E-RESULT rath
 bead = "ornadb-csenl.18"
 
 [[difference]]
-case = "invalid/money-float.orna"
-field = "resolution-unresolved"
-first = "Money:0"
-second = "Money:1"
-reason = "the fixture-catalogue environment the reference corpus is admitted against supplies this name; the case carries no declaration for it and HIR lowering's environment is source-only, so carrying each case's environment is H0 corpus-fidelity work"
-bead = "ornadb-csenl.15"
+case = "valid/money-serialization.orna"
+field = "public-signature"
+first = "examples.valid.money-serialization::json=json(Money<GBP>) -> ByteStream"
+second = "examples.valid.money-serialization::json=json(Money<GBP>) -> Str"
+reason = "the same `std.encoding.orna.encode` cause as valid/codec-orna: the pinned std wrapper declares `: Str` and the HIR signature follows it, while the checker publishes `ByteStream`. Which result type is normative is a checker/H2a decision"
+bead = "ornadb-csenl.17"
 
 [[difference]]
 case = "invalid/secret-display.orna"
@@ -743,8 +743,8 @@ bead = "ornadb-csenl.15"
 
 [[environment]]
 category = "currency-and-unit-names"
-count = 23
-reason = "currencies (Money, GBP, EUR, USD) exist only as a legacy parser construct (LegacyCheck::Currency) and have no HIR item; kWh and mph are fixture units the observer supplies through fixture.units only where the catalogue admits them. Each use is an H0 environment blocker until HIR carries currency and unit declarations"
+count = 3
+reason = "the legacy currency and unit names (kWh, mph and the currency names the fixture observer does not yet admit) exist only as a legacy parser construct (LegacyCheck::Currency) and have no HIR item. Money, GBP, EUR and USD are now declared as core.money and fixture currencies in the root environment; each remaining use is an H0 environment blocker until HIR carries currency and unit declarations"
 bead = "ornadb-csenl.15"
 
 [[environment]]

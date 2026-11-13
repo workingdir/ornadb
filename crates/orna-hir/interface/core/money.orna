@@ -1,0 +1,47 @@
+// Hand-written Orna source, not generated. See README.md in this directory.
+//
+// core.money: the exact amount `Money<C>` and its currency protocol (hir-host.md B2, spec ORNA-MONEY-001 to -004).
+// The currency is a type parameter, not a field: `Money<GBP>` and `Money<EUR>` are different types and do not mix.
+// Operators are instances that forward to top-level natives, because a `native fn` is legal only at the top level.
+// `Self`, not `Money<C>`, is used in protocol arguments, as in core/temperature.orna.
+use core.ops.{Add, Sub, Mul, Div, Neg, Order};
+use core.{Ordering};
+
+// ORNA-MONEY-004: the currency contract. A currency is a nominal type that implements `Currency` with its code and
+// its minor digits. A symbol is deliberately not a member.
+pub protocol Currency {
+    static code: Str;
+    static minor_digits: Int;
+}
+
+// An exact amount in currency `C`. The engine represents a value as `Money { amount, currency }` (tag 60007).
+pub type Money<C impl Currency> {
+    pub amount: Decimal,
+
+    impl Add<Self, Self> {
+        fn add(self, other: Self): Self = money_add(self, other);
+    }
+    impl Sub<Self, Self> {
+        fn sub(self, other: Self): Self = money_sub(self, other);
+    }
+    impl Mul<Decimal, Self> {
+        fn mul(self, factor: Decimal): Self = money_scale(self, factor);
+    }
+    impl Div<Decimal, Self> {
+        fn div(self, divisor: Decimal): Self = money_divide(self, divisor);
+    }
+    impl Neg<Self> {
+        fn neg(self): Self = money_negate(self);
+    }
+    impl Order {
+        fn compare(self, other: Self): Ordering = money_compare(self, other);
+    }
+}
+
+// core.money natives. Declared here; bound by the engine registry in a later slice (hir-host.md HB6).
+native fn money_add<C impl Currency>(left: Money<C>, right: Money<C>): Money<C> effect none;
+native fn money_sub<C impl Currency>(left: Money<C>, right: Money<C>): Money<C> effect none;
+native fn money_scale<C impl Currency>(amount: Money<C>, factor: Decimal): Money<C> effect none;
+native fn money_divide<C impl Currency>(amount: Money<C>, divisor: Decimal): Money<C> effect none;
+native fn money_negate<C impl Currency>(amount: Money<C>): Money<C> effect none;
+native fn money_compare<C impl Currency>(left: Money<C>, right: Money<C>): Ordering effect none;
