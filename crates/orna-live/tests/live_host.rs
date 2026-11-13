@@ -6,13 +6,13 @@ use orna_live::{
     ActionAuthority, ActionAuthorityRegistry, ActionBinding, ActionFuture, ActionHandler,
     CreateRequest, DeleteRequest, Error, FirstPartyEffectTrust, Frame, FrameOutcome, HttpBody,
     HttpConnection, HttpConnectionError, HttpEncodeError, HttpIoError, HttpParseError, Limits,
-    ListenerBindError, ListenerExposure, LiveApplication, LiveApplicationWorkLease,
-    LiveApplicationWorkSupervisor, LiveCredentialIssuer, LiveEvalResponse, LiveEvalTransaction,
-    LiveHost, LiveListenerAcceptor, LiveSessionAuthority, LiveSessionChildren, LiveTransport,
-    ResumeRequest, SUBPROTOCOL, SessionCredential, SessionMetadata, TransportLimits,
+    ListenerBindError, ListenerExposure, LiveApplication, LiveCredentialIssuer, LiveEvalResponse,
+    LiveEvalTransaction, LiveHost, LiveListenerAcceptor, LiveSessionAuthority, LiveSessionChildren,
+    LiveTransport, ResumeRequest, SUBPROTOCOL, SessionCredential, SessionMetadata, TransportLimits,
     WebSocketApplicationPreparation, WebSocketOutput, WebSocketState, WebSocketUpgrade,
     WireRequest, WireResponse, encode_websocket_output, parse_http_request,
 };
+use orna_live_lease::{LiveApplicationWorkLease, LiveApplicationWorkSupervisor};
 use orna_protocol::{
     DatabaseContext, Envelope, Message, PresentIdentity, PresentKind, PresentNode,
     PresentPropertyKey, PresentationContext, ResultBody, ResultStatus, TargetKind,
@@ -531,7 +531,7 @@ impl LiveApplication for CompetingTerminalApplication {
         request: [u8; 16],
         message: &'a Message,
         _: Option<&'a orna_runtime::RuntimeActivationContext>,
-        _: &'a mut orna_live::LiveApplicationWorkLease,
+        _: &'a mut orna_live_lease::LiveApplicationWorkLease,
     ) -> Pin<Box<dyn Future<Output = Result<LiveEvalResponse, Error>> + 'a>> {
         let Message::Eval { fingerprint, .. } = message else {
             return Box::pin(async { Err(Error::ApplicationRejected) });
@@ -592,7 +592,7 @@ impl LiveApplication for CompetingTerminalApplication {
         request: [u8; 16],
         message: &'a Message,
         context: Option<&'a orna_runtime::RuntimeActivationContext>,
-        work: &'a mut orna_live::LiveApplicationWorkLease,
+        work: &'a mut orna_live_lease::LiveApplicationWorkLease,
     ) -> Pin<Box<dyn Future<Output = Result<LiveEvalResponse, Error>> + 'a>> {
         Box::pin(async move {
             work.check_active()?;
@@ -640,7 +640,7 @@ impl LiveApplication for TransactionalApplication {
         request: [u8; 16],
         message: &'a Message,
         _: Option<&'a orna_runtime::RuntimeActivationContext>,
-        _: &'a mut orna_live::LiveApplicationWorkLease,
+        _: &'a mut orna_live_lease::LiveApplicationWorkLease,
     ) -> Pin<Box<dyn Future<Output = Result<LiveEvalResponse, Error>> + 'a>> {
         let Message::Eval { fingerprint, .. } = message else {
             return Box::pin(async { Err(Error::ApplicationRejected) });
@@ -665,7 +665,7 @@ impl LiveApplication for TransactionalApplication {
         request: [u8; 16],
         message: &'a Message,
         context: Option<&'a orna_runtime::RuntimeActivationContext>,
-        work: &'a mut orna_live::LiveApplicationWorkLease,
+        work: &'a mut orna_live_lease::LiveApplicationWorkLease,
     ) -> Pin<Box<dyn Future<Output = Result<LiveEvalResponse, Error>> + 'a>> {
         Box::pin(async move {
             work.check_active()?;
@@ -686,7 +686,7 @@ impl LiveApplication for TransactionalApplication {
         _: Option<[u8; 16]>,
         _: [u8; 32],
         _: Option<&'a orna_runtime::RuntimeActivationContext>,
-        _: &'a mut orna_live::LiveApplicationWorkLease,
+        _: &'a mut orna_live_lease::LiveApplicationWorkLease,
     ) -> Pin<Box<dyn Future<Output = Result<LiveEvalResponse, Error>> + 'a>> {
         let Message::Event { fingerprint, .. } = message else {
             return Box::pin(async { Err(Error::ApplicationRejected) });
@@ -751,7 +751,7 @@ impl LiveApplication for UntrustedTransactionalApplication {
         request: [u8; 16],
         message: &'a Message,
         context: Option<&'a orna_runtime::RuntimeActivationContext>,
-        work: &'a mut orna_live::LiveApplicationWorkLease,
+        work: &'a mut orna_live_lease::LiveApplicationWorkLease,
     ) -> Pin<Box<dyn Future<Output = Result<LiveEvalResponse, Error>> + 'a>> {
         self.0
             .eval_with_transaction(session, request, message, context, work)
@@ -763,7 +763,7 @@ impl LiveApplication for UntrustedTransactionalApplication {
         request: [u8; 16],
         message: &'a Message,
         context: Option<&'a orna_runtime::RuntimeActivationContext>,
-        work: &'a mut orna_live::LiveApplicationWorkLease,
+        work: &'a mut orna_live_lease::LiveApplicationWorkLease,
     ) -> Pin<Box<dyn Future<Output = Result<LiveEvalResponse, Error>> + 'a>> {
         self.0
             .dispatch_eval_with_work(session, request, message, context, work)
@@ -777,7 +777,7 @@ impl LiveApplication for UntrustedTransactionalApplication {
         watch: Option<[u8; 16]>,
         fingerprint: [u8; 32],
         context: Option<&'a orna_runtime::RuntimeActivationContext>,
-        work: &'a mut orna_live::LiveApplicationWorkLease,
+        work: &'a mut orna_live_lease::LiveApplicationWorkLease,
     ) -> Pin<Box<dyn Future<Output = Result<LiveEvalResponse, Error>> + 'a>> {
         self.0.dispatch_event_with_work(
             session,
@@ -821,7 +821,7 @@ impl LiveApplication for ThirdPartyHostEffectApplication {
         request: [u8; 16],
         message: &'a Message,
         _: Option<&'a orna_runtime::RuntimeActivationContext>,
-        _: &'a mut orna_live::LiveApplicationWorkLease,
+        _: &'a mut orna_live_lease::LiveApplicationWorkLease,
     ) -> Pin<Box<dyn Future<Output = Result<LiveEvalResponse, Error>> + 'a>> {
         let Message::Eval { fingerprint, .. } = message else {
             return Box::pin(async { Err(Error::ApplicationRejected) });
@@ -847,7 +847,7 @@ impl LiveApplication for ThirdPartyHostEffectApplication {
         request: [u8; 16],
         message: &'a Message,
         context: Option<&'a orna_runtime::RuntimeActivationContext>,
-        work: &'a mut orna_live::LiveApplicationWorkLease,
+        work: &'a mut orna_live_lease::LiveApplicationWorkLease,
     ) -> Pin<Box<dyn Future<Output = Result<LiveEvalResponse, Error>> + 'a>> {
         Box::pin(async move {
             work.check_active()?;
@@ -1098,7 +1098,7 @@ impl LiveApplication for WatchEventApplication {
         _: Option<[u8; 16]>,
         _: [u8; 32],
         _: Option<&'a orna_runtime::RuntimeActivationContext>,
-        _: &'a mut orna_live::LiveApplicationWorkLease,
+        _: &'a mut orna_live_lease::LiveApplicationWorkLease,
     ) -> Pin<Box<dyn Future<Output = Result<LiveEvalResponse, Error>> + 'a>> {
         self.events += 1;
         let Message::Event { fingerprint, .. } = message else {
@@ -9370,7 +9370,7 @@ impl LiveApplication for DeferredWatchEventApplication {
         _: Option<[u8; 16]>,
         _: [u8; 32],
         _: Option<&'a orna_runtime::RuntimeActivationContext>,
-        _: &'a mut orna_live::LiveApplicationWorkLease,
+        _: &'a mut orna_live_lease::LiveApplicationWorkLease,
     ) -> Pin<Box<dyn Future<Output = Result<LiveEvalResponse, Error>> + 'a>> {
         if !matches!(message, Message::Event { .. }) {
             return Box::pin(async { Err(Error::ApplicationRejected) });

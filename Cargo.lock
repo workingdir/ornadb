@@ -1412,6 +1412,7 @@ dependencies = [
  "orna-evaluator",
  "orna-intrinsics",
  "orna-live",
+ "orna-live-lease",
  "orna-project",
  "orna-project-repl",
  "orna-protocol",
@@ -1540,6 +1541,7 @@ dependencies = [
  "orna-cursor",
  "orna-evaluator",
  "orna-live",
+ "orna-live-lease",
  "orna-project",
  "orna-project-repl",
  "orna-protocol",
@@ -1699,6 +1701,7 @@ dependencies = [
  "orna-base",
  "orna-evaluator",
  "orna-live",
+ "orna-live-lease",
  "orna-protocol",
  "orna-repository",
  "orna-runtime",
@@ -1707,6 +1710,13 @@ dependencies = [
  "orna-stream",
  "orna-sys-id",
  "orna-value",
+]
+
+[[package]]
+name = "orna-live-lease"
+version = "1.0.0"
+dependencies = [
+ "futures",
 ]
 
 [[package]]

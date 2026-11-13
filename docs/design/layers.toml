@@ -176,6 +176,10 @@ layer = 12
 allowed = ["orna-protocol"]
 
 [[crate]]
+name = "orna-live-lease"
+layer = 11
+
+[[crate]]
 name = "orna-live"
 layer = 12
 allowed = ["orna-protocol", "orna-serving"]
