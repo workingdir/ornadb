@@ -408,6 +408,9 @@ fn executor_reason(kind: Kind) -> &'static str {
         }
         Kind::ExecutorGap => "a listed executor error and a listed old error, for one case",
         Kind::Step => "the executor charges a different step count for an agreeing run",
+        Kind::Currency => {
+            "the old pipeline cannot evaluate currency values; HIR evaluates Money per spec"
+        }
     }
 }
 
