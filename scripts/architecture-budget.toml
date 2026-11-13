@@ -296,7 +296,7 @@ name = "orna-runtime"
 [crate.files]
 "src/catalogue.rs" = 3568
 "src/invocation.rs" = 1419
-"src/lib.rs" = 35336
+"src/lib.rs" = 34458
 "src/observation.rs" = 2068
 "src/publication.rs" = 1301
 "src/schema.rs" = 2118
@@ -305,7 +305,6 @@ name = "orna-runtime"
 "src/stream_run.rs" = 1499
 "src/stream_store.rs" = 1230
 "src/table_store.rs" = 1735
-"src/vfs.rs" = 4871
 [crate.functions]
 "src/catalogue.rs::activation_commits_catalogue_identity_with_table_state_or_rolls_back_both" = 141
 "src/catalogue.rs::admit_catalogue_batch_tx" = 123
@@ -340,7 +339,6 @@ name = "orna-runtime"
 "src/lib.rs::repeated_delivery_failures_coalesce_one_durable_failure_after_reopen" = 153
 "src/lib.rs::replay_handler_cancellation_uses_owner_fenced_claim_transition" = 123
 "src/lib.rs::replay_updates_preserve_paused_source_stream_observation" = 335
-"src/lib.rs::replaying_an_already_durable_vfs_save_does_not_commit_twice" = 144
 "src/lib.rs::runtime_stream_runner_repeats_until_exhaustion_and_fences_cancellation" = 216
 "src/lib.rs::runtime_stream_scheduler_commits_noop_and_keeps_failures_unadvanced" = 144
 "src/lib.rs::staged_table_failure_rolls_back_and_retries_the_same_list_delivery" = 198
@@ -355,10 +353,8 @@ name = "orna-runtime"
 "src/lib.rs::sys_lifecycle_procedure_materialization_admits_durable_invocation" = 161
 "src/lib.rs::takeover_recovery_validation_rolls_back_lease_and_barrier" = 121
 "src/lib.rs::terminal_failure_reopens_with_its_stable_identity_after_reset_and_restart" = 202
-"src/lib.rs::two_vfs_saves_from_one_stale_baseline_refuse_only_the_second" = 134
 "src/lib.rs::validate_request_execution_evidence" = 145
 "src/lib.rs::validated_table_activation_commits_protected_blob_transfer_atomically" = 151
-"src/lib.rs::vfs_durable_save_survives_reopen_and_refusal_leaves_no_row" = 227
 "src/observation.rs::load_stream_observation_tx" = 134
 "src/observation.rs::sync_stream_observation_tx" = 187
 "src/recovery.rs::validate_checkpoint_anchors" = 159
@@ -371,11 +367,21 @@ name = "orna-runtime"
 "src/stream_carry.rs::read_stream_carry" = 146
 "src/stream_run.rs::deliver_stream_item" = 160
 "src/stream_run.rs::run_stream" = 123
-"src/vfs.rs::accepted_rename_invalidates_shared_directory_attribute_and_handle_projections" = 135
-"src/vfs.rs::commit_durable_save" = 178
-"src/vfs.rs::durable_blob_temp_rename_cas_commits_canonical_media_and_pin" = 451
-"src/vfs.rs::durable_temporary_rename_commits_and_refuses_changed_row_baseline" = 267
-"src/vfs.rs::vfs_rejected_editor_saves_keep_row_store_and_expose_typed_diagnostic" = 140
+
+[[crate]]
+name = "orna-vfs"
+[crate.files]
+"src/draft.rs" = 633
+"src/lib.rs" = 4871
+"src/naming.rs" = 456
+"src/save.rs" = 583
+"src/spool.rs" = 487
+[crate.functions]
+"src/lib.rs::accepted_rename_invalidates_shared_directory_attribute_and_handle_projections" = 135
+"src/lib.rs::commit_durable_save" = 178
+"src/lib.rs::durable_blob_temp_rename_cas_commits_canonical_media_and_pin" = 451
+"src/lib.rs::durable_temporary_rename_commits_and_refuses_changed_row_baseline" = 267
+"src/lib.rs::vfs_rejected_editor_saves_keep_row_store_and_expose_typed_diagnostic" = 140
 
 [[crate]]
 name = "orna-check"
