@@ -1,7 +1,9 @@
 //! The engine-embedded `sys` interface, `crates/orna-hir/interface/sys.orna`, must parse cleanly under the
 //! interface grammar. Every native callable is a body-less `native fn` with an effect clause.
 
-use orna_syntax::{Declaration, parse_interface};
+use orna_syntax::parse_interface;
+
+use orna_syntax_ast::Declaration;
 
 const SYS_INTERFACE: &str = include_str!("../../orna-hir/interface/sys.orna");
 

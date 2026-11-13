@@ -1,0 +1,11 @@
+[package]
+name = "orna-unicode"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Unicode 16.0.0 case folding, normalization and case-property tables shared by OrnaDB layers"
+
+[dependencies]
+unicode-normalization = "=0.1.24"

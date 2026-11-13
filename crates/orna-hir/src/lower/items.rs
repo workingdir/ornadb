@@ -10,10 +10,12 @@
 //! their own, owned by the definition that declares them, exactly as a function
 //! body is.
 
-use orna_syntax::{
+use orna_syntax_ast::SourceSpan as SyntaxSpan;
+
+use orna_syntax_ast::{
     EnumPayloadField, EnumVariant, Expr, FieldInitializer as SyntaxFieldInitializer,
     FunctionSignature, GenericParameter, ImplMember, Implementation, NativeEffectSet, Parameter,
-    Pattern, ProtocolMember, SyntaxSpan, TableMember, TypeExpr, TypeMember, TypeRepresentation,
+    Pattern, ProtocolMember, TableMember, TypeExpr, TypeMember, TypeRepresentation,
 };
 
 use crate::{
@@ -255,14 +257,14 @@ impl Builder {
         def: DefId,
         module: ModuleId,
         dimension: TypeExpr,
-        definition: orna_syntax::UnitDefinition,
+        definition: orna_syntax_ast::UnitDefinition,
     ) {
         let _ = super::types::lower_type(self, module, &[], &dimension);
         let affine_clause = match &definition {
-            orna_syntax::UnitDefinition::Derived { offset, affine, .. } => {
+            orna_syntax_ast::UnitDefinition::Derived { offset, affine, .. } => {
                 offset.is_some() || *affine
             }
-            orna_syntax::UnitDefinition::Base => false,
+            orna_syntax_ast::UnitDefinition::Base => false,
         };
         if affine_clause {
             let span = self.pending[def.index()].span.clone();
@@ -274,10 +276,10 @@ impl Builder {
             );
         }
         let (offset, affine) = match &definition {
-            orna_syntax::UnitDefinition::Derived { offset, affine, .. } => {
+            orna_syntax_ast::UnitDefinition::Derived { offset, affine, .. } => {
                 (super::units::literal_offset(offset.as_ref()), *affine)
             }
-            orna_syntax::UnitDefinition::Base => (None, false),
+            orna_syntax_ast::UnitDefinition::Base => (None, false),
         };
         self.pending[def.index()].kind = PendingKind::Built(DefKind::Unit(UnitDef {
             family: None,
@@ -285,7 +287,7 @@ impl Builder {
             offset,
             affine,
         }));
-        if let orna_syntax::UnitDefinition::Derived { value, offset, .. } = definition {
+        if let orna_syntax_ast::UnitDefinition::Derived { value, offset, .. } = definition {
             // A derived unit's expression is not part of the value model, but its
             // names are still written in the module: lower it so the editor index
             // sees them.
@@ -854,7 +856,7 @@ impl Builder {
                     .last()
                     .cloned()
                     .unwrap_or_else(|| crate::Name::new(""));
-                let name_span = orna_syntax::SyntaxSpan::new(
+                let name_span = orna_syntax_ast::SourceSpan::new(
                     span.end.saturating_sub(last.as_str().len()),
                     span.end,
                 );
@@ -972,7 +974,7 @@ impl Builder {
         if let Some(ty) = self_ty {
             // An assertion's subject is written as `self` (design section 2.4); the slot
             // is the body's only parameter.
-            let span = orna_syntax::SyntaxSpan::new(0, 0);
+            let span = orna_syntax_ast::SourceSpan::new(0, 0);
             let slot = state.add_local(crate::Name::new("self"), ty, span);
             if let (
                 super::declare::PendingKind::Built(crate::DefKind::Field(_)),

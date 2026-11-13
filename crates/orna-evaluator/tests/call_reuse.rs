@@ -2,7 +2,7 @@ use orna_evaluator::{
     EffectHandler, Environment, EvaluationError, Functions, Limits,
     invoke_named_with_effects_and_reuse_report,
 };
-use orna_syntax::{Declaration, Expr};
+use orna_syntax_ast::{Declaration, Expr};
 use orna_value::Value;
 
 /// Stands in for the relation write and read path. Relation writes reach the

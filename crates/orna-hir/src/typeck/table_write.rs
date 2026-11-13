@@ -7,7 +7,7 @@
 //! changed by an update (E3002), and an explicit rekey of an automatic key
 //! (E3013).
 
-use orna_syntax::SyntaxSpan;
+use orna_syntax_ast::SourceSpan as SyntaxSpan;
 
 use super::{BodyCheck, NotYetReason};
 use crate::{

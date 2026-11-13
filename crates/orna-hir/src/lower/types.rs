@@ -11,7 +11,7 @@
 //! is settled by the type pass of stage H2, so lowering keeps the operands'
 //! common base rather than inventing an algebra here.
 
-use orna_syntax::TypeExpr;
+use orna_syntax_ast::TypeExpr;
 
 use crate::{DefId, EffectRow, FnTy, ModuleId, Name, NameTarget, ParamIdx, Ty, TyKind};
 
@@ -112,7 +112,7 @@ fn lower_named(
     generics: &[Name],
     path: &[String],
     arguments: &[TypeExpr],
-    span: &orna_syntax::SyntaxSpan,
+    span: &orna_syntax_ast::SourceSpan,
 ) -> Ty {
     let args = arguments
         .iter()
@@ -217,7 +217,7 @@ fn lower_builtin(
     builder: &mut Builder,
     module: ModuleId,
     spelling: &str,
-    span: &orna_syntax::SyntaxSpan,
+    span: &orna_syntax_ast::SourceSpan,
 ) -> Option<Ty> {
     let scalar = builtin(spelling)?;
     super::record_use(

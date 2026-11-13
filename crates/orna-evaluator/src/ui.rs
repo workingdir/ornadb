@@ -8,7 +8,7 @@ use super::*;
 impl Context<'_, '_> {
     pub(super) fn ui_action(
         &mut self,
-        arguments: &[orna_syntax::Argument],
+        arguments: &[orna_syntax_ast::Argument],
         scope: &mut Scope,
         depth: usize,
     ) -> Result<Value, EvaluationError> {

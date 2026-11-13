@@ -3,7 +3,7 @@
 //! Split out of `items.rs` to keep that file under its size budget. The
 //! methods are called by the signature builders in `items.rs`.
 
-use orna_syntax::{Expr, FunctionSignature, GenericParameter, Parameter, TypeExpr};
+use orna_syntax_ast::{Expr, FunctionSignature, GenericParameter, Parameter, TypeExpr};
 
 use crate::{BodyId, DefId, DefKind, GenericParam, ModuleId, ParamDef};
 

@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use orna_syntax::{
+use orna_syntax_ast::{
     Declaration, Pattern, ProtocolMember, SyntaxTree, TypeExpr, TypeMember, TypeRepresentation,
     UseTail,
 };

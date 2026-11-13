@@ -1,9 +1,8 @@
 //! The typed OVB-1 codecs and the typed Error value view.
 
 use crate::Result;
-use crate::cbor::encode_raw;
 use crate::error::Error;
-use crate::raw::{Raw, Value, array, map, tag, text};
+use crate::raw::{Raw, Value, array, encode_raw, map, tag, text};
 use crate::tags::{ERROR_TAG, OPTION_TAG, RANGE_TAG, TUPLE_TAG, UNIT_TAG, UUID_TAG};
 use crate::validation::{integer_map, validate_error};
 use num_bigint::BigInt;

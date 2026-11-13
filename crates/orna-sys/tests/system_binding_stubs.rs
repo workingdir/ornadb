@@ -1,4 +1,5 @@
-use orna_syntax::{Declaration, Expr, LiteralKind, TypeExpr, parse_module};
+use orna_syntax::parse_module;
+use orna_syntax_ast::{Declaration, Expr, LiteralKind, TypeExpr};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,

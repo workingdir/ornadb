@@ -1,5 +1,6 @@
 use orna_evaluator::{Environment, Functions, Limits, PureFunction, evaluate_with_functions};
-use orna_syntax::{Declaration, parse_expression, parse_module};
+use orna_syntax::{parse_expression, parse_module};
+use orna_syntax_ast::Declaration;
 use orna_value::CanonicalValue;
 use orna_value::Raw;
 

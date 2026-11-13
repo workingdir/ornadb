@@ -1,7 +1,5 @@
-use orna_syntax::{
-    CaseArm, Declaration, Expr, Pattern, Statement, StringSegment, SyntaxDiagnostic,
-    parse_expression, parse_module, parse_repl, parse_row,
-};
+use orna_syntax::{SyntaxDiagnostic, parse_expression, parse_module, parse_repl, parse_row};
+use orna_syntax_ast::{CaseArm, Declaration, Expr, Pattern, Statement, StringSegment};
 
 fn assert_postfix_question(diagnostics: &[SyntaxDiagnostic], source: &str) {
     assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
@@ -236,7 +234,7 @@ fn case_recovery_ignores_interpolation_commas_before_the_arm_boundary() {
     };
     assert!(matches!(
         arms.as_slice(),
-        [orna_syntax::CaseArm {
+        [orna_syntax_ast::CaseArm {
             pattern: Pattern::Literal { text, .. },
             body: Expr::Literal { text: body, .. },
             ..
@@ -274,7 +272,7 @@ fn case_recovery_restores_delimiter_depth_after_each_interpolation() {
     };
     assert!(matches!(
         arms.as_slice(),
-        [orna_syntax::CaseArm {
+        [orna_syntax_ast::CaseArm {
             pattern: Pattern::Literal { text, .. },
             body: Expr::Literal { text: body, .. },
             ..
@@ -313,7 +311,7 @@ fn case_recovery_isolates_nested_interpolation_delimiters_and_keeps_tail() {
     };
     assert!(matches!(
         arms.as_slice(),
-        [orna_syntax::CaseArm {
+        [orna_syntax_ast::CaseArm {
             pattern: Pattern::Literal { text, .. },
             body: Expr::Literal { text: body, .. },
             ..
@@ -352,7 +350,7 @@ fn case_recovery_restores_each_nested_interpolation_delimiter_tail() {
     };
     assert!(matches!(
         arms.as_slice(),
-        [orna_syntax::CaseArm {
+        [orna_syntax_ast::CaseArm {
             pattern: Pattern::Literal { text, .. },
             body: Expr::Literal { text: body, .. },
             ..
@@ -392,7 +390,7 @@ fn case_recovery_preserves_tail_at_maximum_nested_interpolation_depth() {
     };
     assert!(matches!(
         arms.as_slice(),
-        [orna_syntax::CaseArm {
+        [orna_syntax_ast::CaseArm {
             pattern: Pattern::Literal { text, .. },
             body: Expr::Literal { text: body, .. },
             ..
@@ -430,7 +428,7 @@ fn case_recovery_ignores_nested_case_commas_at_max_interpolation_depth() {
     };
     assert!(matches!(
         arms.as_slice(),
-        [orna_syntax::CaseArm {
+        [orna_syntax_ast::CaseArm {
             pattern: Pattern::Literal { text, .. },
             body: Expr::Literal { text: body, .. },
             ..
@@ -469,7 +467,7 @@ fn case_recovery_restores_case_brace_depth_after_nested_interpolation_at_limit()
     };
     assert!(matches!(
         arms.as_slice(),
-        [orna_syntax::CaseArm {
+        [orna_syntax_ast::CaseArm {
             pattern: Pattern::Literal { text, .. },
             body: Expr::Literal { text: body, .. },
             ..
@@ -509,7 +507,7 @@ fn case_recovery_keeps_nested_case_scrutinee_and_pattern_interpolations_local_at
     };
     assert!(matches!(
         arms.as_slice(),
-        [orna_syntax::CaseArm {
+        [orna_syntax_ast::CaseArm {
             pattern: Pattern::Literal { text, .. },
             body: Expr::Literal { text: body, .. },
             ..

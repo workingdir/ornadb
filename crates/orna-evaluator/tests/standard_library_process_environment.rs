@@ -3,7 +3,8 @@ use orna_evaluator::{
     Limits, SysHostBindingRegistry, reference_standard_profile, reference_standard_sources,
 };
 use orna_project_repl::AdmittedReplSession;
-use orna_syntax::{Declaration, Pattern, TypeExpr, parse_module};
+use orna_syntax::parse_module;
+use orna_syntax_ast::{Declaration, Pattern, TypeExpr};
 use orna_sys::{
     ClockProvider, EnvironmentProvider, ProcessProvider, system_host_binding_modules_json,
     system_host_operation_registry,

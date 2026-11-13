@@ -27,10 +27,8 @@ use orna_repository::{
 };
 use orna_runtime::vfs::{VfsComponent, project_key_component, unproject_component};
 use orna_runtime::{TableMutation, TableObjectId};
-use orna_syntax::{
-    Declaration, Expr, FieldInitializer, TableMember, parse_module, parse_module_with_file,
-    parse_row, parse_row_with_file,
-};
+use orna_syntax::{parse_module, parse_module_with_file, parse_row, parse_row_with_file};
+use orna_syntax_ast::{Declaration, Expr, FieldInitializer, TableMember};
 
 use orna_value::{
     ContextValue, Format3Context, ROV3_BLOB_TAG, Raw, SchemaDescriptor, Snapshot, Value,
@@ -43,7 +41,6 @@ mod committed_store;
 mod object_identity;
 mod table_storage;
 mod typed_row;
-mod unicode16;
 
 pub use committed_store::CommittedTableStore;
 
@@ -3135,7 +3132,7 @@ fn portable_component(component: &str) -> bool {
 
 /// Host-independent NFKC case-fold key for portable sibling ownership.
 fn unicode_sibling_key(component: &str) -> String {
-    unicode16::to_nfkc_casefold(component)
+    orna_unicode::casefold::to_nfkc_casefold(component)
 }
 
 #[cfg(test)]

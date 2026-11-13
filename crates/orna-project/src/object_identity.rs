@@ -20,10 +20,11 @@ use orna_repository::{
     GitCommitRef, PrivateCommit, Repository, RepositoryError, Uuid,
     relation_admission::{RelationAdmissionError, StagedCandidate, StoredObjectIdentity},
 };
-use orna_syntax::{
+use orna_syntax::{Token, TokenKind, lex, parse_module};
+use orna_syntax_ast::{
     Argument, AssignmentTarget, Declaration, EnumVariant, Expr, FieldInitializer, ImplMember,
-    LiteralKind, Pattern, RecordField, Statement, StringSegment, SyntaxTree, TableMember, Token,
-    TokenKind, TypeExpr, TypeMember, TypeRepresentation, UseTail, lex, parse_module,
+    LiteralKind, Pattern, RecordField, Statement, StringSegment, SyntaxTree, TableMember, TypeExpr,
+    TypeMember, TypeRepresentation, UseTail,
 };
 use orna_value::{Raw, SchemaDescriptor, Value, domain_digest};
 

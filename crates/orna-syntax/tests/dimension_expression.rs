@@ -1,4 +1,5 @@
-use orna_syntax::{Declaration, TypeExpr, parse_module};
+use orna_syntax::parse_module;
+use orna_syntax_ast::{Declaration, TypeExpr};
 
 #[test]
 fn dimension_products_preserve_terms_and_operators() {

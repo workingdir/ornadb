@@ -12,7 +12,7 @@
 //! that resolver: a consumer must see the same classification for the same
 //! mistake.
 
-use orna_syntax::SyntaxSpan as SourceSpan;
+use orna_syntax_ast::SourceSpan;
 use orna_value::{Diagnostic, DiagnosticSeverity, DiagnosticSpan, SafeText, Snapshot};
 
 /// A name that no declaration, import, local or language form provides.

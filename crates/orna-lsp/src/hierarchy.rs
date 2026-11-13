@@ -12,8 +12,9 @@ use lsp_types::{
     CallHierarchyIncomingCall, CallHierarchyItem, CallHierarchyOutgoingCall, CodeLens, Command,
     Location, Moniker, MonikerKind, Range, SymbolKind, TypeHierarchyItem, UniquenessLevel,
 };
-use orna_syntax::{
-    Declaration, Implementation, SyntaxSpan, TableMember, TypeExpr, TypeMember, TypeRepresentation,
+use orna_syntax_ast::SourceSpan as SyntaxSpan;
+use orna_syntax_ast::{
+    Declaration, Implementation, TableMember, TypeExpr, TypeMember, TypeRepresentation,
 };
 
 use crate::analysis::{self, EditorSymbolKind};

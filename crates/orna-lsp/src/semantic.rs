@@ -10,7 +10,8 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use lsp_types::{Range, SemanticToken, SemanticTokenModifier, SemanticTokenType};
-use orna_syntax::{SyntaxSpan, editor};
+use orna_syntax::editor;
+use orna_syntax_ast::SourceSpan as SyntaxSpan;
 
 use orna_hir::UseContext;
 

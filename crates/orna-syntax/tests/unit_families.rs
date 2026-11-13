@@ -1,7 +1,9 @@
 //! Syntax of unit families: the `= unit_expr` variant form and the `impl Unit {}` marker
 //! (docs/design/units.md section 2; docs/language/reference/01-lexical-and-grammar.md).
 
-use orna_syntax::{Declaration, EnumVariant, Implementation, UnitExpr, parse_module};
+use orna_syntax::parse_module;
+
+use orna_syntax_ast::{Declaration, EnumVariant, Implementation, UnitExpr};
 
 const FAMILY_BASE_AND_SCALES: &str =
     include_str!("fixtures/units/valid/family-base-and-scales.orna");
@@ -26,7 +28,7 @@ const MISSING_EXPONENT: &str = include_str!("fixtures/units/invalid/missing-expo
 
 /// The enum named `name` in a parsed module: its variants, its remaining implementations, and its family flag.
 fn enum_named<'a>(
-    module: &'a orna_syntax::Parse<orna_syntax::SyntaxTree>,
+    module: &'a orna_syntax::Parse<orna_syntax_ast::SyntaxTree>,
     name: &str,
 ) -> (&'a [EnumVariant], &'a [Implementation], bool) {
     module

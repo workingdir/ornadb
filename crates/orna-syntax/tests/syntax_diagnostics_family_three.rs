@@ -1,4 +1,5 @@
-use orna_syntax::{Declaration, Expr, Statement, parse_module};
+use orna_syntax::parse_module;
+use orna_syntax_ast::{Declaration, Expr, Statement};
 
 #[test]
 fn nested_case_recovery_reports_local_diagnostics_and_keeps_enclosing_suffix() {

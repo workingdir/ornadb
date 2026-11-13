@@ -46,7 +46,9 @@ orna-standard-sources = { path = "../orna-standard-sources" }
 orna-check = { path = "../orna-check" }
 orna-sys = { path = "../orna-sys", optional = true }
 orna-syntax = { path = "../orna-syntax" }
+orna-syntax-ast = { path = "../orna-syntax-ast" }
 orna-value = { path = "../orna-value" }
+orna-unicode = { path = "../orna-unicode" }
 sha2 = "0.10.9"
 unicode-normalization = "=0.1.24"
 unicode-case-mapping = "=1.0.0"

@@ -36,7 +36,7 @@ fn user_declaration_carries_its_doc_comment() {
     let def = def_named(&program, "add");
     assert!(matches!(def.kind, DefKind::Fn(_)));
     assert_eq!(trimmed(&def.docs), vec!["Adds two numbers."]);
-    assert_eq!(def.clauses, orna_syntax::InterfaceClauses::default());
+    assert_eq!(def.clauses, orna_syntax_ast::InterfaceClauses::default());
 }
 
 #[test]

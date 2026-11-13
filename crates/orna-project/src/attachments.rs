@@ -15,7 +15,8 @@ use std::{
 
 use orna_check::ModuleInput;
 use orna_repository::{CommittedTreeEntryKind, GitCommitRef, Repository, RepositoryError};
-use orna_syntax::{Declaration, Keyword, TokenKind, lex, parse_module};
+use orna_syntax::{Keyword, TokenKind, lex, parse_module};
+use orna_syntax_ast::Declaration;
 
 use crate::{LoadedProject, LooseRowCandidate, ProjectLoadError, ProjectLoader};
 

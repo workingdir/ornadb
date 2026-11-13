@@ -2,12 +2,13 @@
 
 use crate::Result;
 use crate::blob::MAX_BLOB_LENGTH;
-use crate::cbor::{Reader, encode_raw, write_raw};
 use crate::error::Error;
 use crate::format3::{Format3Context, validate_annotation_fields};
 use crate::identity::uuid_array;
 use crate::media::MimeRegistry;
-use crate::raw::{Raw, Value, array, bytes, int_u64, integer, map, text};
+use crate::raw::{
+    Raw, Value, array, bytes, decode_raw, encode_raw, int_u64, integer, map, text, write_raw,
+};
 use crate::tags::{
     DATE_TAG, DECIMAL_TAG, DURATION_TAG, ENUM_TAG, INSTANT_TAG, LOCAL_DATE_TIME_TAG, MONEY_TAG,
     OPTION_TAG, QUANTITY_TAG, RANGE_TAG, RECORD_TAG, REFINED_NOMINAL_TAG, ROV3_BLOB_TAG,
@@ -106,11 +107,7 @@ impl SchemaDescriptor {
 /// stored ROV-3 Blob references. Callers must validate the value against its
 /// authenticated row schema before treating it as an admitted value.
 pub fn decode_canonical_storage_value(bytes: &[u8]) -> Result<Raw> {
-    let mut reader = Reader::new(bytes);
-    let raw = reader.raw(0)?;
-    if reader.at != bytes.len() {
-        return Err(Error::TrailingBytes);
-    }
+    let raw = decode_raw(bytes)?;
     if encode_canonical_storage_value(&raw)?.as_slice() != bytes {
         return Err(Error::NonCanonical);
     }

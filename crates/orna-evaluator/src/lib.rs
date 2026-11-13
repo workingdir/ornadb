@@ -17,9 +17,10 @@ use num_bigint::{BigInt, Sign};
 use num_integer::Integer;
 use num_traits::{Signed, ToPrimitive, Zero};
 use orna_check::StandardDependencyProfile;
-use orna_syntax::{
+use orna_syntax::{parse_expression, parse_repl};
+use orna_syntax_ast::{
     AssignmentOperator, AssignmentTarget, ControlKind, Expr, LiteralKind, Parameter, Pattern,
-    PatternField, ReplInput, Statement, StringSegment, parse_expression, parse_repl,
+    PatternField, ReplInput, Statement, StringSegment,
 };
 use orna_value::{
     CANONICAL_NAN_BITS, ContentIdentity, ContextValue, Error as ValueError,
@@ -59,7 +60,6 @@ mod sys_bindings;
 mod sys_dispatch;
 mod timezone;
 mod ui;
-mod unicode_16_case_properties;
 
 #[cfg(feature = "route-trace")]
 pub mod route_trace;
@@ -199,13 +199,13 @@ fn unicode_16_is_final_sigma(scalars: &[char], index: usize) -> bool {
         .iter()
         .rev()
         .copied()
-        .find(|scalar| !unicode_16_case_properties::is_case_ignorable(*scalar))
-        .is_some_and(unicode_16_case_properties::is_cased);
+        .find(|scalar| !orna_unicode::case_properties::is_case_ignorable(*scalar))
+        .is_some_and(orna_unicode::case_properties::is_cased);
     let following_cased = scalars[index + 1..]
         .iter()
         .copied()
-        .find(|scalar| !unicode_16_case_properties::is_case_ignorable(*scalar))
-        .is_some_and(unicode_16_case_properties::is_cased);
+        .find(|scalar| !orna_unicode::case_properties::is_case_ignorable(*scalar))
+        .is_some_and(orna_unicode::case_properties::is_cased);
     preceding_cased && !following_cased
 }
 
@@ -6158,7 +6158,7 @@ impl Context<'_, '_> {
     /// Captures the current scope so the closure keeps the names its body sees.
     fn lambda_closure(
         &self,
-        parameters: &[orna_syntax::LambdaParameter],
+        parameters: &[orna_syntax_ast::LambdaParameter],
         body: &Expr,
         scope: &Scope,
     ) -> Result<Value, EvaluationError> {
@@ -6221,7 +6221,7 @@ impl Context<'_, '_> {
 
     fn record_node(
         &mut self,
-        fields: &[orna_syntax::RecordField],
+        fields: &[orna_syntax_ast::RecordField],
         scope: &mut Scope,
         depth: usize,
     ) -> Result<Value, EvaluationError> {
@@ -6362,7 +6362,7 @@ impl Context<'_, '_> {
         binding: &Pattern,
         iterable: &Expr,
         body: &Expr,
-        arms: &[orna_syntax::CaseArm],
+        arms: &[orna_syntax_ast::CaseArm],
         scope: &mut Scope,
         depth: usize,
     ) -> Result<Value, EvaluationError> {
@@ -6418,8 +6418,8 @@ impl Context<'_, '_> {
     }
     fn nominal(
         &mut self,
-        path: &[orna_syntax::NameSegment],
-        supplied: &[orna_syntax::RecordField],
+        path: &[orna_syntax_ast::NameSegment],
+        supplied: &[orna_syntax_ast::RecordField],
         scope: &Scope,
         depth: usize,
     ) -> Result<Value, EvaluationError> {
@@ -6537,8 +6537,8 @@ impl Context<'_, '_> {
     }
     fn enum_variant_construction(
         &mut self,
-        path: &[orna_syntax::NameSegment],
-        supplied: &[orna_syntax::RecordField],
+        path: &[orna_syntax_ast::NameSegment],
+        supplied: &[orna_syntax_ast::RecordField],
         scope: &Scope,
         depth: usize,
     ) -> Result<Value, EvaluationError> {
@@ -7686,7 +7686,7 @@ impl Context<'_, '_> {
     fn decimal_divide_method(
         &mut self,
         numerator: DecimalValue,
-        arguments: &[orna_syntax::Argument],
+        arguments: &[orna_syntax_ast::Argument],
         scope: &mut Scope,
         depth: usize,
     ) -> Result<Value, EvaluationError> {
@@ -7770,7 +7770,7 @@ impl Context<'_, '_> {
     fn relation_call(
         &mut self,
         callee: &Expr,
-        arguments: &[orna_syntax::Argument],
+        arguments: &[orna_syntax_ast::Argument],
         input: Option<Value>,
         scope: &mut Scope,
         depth: usize,
@@ -9062,7 +9062,7 @@ impl Context<'_, '_> {
         &mut self,
         codec: &str,
         supports_options: bool,
-        arguments: &[orna_syntax::Argument],
+        arguments: &[orna_syntax_ast::Argument],
         input: Option<Value>,
         scope: &mut Scope,
         depth: usize,
@@ -9232,7 +9232,7 @@ impl Context<'_, '_> {
     #[cfg(feature = "system-host-bindings")]
     fn call_sys_explain(
         &mut self,
-        arguments: &[orna_syntax::Argument],
+        arguments: &[orna_syntax_ast::Argument],
         input: Option<Value>,
         scope: &mut Scope,
         depth: usize,
@@ -9279,7 +9279,7 @@ impl Context<'_, '_> {
     #[cfg(feature = "system-host-bindings")]
     fn call_sys_rt_info(
         &self,
-        arguments: &[orna_syntax::Argument],
+        arguments: &[orna_syntax_ast::Argument],
         input: Option<Value>,
     ) -> Result<Value, EvaluationError> {
         if input.is_some() || !arguments.is_empty() {
@@ -9308,7 +9308,7 @@ impl Context<'_, '_> {
     fn call_blob_operation(
         &mut self,
         function: orna_sys::SysFunction,
-        arguments: &[orna_syntax::Argument],
+        arguments: &[orna_syntax_ast::Argument],
         input: Option<Value>,
         scope: &mut Scope,
         depth: usize,
@@ -9599,7 +9599,7 @@ impl Context<'_, '_> {
     fn call(
         &mut self,
         callee: &Expr,
-        arguments: &[orna_syntax::Argument],
+        arguments: &[orna_syntax_ast::Argument],
         mut input: Option<Value>,
         scope: &mut Scope,
         depth: usize,
@@ -10358,7 +10358,7 @@ impl Context<'_, '_> {
     fn order_arguments(
         params: &[orna_intrinsics::Param],
         arities: &[usize],
-        arguments: &[orna_syntax::Argument],
+        arguments: &[orna_syntax_ast::Argument],
         values: Vec<Value>,
         implicit: usize,
         relation: bool,
@@ -10558,7 +10558,7 @@ impl Context<'_, '_> {
     fn case(
         &mut self,
         condition: &Expr,
-        arms: &[orna_syntax::CaseArm],
+        arms: &[orna_syntax_ast::CaseArm],
         scope: &mut Scope,
         depth: usize,
     ) -> Result<Value, EvaluationError> {
@@ -11048,7 +11048,7 @@ fn enum_variant_identity<'scope>(
 }
 
 fn bind_constructor(
-    path: &[orna_syntax::NameSegment],
+    path: &[orna_syntax_ast::NameSegment],
     arguments: &[Pattern],
     fields: &[PatternField],
     value: Value,
@@ -11152,7 +11152,7 @@ fn bind_pattern_fields(
 /// The syntax of one call being evaluated and how its callee is named.
 struct CallSite<'a> {
     callee: &'a Expr,
-    arguments: &'a [orna_syntax::Argument],
+    arguments: &'a [orna_syntax_ast::Argument],
     /// The admitted function the callee resolves to, when one is visible.
     resolved: Option<String>,
     /// The callee's dotted source spelling, when it is a plain path.
@@ -11194,9 +11194,9 @@ enum EffectArguments {
 /// be named exactly once.
 #[cfg(feature = "system-host-bindings")]
 fn ordered_host_arguments<'a>(
-    arguments: &'a [orna_syntax::Argument],
+    arguments: &'a [orna_syntax_ast::Argument],
     parameters: &[String],
-) -> Result<Vec<&'a orna_syntax::Argument>, EvaluationError> {
+) -> Result<Vec<&'a orna_syntax_ast::Argument>, EvaluationError> {
     if arguments.iter().all(|argument| argument.name.is_none()) {
         return Ok(arguments.iter().collect());
     }
@@ -11524,7 +11524,7 @@ fn is_relation_source(expression: &Expr) -> bool {
 
 fn relation_call_candidate(
     name: &str,
-    arguments: &[orna_syntax::Argument],
+    arguments: &[orna_syntax_ast::Argument],
     scope: &Scope,
     functions: &Functions,
 ) -> bool {
@@ -11828,7 +11828,7 @@ fn materialization_row(record: &MaterializationRecord) -> Value {
 fn materialization_clock_callee() -> Expr {
     Expr::Name {
         text: "now".to_owned(),
-        span: orna_syntax::SyntaxSpan::new(0, 0),
+        span: orna_syntax_ast::SourceSpan::new(0, 0),
     }
 }
 
@@ -12429,7 +12429,7 @@ mod tests {
                 .replace('/', ".");
             let module = orna_intrinsics::Module::from_path(&format!("std.{namespace}"));
             for item in parsed.value.items {
-                let orna_syntax::Declaration::Function { signature, body } = item.declaration
+                let orna_syntax_ast::Declaration::Function { signature, body } = item.declaration
                 else {
                     continue;
                 };
@@ -12730,7 +12730,7 @@ mod tests {
         let parsed =
             orna_syntax::parse_module("fn run(seed: Int = 3, doubled: Int = seed * 2) = doubled;");
         assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
-        let orna_syntax::Declaration::Function { signature, body } =
+        let orna_syntax_ast::Declaration::Function { signature, body } =
             &parsed.value.items[0].declaration
         else {
             panic!("function expected");
@@ -12812,13 +12812,13 @@ mod tests {
                 String::from("relay"),
                 PureFunction {
                     parameters: match &parsed.value.items[0].declaration {
-                        orna_syntax::Declaration::Function { signature, .. } => {
+                        orna_syntax_ast::Declaration::Function { signature, .. } => {
                             signature.parameters.clone()
                         }
                         _ => panic!("function expected"),
                     },
                     body: match &parsed.value.items[0].declaration {
-                        orna_syntax::Declaration::Function { body, .. } => body.clone(),
+                        orna_syntax_ast::Declaration::Function { body, .. } => body.clone(),
                         _ => panic!("function expected"),
                     },
                     environment: Environment::new(),
@@ -12828,13 +12828,13 @@ mod tests {
                 String::from("entry"),
                 PureFunction {
                     parameters: match &parsed.value.items[1].declaration {
-                        orna_syntax::Declaration::Function { signature, .. } => {
+                        orna_syntax_ast::Declaration::Function { signature, .. } => {
                             signature.parameters.clone()
                         }
                         _ => panic!("function expected"),
                     },
                     body: match &parsed.value.items[1].declaration {
-                        orna_syntax::Declaration::Function { body, .. } => body.clone(),
+                        orna_syntax_ast::Declaration::Function { body, .. } => body.clone(),
                         _ => panic!("function expected"),
                     },
                     environment: Environment::new(),
@@ -12910,7 +12910,7 @@ mod tests {
 
         let parsed = orna_syntax::parse_module("fn entry(path: Str) = sys.test.capture(path);");
         assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
-        let orna_syntax::Declaration::Function { signature, body } =
+        let orna_syntax_ast::Declaration::Function { signature, body } =
             &parsed.value.items[0].declaration
         else {
             panic!("function expected")
@@ -13074,7 +13074,7 @@ mod tests {
         let parsed =
             orna_syntax::parse_module(include_str!("../tests/fixtures/context-result-owner.orna"));
         assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
-        let orna_syntax::Declaration::Function { signature, body } =
+        let orna_syntax_ast::Declaration::Function { signature, body } =
             &parsed.value.items[0].declaration
         else {
             panic!("function expected")
@@ -13204,7 +13204,7 @@ mod tests {
             "fn entry(blob: Blob) = (sys.test.persist((sys.test.echo(\"ping\"), blob)), blob);",
         );
         assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
-        let orna_syntax::Declaration::Function { signature, body } =
+        let orna_syntax_ast::Declaration::Function { signature, body } =
             &parsed.value.items[0].declaration
         else {
             panic!("function expected")
@@ -13348,7 +13348,7 @@ mod tests {
         let functions = {
             let parsed = orna_syntax::parse_module("fn main() = [now(), now()];");
             assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
-            let orna_syntax::Declaration::Function { signature, body } =
+            let orna_syntax_ast::Declaration::Function { signature, body } =
                 &parsed.value.items[0].declaration
             else {
                 panic!("function expected")
@@ -13391,7 +13391,7 @@ mod tests {
             .items
             .into_iter()
             .map(|item| {
-                let orna_syntax::Declaration::Function { signature, body } = item.declaration
+                let orna_syntax_ast::Declaration::Function { signature, body } = item.declaration
                 else {
                     panic!("function expected")
                 };
@@ -13740,7 +13740,7 @@ mod tests {
             .items
             .into_iter()
             .map(|item| {
-                let orna_syntax::Declaration::Function { signature, body } = item.declaration
+                let orna_syntax_ast::Declaration::Function { signature, body } = item.declaration
                 else {
                     panic!("function expected")
                 };
@@ -14086,7 +14086,7 @@ mod tests {
 
     #[test]
     fn synthetic_relation_receiver_is_a_static_effect_path() {
-        let span = orna_syntax::SyntaxSpan::new(0, 0);
+        let span = orna_syntax_ast::SourceSpan::new(0, 0);
         let expression = Expr::Call {
             callee: Box::new(Expr::Field {
                 base: Box::new(Expr::ReplBinding {
@@ -15678,7 +15678,7 @@ mod output_digest_equivalence {
             parameters: Vec::new(),
             body: Expr::Name {
                 text: "x".to_owned(),
-                span: orna_syntax::SyntaxSpan::new(0, 0),
+                span: orna_syntax_ast::SourceSpan::new(0, 0),
             },
             captured: Scope(
                 BTreeMap::new(),

@@ -9,7 +9,7 @@ No generator writes these files; they are hand-written Orna source (the generato
 declarations bind to the engine registry.
 
 - `core.orna`
-- `core/bits.orna`, `core/collection.orna`, `core/decimal.orna`, `core/hash.orna`, `core/stats.orna`, `core/text.orna`, `core/time.orna`
+- `core/bits.orna`, `core/collection.orna`, `core/decimal.orna`, `core/hash.orna`, `core/money.orna`, `core/stats.orna`, `core/text.orna`, `core/time.orna`
 - `core/ops.orna` (operator protocols, declarations with no natives)
 - `core/encoding/base64.orna`, `core/encoding/json.orna`, `core/encoding/orna.orna`, `core/encoding/ovb.orna`
 

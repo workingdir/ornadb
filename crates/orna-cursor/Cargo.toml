@@ -1,0 +1,12 @@
+[package]
+name = "orna-cursor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Ordered, typed transaction cursors and primary-key component codecs"
+
+[dependencies]
+num-bigint = "0.4.6"
+orna-value = { path = "../orna-value" }
+sha2 = "0.10.9"

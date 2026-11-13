@@ -13,7 +13,9 @@ use orna_evaluator::{
     EffectHandler, Environment, EvaluationError, Functions, Limits, PureFunction, RelationPage,
     RelationReadScope, StepBudget, invoke_named_with_effects,
 };
-use orna_syntax::{Argument, Expr, LiteralKind, SyntaxSpan, parse_module};
+use orna_syntax::parse_module;
+use orna_syntax_ast::SourceSpan as SyntaxSpan;
+use orna_syntax_ast::{Argument, Expr, LiteralKind};
 use orna_value::CanonicalValue;
 use orna_value::Raw;
 
@@ -25,7 +27,8 @@ fn fixture_functions() -> Functions {
         .items
         .into_iter()
         .map(|item| {
-            let orna_syntax::Declaration::Function { signature, body } = item.declaration else {
+            let orna_syntax_ast::Declaration::Function { signature, body } = item.declaration
+            else {
                 panic!("fixture function expected")
             };
             (
@@ -50,7 +53,8 @@ fn nested_window_aggregate_functions() -> Functions {
         .items
         .into_iter()
         .map(|item| {
-            let orna_syntax::Declaration::Function { signature, body } = item.declaration else {
+            let orna_syntax_ast::Declaration::Function { signature, body } = item.declaration
+            else {
                 panic!("fixture function expected")
             };
             (
@@ -75,7 +79,8 @@ fn nested_aggregate_refresh_functions() -> Functions {
         .items
         .into_iter()
         .map(|item| {
-            let orna_syntax::Declaration::Function { signature, body } = item.declaration else {
+            let orna_syntax_ast::Declaration::Function { signature, body } = item.declaration
+            else {
                 panic!("fixture function expected")
             };
             (
@@ -100,7 +105,8 @@ fn nested_aggregate_compaction_functions() -> Functions {
         .items
         .into_iter()
         .map(|item| {
-            let orna_syntax::Declaration::Function { signature, body } = item.declaration else {
+            let orna_syntax_ast::Declaration::Function { signature, body } = item.declaration
+            else {
                 panic!("fixture function expected")
             };
             (
@@ -125,7 +131,8 @@ fn paired_nested_spill_aggregate_functions() -> Functions {
         .items
         .into_iter()
         .map(|item| {
-            let orna_syntax::Declaration::Function { signature, body } = item.declaration else {
+            let orna_syntax_ast::Declaration::Function { signature, body } = item.declaration
+            else {
                 panic!("fixture function expected")
             };
             (
@@ -150,7 +157,8 @@ fn paired_pagination_nested_escalation_functions() -> Functions {
         .items
         .into_iter()
         .map(|item| {
-            let orna_syntax::Declaration::Function { signature, body } = item.declaration else {
+            let orna_syntax_ast::Declaration::Function { signature, body } = item.declaration
+            else {
                 panic!("fixture function expected")
             };
             (
@@ -175,7 +183,8 @@ fn paired_pagination_nested_compaction_functions() -> Functions {
         .items
         .into_iter()
         .map(|item| {
-            let orna_syntax::Declaration::Function { signature, body } = item.declaration else {
+            let orna_syntax_ast::Declaration::Function { signature, body } = item.declaration
+            else {
                 panic!("fixture function expected")
             };
             (
@@ -200,7 +209,8 @@ fn paired_pagination_compaction_escalation_functions() -> Functions {
         .items
         .into_iter()
         .map(|item| {
-            let orna_syntax::Declaration::Function { signature, body } = item.declaration else {
+            let orna_syntax_ast::Declaration::Function { signature, body } = item.declaration
+            else {
                 panic!("fixture function expected")
             };
             (
@@ -225,7 +235,8 @@ fn paired_pagination_nested_spill_functions() -> Functions {
         .items
         .into_iter()
         .map(|item| {
-            let orna_syntax::Declaration::Function { signature, body } = item.declaration else {
+            let orna_syntax_ast::Declaration::Function { signature, body } = item.declaration
+            else {
                 panic!("fixture function expected")
             };
             (
@@ -250,7 +261,8 @@ fn paired_shared_cursor_nested_spill_functions() -> Functions {
         .items
         .into_iter()
         .map(|item| {
-            let orna_syntax::Declaration::Function { signature, body } = item.declaration else {
+            let orna_syntax_ast::Declaration::Function { signature, body } = item.declaration
+            else {
                 panic!("fixture function expected")
             };
             (
@@ -275,7 +287,8 @@ fn paired_nested_restore_fold_functions() -> Functions {
         .items
         .into_iter()
         .map(|item| {
-            let orna_syntax::Declaration::Function { signature, body } = item.declaration else {
+            let orna_syntax_ast::Declaration::Function { signature, body } = item.declaration
+            else {
                 panic!("fixture function expected")
             };
             (
@@ -300,7 +313,8 @@ fn sparse_window_fold_functions() -> Functions {
         .items
         .into_iter()
         .map(|item| {
-            let orna_syntax::Declaration::Function { signature, body } = item.declaration else {
+            let orna_syntax_ast::Declaration::Function { signature, body } = item.declaration
+            else {
                 panic!("fixture function expected")
             };
             (
@@ -325,7 +339,8 @@ fn paired_window_refresh_compaction_functions() -> Functions {
         .items
         .into_iter()
         .map(|item| {
-            let orna_syntax::Declaration::Function { signature, body } = item.declaration else {
+            let orna_syntax_ast::Declaration::Function { signature, body } = item.declaration
+            else {
                 panic!("fixture function expected")
             };
             (
@@ -350,7 +365,8 @@ fn paired_window_scope_compaction_functions() -> Functions {
         .items
         .into_iter()
         .map(|item| {
-            let orna_syntax::Declaration::Function { signature, body } = item.declaration else {
+            let orna_syntax_ast::Declaration::Function { signature, body } = item.declaration
+            else {
                 panic!("fixture function expected")
             };
             (
@@ -375,7 +391,8 @@ fn paired_sparse_window_checkpoint_functions() -> Functions {
         .items
         .into_iter()
         .map(|item| {
-            let orna_syntax::Declaration::Function { signature, body } = item.declaration else {
+            let orna_syntax_ast::Declaration::Function { signature, body } = item.declaration
+            else {
                 panic!("fixture function expected")
             };
             (
@@ -400,7 +417,8 @@ fn paired_refresh_sparse_rotation_functions() -> Functions {
         .items
         .into_iter()
         .map(|item| {
-            let orna_syntax::Declaration::Function { signature, body } = item.declaration else {
+            let orna_syntax_ast::Declaration::Function { signature, body } = item.declaration
+            else {
                 panic!("fixture function expected")
             };
             (
@@ -425,7 +443,8 @@ fn paired_snapshot_sparse_escalation_functions() -> Functions {
         .items
         .into_iter()
         .map(|item| {
-            let orna_syntax::Declaration::Function { signature, body } = item.declaration else {
+            let orna_syntax_ast::Declaration::Function { signature, body } = item.declaration
+            else {
                 panic!("fixture function expected")
             };
             (
@@ -450,7 +469,8 @@ fn nested_pagination_compaction_functions() -> Functions {
         .items
         .into_iter()
         .map(|item| {
-            let orna_syntax::Declaration::Function { signature, body } = item.declaration else {
+            let orna_syntax_ast::Declaration::Function { signature, body } = item.declaration
+            else {
                 panic!("fixture function expected")
             };
             (
@@ -475,7 +495,8 @@ fn paired_checkpoint_rotation_functions() -> Functions {
         .items
         .into_iter()
         .map(|item| {
-            let orna_syntax::Declaration::Function { signature, body } = item.declaration else {
+            let orna_syntax_ast::Declaration::Function { signature, body } = item.declaration
+            else {
                 panic!("fixture function expected")
             };
             (
@@ -500,7 +521,8 @@ fn paired_limit_refresh_compaction_functions() -> Functions {
         .items
         .into_iter()
         .map(|item| {
-            let orna_syntax::Declaration::Function { signature, body } = item.declaration else {
+            let orna_syntax_ast::Declaration::Function { signature, body } = item.declaration
+            else {
                 panic!("fixture function expected")
             };
             (
@@ -525,7 +547,8 @@ fn scoped_refresh_aggregate_functions() -> Functions {
         .items
         .into_iter()
         .map(|item| {
-            let orna_syntax::Declaration::Function { signature, body } = item.declaration else {
+            let orna_syntax_ast::Declaration::Function { signature, body } = item.declaration
+            else {
                 panic!("fixture function expected")
             };
             (
