@@ -532,6 +532,7 @@ impl WorkspaceFilesystem {
 
 /// The digest an explicit edit carries from its read to its save (41-vfs.md:75-77): the
 /// lowercase hex SHA-256 of the mounted bytes the editor was seeded from.
+#[must_use]
 pub fn edit_view_digest(bytes: &[u8]) -> String {
     hex(&Sha256::digest(bytes))
 }
