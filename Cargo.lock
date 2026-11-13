@@ -1814,6 +1814,7 @@ dependencies = [
  "libc",
  "num-bigint 0.4.8",
  "orna-base",
+ "orna-cbor",
  "orna-check",
  "orna-conformance",
  "orna-evaluator",

@@ -338,7 +338,6 @@ mod tests {
     use crate::hex::hex_encode;
     use crate::native_graph::{
         ByteIndexEntry, CborValue, GitHashAlgorithm, NativeNodeEnvelope, NativeObjectKind,
-        canonical_value_bytes,
     };
 
     /// Roots the reference model builds; see the fixture's README.
@@ -347,6 +346,10 @@ mod tests {
     const RELEASE_VECTORS: &str =
         include_str!("../tests/fixtures/reference/tests/final-vectors.json");
     const BLOB_MEDIA_TYPE: &str = "application/octet-stream";
+
+    fn canonical_value_bytes(value: &CborValue) -> Vec<u8> {
+        crate::native_graph::canonical_value_bytes(value).expect("canonical test value")
+    }
 
     fn sha256(bytes: &[u8]) -> [u8; 32] {
         Sha256::digest(bytes).into()

@@ -925,9 +925,13 @@ pub(crate) fn maintain_ordered_map(
 mod tests {
     use super::*;
     use crate::{
-        native_graph::{CborValue, GitHashAlgorithm, canonical_value_bytes},
+        native_graph::{CborValue, GitHashAlgorithm},
         orp::build_ordered_map,
     };
+
+    fn canonical_value_bytes(value: &CborValue) -> Vec<u8> {
+        crate::native_graph::canonical_value_bytes(value).expect("canonical test value")
+    }
 
     /// An in-memory node store; `reads` holds the nodes the last pass read.
     #[derive(Default)]
