@@ -2,7 +2,7 @@
 //!
 //! `S` is the repository owner's opaque row-map snapshot (in production,
 //! `orna_repository::row_store::RowMapSnapshot`). Keeping that value in a
-//! [`SnapshotPin`](crate::vfs::SnapshotPin) binds each open handle and readdir
+//! [`SnapshotPin`](orna_runtime::SnapshotPin) binds each open handle and readdir
 //! cursor to one immutable row-map version without giving this module a second
 //! row authority.
 
@@ -20,7 +20,7 @@ use orna_repository::{
 };
 use tokio::sync::Mutex;
 
-use crate::{FaultInjector, RuntimeError, RuntimeState, TableActivationError};
+use orna_runtime::{FaultInjector, RuntimeError, RuntimeState, TableActivationError};
 use orna_stream::{DiagnosticCode, SafeDiagnostic};
 
 mod draft;
@@ -598,7 +598,7 @@ pub enum FsyncOutcome<S> {
 }
 
 /// Whether a managed destination still names a live row file.
-pub(super) enum ManagedFileState<S> {
+pub(crate) enum ManagedFileState<S> {
     /// The destination is linked. New opens and replacements observe this
     /// image, and an accepted replacement advances it.
     Live { image: Arc<VfsFileSnapshot<S>> },
@@ -1091,7 +1091,7 @@ struct TemporarySaveState<S> {
 }
 
 /// How far a temporary file's scratch sequence has advanced.
-pub(super) enum ScratchSync<S> {
+pub(crate) enum ScratchSync<S> {
     /// No scratch sequence has been persisted yet.
     Unsaved,
     /// `fsync` persisted one draft revision as scratch.
@@ -1774,7 +1774,7 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
         A: FnOnce(VfsSaveCoordinates, Arc<[u8]>) -> AFut,
         AFut: Future<Output = Result<VfsSaveCandidate, TableActivationError>>,
     {
-        if super::activation::runtime_activation_active(runtime) {
+        if orna_runtime::runtime_activation_active(runtime) {
             return Err(VfsSaveError::Activation(TableActivationError::Runtime(
                 RuntimeError::AdminBusy,
             )));
@@ -1949,7 +1949,7 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
             .duplicate()
             .map_err(|_| VfsSaveError::Backing(EditDraftError::BackingIo))?;
         let candidate =
-            super::activation::with_activation_scope(runtime, writer, move || async move {
+            orna_runtime::with_activation_scope(runtime, writer, move || async move {
                 admit(coordinates, callback_snapshot).await
             })
             .await
@@ -2085,7 +2085,7 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
         if save.expected_baseline_row.is_none() {
             return Err(VfsSaveError::MissingBaseline);
         }
-        if super::activation::runtime_activation_active(runtime) {
+        if orna_runtime::runtime_activation_active(runtime) {
             return Err(VfsSaveError::Activation(TableActivationError::Runtime(
                 RuntimeError::AdminBusy,
             )));
@@ -2130,7 +2130,7 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
 mod tests {
     use super::spool::{CandidateSource, DRAFT_SPOOL_DIRECTORY};
     use super::*;
-    use crate::{
+    use orna_runtime::{
         ProtectedContentTransferEvidence, RuntimeIdentity, RuntimeQueryError, RuntimeState,
         RuntimeTableIdentity, RuntimeTableRows, TableActivationCandidateValidator, TableMutation,
         TableObjectId, TableSchemaIdentity,
@@ -2591,7 +2591,7 @@ mod tests {
 
     #[test]
     fn vfs_table_row_replacement_preserves_admitted_table_identity() {
-        let table = RuntimeTableIdentity::new("Song", crate::TableObjectId::new([0x71; 16]))
+        let table = RuntimeTableIdentity::new("Song", orna_runtime::TableObjectId::new([0x71; 16]))
             .expect("valid table identity");
         let replacement = VfsTableRowReplacement::new(
             [0x55; 16],
@@ -4193,7 +4193,7 @@ mod tests {
                         }),
                     ))
                 },
-                &crate::NoFault,
+                &orna_runtime::NoFault,
             )
             .await
             .unwrap();
@@ -4213,7 +4213,7 @@ mod tests {
                 VfsDurableSave::new([4; 16], schema.clone(), identity.clone(), key.clone())
                     .with_expected_baseline_row(None),
                 |_, _| async { panic!("an accepted temp rename must replay its outcome") },
-                &crate::NoFault,
+                &orna_runtime::NoFault,
             )
             .await
             .unwrap();
@@ -4259,7 +4259,7 @@ mod tests {
                         }),
                     ))
                 },
-                &crate::NoFault,
+                &orna_runtime::NoFault,
             )
             .await;
         let Err(VfsSaveError::Stale { diagnostic, .. }) = identical else {
@@ -4301,7 +4301,7 @@ mod tests {
                         }),
                     ))
                 },
-                &crate::NoFault,
+                &orna_runtime::NoFault,
             )
             .await;
         let Err(VfsSaveError::Stale { diagnostic, .. }) = stale else {
@@ -4341,7 +4341,7 @@ mod tests {
                         }),
                     ))
                 },
-                &crate::NoFault,
+                &orna_runtime::NoFault,
             )
             .await
             .unwrap();
@@ -4354,11 +4354,11 @@ mod tests {
         let mut failed_lookup = VfsSaveAdmission::<u64>::begin(
             &state,
             VfsDurableSave::new([4; 16], schema.clone(), identity.clone(), key.clone()),
-            &crate::NoFault,
+            &orna_runtime::NoFault,
         )
         .await
         .unwrap();
-        failed_lookup.snapshot.table_rows.clear();
+        failed_lookup.snapshot.clear_table_rows_for_test();
         assert_eq!(
             failed_lookup.admitted_row(),
             Err(RuntimeQueryError::TableNotAdmitted),
@@ -4407,7 +4407,7 @@ mod tests {
         let state = RuntimeState::open(&repo, runtime_identity, [0x62; 32])
             .await
             .unwrap();
-        let cache = state.vfs_repository_cache();
+        let cache = Arc::new(VfsRepositoryCache::new());
         let retention = Arc::new(());
         let retained = Arc::downgrade(&retention);
         let target = cache
@@ -4521,7 +4521,7 @@ mod tests {
                 "image/png",
                 Some("png"),
                 |_, _, _| async { panic!("identity mismatch must stop before row admission") },
-                &crate::NoFault,
+                &orna_runtime::NoFault,
             )
             .await;
         assert!(matches!(
@@ -4623,7 +4623,7 @@ mod tests {
                         }),
                     ))
                 },
-                &crate::NoFault,
+                &orna_runtime::NoFault,
             )
             .await;
         let diagnostic = match stale {
@@ -4653,7 +4653,7 @@ mod tests {
             "stale rejection removes its provisional graph pin"
         );
 
-        let cache_for_admit = cache;
+        let cache_for_admit = Arc::clone(&cache);
         let encoded_row = Arc::new(TestMutex::new(None));
         let encoded_row_for_admit = Arc::clone(&encoded_row);
         let save_table = table.clone();
@@ -4705,7 +4705,7 @@ mod tests {
                         VfsSaveAdmission::<u64>::begin(
                             state_for_admit,
                             nested_save,
-                            &crate::NoFault,
+                            &orna_runtime::NoFault,
                         )
                         .await,
                         Err(TableActivationError::Runtime(RuntimeError::AdminBusy))
@@ -4721,7 +4721,7 @@ mod tests {
                                     TableActivationError::Runtime(RuntimeError::AdminBusy),
                                 )
                             },
-                            &crate::NoFault,
+                            &orna_runtime::NoFault,
                         )
                         .await;
                     assert!(matches!(
@@ -4763,7 +4763,7 @@ mod tests {
                         }),
                     ))
                 },
-                &crate::NoFault,
+                &orna_runtime::NoFault,
             )
             .await
             .unwrap();

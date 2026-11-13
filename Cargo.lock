@@ -1491,6 +1491,7 @@ dependencies = [
  "orna-sys",
  "orna-sys-id",
  "orna-value",
+ "orna-vfs",
  "parquet",
  "rustix 0.38.44",
  "serde_json",
@@ -1753,6 +1754,7 @@ dependencies = [
  "orna-syntax-ast",
  "orna-unicode",
  "orna-value",
+ "orna-vfs",
  "tempfile",
  "unicode-normalization",
 ]
@@ -2022,6 +2024,26 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "unicode-normalization",
+]
+
+[[package]]
+name = "orna-vfs"
+version = "1.0.0"
+dependencies = [
+ "num-bigint 0.4.8",
+ "orna-base",
+ "orna-evaluator",
+ "orna-repository",
+ "orna-runtime",
+ "orna-stream",
+ "orna-syntax",
+ "orna-syntax-ast",
+ "orna-value",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

@@ -38,16 +38,16 @@ pub(crate) struct MountWriter {
 /// per process, so every editor opened by one mount shares one budget; a
 /// malformed value is an error, never a silent fallback.
 #[cfg(feature = "test-seams")]
-pub(crate) fn mount_draft_quota() -> Result<Arc<orna_runtime::vfs::DraftQuota>, String> {
+pub(crate) fn mount_draft_quota() -> Result<Arc<orna_vfs::DraftQuota>, String> {
     const DRAFT_QUOTA_ENV: &str = "ORNA_DRAFT_QUOTA_BYTES";
     static MOUNT_DRAFT_QUOTA: std::sync::LazyLock<
-        Result<Arc<orna_runtime::vfs::DraftQuota>, String>,
+        Result<Arc<orna_vfs::DraftQuota>, String>,
     > = std::sync::LazyLock::new(|| match std::env::var(DRAFT_QUOTA_ENV) {
-        Err(std::env::VarError::NotPresent) => Ok(orna_runtime::vfs::default_draft_quota()),
+        Err(std::env::VarError::NotPresent) => Ok(orna_vfs::default_draft_quota()),
         Err(error) => Err(format!("{DRAFT_QUOTA_ENV} is not valid: {error}")),
         Ok(value) => value
             .parse::<u64>()
-            .map(|bytes| Arc::new(orna_runtime::vfs::DraftQuota::new(bytes)))
+            .map(|bytes| Arc::new(orna_vfs::DraftQuota::new(bytes)))
             .map_err(|error| format!("{DRAFT_QUOTA_ENV} is not a byte count: {error}")),
     });
     MOUNT_DRAFT_QUOTA.clone()
@@ -58,8 +58,8 @@ pub(crate) fn mount_draft_quota() -> Result<Arc<orna_runtime::vfs::DraftQuota>, 
 /// value, so both call sites stay identical.
 #[cfg(not(feature = "test-seams"))]
 #[allow(clippy::unnecessary_wraps)]
-pub(crate) fn mount_draft_quota() -> Result<Arc<orna_runtime::vfs::DraftQuota>, String> {
-    Ok(orna_runtime::vfs::default_draft_quota())
+pub(crate) fn mount_draft_quota() -> Result<Arc<orna_vfs::DraftQuota>, String> {
+    Ok(orna_vfs::default_draft_quota())
 }
 
 impl MountWriter {

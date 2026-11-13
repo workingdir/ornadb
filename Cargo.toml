@@ -43,6 +43,7 @@ members = [
     "crates/orna-sys-model",
     "crates/orna-traceability",
     "crates/orna-value",
+    "crates/orna-vfs",
 ]
 resolver = "3"
 

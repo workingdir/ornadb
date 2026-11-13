@@ -71,6 +71,13 @@ pub struct RuntimeTableActivationSnapshot {
 }
 
 impl RuntimeTableActivationSnapshot {
+    /// Test seam for downstream crates: drops the admitted rows so a caller can
+    /// exercise the unverifiable-row lookup path. Not for production use.
+    #[doc(hidden)]
+    pub fn clear_table_rows_for_test(&mut self) {
+        self.table_rows.clear();
+    }
+
     pub fn context(&self) -> &RuntimeActivationContext {
         &self.context
     }

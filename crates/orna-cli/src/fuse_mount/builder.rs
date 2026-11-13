@@ -854,7 +854,7 @@ impl FsBuilder {
                         .into());
                     }
                 };
-                let file_name = orna_runtime::vfs::project_content_name(
+                let file_name = orna_vfs::project_content_name(
                     field_name,
                     media_type.as_str(),
                     suffix.as_deref(),
@@ -894,7 +894,7 @@ impl FsBuilder {
             } else if let Some(text) = large_text_payload(&value) {
                 let required = !is_optional_field(field_type);
                 let text_file =
-                    orna_runtime::vfs::project_text_name(field_name).map_err(|error| {
+                    orna_vfs::project_text_name(field_name).map_err(|error| {
                         format!(
                             "stored Str field {field_name} cannot be projected as text: {error:?}"
                         )

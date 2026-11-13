@@ -152,7 +152,7 @@ fn release_names_an_unrefused_candidate_unsynced_and_keeps_a_refusal_cause() {
 fn retained_candidate_streams_in_bounded_chunks() {
     const LEN: u64 = 64 * 1024 * 1024;
     let runtime = tempfile::tempdir().unwrap();
-    let quota = std::sync::Arc::new(orna_runtime::vfs::DraftQuota::new(1 << 30));
+    let quota = std::sync::Arc::new(orna_vfs::DraftQuota::new(1 << 30));
     let store = super::VfsRetainedDraftStore::open(runtime.path(), quota).unwrap();
     let largest_read = std::cell::Cell::new(0_usize);
     let total_read = std::cell::Cell::new(0_u64);
@@ -163,7 +163,7 @@ fn retained_candidate_streams_in_bounded_chunks() {
             .map(|index| (index % 251) as u8)
             .collect())
     };
-    let mut candidate = orna_runtime::vfs::QuotaCharge::empty(&store.quota);
+    let mut candidate = orna_vfs::QuotaCharge::empty(&store.quota);
     let retained = store
         .retain(
             "/music/big.orna",

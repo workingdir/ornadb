@@ -22,6 +22,7 @@
     "orna-protocol",
     "orna-repository",
     "orna-runtime",
+    "orna-vfs",
     "orna-security",
     "orna-check",
     "orna-serving",

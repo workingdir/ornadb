@@ -92,7 +92,7 @@ fn reply_read_size_caps_each_reply_at_one_chunk() {
 
 #[test]
 fn quota_exceeded_maps_to_edquot_and_backing_io_to_eio() {
-    use orna_runtime::vfs::EditDraftError;
+    use orna_vfs::EditDraftError;
     assert_eq!(
         super::draft_errno(&Err(EditDraftError::QuotaExceeded)).code(),
         122
@@ -109,7 +109,7 @@ fn quota_exceeded_maps_to_edquot_and_backing_io_to_eio() {
 
 #[test]
 fn aggregate_quota_refusal_at_save_is_edquot_on_every_commit_path() {
-    use orna_runtime::vfs::{EditDraftError, VfsSaveError};
+    use orna_vfs::{EditDraftError, VfsSaveError};
     // The document, fsync and flush replies all return `DocumentCommitError::errno()`
     // of the error `save_failure` classifies (41-vfs.md:105: EDQUOT for resource limits).
     for error in [EditDraftError::QuotaExceeded, EditDraftError::FileTooLarge] {
@@ -128,7 +128,7 @@ fn aggregate_quota_refusal_at_save_is_edquot_on_every_commit_path() {
 
 #[test]
 fn temporary_commit_backing_io_failure_is_eio_and_malformed_draft_is_einval() {
-    use orna_runtime::vfs::{EditDraftError, VfsSaveError};
+    use orna_vfs::{EditDraftError, VfsSaveError};
     use orna_runtime::{RuntimeError, TableActivationError};
     let malformed = || {
         VfsSaveError::<TableActivationError>::Activation(TableActivationError::Runtime(
@@ -160,7 +160,8 @@ use super::{
     runtime_table_key_bytes, select_runtime_row_fields, source_without_fields,
 };
 use orna_repository::TypedKey;
-use orna_runtime::{RuntimeTableIdentity, RuntimeTableRows, TableObjectId, vfs::project_component};
+use orna_runtime::{RuntimeTableIdentity, RuntimeTableRows, TableObjectId};
+use orna_vfs::project_component;
 use orna_value::{Raw, Value};
 fn encode_fields(fields: Vec<Raw>) -> Vec<u8> {
     Value::new(Raw::Array(fields)).unwrap().encode().unwrap()

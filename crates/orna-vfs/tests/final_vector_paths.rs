@@ -2,7 +2,7 @@
 //! component projection reproduces every published host spelling, including
 //! the long `~key-` alias (`profiles/vfs-1.md`, "Row/key directory mapping").
 
-use orna_runtime::vfs::{
+use orna_vfs::{
     VfsComponent, project_component, project_key_component, unproject_component,
 };
 use sha2::{Digest, Sha256};

@@ -15,7 +15,7 @@ use std::{
     },
 };
 
-use orna_runtime::vfs::{
+use orna_vfs::{
     DraftQuota, DraftStorage, EditDraft, SnapshotPin, VfsFileSnapshot, VfsRepositoryCache,
 };
 use tempfile::TempDir;

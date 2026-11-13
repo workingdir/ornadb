@@ -97,7 +97,7 @@ async fn data_orna_key_escapes_first_byte_and_round_trips() {
 #[test]
 fn blob_data_with_orna_suffix_projects_as_escaped_name() {
     let name =
-        orna_runtime::vfs::project_content_name("data", "application/octet-stream", Some("orna"))
+        orna_vfs::project_content_name("data", "application/octet-stream", Some("orna"))
             .expect("octet-stream with suffix orna is a valid annotation");
     assert_eq!(name, "%64ata.orna");
 }

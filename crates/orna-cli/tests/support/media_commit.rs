@@ -37,7 +37,7 @@ fn vfs_key_component(key: &str) -> (String, KeyComponentText) {
     let canonical_encoding = orna_repository::TypedKey::Text(key.to_owned())
         .canonical_bytes()
         .expect("the fixture key has a canonical encoding");
-    let encoded = orna_runtime::vfs::project_key_component(key, &canonical_encoding);
+    let encoded = orna_vfs::project_key_component(key, &canonical_encoding);
     (
         encoded,
         KeyComponentText {
