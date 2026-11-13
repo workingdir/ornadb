@@ -7,11 +7,11 @@
 
 use orna_syntax::{Expr as AstExpr, SyntaxSpan};
 
-use crate::{DefId, ExprId, Name, NameTarget};
+use crate::{DefId, ExprId, ExprKind, Name, NameTarget};
 
 use super::BodyState;
 use super::declare::Builder;
-use super::exprs::{error_expr, flatten_path};
+use super::exprs::{error_expr, flatten_path, push, record_prefix_uses};
 
 /// `base.name` where `base` names a module that has no export `name`: the miss is reported on the
 /// member (`ORNA-S012-UNRESOLVED`), as a call path reports it, not on the module used as a value.
@@ -113,4 +113,98 @@ pub(super) fn namespace_member(
         }
         _ => None,
     }
+}
+
+/// Whether `root` names the `sys` module in `state`, not a local that shadows it.
+pub(super) fn is_sys_rooted(state: &BodyState, root: &str) -> bool {
+    root == "sys" && state.local(&Name::new(root)).is_none()
+}
+
+/// Lowers a `sys`-rooted value path (`sys.a.b`): the host's admission decides the whole path first,
+/// then the path resolves as a value.
+pub(super) fn lower_sys_value(
+    builder: &mut Builder,
+    state: &mut BodyState,
+    segments: &[(&str, SyntaxSpan)],
+    span: &SyntaxSpan,
+) -> ExprId {
+    let path = segments.iter().map(|(text, _)| *text).collect::<Vec<_>>();
+    if super::admission::reject_unlinked(builder, state.module, &path, span.clone()) {
+        return error_expr(builder, state, span.clone());
+    }
+    resolve_sys_value(builder, state, segments, span)
+}
+
+/// Resolves an already admitted `sys`-rooted value path to its definition, or to a variant or static
+/// of an admitted type. A `sys` declaration not represented yet is UNSUPPORTED.
+pub(super) fn resolve_sys_value(
+    builder: &mut Builder,
+    state: &mut BodyState,
+    segments: &[(&str, SyntaxSpan)],
+    span: &SyntaxSpan,
+) -> ExprId {
+    let module = state.module;
+    let names = segments
+        .iter()
+        .map(|(text, _)| Name::new(text))
+        .collect::<Vec<_>>();
+    let path = segments
+        .iter()
+        .zip(&names)
+        .map(|((_, span), name)| (name.clone(), span.clone()))
+        .collect::<Vec<_>>();
+    let Some((last, last_span)) = path.last().cloned() else {
+        return error_expr(builder, state, span.clone());
+    };
+    let resolved =
+        match builder.resolve_path(module, &names) {
+            crate::resolve::PathKind::Def(def) => Some(def),
+            _ => names.split_last().and_then(|(last, owner)| {
+                match builder.resolve_path(module, owner) {
+                    crate::resolve::PathKind::Def(owner) => {
+                        builder.member_def(owner, last).filter(|def| {
+                            builder.is_variant(*def)
+                                || builder.is_static(*def)
+                                || builder.is_unit(*def)
+                        })
+                    }
+                    _ => None,
+                }
+            }),
+        };
+    let Some(def) = resolved else {
+        super::record_body_use(
+            &mut builder.program,
+            module,
+            state.id,
+            last_span.clone(),
+            last,
+            crate::UseContext::Value,
+            NameTarget::Unresolved,
+        );
+        builder.diagnose(
+            module,
+            crate::diag::UNSUPPORTED,
+            "the `sys` declarations are not represented yet",
+            last_span,
+        );
+        return error_expr(builder, state, span.clone());
+    };
+    record_prefix_uses(
+        builder,
+        module,
+        Some(state.id),
+        &path,
+        crate::UseContext::Value,
+    );
+    super::record_body_use(
+        &mut builder.program,
+        module,
+        state.id,
+        last_span,
+        last,
+        crate::UseContext::Value,
+        NameTarget::Def(def),
+    );
+    push(builder, state, ExprKind::Def(def), span.clone())
 }

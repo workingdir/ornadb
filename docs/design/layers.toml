@@ -50,6 +50,10 @@ name = "orna-cbor"
 layer = 1
 
 [[crate]]
+name = "orna-cursor"
+layer = 2
+
+[[crate]]
 name = "orna-unicode"
 layer = 1
 
@@ -174,6 +178,10 @@ allowed = ["orna-protocol", "orna-serving"]
 
 [[crate]]
 name = "orna-application"
+layer = 13
+
+[[crate]]
+name = "orna-cli-support"
 layer = 13
 
 [[crate]]

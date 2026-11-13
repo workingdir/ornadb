@@ -17,7 +17,7 @@
 
 use orna_syntax::{Expr as AstExpr, SyntaxSpan, TypeExpr};
 
-use crate::{Callee, DefId, ExprId, ExprKind, FieldRef, Name, NameTarget};
+use crate::{Callee, DefId, ExprId, ExprKind, FieldRef, Name, NameTarget, TableOp};
 
 use super::BodyState;
 use super::classify::{Classified, ParamInfo};
@@ -204,6 +204,35 @@ fn classify_path(
         let params = pending_params(&last);
         return Some((Callee::Pending { base, name: last }, params));
     }
+    if segments
+        .first()
+        .is_some_and(|(root, _)| super::namespace::is_sys_rooted(state, root))
+    {
+        let path = segments.iter().map(|(text, _)| *text).collect::<Vec<_>>();
+        if super::admission::reject_unlinked(builder, module, &path, last_span.clone()) {
+            return None;
+        }
+        // Portable `sys` rows are read-only (ORNA-SYS mutation rule): a row mutator on a `sys` path is
+        // not a write HIR can lower, so it is rejected rather than accepted as a pending method call.
+        if super::classify::table_op(last.as_str()).is_some_and(|op| {
+            matches!(
+                op,
+                TableOp::Insert
+                    | TableOp::Upsert
+                    | TableOp::Update
+                    | TableOp::Delete
+                    | TableOp::Rekey
+            )
+        }) {
+            builder.diagnose(
+                module,
+                crate::diag::UNSUPPORTED,
+                "`sys` rows are read-only; a row mutator on a `sys` path is not represented",
+                last_span,
+            );
+            return None;
+        }
+    }
     super::exprs::record_prefix_uses(
         builder,
         module,
@@ -238,15 +267,12 @@ fn classify_path(
                 NameTarget::Unresolved,
             );
             if builder.program.modules[target].origin == crate::ModuleOrigin::Sys {
-                let path = segments.iter().map(|(text, _)| *text).collect::<Vec<_>>();
-                if !super::admission::reject_unlinked(builder, module, &path, last_span.clone()) {
-                    builder.diagnose(
-                        module,
-                        crate::diag::UNSUPPORTED,
-                        "the `sys` declarations are not represented yet",
-                        last_span,
-                    );
-                }
+                builder.diagnose(
+                    module,
+                    crate::diag::UNSUPPORTED,
+                    "the `sys` declarations are not represented yet",
+                    last_span,
+                );
             } else {
                 builder.diagnose(
                     module,
@@ -379,6 +405,10 @@ fn lower_path_value(
     let Some((first, first_span)) = segments.first() else {
         return error_expr(builder, state, SyntaxSpan::new(0, 0));
     };
+    if super::namespace::is_sys_rooted(state, first) {
+        let (_, span) = &segments[segments.len() - 1];
+        return super::namespace::lower_sys_value(builder, state, segments, span);
+    }
     let mut value = super::exprs::lower_name(builder, state, first, first_span);
     for (name, span) in &segments[1..] {
         let span = span.clone();

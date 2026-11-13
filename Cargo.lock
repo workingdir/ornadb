@@ -1469,6 +1469,7 @@ dependencies = [
  "orna-application",
  "orna-base",
  "orna-check",
+ "orna-cli-support",
  "orna-conformance",
  "orna-evaluator",
  "orna-exec",
@@ -1496,6 +1497,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "orna-cli-support"
+version = "0.1.0"
+dependencies = [
+ "orna-base",
+ "orna-project",
+ "orna-repository",
+ "orna-runtime",
+ "orna-value",
+ "sha2 0.10.9",
+ "tempfile",
+]
+
+[[package]]
 name = "orna-compat-v1"
 version = "1.0.0"
 dependencies = [
@@ -1520,6 +1534,7 @@ dependencies = [
  "orna-base",
  "orna-check",
  "orna-compat-v1",
+ "orna-cursor",
  "orna-evaluator",
  "orna-live",
  "orna-project",
@@ -1541,6 +1556,15 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "orna-cursor"
+version = "1.0.0"
+dependencies = [
+ "num-bigint 0.4.8",
+ "orna-value",
+ "sha2 0.10.9",
 ]
 
 [[package]]
