@@ -19,7 +19,7 @@ their source. Anything not measured is marked `not measured`.
 
 | Ratchet | Test | Measured now | Recorded in file | What the test enforces |
 |---|---|---|---|---|
-| Diagnostic codes, old checker vs HIR | `crates/orna-differential/tests/diagnostic_codes.rs`, 211 cases, 0 skipped | 88 cases differ | 88 rows under `## expected` in `crates/orna-differential/tests/diagnostic_codes_differing.txt` | the differing set equals the expected rows exactly; a listed case that now agrees fails as stale |
+| Diagnostic codes, old checker vs HIR | `crates/orna-differential/tests/diagnostic_codes.rs`, 211 cases, 0 skipped | 84 cases differ | 84 rows under `## expected` in `crates/orna-differential/tests/diagnostic_codes_differing.txt` | the differing set equals the expected rows exactly; a listed case that now agrees fails as stale |
 | Executor agreement (H4) | `crates/orna-differential/tests/exec_share.rs`, corpus of 226 cases | 56 of 72 run cases agree; 110 evaluable; 50 of 56 agreeing run cases have exact step parity | `agreed = 56`, `evaluable = 110`, `steps-exact = 50`, `old-harness-environment = 10`, and 18 allowances (10 `harness-allowance`, 1 `representation-allowance`, 4 `executor-gap-allowance`, 1 `currency-allowance`, 2 `not-yet-allowance`) in `crates/orna-differential/tests/differential/exec-share.toml` | `agreed` may only grow; `steps-exact` must equal its recorded value; `old-harness-environment` may only shrink; `evaluable` must equal its recorded value (the denominator) |
 | Typed share (H2) | `crates/orna-differential/tests/typed_share.rs` | 49 of 104 old-accepted cases typed; 14 not lowered; 108 old-rejected cases excluded | `typed = 35`, `lowered = 104` in `crates/orna-differential/tests/differential/typed-share.toml` | see the comparator note below |
 | REPL inline (H8) | `crates/orna-differential/tests/repl_inline_differential.rs` | 15 of 48 runnable fixtures agree; 104 fixtures in total; 56 excluded; 33 expected disagreements | `AGREED_FLOOR = 15` in the test; 33 rows under `## expected` in `crates/orna-differential/tests/repl_inline_differing.txt`, each with a one-line reason; 56 excluded in `crates/orna-differential/tests/repl_inline_exclusions.txt` | `agreed >= 15`; the disagreement set equals the 33 rows |
@@ -42,7 +42,7 @@ Notes on the table:
 
 ### Diagnostic-ledger status by class
 
-The ledger held 89 rows before the Float primary-key fix (ORNA-KEY-003, E3003). The file's `## expected` section held 88 rows before the sys-admin fix and now holds 85. The 104 in the earlier text of this file predates the current corpus and is stale. Class counts come from the reason field of each row and sum to 85.
+The ledger held 89 rows before the Float primary-key fix (ORNA-KEY-003, E3003). The file's `## expected` section held 88 rows before the sys-admin fix, 85 after it, and 84 now, after main removed the `incompatible-dimensions` row when builtin Duration was routed through the E5001 dimension rule (`ornadb-2bga0`). The 104 in the earlier text of this file predates the current corpus and is stale. Class counts come from the reason field of each row and sum to 84.
 
 | Class (reason field) | Before | After | Status |
 |---|---|---|---|
@@ -56,7 +56,7 @@ The ledger held 89 rows before the Float primary-key fix (ORNA-KEY-003, E3003). 
 | HIR reports `sys` as a module rather than a value | 4 | 4 | open |
 | HIR binds named arguments only against statically known labels | 4 | 4 | spec-consistent; open for member, std and relation callees |
 | HIR import diagnostic the checker does not report under this code | 3 | 3 | open |
-| units and quantities (Temperature, `20.C`, builtin Duration) | 3 | 3 | open; builtin Duration dimension routing is bead `ornadb-2bga0` |
+| units and quantities (Temperature, `20.C`, builtin Duration) | 3 | 2 | open; builtin Duration dimension routing landed on main (`ornadb-2bga0`), which removed the `incompatible-dimensions` row |
 
 Open items not fixed in this change:
 
