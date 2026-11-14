@@ -289,16 +289,6 @@ fn lower_quantity(
     })
 }
 
-/// The numeric kind a unit-carrying spelling such as `Decimal<kWh>` measures, or `None` for any other spelling.
-fn numeric_builtin(spelling: &str) -> Option<TyKind> {
-    Some(match spelling {
-        "Int" => TyKind::Int,
-        "Float" => TyKind::Float,
-        "Decimal" => TyKind::Decimal,
-        _ => return None,
-    })
-}
-
 /// The unit key of a written unit name such as `kWh`, or `None` when the written type is not a bare unit name or the
 /// name does not resolve to a unit with a key.
 fn unit_operand(
