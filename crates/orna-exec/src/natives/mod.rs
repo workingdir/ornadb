@@ -12,6 +12,7 @@ mod decimal_divide;
 mod hash;
 mod json;
 mod money;
+mod money_round;
 mod order;
 mod orna;
 mod ovb;
@@ -59,6 +60,9 @@ pub(crate) fn lookup(key: &NativeKey) -> Option<NativeFn> {
         ("core.money", "money_divide") => money::divide,
         ("core.money", "money_negate") => money::negate,
         ("core.money", "money_compare") => money::compare,
+        ("core.money", "quantize") => money_round::quantize,
+        ("core.money", "allocate") => money_round::allocate,
+        ("core.money", "format") => money_round::format,
         ("core.decimal", "divide") => decimal_divide::divide,
         ("core.encoding.base64", "encode") => base64::encode,
         ("core.encoding.base64", "decode") => base64::decode,

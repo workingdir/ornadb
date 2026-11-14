@@ -139,6 +139,8 @@ pub struct ActivationContext {
     pub cwd: Snapshot,
     /// The head snapshot, `None` when the repository has no commit.
     pub head: Option<Snapshot>,
+    /// The locale profile `format` renders money in (ORNA-MONEY-009), a BCP 47 tag such as `en-GB`.
+    pub locale: String,
 }
 
 /// Everything a run takes from outside the program (`docs/design/hir-host.md` section A1).
