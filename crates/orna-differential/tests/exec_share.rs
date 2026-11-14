@@ -58,6 +58,9 @@ fn executor_agreement_with_the_old_pipeline_only_grows() {
                     continue;
                 }
                 agreed += 1;
+                if std::env::var_os("EXEC_SHARE_IDS").is_some() {
+                    println!("AGREED {}", case.id);
+                }
                 match observation.steps {
                     Some(old) if old == steps => steps_exact += 1,
                     Some(old) => step_differences.push((case.id.clone(), old, steps)),
