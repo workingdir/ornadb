@@ -71,7 +71,7 @@ pub(super) fn write_styled_display<W: io::Write, T: std::fmt::Display>(
     Ok(())
 }
 
-enum ReadSubmission {
+pub(crate) enum ReadSubmission {
     Eof,
     TooLong,
     InvalidUtf8,
@@ -606,7 +606,11 @@ fn write_repl_failure<W: Write>(
     write_rendered_error(writer, &render_repl_failure(failure, source), color_enabled)
 }
 
-fn write_repl_error<W: Write>(writer: &mut W, code: &str, color_enabled: bool) -> io::Result<()> {
+pub(crate) fn write_repl_error<W: Write>(
+    writer: &mut W,
+    code: &str,
+    color_enabled: bool,
+) -> io::Result<()> {
     write_repl_failure(writer, &ReplFailure::code(code), "", color_enabled)
 }
 
@@ -615,10 +619,16 @@ fn write_repl_value<W: Write>(
     value: &CanonicalValue,
     color_enabled: bool,
 ) -> io::Result<()> {
-    let rendered = inspect(value);
-    let (result, ty) = rendered
-        .rsplit_once(" : ")
-        .unwrap_or((rendered.as_str(), ""));
+    write_rendered_value(writer, &inspect(value), color_enabled)
+}
+
+/// Writes one `RESULT : TYPE` rendering: the result green, the type dim.
+pub(crate) fn write_rendered_value<W: Write>(
+    writer: &mut W,
+    rendered: &str,
+    color_enabled: bool,
+) -> io::Result<()> {
+    let (result, ty) = rendered.rsplit_once(" : ").unwrap_or((rendered, ""));
     write_styled(writer, AnsiColor::Green, result.as_bytes(), color_enabled)?;
     if !ty.is_empty() {
         writer.write_all(b" : ")?;
@@ -973,7 +983,7 @@ fn pump_watch_frames<W: Write, S: WatchFrameSource + ?Sized>(
     Ok(())
 }
 
-fn parse_help_command(command: &str) -> Option<Result<&'static str, ()>> {
+pub(crate) fn parse_help_command(command: &str) -> Option<Result<&'static str, ()>> {
     let mut words = command.split_ascii_whitespace();
     if words.next() != Some(":help") {
         return None;
@@ -991,7 +1001,7 @@ fn parse_help_command(command: &str) -> Option<Result<&'static str, ()>> {
     })
 }
 
-fn parse_snapshot_target(command: &str) -> Option<Result<SnapshotTarget, ()>> {
+pub(crate) fn parse_snapshot_target(command: &str) -> Option<Result<SnapshotTarget, ()>> {
     let mut words = command.split_ascii_whitespace();
     if words.next() != Some(":at") {
         return None;
@@ -1013,7 +1023,7 @@ fn parse_snapshot_target(command: &str) -> Option<Result<SnapshotTarget, ()>> {
 }
 
 /// Splits a `:watch` console command into its required source expression.
-fn parse_watch_source(command: &str) -> Option<&str> {
+pub(crate) fn parse_watch_source(command: &str) -> Option<&str> {
     let mut words = command.split_ascii_whitespace();
     if words.next() != Some(":watch") {
         return None;
@@ -1028,7 +1038,7 @@ fn parse_watch_source(command: &str) -> Option<&str> {
     Some(rest)
 }
 
-fn read_submission<R: BufRead>(reader: &mut R) -> io::Result<ReadSubmission> {
+pub(crate) fn read_submission<R: BufRead>(reader: &mut R) -> io::Result<ReadSubmission> {
     let mut source = Vec::new();
     loop {
         let bytes = reader.fill_buf()?;

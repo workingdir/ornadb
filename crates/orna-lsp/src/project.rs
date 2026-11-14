@@ -16,7 +16,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use lsp_types::{Diagnostic, Uri};
-use orna_check::{Catalogue, analyze_with_catalogue_located};
+use orna_check::Catalogue;
 use orna_hir::{DefKind, FnBody, NativeBinding, NativeKey, SourceId, SourceUnit, lower};
 use orna_link::{EngineRegistry, LinkError, LinkProfile, ProjectManifest, host_target, plan};
 use orna_project::{LoadedProject, ProjectLoadError, ProjectLoader};
@@ -26,6 +26,7 @@ use orna_syntax_ast::SourceSpan as SyntaxSpan;
 use orna_syntax_ast::{Declaration, SyntaxTree};
 
 use crate::analysis;
+use crate::check_backend::semantic_findings;
 use crate::documents::PositionMapper;
 use crate::sync::lock;
 use crate::workspace::module_path_of;
@@ -187,10 +188,11 @@ pub(crate) fn check(project: &Project, open: &[OpenModule<'_>]) -> ProjectCheck 
         return ProjectCheck { diagnostics };
     };
 
-    let located = analyze_with_catalogue_located(loaded.modules(), &catalogue);
+    let findings = semantic_findings(&loaded, &catalogue, &sources);
     let mut selections = HashMap::<&str, ModuleSelections>::new();
-    for (diagnostic, origin) in located.analysis.diagnostics.iter().zip(&located.origins) {
-        let logical_path = origin
+    for finding in &findings {
+        let logical_path = finding
+            .origin
             .logical_path
             .as_deref()
             .filter(|path| sources.contains_key(path))
@@ -199,7 +201,8 @@ pub(crate) fn check(project: &Project, open: &[OpenModule<'_>]) -> ProjectCheck 
         let module = selections
             .entry(logical_path)
             .or_insert_with(|| ModuleSelections::new(source));
-        let range = origin
+        let range = finding
+            .origin
             .primary
             .as_ref()
             .map_or_else(lsp_types::Range::default, |item| module.range(item));
@@ -208,8 +211,8 @@ pub(crate) fn check(project: &Project, open: &[OpenModule<'_>]) -> ProjectCheck 
             .or_default()
             .push(analysis::source_diagnostic(
                 range,
-                diagnostic.code(),
-                diagnostic.message(),
+                &finding.code,
+                &finding.message,
                 &[],
             ));
     }
