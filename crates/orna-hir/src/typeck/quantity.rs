@@ -132,8 +132,11 @@ impl<'a> BodyCheck<'a> {
         {
             return None;
         }
-        if let Some(money) = self.money_rate_product(op, lhs, rhs) {
-            return Some(money);
+        if let Some(rate_product) = self.money_rate(op, lhs, rhs) {
+            return Some(match rate_product {
+                Ok(ty) => ty,
+                Err(fail) => self.report(fail, span),
+            });
         }
         let left = self.operand(lhs)?;
         let right = self.operand(rhs)?;
@@ -195,13 +198,20 @@ impl<'a> BodyCheck<'a> {
         })
     }
 
-    /// The money-rate product (ORNA-MONEY-003, units.md section 8.3): a `Decimal` quantity in unit `U` times a
-    /// `Rate<C, U>` in the same unit is `Money<C>`, in either operand order. `None` for any other operands, which the
-    /// ordinary quantity typing then handles.
-    fn money_rate_product(&mut self, op: BinOp, lhs: Ty, rhs: Ty) -> Option<Ty> {
-        if !matches!(op, BinOp::Mul) {
-            return None;
+    /// The money-rate products (ORNA-MONEY-003, units.md section 8.3): a quantity times a `Rate<C, U>` is `Money<C>`
+    /// in either operand order, and a `Money<C>` divided by a quantity of key `U` is `Rate<C, U>`. `None` for any
+    /// other operands, which the ordinary quantity typing then handles.
+    fn money_rate(&mut self, op: BinOp, lhs: Ty, rhs: Ty) -> Option<Result<Ty, Fail>> {
+        match op {
+            BinOp::Mul => self.rate_times_quantity(lhs, rhs),
+            BinOp::Div => self.money_over_quantity(lhs, rhs),
+            _ => None,
         }
+    }
+
+    /// `Rate<C, U>` times a `Decimal` or `Int` quantity, in either operand order, is `Money<C>`. The quantity converts
+    /// to `U` by an exact ratio (ORNA-UNIT-015, ORNA-UNIT-016); a dimension mismatch is ORNA-UNIT-DIM.
+    fn rate_times_quantity(&mut self, lhs: Ty, rhs: Ty) -> Option<Result<Ty, Fail>> {
         let (lhs, rhs) = (self.resolved(lhs), self.resolved(rhs));
         let (quantity, rate) = if self.is_quantity(lhs) {
             (lhs, rhs)
@@ -211,18 +221,52 @@ impl<'a> BodyCheck<'a> {
         let Some(TyKind::Quantity(value, key)) = self.kind_of(quantity) else {
             return None;
         };
-        if !matches!(self.kind_of(value), Some(TyKind::Decimal)) {
-            return None;
-        }
+        let num = match self.kind_of(value) {
+            Some(TyKind::Int) => Num::Int,
+            Some(TyKind::Decimal) => Num::Decimal,
+            _ => return None,
+        };
         let (currency, per_unit) = engine_money::rate_parts(self.program, rate)?;
         let Some(TyKind::Quantity(_, rate_key)) = self.kind_of(per_unit) else {
             return None;
         };
-        if rate_key != key {
+        let money = engine_money::library_def(self.program, "core.money", "Money")?;
+        if let Err(fail) = self.to_rate_unit(num, key, rate_key) {
+            return Some(Err(fail));
+        }
+        Some(Ok(self.intern(TyKind::Adt(money, Box::new([currency])))))
+    }
+
+    /// `Money<C>` divided by a `Decimal` or `Int` quantity of key `U` is `Rate<C, U>` (units.md section 8.3). The
+    /// per-unit type is the quantity `Decimal<U>`, the type that the type-position `Rate<C, U>` lowers to.
+    fn money_over_quantity(&mut self, lhs: Ty, rhs: Ty) -> Option<Result<Ty, Fail>> {
+        let (lhs, rhs) = (self.resolved(lhs), self.resolved(rhs));
+        let Some(TyKind::Quantity(value, key)) = self.kind_of(rhs) else {
+            return None;
+        };
+        if !matches!(self.kind_of(value), Some(TyKind::Int | TyKind::Decimal)) {
             return None;
         }
-        let money = engine_money::library_def(self.program, "core.money", "Money")?;
-        Some(self.intern(TyKind::Adt(money, Box::new([currency]))))
+        let currency = engine_money::money_currency(self.program, lhs)?;
+        let rate = engine_money::library_def(self.program, "core.rate", "Rate")?;
+        let decimal = self.intern(TyKind::Decimal);
+        let per_unit = self.intern(TyKind::Quantity(decimal, key));
+        Some(Ok(
+            self.intern(TyKind::Adt(rate, Box::new([currency, per_unit])))
+        ))
+    }
+
+    /// Checks that a value of numeric type `num` in unit `from` converts exactly to unit `to` (ORNA-UNIT-015): the
+    /// units share a dimension, and the exact ratio of their scales is an integer, or a finite decimal for a `Decimal`
+    /// value (ORNA-UNIT-016).
+    fn to_rate_unit(&self, num: Num, from: UnitKeyId, to: UnitKeyId) -> Result<(), Fail> {
+        let from_key = self.program.units.key(from).clone();
+        let to_key = self.program.units.key(to).clone();
+        if !from_key.same_dimension(&to_key) {
+            return Err(self.dimension_mismatch(from, to));
+        }
+        let factor = from_key.ratio_to(&to_key).map_err(budget)?;
+        scaled(num, &factor).map(|_| ())
     }
 
     fn is_quantity(&self, ty: Ty) -> bool {
