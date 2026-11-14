@@ -172,16 +172,16 @@ fn authoritative_sensor_project() -> ProjectUnit {
             source_id: "sensors.orna".into(),
             parse_as: "module_unit".into(),
             source: r#"
-                pub type Sample { pub sensor: Str, pub sequence: Int, pub value: Decimal, }
-                pub table Reading(sensor: Str, sequence: Int) { value: Decimal, }
-                pub fn input() = Stream.from_list([
-                    Sample { sensor: "greenhouse", sequence: 0, value: 18.25 },
-                    Sample { sensor: "greenhouse", sequence: 1, value: 18.50 },
-                    Sample { sensor: "greenhouse", sequence: 2, value: 18.75 },
-                ], source_identity: "example:sensors:v1");
-                pub fn ingest() { input() | for_each(sample => {
-                    Reading.insert({ sensor: sample.sensor, sequence: sample.sequence, value: sample.value });
-                }); }
+                    pub type Sample { pub sensor: Str, pub sequence: Int, pub value: Decimal, }
+                    pub table Reading(sensor: Str, sequence: Int) { value: Decimal, }
+                    pub fn input() = Stream.from_list([
+                        Sample { sensor: "greenhouse", sequence: 0, value: 18.25 },
+                        Sample { sensor: "greenhouse", sequence: 1, value: 18.50 },
+                        Sample { sensor: "greenhouse", sequence: 2, value: 18.75 },
+                    ], source_identity: "example:sensors:v1");
+                    pub fn ingest() { input() | for_each(sample => {
+                        Reading.insert({ sensor: sample.sensor, sequence: sample.sequence, value: sample.value });
+                    }); }
             "#.into(),
         }],
         loose_rows: Vec::new(),

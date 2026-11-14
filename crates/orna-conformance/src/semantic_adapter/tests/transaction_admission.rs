@@ -409,15 +409,15 @@ fn table_assertion_item_limit_rolls_back_the_complete_activation() {
         source_id: "table-assertion-item-limit.orna".into(),
         parse_as: "module_unit".into(),
         source: r#"
-            pub table Note(id: Int) {
-                text: Str,
-                assert every(note => note.text != "");
-            }
-            fn main() {
-                Note.insert({ id: 1, text: "one" });
-                Note.insert({ id: 2, text: "two" });
-                Note.insert({ id: 3, text: "three" });
-            }
+                pub table Note(id: Int) {
+                    text: Str,
+                    assert every(note => note.text != "");
+                }
+                fn main() {
+                    Note.insert({ id: 1, text: "one" });
+                    Note.insert({ id: 2, text: "two" });
+                    Note.insert({ id: 3, text: "three" });
+                }
         "#
         .into(),
     };
@@ -449,15 +449,15 @@ fn relation_scan_step_limit_rolls_back_the_complete_activation() {
         source_id: "relation-scan-step-limit.orna".into(),
         parse_as: "module_unit".into(),
         source: r#"
-            pub table Note(id: Int) {
-                text: Str,
-            }
-            fn main() {
-                Note.insert({ id: 1, text: "one" });
-                Note.insert({ id: 2, text: "two" });
-                Note.insert({ id: 3, text: "three" });
-                Note | take(3) | count();
-            }
+                pub table Note(id: Int) {
+                    text: Str,
+                }
+                fn main() {
+                    Note.insert({ id: 1, text: "one" });
+                    Note.insert({ id: 2, text: "two" });
+                    Note.insert({ id: 3, text: "three" });
+                    Note | take(3) | count();
+                }
         "#
         .into(),
     };

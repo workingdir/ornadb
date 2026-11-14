@@ -252,9 +252,9 @@ fn relation_integer_aggregate_lowering_requires_unshadowed_root_bindings() {
         };
         let source = format!(
             r#"
-                pub table Reading(id: Int) {{ value: Int, }}
-                fn {operation}(values: Int) = 99;
-                fn total() = Reading | map(reading => reading.value) | {terminal};
+                    pub table Reading(id: Int) {{ value: Int, }}
+                    fn {operation}(values: Int) = 99;
+                    fn total() = Reading | map(reading => reading.value) | {terminal};
             "#
         );
         let parsed = parse_module(&source);
@@ -280,24 +280,24 @@ fn relation_integer_aggregate_lowering_requires_unshadowed_root_bindings() {
 fn specialized_relation_lowering_respects_declarations_and_bindings() {
     for source in [
         r#"
-            pub table Stock(location: Str, sku: Str) { quantity: Int, }
-            fn filter(value: Int) = 99;
-            fn one(value: Int) = 99;
-            fn count(value: Int) = 99;
-            fn window(value: Int) = 99;
-            fn lookup_case() = Stock | filter(stock => stock.location == "north" && stock.sku == "pencil") | one();
-            fn filtered_one_case() = Stock | filter(stock => stock.quantity == 12) | one();
-            fn filter_count_case() = Stock | filter(stock => stock.quantity == 12) | count;
-            fn count_case() = Stock | count;
-            fn window_case() = Stock | window(2) | count;
+                pub table Stock(location: Str, sku: Str) { quantity: Int, }
+                fn filter(value: Int) = 99;
+                fn one(value: Int) = 99;
+                fn count(value: Int) = 99;
+                fn window(value: Int) = 99;
+                fn lookup_case() = Stock | filter(stock => stock.location == "north" && stock.sku == "pencil") | one();
+                fn filtered_one_case() = Stock | filter(stock => stock.quantity == 12) | one();
+                fn filter_count_case() = Stock | filter(stock => stock.quantity == 12) | count;
+                fn count_case() = Stock | count;
+                fn window_case() = Stock | window(2) | count;
         "#,
         r#"
-            pub table Stock(location: Str, sku: Str) { quantity: Int, }
-            fn lookup_case(filter: Int, one: Int) = Stock | filter(stock => stock.location == "north" && stock.sku == "pencil") | one();
-            fn filtered_one_case(filter: Int, one: Int) = Stock | filter(stock => stock.quantity == 12) | one();
-            fn filter_count_case(filter: Int, count: Int) = Stock | filter(stock => stock.quantity == 12) | count;
-            fn count_case(count: Int) = Stock | count;
-            fn window_case(window: Int) = Stock | window(2) | count;
+                pub table Stock(location: Str, sku: Str) { quantity: Int, }
+                fn lookup_case(filter: Int, one: Int) = Stock | filter(stock => stock.location == "north" && stock.sku == "pencil") | one();
+                fn filtered_one_case(filter: Int, one: Int) = Stock | filter(stock => stock.quantity == 12) | one();
+                fn filter_count_case(filter: Int, count: Int) = Stock | filter(stock => stock.quantity == 12) | count;
+                fn count_case(count: Int) = Stock | count;
+                fn window_case(window: Int) = Stock | window(2) | count;
         "#,
     ] {
         let parsed = parse_module(source);
@@ -329,11 +329,11 @@ fn specialized_relation_lowering_respects_declarations_and_bindings() {
 #[test]
 fn admitted_assertions_retain_parser_metadata_until_validation() {
     let source = r#"
-        pub table Note(id: Int) {
-            text: Str,
-            assert every(note => note.text != "");
-        }
-        assert every(Note, note => note.id == note.id);
+            pub table Note(id: Int) {
+                text: Str,
+                assert every(note => note.text != "");
+            }
+            assert every(Note, note => note.id == note.id);
     "#;
     let parsed = parse_module(source);
     assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
@@ -366,12 +366,12 @@ fn relation_float_sum_returns_a_canonical_nan_from_a_canonical_nan_row() {
         source_id: "relation-float-sum-nan.orna".into(),
         parse_as: "module_unit".into(),
         source: r#"
-            pub table Reading(id: Int) { value: Float, }
-            fn total(): Float = Reading | map(reading => reading.value) | sum;
-            fn parent() {
-                assert total() != total();
-                Reading.insert({ id: 2, value: total() });
-            }
+                pub table Reading(id: Int) { value: Float, }
+                fn total(): Float = Reading | map(reading => reading.value) | sum;
+                fn parent() {
+                    assert total() != total();
+                    Reading.insert({ id: 2, value: total() });
+                }
         "#
         .into(),
     };
@@ -430,13 +430,13 @@ fn source_relation_distinct_uses_lazy_plan_for_decimal_rows() {
         source_id: "txn-relation-distinct.orna".into(),
         parse_as: "module_unit".into(),
         source: r#"
-            pub table Reading(id: Int) { value: Decimal, }
-            fn main() {
-                Reading.insert({ id: 1, value: 18.2500 });
-                Reading.insert({ id: 2, value: 2.0 });
-                Reading.insert({ id: 3, value: 18.25 });
-                assert Reading | map(reading => reading.value) | distinct() | count() == 2;
-            }
+                pub table Reading(id: Int) { value: Decimal, }
+                fn main() {
+                    Reading.insert({ id: 1, value: 18.2500 });
+                    Reading.insert({ id: 2, value: 2.0 });
+                    Reading.insert({ id: 3, value: 18.25 });
+                    assert Reading | map(reading => reading.value) | distinct() | count() == 2;
+                }
         "#
         .into(),
     };

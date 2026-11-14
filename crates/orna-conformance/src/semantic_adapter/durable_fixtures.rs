@@ -10,14 +10,14 @@ pub(super) fn assertion_checkpoint_091_project() -> ProjectUnit {
             source_id: "main.orna".into(),
             parse_as: "module_unit".into(),
             source: r#"
-            pub table Reading(id: Int) {
-                value: Int,
-                assert every(reading => reading.value < 2);
-            }
-            pub fn input() = Stream.from_list([1, 2], source_identity: "fixture:assertion");
-            pub fn ingest() { input() | for_each(value => {
-                Reading.insert({ id: value, value: value });
-            }); }
+                pub table Reading(id: Int) {
+                    value: Int,
+                    assert every(reading => reading.value < 2);
+                }
+                pub fn input() = Stream.from_list([1, 2], source_identity: "fixture:assertion");
+                pub fn ingest() { input() | for_each(value => {
+                    Reading.insert({ id: value, value: value });
+                }); }
         "#
             .into(),
         }],
