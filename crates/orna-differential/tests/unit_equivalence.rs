@@ -20,7 +20,9 @@ fn core_unit(name: &str) -> orna_hir::UnitDef {
         .defs
         .iter()
         .find_map(|def| match &def.kind {
-            DefKind::Unit(unit) if def.name == Name::new(name) && unit.family.is_none() => Some(unit.clone()),
+            DefKind::Unit(unit) if def.name == Name::new(name) && unit.family.is_none() => {
+                Some(unit.clone())
+            }
             _ => None,
         })
         .unwrap_or_else(|| panic!("no core unit `{name}`"))
@@ -28,7 +30,10 @@ fn core_unit(name: &str) -> orna_hir::UnitDef {
 
 #[test]
 fn c_is_the_affine_kelvin_offset_of_the_checker_catalogue() {
-    assert!(orna_check::FIXTURE_UNIT_SUPPORT.contains("pub unit C : Temperature = K offset 273.15 affine;"));
+    assert!(
+        orna_check::FIXTURE_UNIT_SUPPORT
+            .contains("pub unit C : Temperature = K offset 273.15 affine;")
+    );
     let c = core_unit("C");
     assert_eq!(c.offset.as_deref(), Some("273.15"));
     assert!(c.affine);

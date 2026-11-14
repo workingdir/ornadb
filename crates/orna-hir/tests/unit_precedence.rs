@@ -2,10 +2,7 @@
 //! user module declares with the same name wins over it; two user declarations of one name stay ambiguous.
 
 use orna_hir::{
-    ModulePath, Name, Program, SourceId, SourceUnit,
-    diag::AMBIGUOUS,
-    lower,
-    typeck::typeck,
+    ModulePath, Name, Program, SourceId, SourceUnit, diag::AMBIGUOUS, lower, typeck::typeck,
 };
 use orna_syntax::parse_module_with_file;
 
@@ -15,7 +12,11 @@ fn checked(modules: &[(&str, &str)]) -> Program {
         .iter()
         .map(|(_, source)| {
             let parsed = parse_module_with_file(source, "test.orna");
-            assert!(parsed.is_ok(), "test source must parse: {:?}", parsed.diagnostics);
+            assert!(
+                parsed.is_ok(),
+                "test source must parse: {:?}",
+                parsed.diagnostics
+            );
             parsed.value
         })
         .collect();
@@ -51,7 +52,11 @@ fn a_user_unit_shadows_the_core_unit_of_the_same_name() {
     let lib = "pub dim Length;\npub unit m : Length base;\n";
     let main = "pub fn run() = 1.m;\n";
     let program = checked(&[("lib", lib), ("main", main)]);
-    assert!(!codes(&program).contains(&AMBIGUOUS), "{:?}", codes(&program));
+    assert!(
+        !codes(&program).contains(&AMBIGUOUS),
+        "{:?}",
+        codes(&program)
+    );
 }
 
 #[test]
@@ -60,5 +65,9 @@ fn two_user_modules_declaring_one_unit_stay_ambiguous() {
     let second = "pub dim Length;\npub unit q : Length base;\n";
     let main = "pub fn run() = 1.q;\n";
     let program = checked(&[("first", first), ("second", second), ("main", main)]);
-    assert!(codes(&program).contains(&AMBIGUOUS), "{:?}", codes(&program));
+    assert!(
+        codes(&program).contains(&AMBIGUOUS),
+        "{:?}",
+        codes(&program)
+    );
 }

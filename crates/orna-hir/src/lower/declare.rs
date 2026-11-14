@@ -518,7 +518,9 @@ impl Builder {
         let user = scoped
             .iter()
             .copied()
-            .filter(|def| self.program.modules[self.pending[def.index()].module].origin != ModuleOrigin::Core)
+            .filter(|def| {
+                self.program.modules[self.pending[def.index()].module].origin != ModuleOrigin::Core
+            })
             .collect::<Vec<_>>();
         let scoped = if user.is_empty() { scoped } else { user };
         match scoped.as_slice() {
