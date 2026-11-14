@@ -47,8 +47,10 @@ pub fn operator_rejection(
 
 /// The `Money` classes of `operator_rejection`: `E5003` for two currencies, `E5103` for a `Float` operand.
 fn money_rejection(program: &Program, op: BinOp, left: Ty, right: Ty) -> Option<&'static str> {
-    let money_left = engine_money::money_currency(program, left);
-    let money_right = engine_money::money_currency(program, right);
+    let money_left = engine_money::money_currency(program, left)
+        .or_else(|| engine_money::rate_parts(program, left).map(|(currency, _)| currency));
+    let money_right = engine_money::money_currency(program, right)
+        .or_else(|| engine_money::rate_parts(program, right).map(|(currency, _)| currency));
     match (money_left, money_right) {
         (Some(left_currency), Some(right_currency)) => {
             let mismatch = matches!(
