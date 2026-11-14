@@ -1,0 +1,10 @@
+// Hand-written Orna source, not generated. See README.md in this directory.
+//
+// core.rate: the exact price per unit `Rate<C, U>` (spec ORNA-MONEY-003, units.md section 8.3). `Money<C> / U` in type
+// position lowers to `Rate<C, Quantity<Decimal, U>>`; the product `Quantity<Decimal, U> * Rate<C, U>` is `Money<C>`.
+use core.money.{Money, Currency};
+
+// The amount of currency `C` charged per one unit `U`, kept exact as one `Decimal`.
+pub type Rate<C impl Currency, U> {
+    pub amount: Decimal,
+}
