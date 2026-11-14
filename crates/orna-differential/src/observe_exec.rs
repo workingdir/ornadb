@@ -36,12 +36,13 @@ const STEP_LIMIT_CODE: &str = "ORNA-EVAL-LIMIT";
 /// What the executor did with one case.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExecOutcome {
-    /// The entry ran to a value or to a language error, in the same shape as
-    /// [`crate::Observation::outcome`]: canonical bytes or the error code.
+    /// The case ran to its outcome, in the same shape as [`crate::Observation::outcome`]: `None` when the
+    /// last input binds a name and produces no value, otherwise canonical bytes or the error code.
     Ran {
-        /// Canonical bytes or the error code, in the shape of [`crate::Observation::outcome`].
-        outcome: Result<Vec<u8>, String>,
-        /// The legacy evaluator steps the run charged, per node weight.
+        /// `None` when the case produces no value; otherwise canonical bytes or the error code.
+        outcome: Option<Result<Vec<u8>, String>>,
+        /// The legacy evaluator steps the run charged, per node weight. A REPL session charges none: the
+        /// old REPL records no step count, so it has no step parity to measure.
         steps: u64,
     },
     /// The case is outside what this stage runs; the reason names the stage or
@@ -65,8 +66,14 @@ fn run_with(case: &Case, cancel: Option<Arc<AtomicBool>>) -> ExecOutcome {
     if !case.evaluate {
         return ExecOutcome::NotYet("the case is not evaluated".to_owned());
     }
-    if !case.rows.is_empty() || !case.arguments.is_empty() || !case.inputs.is_empty() {
-        return ExecOutcome::NotYet("the case binds rows, arguments or inputs (H5/H8)".to_owned());
+    if !case.rows.is_empty() || !case.arguments.is_empty() {
+        return ExecOutcome::NotYet("the case binds rows or arguments (H5)".to_owned());
+    }
+    if case.kind == CaseKind::Repl {
+        return run_repl(case, cancel);
+    }
+    if !case.inputs.is_empty() {
+        return ExecOutcome::NotYet("the case binds inputs outside a REPL session".to_owned());
     }
     let lowered = match observe_new::lower_case_admitted(case) {
         Ok(lowered) => lowered,
@@ -74,7 +81,7 @@ fn run_with(case: &Case, cancel: Option<Arc<AtomicBool>>) -> ExecOutcome {
     };
     if let Some(code) = admission_rejection(&lowered) {
         return ExecOutcome::Ran {
-            outcome: Err(code.to_owned()),
+            outcome: Some(Err(code.to_owned())),
             steps: 0,
         };
     }
@@ -94,24 +101,49 @@ fn run_with(case: &Case, cancel: Option<Arc<AtomicBool>>) -> ExecOutcome {
     let steps = run.steps;
     match run.result {
         Ok(value) => ExecOutcome::Ran {
-            outcome: match value.to_raw() {
+            outcome: Some(match value.to_raw() {
                 Ok(raw) => encode(raw),
                 Err(code) => Err(code.to_owned()),
-            },
+            }),
             steps,
         },
         Err(ExecError::Code(STEP_LIMIT_CODE)) => ExecOutcome::NotYet(
             "the step budget ends the run; step parity is not measured yet".to_owned(),
         ),
         Err(ExecError::Code(code)) => ExecOutcome::Ran {
-            outcome: Err(code.to_owned()),
+            outcome: Some(Err(code.to_owned())),
             steps,
         },
         Err(ExecError::NotYet(reason)) => ExecOutcome::NotYet(reason.to_owned()),
         Err(ExecError::Cancelled) => ExecOutcome::Ran {
-            outcome: Err("ORNA-EVAL-CANCELLED".to_owned()),
+            outcome: Some(Err("ORNA-EVAL-CANCELLED".to_owned())),
             steps,
         },
+    }
+}
+
+/// Runs one REPL case through the orna-repl session, input by input, and reports the last input's outcome: the
+/// value it produces (`None` for a name binding), or the error code of its rejection. Every input is submitted, so
+/// a rejected input does not stop the session, as the old REPL's `AdmittedReplSession` does not.
+fn run_repl(case: &Case, cancel: Option<Arc<AtomicBool>>) -> ExecOutcome {
+    if cancel.is_some() {
+        return ExecOutcome::NotYet("a cancelled REPL session is not run on HIR yet".to_owned());
+    }
+    let mut session = orna_repl::Session::new();
+    let mut last = None;
+    for input in &case.inputs {
+        last = Some(match orna_repl::submit(&mut session, input) {
+            Ok(None) => None,
+            Ok(Some(value)) => Some(match value.to_raw() {
+                Ok(raw) => encode(raw),
+                Err(code) => Err(code.to_owned()),
+            }),
+            Err(error) => Some(Err(error.code().to_owned())),
+        });
+    }
+    ExecOutcome::Ran {
+        outcome: last.flatten(),
+        steps: 0,
     }
 }
 

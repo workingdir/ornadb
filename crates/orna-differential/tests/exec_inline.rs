@@ -20,7 +20,7 @@ fn expression_case(id: &str, text: &str) -> Case {
 fn assert_agrees(id: &str, text: &str) {
     let case = expression_case(id, text);
     let executor = match observe_exec::run_case(&case) {
-        ExecOutcome::Ran { outcome, .. } => outcome,
+        ExecOutcome::Ran { outcome, .. } => outcome.expect("a module case has an outcome"),
         ExecOutcome::NotYet(reason) => panic!("{id}: the executor did not run the case: {reason}"),
     };
     let old = observe_old::observe(&case)
@@ -67,7 +67,7 @@ fn a_cancelled_run_reports_cancellation_not_a_value() {
     assert!(
         matches!(
             &outcome,
-            ExecOutcome::Ran { outcome: Err(code), .. } if code == "ORNA-EVAL-CANCELLED"
+            ExecOutcome::Ran { outcome: Some(Err(code)), .. } if code == "ORNA-EVAL-CANCELLED"
         ),
         "unexpected outcome {outcome:?}"
     );
@@ -79,7 +79,13 @@ fn a_run_whose_flag_is_clear_is_not_cancelled() {
     let flag = Arc::new(AtomicBool::new(false));
     let outcome = observe_exec::run_case_cancellable(&case, flag);
     assert!(
-        matches!(outcome, ExecOutcome::Ran { outcome: Ok(_), .. }),
+        matches!(
+            outcome,
+            ExecOutcome::Ran {
+                outcome: Some(Ok(_)),
+                ..
+            }
+        ),
         "unexpected outcome {outcome:?}"
     );
 }
@@ -103,7 +109,9 @@ fn module_case(id: &str, text: &str) -> Case {
 
 fn executor_outcome(case: &Case) -> Result<Vec<u8>, String> {
     match observe_exec::run_case(case) {
-        ExecOutcome::Ran { outcome, .. } => outcome,
+        ExecOutcome::Ran { outcome, .. } => {
+            outcome.unwrap_or_else(|| panic!("{}: a module case has no outcome", case.id))
+        }
         ExecOutcome::NotYet(reason) => {
             panic!("{}: the executor did not run the case: {reason}", case.id)
         }
