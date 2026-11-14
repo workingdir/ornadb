@@ -7,8 +7,13 @@
 //!
 //! The executor runs only a case the HIR lowers with no owned diagnostic, that
 //! is evaluated, that has no table rows or arguments, and whose entry is a
-//! source function. A step-budget exhaustion is not compared: the executor
-//! counts its own steps, and the step parity is a later stage's measurement.
+//! source function. Its owned modules are then type-checked. When every owned
+//! diagnostic is one money, affine or quantity code (E5001-E5004, E5103), that
+//! code is the case's outcome; a set that mixes two such codes, or one such
+//! code with another diagnostic, is not run. Other type-check diagnostics leave
+//! the run as it is, and the agreement ratchet checks each run against the old
+//! pipeline. A step-budget exhaustion is not compared: the executor counts its
+//! own steps, and the step parity is a later stage's measurement.
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -32,6 +37,16 @@ const EXEC_LIMITS: ExecLimits = ExecLimits {
 
 /// The step-budget code the executor reports when its own budget ends a run.
 const STEP_LIMIT_CODE: &str = "ORNA-EVAL-LIMIT";
+
+/// The money, affine and quantity rejections the checker reports (E5001-E5004,
+/// E5103). The old pipeline reports one of them as a case's outcome.
+const CHECKER_CODES: [&str; 5] = [
+    orna_hir::diag::QUANTITY_DIMENSIONS,
+    orna_hir::diag::AFFINE_POINT_OPERATOR,
+    orna_hir::diag::MONEY_CURRENCY_MISMATCH,
+    orna_hir::diag::MONEY_FROM_FLOAT,
+    orna_hir::diag::MONEY_BINARY_FLOAT,
+];
 
 /// What the executor did with one case.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -75,7 +90,7 @@ fn run_with(case: &Case, cancel: Option<Arc<AtomicBool>>) -> ExecOutcome {
     if !case.inputs.is_empty() {
         return ExecOutcome::NotYet("the case binds inputs outside a REPL session".to_owned());
     }
-    let lowered = match observe_new::lower_case_admitted(case) {
+    let mut lowered = match observe_new::lower_case_admitted(case) {
         Ok(lowered) => lowered,
         Err(error) => return ExecOutcome::NotYet(error),
     };
@@ -88,16 +103,26 @@ fn run_with(case: &Case, cancel: Option<Arc<AtomicBool>>) -> ExecOutcome {
     if owned_diagnostics(&lowered) {
         return ExecOutcome::NotYet("the owned modules lower with a diagnostic".to_owned());
     }
-    let mut typed = match observe_new::lower_case_admitted(case) {
-        Ok(typed) => typed,
-        Err(error) => return ExecOutcome::NotYet(error),
-    };
-    orna_hir::typeck(&mut typed.program);
-    if let Some(Some(code)) = static_rejection(&typed) {
+    // The checker's money, affine and quantity rejections are the case's outcome
+    // (docs/design/hir-host.md B8), and so are the table-write rejections (E2002, E2003, E3010):
+    // `typeck` reports every one of them as an owned diagnostic, and the run is lowered and checked once.
+    orna_hir::typeck(&mut lowered.program);
+    if let Some(Some(code)) = static_rejection(&lowered) {
         return ExecOutcome::Ran {
             outcome: Err(code.to_owned()),
             steps: 0,
         };
+    }
+    if let Some(code) = checker_rejection(&lowered) {
+        return ExecOutcome::Ran {
+            outcome: Err(code.to_owned()),
+            steps: 0,
+        };
+    }
+    if checker_coded(&lowered) {
+        return ExecOutcome::NotYet(
+            "the owned modules have mixed type-check rejections".to_owned(),
+        );
     }
     let Some(entry) = entry_name(case) else {
         return ExecOutcome::NotYet("the module case has no entry function".to_owned());
@@ -238,6 +263,47 @@ fn static_rejection(lowered: &LoweredProgram) -> Option<Option<&'static str>> {
         }
     }
     Some(first)
+}
+
+/// The code of the type-check rejection the old pipeline also reports as the
+/// case's outcome: the one money, affine or quantity code (E5001-E5004, E5103)
+/// that every owned diagnostic carries. The old observer reports the first
+/// sorted code, which equals this code only when it is the sole code, so a
+/// set with two such codes, or with one such code and another diagnostic, has
+/// no shared outcome (see `checker_coded`).
+fn checker_rejection(lowered: &LoweredProgram) -> Option<&'static str> {
+    let mut rejection = None;
+    for (module, found) in lowered.program.modules.iter_enumerated() {
+        if !lowered.owned[module.index()] {
+            continue;
+        }
+        for diagnostic in &found.diagnostics {
+            let code = CHECKER_CODES
+                .iter()
+                .copied()
+                .find(|known| *known == diagnostic.code)?;
+            if rejection.is_some_and(|sole| sole != code) {
+                return None;
+            }
+            rejection = Some(code);
+        }
+    }
+    rejection
+}
+
+/// Whether any owned module carries a money, affine or quantity rejection.
+fn checker_coded(lowered: &LoweredProgram) -> bool {
+    for (module, found) in lowered.program.modules.iter_enumerated() {
+        if !lowered.owned[module.index()] {
+            continue;
+        }
+        for diagnostic in &found.diagnostics {
+            if CHECKER_CODES.contains(&diagnostic.code) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// The definition `entry` names in the case's primary module.

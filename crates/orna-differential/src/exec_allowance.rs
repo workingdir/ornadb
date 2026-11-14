@@ -48,6 +48,8 @@ pub struct ExecAllowances {
     step: Vec<compare::StepAllowance>,
     currency: Vec<compare::HarnessAllowance>,
     currency_used: Vec<bool>,
+    not_yet: Vec<compare::HarnessAllowance>,
+    not_yet_used: Vec<bool>,
     step_used: Vec<bool>,
 }
 
@@ -63,6 +65,8 @@ impl ExecAllowances {
         let currency =
             compare::load_currency_allowances().map_err(|e| format!("currency allowances: {e}"))?;
         let step = compare::load_step_allowances().map_err(|e| format!("step allowances: {e}"))?;
+        let not_yet =
+            compare::load_not_yet_allowances().map_err(|e| format!("not-yet allowances: {e}"))?;
         Ok(Self {
             harness_used: vec![false; harness.len()],
             harness,
@@ -72,6 +76,8 @@ impl ExecAllowances {
             executor_gap,
             currency_used: vec![false; currency.len()],
             currency,
+            not_yet_used: vec![false; not_yet.len()],
+            not_yet,
             step_used: vec![false; step.len()],
             step,
         })
@@ -128,6 +134,29 @@ impl ExecAllowances {
         }
     }
 
+    /// Checks a case the executor does not run yet against its `[[not-yet-allowance]]`. An entry
+    /// matches only its exact case and reason, so a case listed under another reason is a mismatch
+    /// until its entry names that reason. A case with no entry is counted by its reason alone.
+    pub fn not_yet_check(&mut self, case: &str, reason: &str) -> Result<(), String> {
+        let mut listed: Option<&str> = None;
+        for (index, allowance) in self.not_yet.iter().enumerate() {
+            if allowance.case != case {
+                continue;
+            }
+            if allowance.reason == reason {
+                self.not_yet_used[index] = true;
+                return Ok(());
+            }
+            listed = Some(allowance.reason.as_str());
+        }
+        match listed {
+            Some(expected) => Err(format!(
+                "{case}: the executor defers it for {reason:?}, not {expected:?}; update the entry"
+            )),
+            None => Ok(()),
+        }
+    }
+
     /// Run cases the harness environment explains, counted for the exec-share ratchet.
     #[must_use]
     pub fn harness_environment_count(&self) -> usize {
@@ -159,6 +188,7 @@ impl ExecAllowances {
                 }),
         );
         stale.extend(currency_stale(&self.currency, &self.currency_used));
+        stale.extend(not_yet_stale(&self.not_yet, &self.not_yet_used));
         stale
     }
 }
@@ -197,6 +227,21 @@ fn currency_stale(allowances: &[compare::HarnessAllowance], used: &[bool]) -> Ve
         .map(|(allowance, _)| {
             format!(
                 "{}: currency allowance is stale; the case no longer differs, remove it",
+                allowance.case
+            )
+        })
+        .collect()
+}
+
+/// Not-yet allowances no run used: the executor now runs the case, or defers it for another reason.
+fn not_yet_stale(allowances: &[compare::HarnessAllowance], used: &[bool]) -> Vec<String> {
+    allowances
+        .iter()
+        .zip(used)
+        .filter(|(_, used)| !**used)
+        .map(|(allowance, _)| {
+            format!(
+                "{}: not-yet allowance is stale; remove or update it",
                 allowance.case
             )
         })

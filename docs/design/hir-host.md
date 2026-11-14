@@ -510,6 +510,8 @@ independent except HB7 (needs HA3). Within a part the order is the dependency or
 | HB7 `quantize`, `allocate`, `format` | `ornadb-csenl.39` | HB6, HA3 | `core/money.orna`, `natives/money_round.rs` | all six rounding rules; `allocate(100.GBP, [1,1,1])` sums to 100; `format` takes the locale from the host | `registry_test` passes |
 | HB8 harness outcome for `E50xx`, allowances, ratchets | `ornadb-csenl.40` | HB5, HB6 | `observe_exec.rs`, `exec-share.toml` | exec_share, diagnostic_codes, typed_share ratchets | `invalid/currency-addition`, `affine-addition`, `incompatible-dimensions` agree; `valid/currency` allowance recorded |
 
+**HB8 status: NOT MET.** `invalid/currency-addition` agrees on HIR, which is 1 of the 3 acceptance cases. `invalid/affine-addition` (old E5002) and `invalid/incompatible-dimensions` (old E5001) are not yet run on HIR; they are `not-yet-allowance` entries owned by `ornadb-csenl.37` (HB5) and `ornadb-2bga0` (builtin Duration is not a declared Quantity). `valid/currency` is recorded as a `currency-allowance` naming `ornadb-csenl.40`. The C3 criteria (a) and (b) in `hir-cutover.md` remain unmet.
+
 ### 3.3 Open decisions
 
 - **Q-B1** (section B3): how a user-declared `Currency` protocol relates to `core.money.Currency`. Default implemented in

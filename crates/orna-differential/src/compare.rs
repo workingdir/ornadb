@@ -467,6 +467,14 @@ pub fn load_currency_allowances() -> Result<Vec<HarnessAllowance>, String> {
     parse_allowances(&read_file(&path)?, "currency-allowance")
 }
 
+/// Reads the `[[not-yet-allowance]]` tables of `tests/differential/exec-share.toml`: the cases the
+/// executor does not run yet, each with the exact reason it names. A changed reason needs its
+/// entry updated, so an entry cannot outlive the gap it records.
+pub fn load_not_yet_allowances() -> Result<Vec<HarnessAllowance>, String> {
+    let path = differential_dir().join("exec-share.toml");
+    parse_allowances(&read_file(&path)?, "not-yet-allowance")
+}
+
 /// Parses the `table` allowances. A missing reason or bead is a load error.
 fn parse_allowances(source: &str, table: &str) -> Result<Vec<HarnessAllowance>, String> {
     let document = toml_lite::parse(source)?;
