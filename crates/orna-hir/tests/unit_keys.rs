@@ -63,8 +63,8 @@ fn codes(program: &Program) -> Vec<String> {
         .collect()
 }
 
-const TIME_AND_LENGTH: &str = "pub enum Length {\n    metre,\n    kilometre = 1000 metre,\n    mile = 1609.344 metre,\n    impl Unit {}\n}\n\
-pub enum Duration {\n    second,\n    minute = 60 second,\n    hour = 3600 second,\n    impl Unit {}\n}\n";
+const TIME_AND_LENGTH: &str = "pub enum Distance {\n    metre,\n    kilometre = 1000 metre,\n    mile = 1609.344 metre,\n    impl Unit {}\n}\n\
+pub enum Clock {\n    second,\n    minute = 60 second,\n    hour = 3600 second,\n    impl Unit {}\n}\n";
 
 #[test]
 fn a_base_family_unit_has_its_axis_and_scale() {
@@ -74,8 +74,8 @@ fn a_base_family_unit_has_its_axis_and_scale() {
         "no diagnostics: {:?}",
         codes(&program)
     );
-    let metre = variant(&program, "Length", "metre");
-    let kilometre = variant(&program, "Length", "kilometre");
+    let metre = variant(&program, "Distance", "metre");
+    let kilometre = variant(&program, "Distance", "kilometre");
     let metre_key = program
         .units
         .key(program.units.unit_key(metre).expect("metre has a key"));
@@ -94,7 +94,7 @@ fn a_base_family_unit_has_its_axis_and_scale() {
 #[test]
 fn a_derived_family_has_the_dimension_and_scale_of_its_factors() {
     let source = format!(
-        "{TIME_AND_LENGTH}pub enum Speed {{\n    kmh = Length.kilometre / Duration.hour,\n    mph = Length.mile / Duration.hour,\n    impl Unit {{}}\n}}\n"
+        "{TIME_AND_LENGTH}pub enum Speed {{\n    kmh = Distance.kilometre / Clock.hour,\n    mph = Distance.mile / Clock.hour,\n    impl Unit {{}}\n}}\n"
     );
     let program = lower_one(&source);
     assert!(
@@ -102,8 +102,8 @@ fn a_derived_family_has_the_dimension_and_scale_of_its_factors() {
         "no diagnostics: {:?}",
         codes(&program)
     );
-    let metre = variant(&program, "Length", "metre");
-    let second = variant(&program, "Duration", "second");
+    let metre = variant(&program, "Distance", "metre");
+    let second = variant(&program, "Clock", "second");
     let speed = defined(&program, "Speed");
     let dimension = program
         .units
@@ -135,7 +135,7 @@ fn a_derived_family_has_the_dimension_and_scale_of_its_factors() {
 #[test]
 fn an_unknown_factor_is_reported_and_has_no_key() {
     let source = format!(
-        "{TIME_AND_LENGTH}pub enum Speed {{\n    kmh = Length.furlong / Duration.hour,\n    impl Unit {{}}\n}}\n"
+        "{TIME_AND_LENGTH}pub enum Speed {{\n    kmh = Distance.furlong / Clock.hour,\n    impl Unit {{}}\n}}\n"
     );
     let program = lower_one(&source);
     assert!(

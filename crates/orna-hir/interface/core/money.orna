@@ -5,7 +5,7 @@
 // Operators are instances that forward to top-level natives, because a `native fn` is legal only at the top level.
 // `Self`, not `Money<C>`, is used in protocol arguments, as in core/temperature.orna.
 use core.ops.{Add, Sub, Mul, Div, Neg, Order};
-use core.{Ordering};
+use core.{Ordering, Rounding};
 
 // ORNA-MONEY-004: the currency contract. A currency is a nominal type that implements `Currency` with its code and
 // its minor digits. A symbol is deliberately not a member.
@@ -45,3 +45,11 @@ native fn money_scale<C impl Currency>(amount: Money<C>, factor: Decimal): Money
 native fn money_divide<C impl Currency>(amount: Money<C>, divisor: Decimal): Money<C> effect none;
 native fn money_negate<C impl Currency>(amount: Money<C>): Money<C> effect none;
 native fn money_compare<C impl Currency>(left: Money<C>, right: Money<C>): Ordering effect none;
+
+// core.money rounding natives (hir-host.md B7). The currency's `code` and `minor_digits` are read from the `impl Currency`
+// of `C`. `allocate` takes an optional rounding mode, used only when the amount is finer than the minor digits.
+// `format` takes its locale from the host's activation, so it declares no locale argument; its `pinned_data` effect
+// of the old catalogue is not a `sys.EffectKind` member, and the native is pure given the host, so it declares `none`.
+pub native fn quantize<C impl Currency>(amount: Money<C>, rounding: Rounding): Money<C> effect none;
+pub native fn allocate<C impl Currency>(amount: Money<C>, weights: [Int], rounding: Rounding?): [Money<C>] effect none;
+pub native fn format<C impl Currency>(amount: Money<C>, rounding: Rounding): Str effect none;
