@@ -101,6 +101,22 @@ case = "valid/currency.orna"
 reason = "old pipeline cannot evaluate currency values; HIR evaluates Money per spec"
 bead = "ornadb-csenl.40"
 
+# Cases the executor does not run yet: each stops at a money or type constructor it does not
+# evaluate (reason H4, raised in `orna-exec` `eval.rs` and `unit_variant.rs`). The static rejection
+# these programs need is HIR typing, not an executor gap. `20.C` is typed as a plain number, so the
+# E5002 affine-point rule never sees two points (owner `ornadb-csenl.37`). `90.days` is typed through
+# the builtin Duration, so the E5001 dimension rule does not see two Quantities (follow-up
+# `ornadb-2bga0`). Each entry matches only its exact case and reason.
+[[not-yet-allowance]]
+case = "invalid/affine-addition.orna"
+reason = "money or type constructor (H4)"
+bead = "ornadb-csenl.37"
+
+[[not-yet-allowance]]
+case = "invalid/incompatible-dimensions.orna"
+reason = "money or type constructor (H4)"
+bead = "ornadb-2bga0"
+
 # Cases the executor runs whose update or rekey targets a key the table does not hold. The executor
 # answers the spec result for an absent row. Four disagree with the old pipeline, each for a named
 # reason, and each entry matches only its exact (executor, old) error-code pair; any other

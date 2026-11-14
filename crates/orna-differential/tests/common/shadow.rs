@@ -278,7 +278,12 @@ fn executor(corpus: &Corpus) -> Result<ExecutorSection, String> {
     let mut step_differences: Vec<(String, u64, u64)> = Vec::new();
     for case in &corpus.cases {
         match observe_exec::run_case(case) {
-            ExecOutcome::NotYet(_) => section.not_yet += 1,
+            ExecOutcome::NotYet(reason) => {
+                section.not_yet += 1;
+                if let Err(mismatch) = allowances.not_yet_check(&case.id, &reason) {
+                    section.unexplained.push(mismatch);
+                }
+            }
             ExecOutcome::Ran { outcome, steps } => {
                 section.run += 1;
                 let observation = match observe_old::observe(case) {

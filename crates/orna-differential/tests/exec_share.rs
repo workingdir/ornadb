@@ -30,6 +30,9 @@ fn executor_agreement_with_the_old_pipeline_only_grows() {
     for case in &corpus.cases {
         match observe_exec::run_case(case) {
             ExecOutcome::NotYet(reason) => {
+                if let Err(mismatch) = allowances.not_yet_check(&case.id, &reason) {
+                    mismatches.push(mismatch);
+                }
                 if reason.ends_with("(H4)") && std::env::var_os("EXEC_SHARE_IDS").is_some() {
                     let old = observe_old::observe(case).map(|observation| observation.outcome);
                     println!("OLD {} => {old:?}", case.id);
