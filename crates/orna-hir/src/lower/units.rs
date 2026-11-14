@@ -15,7 +15,7 @@ use super::exprs::{error_expr, lower_expr, push};
 use crate::diag::{AMBIGUOUS, UNIT_UNRESOLVED};
 use crate::{
     Arg, ArgValue, Call, Callee, DefId, DefKind, DimensionDef, ExprId, ExprKind, Idx, ModuleId,
-    Name, NameTarget, ParamIdx, UnitDef, UnitFactor, UseContext, Visibility,
+    Name, NameTarget, ParamIdx, UnitDef, UnitFactor, UseContext,
 };
 
 /// Whether `base` is a numeric literal, the only base a unit suffix applies to (ORNA-UNIT-008).
@@ -126,25 +126,15 @@ pub(crate) fn family_dimension(variants: &[EnumVariant], lowered: &[DefId]) -> D
 }
 
 impl Builder {
-    /// Declares one variant of a unit family as a unit. A derived variant queues its expression.
-    pub(crate) fn build_family_unit(
+    /// Queues the expression of one pre-declared unit-family variant (`declare_family_variants`). A derived
+    /// variant's expression is resolved once every definition exists.
+    pub(crate) fn queue_family_unit(
         &mut self,
         module: ModuleId,
         family: DefId,
+        unit: DefId,
         variant: &EnumVariant,
-    ) -> DefId {
-        let unit = self.declare_nested(
-            module,
-            &variant.name,
-            Visibility::Public,
-            variant.span.clone(),
-            DefKind::Unit(UnitDef {
-                family: Some(family),
-                factors: Vec::new(),
-                offset: None,
-                affine: false,
-            }),
-        );
+    ) {
         if let Some(expr) = &variant.unit {
             self.unit_jobs.push(UnitJob {
                 unit,
@@ -153,7 +143,6 @@ impl Builder {
                 expr: expr.clone(),
             });
         }
-        unit
     }
 
     /// Resolves every queued derived-unit expression into factors, once all definitions exist.

@@ -558,23 +558,27 @@ impl Builder {
         let names = generic_names(generics);
         let inherited = self.build_generics(module, &names, generics);
         let mut lowered = Vec::new();
-        for variant in variants {
-            if unit_family {
-                lowered.push(self.build_family_unit(module, def, variant));
-                continue;
+        if unit_family {
+            let units = self.family_variants.get(&def).cloned().unwrap_or_default();
+            for (unit, variant) in units.into_iter().zip(variants) {
+                self.queue_family_unit(module, def, unit, variant);
+                lowered.push(unit);
             }
-            let fields = variant
-                .fields
-                .iter()
-                .map(|field| self.build_payload_field(module, &names, field))
-                .collect::<Vec<_>>();
-            lowered.push(self.declare_nested(
-                module,
-                &variant.name,
-                Visibility::Public,
-                variant.span.clone(),
-                DefKind::Variant(VariantDef { fields }),
-            ));
+        } else {
+            for variant in variants {
+                let fields = variant
+                    .fields
+                    .iter()
+                    .map(|field| self.build_payload_field(module, &names, field))
+                    .collect::<Vec<_>>();
+                lowered.push(self.declare_nested(
+                    module,
+                    &variant.name,
+                    Visibility::Public,
+                    variant.span.clone(),
+                    DefKind::Variant(VariantDef { fields }),
+                ));
+            }
         }
         let dimension = unit_family.then(|| super::units::family_dimension(variants, &lowered));
         let mut members = Vec::new();
