@@ -171,7 +171,7 @@ pub fn recorded_reason(code: &str) -> Option<&'static str> {
             Some("checker-only system or assertion check not ported to HIR")
         }
         "E5001" => Some(
-            "HIR types the corpus unit literals as plain numbers, not Quantity, so the E5001 dimension rule never sees two quantities",
+            "HIR types `90.days` through the builtin Duration postfix, which is not a declared Quantity, so the E5001 dimension rule (HB5 engine_codes operator_rejection) does not see two Quantities; follow-up: route builtin Duration through the same dimension check, bead ornadb-2bga0",
         ),
         "E5002" => Some(
             "HIR types the corpus literal (20.C) as a plain number, not Temperature, so the E5002 affine-point rule never sees two points",
