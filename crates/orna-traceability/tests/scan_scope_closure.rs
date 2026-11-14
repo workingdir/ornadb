@@ -1,6 +1,6 @@
 //! The citation ratchet must scan exactly the crates linked into the shipped binaries.
 
-use orna_traceability::citation_ratchet::CitationBaseline;
+use orna_citation_ratchet::CitationBaseline;
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},

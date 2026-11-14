@@ -57,20 +57,19 @@ fn cited(args: Vec<std::ffi::OsString>) -> ExitCode {
     };
     let catalogue = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/reference/tests/requirements.json");
-    let baseline: orna_traceability::citation_ratchet::CitationBaseline =
-        match fs::read(&baseline_path)
-            .map_err(|e| format!("read {}: {e}", baseline_path.display()))
-            .and_then(|bytes| {
-                serde_json::from_slice(&bytes)
-                    .map_err(|e| format!("parse {}: {e}", baseline_path.display()))
-            }) {
-            Ok(value) => value,
-            Err(error) => {
-                eprintln!("citation baseline failed: {error}");
-                return ExitCode::FAILURE;
-            }
-        };
-    let report = match orna_traceability::citation_ratchet::cite_requirements(
+    let baseline: orna_citation_ratchet::CitationBaseline = match fs::read(&baseline_path)
+        .map_err(|e| format!("read {}: {e}", baseline_path.display()))
+        .and_then(|bytes| {
+            serde_json::from_slice(&bytes)
+                .map_err(|e| format!("parse {}: {e}", baseline_path.display()))
+        }) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("citation baseline failed: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let report = match orna_citation_ratchet::cite_requirements(
         &catalogue,
         &crates_root,
         &baseline.scanned_crates,
@@ -112,7 +111,7 @@ fn cited(args: Vec<std::ffi::OsString>) -> ExitCode {
         "{}",
         serde_json::to_string_pretty(&report.cited_ids).expect("BTreeSet serializes")
     );
-    match orna_traceability::citation_ratchet::check_ratchet(&report, &baseline) {
+    match orna_citation_ratchet::check_ratchet(&report, &baseline) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("{error}");
