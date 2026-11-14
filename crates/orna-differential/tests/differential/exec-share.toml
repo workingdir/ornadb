@@ -13,7 +13,7 @@
 # are not part of `agreed`.
 
 [[exec-share]]
-agreed = 77
+agreed = 78
 evaluable = 110
 steps-exact = 52
 old-harness-environment = 4
@@ -76,11 +76,6 @@ bead = "ornadb-csenl.40"
 case = "invalid/affine-addition.orna"
 reason = "money or type constructor (H4)"
 bead = "ornadb-csenl.37"
-
-[[not-yet-allowance]]
-case = "invalid/incompatible-dimensions.orna"
-reason = "money or type constructor (H4)"
-bead = "ornadb-2bga0"
 
 # Cases the executor runs whose update or rekey targets a key the table does not hold. The executor
 # answers the spec result for an absent row. Four disagree with the old pipeline, each for a named
