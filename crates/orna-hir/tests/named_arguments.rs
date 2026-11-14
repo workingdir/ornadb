@@ -4,6 +4,7 @@
 //! label on those forms binds to the declared parameter. A label the form does not declare is
 //! still an argument diagnostic, and a call that omits a required parameter is too.
 
+use orna_hir::typeck::typeck;
 use orna_hir::{ModulePath, Name, Program, SourceId, SourceUnit, lower};
 use orna_syntax::parse_module_with_file;
 use orna_syntax_ast::SyntaxTree;
@@ -88,5 +89,56 @@ fn bucket_by_rejects_an_undeclared_label() {
     assert_eq!(
         argument_messages(&program),
         vec!["no parameter is named `timezone`".to_string()]
+    );
+}
+
+/// Lowers and types `source`, then returns the argument diagnostics of the `main` module.
+fn typed_argument_messages(source: &str) -> Vec<String> {
+    let mut program = lower_source(source);
+    typeck(&mut program);
+    argument_messages(&program)
+}
+
+const GREETER: &str = "pub protocol Greeter { fn greet(self, punctuation: Str): Str; }\n\
+    pub enum Rounding {\n\
+        half_up,\n\
+        impl Greeter { fn greet(self, punctuation: Str): Str = \"hi\"; }\n\
+    }\n";
+
+#[test]
+fn a_protocol_member_accepts_its_declared_label() {
+    let source = format!("{GREETER}pub fn f(r: Rounding): Str = r.greet(punctuation: \"!\");\n");
+    assert_eq!(typed_argument_messages(&source), Vec::<String>::new());
+}
+
+#[test]
+fn a_protocol_member_rejects_an_undeclared_label() {
+    let source = format!("{GREETER}pub fn f(r: Rounding): Str = r.greet(bogus: \"!\");\n");
+    let messages = typed_argument_messages(&source);
+    assert!(
+        messages.iter().any(|m| m.contains("no parameter is named `bogus`")),
+        "{messages:?}"
+    );
+}
+
+#[test]
+fn a_protocol_member_rejects_an_omitted_required_label() {
+    let source = format!("{GREETER}pub fn f(r: Rounding): Str = r.greet(bogus: \"!\");\n");
+    let messages = typed_argument_messages(&source);
+    assert!(
+        messages.iter().any(|m| m.contains("omits a required parameter")),
+        "{messages:?}"
+    );
+}
+
+#[test]
+fn a_protocol_member_rejects_a_repeated_label() {
+    let source = format!(
+        "{GREETER}pub fn f(r: Rounding): Str = r.greet(punctuation: \"!\", punctuation: \"?\");\n"
+    );
+    let messages = typed_argument_messages(&source);
+    assert!(
+        messages.iter().any(|m| m.contains("supplied twice")),
+        "{messages:?}"
     );
 }
