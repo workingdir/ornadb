@@ -30,6 +30,7 @@ orna-cli-support = { path = "../orna-cli-support" }
 orna-conformance = { path = "../orna-conformance" }
 orna-evaluator = { path = "../orna-evaluator" }
 orna-project-repl = { path = "../orna-project-repl" }
+orna-repl = { path = "../orna-repl" }
 orna-live = { path = "../orna-live" }
 orna-protocol = { path = "../orna-protocol" }
 orna-project = { path = "../orna-project" }
