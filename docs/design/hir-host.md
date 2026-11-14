@@ -91,7 +91,7 @@ Three static `sys` rejections are the spec's own codes, so lowering reports them
 
 - `sys.runtime.*` reports `ORNA100-E-SYS-RUNTIME` (ORNA-SYS-005: the member is renamed `sys.rt`, not aliased).
 - The path `sys.storage` used as a callee reports `ORNA100-E-SYS-STORAGE-CALL` (ORNA-SYS-120: a grouping namespace).
-- A row mutator on `sys.Commit` reports `E7001` (the read-only `sys.Commit` rule; published by the checker).
+- A row mutator on any portable `sys` relation reports `E7001` (portable `sys` rows are read-only; the checker publishes this code).
 
 The codes are mirrored as string constants in `crates/orna-hir/src/diag.rs` (the checker owns the same strings in
 `crates/orna-check/src/diagnostics.rs`; `orna-check` depends on `orna-hir`, so the strings cannot be imported). The

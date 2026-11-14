@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use orna_hir::{
     ModulePath, Name, PreludeExports, Program, SourceId, SourceUnit, SysAdmission, SysMemberStatus,
-    diag::{SYS_VERSION_INCOMPATIBLE, UNSUPPORTED},
+    diag::{SYS_COMMIT_READ_ONLY, SYS_VERSION_INCOMPATIBLE, UNSUPPORTED},
     lower_with_admission,
 };
 use orna_syntax::parse_module_with_file;
@@ -142,21 +142,21 @@ fn unlinked_sys_run_value_is_rejected() {
 
 #[test]
 fn sys_row_mutator_is_rejected_not_accepted() {
-    // `sys` rows are read-only; a mutator on a linked `sys` relation must not lower as a pending method call.
+    // Portable `sys` rows are read-only; a mutator on a linked `sys` relation must not lower as a pending method call.
     let program = lowered("pub fn bad() = sys.Commit.insert({ hash: \"x\" });\n");
     assert!(
-        codes(&program).contains(&UNSUPPORTED),
-        "a `sys` row mutator must be rejected, not accepted silently: {:?}",
+        codes(&program).contains(&SYS_COMMIT_READ_ONLY),
+        "a `sys` row mutator must be rejected as read-only, not accepted silently: {:?}",
         codes(&program)
     );
 }
 
 #[test]
-fn linked_sys_row_mutator_is_unsupported_not_admitted() {
+fn linked_sys_row_mutator_is_read_only_not_admitted() {
     let program = lowered("pub fn a() = sys.Audit.insert(1);\n");
     assert!(
-        codes(&program).contains(&UNSUPPORTED),
-        "a linked `sys` row mutator must report ORNA-S022-UNSUPPORTED: {:?}",
+        codes(&program).contains(&SYS_COMMIT_READ_ONLY),
+        "a linked `sys` row mutator must report the read-only code E7001: {:?}",
         codes(&program)
     );
     assert!(

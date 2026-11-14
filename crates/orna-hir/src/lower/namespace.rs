@@ -186,12 +186,7 @@ pub(super) fn resolve_sys_value(
         );
         let texts = segments.iter().map(|(text, _)| *text).collect::<Vec<_>>();
         let (code, message) = super::admission::unrepresented_sys(&texts);
-        builder.diagnose(
-            module,
-            code,
-            message,
-            last_span,
-        );
+        builder.diagnose(module, code, message, last_span);
         return error_expr(builder, state, span.clone());
     };
     record_prefix_uses(

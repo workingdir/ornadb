@@ -80,7 +80,7 @@ pub const AFFINE_POINT_OPERATOR: &str = "E5002";
 /// A fold (`sum`) over affine points (hir-host.md B5; `E5003`, the absolute-quantity sum class).
 pub const AFFINE_POINT_SUM: &str = "E5003";
 
-/// A row mutator on `sys.Commit`, which is read-only. Published by the checker (`DIAG_SYS_COMMIT_READ_ONLY`, typecheck E7001).
+/// A row mutator on a portable `sys` relation. Portable `sys` rows are read-only (ORNA-SYS admin rule). Published by the checker (`DIAG_SYS_COMMIT_READ_ONLY`, typecheck E7001).
 pub const SYS_COMMIT_READ_ONLY: &str = "E7001";
 
 /// An inference variable is still unsolved after its body was checked.
