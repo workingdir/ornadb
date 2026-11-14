@@ -136,6 +136,43 @@ fn an_unsolved_declared_type_argument_is_underconstrained() {
 }
 
 #[test]
+fn an_explicit_type_argument_in_an_unannotated_entry_is_accepted() {
+    // The REPL wraps each input in a private, unannotated entry (`fn __repl_input() = ...`). Its explicit type
+    // argument fills the declared `T`; the implicit parameter of `generic` is inferred from the argument.
+    let mut program = program(
+        "fn generic<T>(value) = value;\n\
+         fn run() = generic<Int>(2);\n",
+    );
+    let summary = typeck(&mut program);
+    assert!(test_accepted(&program, &summary), "{summary:?}");
+    assert!(
+        infer_codes(&program).is_empty(),
+        "{:?}",
+        infer_codes(&program)
+    );
+    assert_eq!(result(&program, "run"), "Int");
+    assert_eq!(recorded_targs(&program, "run"), ["Int", "Int"]);
+}
+
+#[test]
+fn an_omitted_unsolved_type_argument_names_the_call_as_its_annotation_site() {
+    // No argument determines the declared `T`, and the omitted type argument must infer to one static type
+    // (ORNA-INFER-001). The smallest useful annotation site is the call that omits it (ORNA-INFER-007).
+    let source = "fn generic<T>(value) = value;\n\
+                  fn run() = generic(2);\n";
+    let mut program = program(source);
+    let summary = typeck(&mut program);
+    assert!(!test_accepted(&program, &summary), "{summary:?}");
+    assert_eq!(infer_codes(&program), ["ORNA-INFER-007"]);
+    let module = test_module(&program);
+    let diagnostic = &program.modules[module].diagnostics[0];
+    assert_eq!(
+        &source[diagnostic.span.start..diagnostic.span.end],
+        "generic(2)"
+    );
+}
+
+#[test]
 fn a_type_argument_count_that_is_not_the_declared_count_is_a_conflict() {
     let mut program = program(
         "pub fn id<T>(value: T): T = value;\n\
