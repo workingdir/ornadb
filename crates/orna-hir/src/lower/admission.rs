@@ -71,3 +71,31 @@ pub(crate) fn reject_unlinked(
     );
     true
 }
+
+/// The diagnostic for a `sys` path with no represented declaration. The renamed `sys.runtime`
+/// is the spec's ORNA100-E-SYS-RUNTIME (ORNA-SYS-005); any other path stays unrepresented.
+pub(crate) fn unrepresented_sys(path: &[&str]) -> (&'static str, String) {
+    if path.first() == Some(&"sys") && path.get(1) == Some(&"runtime") {
+        return (
+            diag::LEGACY_SYS_RUNTIME,
+            "`sys.runtime` was renamed to `sys.rt`".to_owned(),
+        );
+    }
+    (
+        diag::UNSUPPORTED,
+        "the `sys` declarations are not represented yet".to_owned(),
+    )
+}
+
+/// The diagnostic for a `sys` module used as a callee. `sys.storage` is a grouping namespace
+/// (ORNA-SYS-120); any other module stays unrepresented as a callee.
+pub(crate) fn module_as_function(path: &[&str]) -> (&'static str, String) {
+    if path == ["sys", "storage"] {
+        return (
+            diag::SYS_STORAGE_CALL,
+            "`sys.storage` is a grouping namespace; use `sys.Storage` or `sys.admin` storage functions"
+                .to_owned(),
+        );
+    }
+    (diag::UNSUPPORTED, "a module is not a function".to_owned())
+}

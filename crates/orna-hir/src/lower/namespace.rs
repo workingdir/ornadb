@@ -184,10 +184,12 @@ pub(super) fn resolve_sys_value(
             crate::UseContext::Value,
             NameTarget::Unresolved,
         );
+        let texts = segments.iter().map(|(text, _)| *text).collect::<Vec<_>>();
+        let (code, message) = super::admission::unrepresented_sys(&texts);
         builder.diagnose(
             module,
-            crate::diag::UNSUPPORTED,
-            "the `sys` declarations are not represented yet",
+            code,
+            message,
             last_span,
         );
         return error_expr(builder, state, span.clone());

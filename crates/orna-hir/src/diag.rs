@@ -27,6 +27,10 @@ pub const DUPLICATE: &str = "ORNA-S013-DUPLICATE";
 pub const UNSUPPORTED: &str = "ORNA-S022-UNSUPPORTED";
 /// A `sys` member the host has not linked a production provider for (ORNA-SYS-008).
 pub const SYS_VERSION_INCOMPATIBLE: &str = "sys.version.incompatible";
+/// The renamed `sys.runtime` member is not an alias; the unrecognised member MUST produce this code (ORNA-SYS-005).
+pub const LEGACY_SYS_RUNTIME: &str = "ORNA100-E-SYS-RUNTIME";
+/// `sys.storage` is a grouping namespace, not a callable selector (ORNA-SYS-120).
+pub const SYS_STORAGE_CALL: &str = "ORNA100-E-SYS-STORAGE-CALL";
 /// A unit name that names no unit of a family or unit declaration in scope (units.md ORNA-UNIT-UNRESOLVED).
 pub const UNIT_UNRESOLVED: &str = "ORNA-UNIT-UNRESOLVED";
 /// A unit family whose variants do not share the family's dimension (units.md ORNA-UNIT-010).
@@ -75,6 +79,9 @@ pub const AFFINE_POINT_OPERATOR: &str = "E5002";
 
 /// A fold (`sum`) over affine points (hir-host.md B5; `E5003`, the absolute-quantity sum class).
 pub const AFFINE_POINT_SUM: &str = "E5003";
+
+/// A row mutator on `sys.Commit`, which is read-only. Published by the checker (`DIAG_SYS_COMMIT_READ_ONLY`, typecheck E7001).
+pub const SYS_COMMIT_READ_ONLY: &str = "E7001";
 
 /// An inference variable is still unsolved after its body was checked.
 ///
