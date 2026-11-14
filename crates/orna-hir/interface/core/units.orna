@@ -17,3 +17,22 @@ pub enum Data {
     GiB = 1073741824 byte,
     impl Unit {}
 }
+
+// core.units: the affine temperature and energy units the differential corpus uses (units.md sections 2 and 8.5).
+// Values are those of the checker's observer catalogue (orna-check FIXTURE_UNIT_SUPPORT): `C` is the affine
+// Celsius scale over kelvin with offset 273.15, `kWh` is 3.6e6 joules. The derived values are kept as written;
+// their factors are evaluated by the checker, not here. `days` is the 86400-second day, and `m`, `kg`, `s` are the
+// base units that `J` and `kWh` are written over. The time family beyond `days` stays in lower/literals.rs.
+pub dim Length;
+pub dim Mass;
+pub dim Time;
+pub dim Temperature;
+pub dim Energy;
+pub unit m : Length base;
+pub unit kg : Mass base;
+pub unit s : Time base;
+pub unit days : Time = 86400.s;
+pub unit K : Temperature base;
+pub unit C : Temperature = K offset 273.15 affine;
+pub unit J : Energy = kg * m * m / (s * s);
+pub unit kWh : Energy = 3.6e6.J;

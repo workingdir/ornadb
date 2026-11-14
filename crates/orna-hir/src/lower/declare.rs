@@ -513,6 +513,14 @@ impl Builder {
             .filter(|def| self.pending[def.index()].module == module)
             .collect::<Vec<_>>();
         let scoped = if own.is_empty() { candidates } else { own };
+        // Embedded core units are the lowest precedence: a unit a user or project module declares wins over the
+        // root environment's unit of the same name, so the core candidate drops out. Ambiguity remains among the rest.
+        let user = scoped
+            .iter()
+            .copied()
+            .filter(|def| self.program.modules[self.pending[def.index()].module].origin != ModuleOrigin::Core)
+            .collect::<Vec<_>>();
+        let scoped = if user.is_empty() { scoped } else { user };
         match scoped.as_slice() {
             [] => UnitLookup::None,
             [unit] => UnitLookup::Found(*unit),

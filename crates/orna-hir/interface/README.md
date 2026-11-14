@@ -27,7 +27,8 @@ definition of the `sys` module (decision D19).
   `Temperature` (a point) and `Delta` (a difference). The kernel has no affine flag (units.md C6). Their bodies use field
   access and struct literals, which HIR does not type yet, so those bodies are not type-checked; the instance signatures
   are.
-- `core/units.orna`: the built-in data-size unit family (units.md section 8.2). The time family is not here yet; see
-  the comment at the top of the file.
+- `core/units.orna`: the built-in data-size family (units.md section 8.2), plus the affine temperature `C` (offset
+  273.15 over `K`) and the energy unit `kWh` the differential corpus uses (units.md sections 2 and 8.5). Values follow the
+  checker's observer catalogue. The time family beyond `days` is not here; see the comment at the top of the file.
 
 Hand-written modules must lower with zero diagnostics (`crates/orna-hir/tests/embedded_clean.rs`).
