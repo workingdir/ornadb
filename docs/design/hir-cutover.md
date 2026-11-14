@@ -104,16 +104,14 @@ Grep of `crates/` for `ORNA_CHECK_` finds two variables, both read in
   to stderr as `orna check shadow: checker-only ...` and `orna check shadow:
   hir-only ...`. The command never fails for a difference. Shadow wins when both
   variables are set.
+- LSP (`crates/orna-lsp`, semantic diagnostics published on open and on change): `ORNA_LSP_HIR=1` publishes HIR's diagnostics instead of the checker's. `ORNA_LSP_SHADOW=1` publishes the checker's diagnostics and writes differences to the server's stderr as `orna-lsp shadow: checker-only ...` and `orna-lsp shadow: hir-only ...`; agreement is logged as `orna-lsp shadow: agree on N diagnostic(s)`. Shadow wins when both are set. With neither variable, the checker runs. The variables belong to the editor's server process environment.
 
 Discrepancies with `hir.md`:
 
 - `hir.md` section 6.3 named an `ORNA_CHECK_LEGACY` variable that does not
   exist. Corrected in this PR: it names `ORNA_CHECK_HIR` and `ORNA_CHECK_SHADOW`,
   which exist. The old-path switch is decision Q7.
-- `hir.md` section 6.6 said H1 (LSP) is gated by an environment variable. No gate
-  exists in `crates/orna-lsp/src` (its `env::var_os` reads are `XDG_CACHE_HOME`
-  and `HOME`, `standard.rs:290-292`). Corrected in this PR: the LSP gate is not
-  yet implemented, tracked under `ornadb-csenl.16` (gap G8).
+- `hir.md` section 6.6 said H1 (LSP) has no environment gate. Corrected: the LSP gate is `ORNA_LSP_HIR` and `ORNA_LSP_SHADOW`, listed above. Gap G8 stays open (`ornadb-csenl.16`): HIR's codes, messages and ranges differ from the checker's (see section 8, G8), and no other LSP feature reads HIR.
 - No switch exists for the assertion gate, `orna run`, the REPL, `serve` or the
   mount (gaps G6, G7). The per-entry switches in section 4.1 are new work.
 
@@ -130,7 +128,7 @@ Each criterion is a number that a command prints or a file records.
 | C4 REPL | H8 | (a) `agreed` equals the 48 runnable fixtures (currently 15); (b) the 33 expected rows are empty, or each names a bead; (c) the 56 excluded fixtures stay listed in `repl_inline_exclusions.txt` with a reason; (d) zero shadow differences on two consecutive nightly runs | 15 of 48; 33 expected; 56 excluded |
 | C5 `serve` and mount | H9 steps 4 and 5 | (a) a switch exists (gap G7); (b) the serve and mount tests pass with HIR; (c) zero shadow differences on two consecutive nightly runs. None of the three ratchet files of section 1 covers these two entry points (gap G7) | no switch; no ratchet |
 | C6 typed share | H2 | `typed` equals the measured value on the old-accepted corpus, and `typed-share.toml` records it in the same PR | measured 51 of 104; file records 51; comparator exact both ways (gap G3, fixed in this PR) |
-| C7 LSP | H1 | (a) the LSP conformance suite (`crates/orna-lsp/tests/ji3t0_conformance.rs`) passes against HIR; (b) no production import of `orna_check` remains in `crates/orna-lsp` | not verified; the LSP gate is not yet implemented (gap G8; `ornadb-csenl.16`) |
+| C7 LSP | H1 | (a) the LSP conformance suite (`crates/orna-lsp/tests/ji3t0_conformance.rs`) passes against HIR; (b) no production import of `orna_check` remains in `crates/orna-lsp` | (a) measured with `ORNA_LSP_HIR=1`: `ji3t0_conformance` 9 of 9 and `lsp_e2e` 24 of 24 pass; `project_diagnostics` 6 of 8 pass (codes and messages differ, gap G8). (b) not met: `orna_check` is imported by `check_backend.rs`, `hierarchy.rs`, `project.rs`, `semantic.rs`, `server.rs`, `standard.rs` and `workspace.rs` (`ornadb-csenl.16`) |
 | C8 allowlist hygiene | H9 | every `expected-differences.toml` entry names a bead that exists; no `[[difference]]` lacks a reason; the entry count is recorded in the PR | 107 entries, 107 reason and 107 bead fields; bead existence not checked (gap G19) |
 | C9 benchmarks | H9 | the benchmarks of `hir.md` section 7.4 meet their targets in CI | not measured here (gap G13) |
 | C10 dependency | H9 | `cargo metadata` shows no `orna-evaluator`, `orna-intrinsics`, `orna-project-repl` or `orna-check` types needed by production (and `orna-compat-v1` removed from the production graph) | `orna-evaluator` present |
@@ -330,7 +328,7 @@ Each decision is stated so that the answer is an option letter or a short phrase
 | G5 | C4 | REPL 15 of 48 runnable agree; 33 expected rows | `ornadb-csenl.23` (H8, "REPL as incremental module on HIR") | open |
 | G6 | C2 | the assertion gate has no HIR switch; it calls `orna_check` directly | none | propose a bead under `ornadb-csenl.24` |
 | G7 | C5 | `orna run`, REPL, serve and mount have no switch; serve and mount have no corpus ratchet | none | propose beads under `ornadb-csenl.24` |
-| G8 | C7 | `hir.md` 6.6 said H1 LSP is env-gated; no gate exists; LSP HIR status unverified | `ornadb-csenl.16` (H1, "lowering, resolver and call classification; LSP on HIR") | `hir.md` corrected in this PR; LSP gate not yet implemented; verify the LSP path under `ornadb-csenl.16` before H9 |
+| G8 | C7 | `hir.md` 6.6 said H1 LSP is env-gated; no gate existed; LSP HIR parity unverified | `ornadb-csenl.16` (H1, "lowering, resolver and call classification; LSP on HIR") | gate added in this PR: `ORNA_LSP_HIR=1` publishes HIR diagnostics, `ORNA_LSP_SHADOW=1` publishes the checker's and logs differences (`crates/orna-lsp/src/check_backend.rs`). Parity gaps, still open: (1) codes and ranges differ on an unresolved name (HIR anchors on the use, the checker on the declaration) and on a type mismatch (HIR `ORNA-INFER-011` on the literal, the checker `ORNA-S021-TYPE` on the name), pinned in `crates/orna-lsp/tests/check_backend_gate.rs`; (2) messages differ: `project_diagnostics` fails 2 of 8 under HIR; (3) rename verification counts follow the gate, but no LSP request handler reads HIR directly: hover, completion, code actions, signature help, definition, references, document highlight, rename edits, document symbols, formatting, semantic tokens, inlay hints, inline values, linked editing, document links, folding, selection ranges, code lens and call/type hierarchy still do not use HIR (beads proposed under `ornadb-csenl.16`, not created) |
 | G9 | section 4.2 | closed by the `shadow-report` job of `nightly-gates.yml`: the whole corpus runs through both pipelines and writes a markdown report (section 4.2) | none | the job has no run history yet, so criterion C1(c) is not met |
 | G10 | P2, section 2 | production types from `orna-check` (decision Q6) | `ornadb-csenl.18` (H3), `.24` (H9) | decision Q6 |
 | G11 | P1 | the differential harness has a normal dependency on the old evaluator; no golden freeze exists | none | propose a bead under `ornadb-csenl.24` |
