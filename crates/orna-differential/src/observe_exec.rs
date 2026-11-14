@@ -201,12 +201,14 @@ fn entry_name(case: &Case) -> Option<&str> {
 
 /// The lowering rejections the old pipeline reports as its outcome before evaluation, each under the
 /// spec's own code: an unlinked `sys` member (`sys.version.incompatible`, ORNA-SYS-008), the renamed
-/// `sys.runtime` (ORNA-SYS-005), a `sys.storage` call (ORNA-SYS-120) and a `sys` row mutator (E7001).
-const STATIC_REJECTIONS: [&str; 4] = [
+/// `sys.runtime` (ORNA-SYS-005), a `sys.storage` call (ORNA-SYS-120), a `sys` row mutator (E7001) and a
+/// durable source consumed twice in one `parallel` (E9101).
+const STATIC_REJECTIONS: [&str; 5] = [
     orna_hir::diag::SYS_VERSION_INCOMPATIBLE,
     orna_hir::diag::LEGACY_SYS_RUNTIME,
     orna_hir::diag::SYS_STORAGE_CALL,
     orna_hir::diag::SYS_COMMIT_READ_ONLY,
+    orna_hir::diag::DURABLE_CONSUMER_DUPLICATE,
 ];
 
 /// The code of an owned-module lowering rejection the old pipeline also reports before evaluation.
