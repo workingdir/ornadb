@@ -45,18 +45,6 @@ fn param(name: &str, has_default: bool) -> ParamInfo {
     }
 }
 
-/// The labelled parameters of a member call the receiver's type settles, after its receiver. Only `divide` has any:
-/// `core.decimal.divide(value, scale:, rounding:)` on a `Decimal` receiver.
-fn pending_params(name: &Name) -> Option<Vec<ParamInfo>> {
-    (name.as_str() == "divide").then(|| {
-        vec![
-            param("value", false),
-            param("scale", false),
-            param("rounding", false),
-        ]
-    })
-}
-
 /// Whether a callee starts concurrent bodies: the lambdas it receives run as
 /// separate activations that capture snapshots (design 03, "Concurrent bodies
 /// capture snapshots"). These are `parallel`, `race` and `timeout`, and
@@ -91,8 +79,14 @@ pub(crate) fn classify_callee(
     if let AstExpr::Field { base, name, .. } = callee {
         let base = lower_expr(builder, state, base);
         let name = Name::new(name);
-        let params = pending_params(&name);
-        return Some((Callee::Pending { base, name }, params));
+        return Some((
+            Callee::Pending {
+                base,
+                name,
+                named: Box::new([]),
+            },
+            None,
+        ));
     }
     let value = lower_expr(builder, state, callee);
     Some((Callee::Value { callee: value }, None))
@@ -203,8 +197,14 @@ fn classify_path(
         .collect::<Vec<_>>();
     if state.local(&names[0]).is_some() {
         let base = lower_path_value(builder, state, &segments[..segments.len() - 1]);
-        let params = pending_params(&last);
-        return Some((Callee::Pending { base, name: last }, params));
+        return Some((
+            Callee::Pending {
+                base,
+                name: last,
+                named: Box::new([]),
+            },
+            None,
+        ));
     }
     if segments
         .first()
@@ -342,8 +342,14 @@ fn classify_member_path(
     // A relation stage on a table path (`Note.take(0)`) is the member call `rows.take(0)` with the table as the
     // receiver: typeck settles the stage and places the receiver at argument 0, as a pipe does.
     let base = lower_path_value(builder, state, &segments[..segments.len() - 1]);
-    let params = pending_params(&last);
-    Some((Callee::Pending { base, name: last }, params))
+    Some((
+        Callee::Pending {
+            base,
+            name: last,
+            named: Box::new([]),
+        },
+        None,
+    ))
 }
 
 /// Reports a path whose root name does not resolve.

@@ -16,7 +16,7 @@ use orna_syntax_ast::{Expr as AstExpr, TypeExpr};
 
 use crate::{
     BinOp, Call, Capture, DefId, DefKind, Expr, ExprId, ExprKind, FieldRef, Idx, InterpPart,
-    LogicOp, Name, NameTarget, Stmt, Ty, TyKind, UnOp,
+    LogicOp, ModuleId, Name, NameTarget, Stmt, Ty, TyKind, UnOp,
 };
 
 use super::blocks::lower_block;
@@ -851,6 +851,7 @@ fn lower_call(
             )
         })
         .collect::<Vec<_>>();
+    let (lowered, callee) = defer_named_arguments(builder, module, callee, lowered);
     let placeholder = error_expr(builder, state, span.clone());
     let (args, piped) = builder.bind_arguments(
         module,
@@ -872,6 +873,46 @@ fn lower_call(
         })),
         span.clone(),
         ty,
+    )
+}
+
+/// Splits a member call's labelled arguments off its positional ones. Typing binds the labelled ones once the
+/// receiver's type settles the member, so they stay unbound on the callee; the positional ones bind here, in order.
+/// A positional argument after a labelled one is an error, as for any call.
+fn defer_named_arguments(
+    builder: &mut Builder,
+    module: ModuleId,
+    callee: crate::Callee,
+    lowered: Vec<(Option<Name>, ExprId, SyntaxSpan)>,
+) -> (Vec<(Option<Name>, ExprId, SyntaxSpan)>, crate::Callee) {
+    let crate::Callee::Pending { base, name, .. } = callee else {
+        return (lowered, callee);
+    };
+    let mut positional = Vec::new();
+    let mut named = Vec::new();
+    for (label, value, span) in lowered {
+        match label {
+            Some(label) => named.push(crate::NamedArg {
+                name: label,
+                value,
+                span,
+            }),
+            None if named.is_empty() => positional.push((None, value, span)),
+            None => builder.diagnose(
+                module,
+                crate::diag::ARGUMENT,
+                "a positional argument follows a named argument",
+                span,
+            ),
+        }
+    }
+    (
+        positional,
+        crate::Callee::Pending {
+            base,
+            name,
+            named: named.into_boxed_slice(),
+        },
     )
 }
 

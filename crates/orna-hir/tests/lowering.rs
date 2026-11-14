@@ -247,7 +247,7 @@ fn a_relation_stage_on_a_table_path_keeps_the_table_as_its_receiver() {
     let ExprKind::Call(call) = &root.kind else {
         panic!("run's root is a call");
     };
-    let Callee::Pending { base, name } = &call.callee else {
+    let Callee::Pending { base, name, .. } = &call.callee else {
         panic!("a relation stage is pending until typeck settles it");
     };
     assert_eq!(name.as_str(), "take");

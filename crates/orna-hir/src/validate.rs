@@ -825,7 +825,12 @@ impl Program {
                 self.validate_def_ref(*table, errors);
             }
             Callee::Relational { .. } | Callee::Intrinsic(_) => {}
-            Callee::Pending { base, .. } => self.validate_expr_ref(body_id, body, *base, errors),
+            Callee::Pending { base, named, .. } => {
+                self.validate_expr_ref(body_id, body, *base, errors);
+                for argument in named.iter() {
+                    self.validate_expr_ref(body_id, body, argument.value, errors);
+                }
+            }
             Callee::Value { callee } => self.validate_expr_ref(body_id, body, *callee, errors),
         }
         let mut previous = None;
