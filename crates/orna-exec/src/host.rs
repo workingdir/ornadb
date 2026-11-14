@@ -26,6 +26,9 @@ pub(crate) const UNSUPPORTED: &str = "ORNA-EVAL-UNSUPPORTED";
 /// The code a host answers for an `as_of` snapshot it does not hold.
 pub(crate) const SNAPSHOT_NOT_FOUND: &str = "sys.snapshot.not_found";
 
+/// The code `HEAD` fails with in an unborn repository, which has no head commit to name.
+pub(crate) const UNBORN_HEAD: &str = "sys.git.unborn_head";
+
 /// A host's failure to serve one request. `code` is a canonical code; the machine maps it to a language error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HostFailure {
@@ -160,7 +163,7 @@ pub trait Host {
     /// # Errors
     ///
     /// [`HostFailure`] with `sys.snapshot.not_found` when the host holds no such snapshot.
-    fn store_at(&mut self, at: &Snapshot) -> Result<Box<dyn TableStore + '_>, HostFailure>;
+    fn store_at(&mut self, at: &Snapshot) -> Result<Box<dyn TableStore>, HostFailure>;
 
     /// The instant of the activation. It is the same for every read within one activation.
     fn now(&self) -> HostInstant;
@@ -215,15 +218,19 @@ pub trait Host {
 pub struct StoreHost {
     store: Box<dyn TableStore>,
     manifest: HostManifest,
+    activation: Option<ActivationContext>,
+    pinned: Vec<(Snapshot, MemoryStore)>,
 }
 
 impl StoreHost {
-    /// A host over `store`.
+    /// A host over `store`, with no activation context and no pinned snapshots.
     #[must_use]
     pub fn new(store: Box<dyn TableStore>) -> Self {
         Self {
             store,
             manifest: HostManifest::new(),
+            activation: None,
+            pinned: Vec::new(),
         }
     }
 
@@ -238,6 +245,20 @@ impl StoreHost {
     pub fn into_store(self) -> Box<dyn TableStore> {
         self.store
     }
+
+    /// Pins a read-only copy of `store` as the state of `snapshot`, so `store_at(snapshot)` reads it.
+    #[must_use]
+    pub fn pin(mut self, snapshot: Snapshot, store: &MemoryStore) -> Self {
+        self.pinned.push((snapshot, store.snapshot()));
+        self
+    }
+
+    /// Sets the snapshots the activation reads: `cwd` and, when the repository has one, `head`.
+    #[must_use]
+    pub fn with_activation(mut self, activation: ActivationContext) -> Self {
+        self.activation = Some(activation);
+        self
+    }
 }
 
 impl Host for StoreHost {
@@ -249,10 +270,14 @@ impl Host for StoreHost {
         self.store.as_mut()
     }
 
-    fn store_at(&mut self, _at: &Snapshot) -> Result<Box<dyn TableStore + '_>, HostFailure> {
-        Err(HostFailure {
-            code: SNAPSHOT_NOT_FOUND,
-        })
+    fn store_at(&mut self, at: &Snapshot) -> Result<Box<dyn TableStore>, HostFailure> {
+        self.pinned
+            .iter()
+            .find(|(snapshot, _)| snapshot == at)
+            .map(|(_, store)| Box::new(store.snapshot()) as Box<dyn TableStore>)
+            .ok_or(HostFailure {
+                code: SNAPSHOT_NOT_FOUND,
+            })
     }
 
     fn now(&self) -> HostInstant {
@@ -264,7 +289,7 @@ impl Host for StoreHost {
     }
 
     fn activation(&self) -> Option<&ActivationContext> {
-        None
+        self.activation.as_ref()
     }
 
     fn sys_call(&mut self, _slot: SysSlot, _args: Vec<Raw>) -> Result<Raw, HostFailure> {
@@ -356,7 +381,7 @@ impl Host for FixtureHost {
         self.inner.store()
     }
 
-    fn store_at(&mut self, at: &Snapshot) -> Result<Box<dyn TableStore + '_>, HostFailure> {
+    fn store_at(&mut self, at: &Snapshot) -> Result<Box<dyn TableStore>, HostFailure> {
         self.inner.store_at(at)
     }
 
