@@ -230,8 +230,10 @@ This is `ProgramCatalog` in `orna-exec/src/host/catalog.rs` (slice HA7). It need
 `sys.Materialization`, `sys.MaintenanceJob` and `sys.Storage` need publication metadata (`orna-runtime`) and are not
 in the first provider; with no data they answer `ORNA-EVAL-UNSUPPORTED`, which is what the old evaluator answers for
 `valid/sys-storage`. `sys.rt.runs` and `sys.rt.streams` come from `orna-runtime`'s `SysCurrentRuntimeProjection`
-(`orna-runtime/src/observation.rs:79`) in slice HA8; that projection already states which fields the runtime does not
-own (`FunctionRef`, `ObjectRef`, `InvocationRef`), and HA8 leaves those fields `null` as the projection does.
+(`orna-runtime/src/observation.rs:79`) in slice HA8. That projection states which fields the runtime does not own
+(`FunctionRef`, `ObjectRef`, `InvocationRef`). HA8 does not `null` those non-null fields: the contract is frozen, so HA8
+registers all 25 `sys.rt` fields (`orna-runtime/src/host_rows.rs`) and each member that cannot be answered honestly is
+`ORNA-EVAL-UNSUPPORTED`. HA8 is PARTIAL; the member-to-bead map is in the `host_rows.rs` module table and row HA8 of 3.1.
 
 ### A6. The test provider for the differential harness
 
@@ -480,7 +482,7 @@ independent except HB7 (needs HA3). Within a part the order is the dependency or
 | HA5 relation handles, provider source, `sys_call` | `ornadb-csenl.29` | HA3, HA2 | `value.rs`, `relation/pipeline.rs`, `eval.rs`, `host.rs` (`FixtureHost`) | `tests/sys_host.rs`: rows through `filter\|map\|take\|first\|count`; `take(1)` reads one row; registered member with no data is `ORNA-EVAL-UNSUPPORTED` | `valid/sys-storage` agrees; measured `agreed` recorded |
 | HA6 snapshots, `HEAD`/`CWD`, `as_of` | `ornadb-csenl.30` | HA5 | `orna-hir/interface`, `table.rs`, `host.rs`, `store/memory.rs` | `as_of(HEAD)` reads the snapshot, not current; `sys.rt` handle refuses `as_of`; unknown snapshot is `sys.snapshot.not_found` | `valid/cwd-head` runs, recorded as a harness allowance |
 | HA7 `ProgramCatalog` provider | `ornadb-csenl.31` | HA5 | `orna-exec` `host/catalog.rs`, `raw_value.rs` | `sys_catalog.rs`: tables and columns of a two-table program; `sys.rt.info` from `HostInfo` | rows match the declared tables; unlisted members stay unlinked |
-| HA8 runtime provider (`sys.rt.runs`, `streams`) | `ornadb-csenl.32` | HA5 | `orna-runtime` `host_rows.rs` | two projected runs yield two records; `sys.rt.runs \| count` is 2 through `run_entry_with_host` | `check_architecture.py` passes |
+| HA8 runtime provider, PARTIAL (`sys.rt`, 25 fields) | `ornadb-csenl.32` | HA5 | `orna-runtime` `host_rows.rs`, `orna-exec` `host/runtime_rows.rs`, `orna-exec/tests/runtime_rows.rs` | every `sys.rt` member links through `RuntimeHostRows`; `sys.rt.runs` is `ORNA-EVAL-UNSUPPORTED` (not "`count` is 2"): `sys.Run.function` (FunctionRef) and `sys.Stream.producer` (ObjectRef) are non-null and the runtime retains only names (`ornadb-jdq5h`); presentation scalars have no producer (`ornadb-jjgvi`); diagnostics members (`ornadb-5il1.280`); source-level `sys.rt.<member>` paths do not yet execute (`ornadb-5il1.249`) | `orna-exec` `runtime_rows` tests pass; `check_architecture.py` passes |
 
 ### 3.2 Part B, in order
 

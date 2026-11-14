@@ -8,8 +8,8 @@ use std::rc::Rc;
 use num_bigint::BigInt;
 use orna_hir::Name;
 use orna_value::{
-    DATE_TAG, DECIMAL_TAG, DIGEST_TAG, ENUM_TAG, INSTANT_TAG, MONEY_TAG, OPTION_TAG,
-    PINNED_ROW_REFERENCE_TAG, Raw, TUPLE_TAG, UNIT_TAG, UUID_TAG,
+    DATE_TAG, DECIMAL_TAG, DIGEST_TAG, ENUM_TAG, INSTANT_TAG, MONEY_TAG, OPAQUE_SYSTEM_ID_TAG,
+    OPTION_TAG, PINNED_ROW_REFERENCE_TAG, Raw, TUPLE_TAG, UNIT_TAG, UUID_TAG,
 };
 
 use crate::calendar;
@@ -46,7 +46,9 @@ pub(crate) fn from_raw(raw: &Raw) -> Result<Value, Stop> {
         Raw::Tag(DECIMAL_TAG, body) => decimal_from(body),
         Raw::Tag(MONEY_TAG, body) => money_from(body),
         Raw::Tag(ENUM_TAG, body) => enum_from(body),
-        Raw::Tag(PINNED_ROW_REFERENCE_TAG, body) if matches!(&**body, Raw::Array(_)) => {
+        Raw::Tag(PINNED_ROW_REFERENCE_TAG | OPAQUE_SYSTEM_ID_TAG, body)
+            if matches!(&**body, Raw::Array(_)) =>
+        {
             Ok(Value::RowRef(raw.clone()))
         }
         Raw::Null => Ok(Value::Null),

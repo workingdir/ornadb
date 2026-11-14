@@ -65,11 +65,11 @@ name = "orna-cli"
 "src/cli_query.rs" = 1252
 "src/cli_serve.rs" = 2354
 "src/cli_serve_app.rs" = 1270
-"src/main.rs" = 4317
+"src/main.rs" = 449
 "src/repl.rs" = 1674
 [crate.functions]
 "src/cli_serve_app.rs::stage_at_head" = 128
-"src/main.rs::run_repl_input" = 264
+"src/repl_run.rs::run_repl_input" = 264
 
 [[crate]]
 name = "orna-conformance"
