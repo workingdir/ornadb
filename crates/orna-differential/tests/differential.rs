@@ -22,7 +22,7 @@ const REPL_CASES: usize = 14;
 const STANDARD_CASES: usize = 1;
 
 /// Programs outside the corpus, summed over the exclusion scopes.
-const EXCLUDED_PROGRAMS: usize = 5467;
+const EXCLUDED_PROGRAMS: usize = 5469;
 
 /// Reference-corpus programs the published manifest calls valid that the old
 /// pipeline rejects.

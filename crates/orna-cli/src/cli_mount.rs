@@ -46,7 +46,7 @@ pub(super) fn run_mount(
     release_dead_mount(&repository, mountpoint)?;
     let view = MountView::attach(&repository, mountpoint, selector).map_err(attach_refusal)?;
     serve_attached_view(view, |view, status, source| {
-        crate::fuse_mount::spawn_read_only(
+        orna_fuse::spawn_read_only(
             &repository,
             view.commit(),
             view.context(),
@@ -187,7 +187,7 @@ fn release_dead_mount(repository: &Repository, mountpoint: &Path) -> Result<(), 
                 &identity,
                 || mounted_mount_for_path(&mountpoint),
                 || {
-                    crate::fuse_mount::unmount_dead_mountpoint(&mountpoint).map_err(|error| {
+                    orna_fuse::unmount_dead_mountpoint(&mountpoint).map_err(|error| {
                         mount_error("Dead Orna mount could not be released", error)
                     })
                 },
@@ -342,7 +342,7 @@ pub(super) fn run_mount_cwd(endpoint: &Endpoint, mountpoint: &Path) -> Result<()
     let view = MountView::attach_writable(&repository, mountpoint, commit.as_str())
         .map_err(attach_refusal)?;
     serve_attached_view(view, |view, status, source| {
-        crate::fuse_mount::spawn_editor(
+        orna_fuse::spawn_editor(
             &repository,
             &commit,
             view.context(),
@@ -354,8 +354,8 @@ pub(super) fn run_mount_cwd(endpoint: &Endpoint, mountpoint: &Path) -> Result<()
 }
 
 #[cfg(target_os = "linux")]
-fn edit_refusal(error: crate::fuse_mount::EditError) -> Diagnostic {
-    use crate::fuse_mount::EditError;
+fn edit_refusal(error: orna_fuse::EditError) -> Diagnostic {
+    use orna_fuse::EditError;
     // The retained draft is the recovery handle, so its location is part of the title that default
     // output prints; the technical cause stays in the detail shown under --debug (ORNA-UX-004).
     match error {
@@ -415,7 +415,7 @@ pub(super) fn run_edit(endpoint: &Endpoint, path: &str, row: bool) -> Result<(),
                 format!("workspace snapshot could not be pinned: {error:?}"),
             )
         })?;
-    crate::fuse_mount::edit_path(
+    orna_fuse::edit_path(
         &repository,
         context.commit(),
         &context,
@@ -442,7 +442,7 @@ fn edit_via_owner(
             format!("mounted entry could not be read: {error}"),
         )
     })?;
-    let draft = crate::fuse_mount::run_editor_on_draft(repository.runtime_paths().root(), &initial)
+    let draft = orna_fuse::run_editor_on_draft(repository.runtime_paths().root(), &initial)
         .map_err(edit_refusal)?;
     let mut request = vec![if row { b'1' } else { b'0' }, 0];
     request.extend_from_slice(relative.as_os_str().as_bytes());
@@ -451,10 +451,10 @@ fn edit_via_owner(
     // The digest names the bytes the editor was seeded from, so the owner refuses a draft whose
     // mounted view moved after this read (41-vfs.md:75-77).
     request.push(0);
-    request.extend_from_slice(crate::fuse_mount::edit_view_digest(&initial).as_bytes());
+    request.extend_from_slice(orna_fuse::edit_view_digest(&initial).as_bytes());
     match rustix::fs::setxattr(
         mountpoint,
-        crate::fuse_mount::XATTR_EDIT_COMMIT,
+        orna_fuse::XATTR_EDIT_COMMIT,
         &request,
         rustix::fs::XattrFlags::empty(),
     ) {
@@ -481,7 +481,7 @@ fn settle_owner_reply(
         Err(error) => error,
     };
     if error == rustix::io::Errno::STALE {
-        return Err(edit_refusal(crate::fuse_mount::EditError::Stale {
+        return Err(edit_refusal(orna_fuse::EditError::Stale {
             message: format!(
                 "the mounted baseline is stale against the durable row (cause sys.vfs.stale_edit); nothing was written; draft retained at {}",
                 draft.display()
@@ -492,7 +492,7 @@ fn settle_owner_reply(
     // BUSY, IO, INVAL and NODATA are definite refusals; the owner has retained the draft.
     if error == rustix::io::Errno::INVAL {
         // EINVAL is a malformed candidate (ORNA-VFS spec, profiles/vfs-1.md), so the retained draft is the content to correct.
-        return Err(edit_refusal(crate::fuse_mount::EditError::Failed {
+        return Err(edit_refusal(orna_fuse::EditError::Failed {
             message: format!(
                 "mounted workspace refused the edit ({error}); draft retained at {}",
                 draft.display()
@@ -709,7 +709,7 @@ const VIEW_CHECK_TICKS: u32 = 8;
 fn unmount_with_busy_retry(mountpoint: &Path) -> Result<(), String> {
     let deadline = std::time::Instant::now() + SIGNAL_UNMOUNT_GRACE;
     loop {
-        let error = match crate::fuse_mount::unmount_mountpoint(mountpoint) {
+        let error = match orna_fuse::unmount_mountpoint(mountpoint) {
             Ok(()) => return Ok(()),
             Err(error) => error,
         };
@@ -732,7 +732,7 @@ async fn unmount_after_signal(
 ) -> Result<(), String> {
     let deadline = std::time::Instant::now() + SIGNAL_UNMOUNT_GRACE;
     loop {
-        let error = match crate::fuse_mount::unmount_mountpoint(mountpoint) {
+        let error = match orna_fuse::unmount_mountpoint(mountpoint) {
             Ok(()) => return Ok(()),
             Err(error) => error,
         };
@@ -909,15 +909,15 @@ async fn wait_for_stop(
 /// reported as lost.
 #[cfg(target_os = "linux")]
 async fn retain_drafts(signals: &mut StopSignals, mountpoint: &Path) -> DraftRetention {
-    use crate::fuse_mount::DraftRetentionStop;
+    use orna_fuse::DraftRetentionStop;
     let mut last_logged: Option<std::time::Instant> = None;
     loop {
-        match crate::fuse_mount::retain_drafts_for_shutdown(mountpoint) {
+        match orna_fuse::retain_drafts_for_shutdown(mountpoint) {
             Ok(true) => return DraftRetention::Retained,
             Ok(false) => return DraftRetention::NothingUnresolved,
             Err(DraftRetentionStop::Retention(error)) => {
                 if last_logged.is_none_or(|at| at.elapsed() >= RETENTION_LOG_INTERVAL) {
-                    let unresolved = crate::fuse_mount::unresolved_draft_list(mountpoint)
+                    let unresolved = orna_fuse::unresolved_draft_list(mountpoint)
                         .map_or(0, |list| {
                             list.lines().filter(|line| !line.is_empty()).count()
                         });
@@ -926,7 +926,7 @@ async fn retain_drafts(signals: &mut StopSignals, mountpoint: &Path) -> DraftRet
                     );
                     last_logged = Some(std::time::Instant::now());
                 }
-                if let Err(resume) = crate::fuse_mount::cancel_unmount(mountpoint) {
+                if let Err(resume) = orna_fuse::cancel_unmount(mountpoint) {
                     eprintln!("{resume}");
                 }
                 tokio::select! {
@@ -939,7 +939,7 @@ async fn retain_drafts(signals: &mut StopSignals, mountpoint: &Path) -> DraftRet
                 }
             }
             Err(DraftRetentionStop::Mount(error)) => {
-                return if crate::fuse_mount::has_unresolved_drafts(mountpoint).unwrap_or(true) {
+                return if orna_fuse::has_unresolved_drafts(mountpoint).unwrap_or(true) {
                     DraftRetention::Abandoned(
                         "the mount could not be quiesced to keep its drafts".to_owned(),
                     )
@@ -954,7 +954,7 @@ async fn retain_drafts(signals: &mut StopSignals, mountpoint: &Path) -> DraftRet
 /// Names the drafts an abandoned stop will lose.
 #[cfg(target_os = "linux")]
 fn report_lost_drafts(mountpoint: &Path, reason: &str) {
-    let lost = crate::fuse_mount::unresolved_draft_list(mountpoint)
+    let lost = orna_fuse::unresolved_draft_list(mountpoint)
         .unwrap_or_else(|error| format!("could not list unresolved drafts: {error}"));
     eprintln!("stop abandoned ({reason}); these unretained drafts will be lost:");
     for line in lost.lines().filter(|line| !line.is_empty()) {
@@ -1157,14 +1157,14 @@ fn attached_view(
 /// decides that it needs none.
 #[cfg(target_os = "linux")]
 fn quiesce_for_unmount(mountpoint: &Path) -> Result<UnmountMode, Diagnostic> {
-    use crate::fuse_mount::UnmountPreparationError;
-    match crate::fuse_mount::begin_unmount(mountpoint) {
+    use orna_fuse::UnmountPreparationError;
+    match orna_fuse::begin_unmount(mountpoint) {
         Ok(()) => Ok(UnmountMode::Quiesced),
         Err(UnmountPreparationError::UnresolvedDrafts) => {
             Err(unresolved_drafts_refusal(mountpoint))
         }
         Err(UnmountPreparationError::ReadOnlyMount) => {
-            let unresolved = crate::fuse_mount::has_unresolved_drafts(mountpoint)
+            let unresolved = orna_fuse::has_unresolved_drafts(mountpoint)
                 .map_err(|error| mount_error("Mount draft state could not be read", error))?;
             if unresolved {
                 Err(unresolved_drafts_refusal(mountpoint))
@@ -1200,7 +1200,7 @@ fn take_down_mount(
         None => return Ok(()),
     }
     let unmount_error = if mode == UnmountMode::Disconnected {
-        crate::fuse_mount::unmount_dead_mountpoint(mountpoint)
+        orna_fuse::unmount_dead_mountpoint(mountpoint)
     } else {
         unmount_with_busy_retry(mountpoint)
     }
@@ -1213,7 +1213,7 @@ fn take_down_mount(
             .to_owned()
     });
     if mode == UnmountMode::Quiesced {
-        crate::fuse_mount::cancel_unmount(mountpoint).map_err(|resume_error| {
+        orna_fuse::cancel_unmount(mountpoint).map_err(|resume_error| {
             mount_error(
                 "FUSE unmount failed and the mount could not resume",
                 format!("{detail}; {resume_error}"),
@@ -1269,7 +1269,7 @@ fn detach_stale_view(repository: &Repository, mountpoint: &Path) -> Result<(), D
 #[cfg(target_os = "linux")]
 fn unresolved_drafts_refusal(mountpoint: &Path) -> Diagnostic {
     let mut stderr = io::stderr().lock();
-    match crate::fuse_mount::unresolved_draft_list(mountpoint) {
+    match orna_fuse::unresolved_draft_list(mountpoint) {
         Ok(list) => {
             let parsed = parse_draft_list(&list);
             for draft in &parsed.drafts {
@@ -1632,8 +1632,8 @@ fn status_drafts(status: &MountStatus) -> DraftListing {
         return DraftListing::default();
     }
     draft_listing(
-        crate::fuse_mount::unresolved_draft_fields(status.mountpoint()),
-        || crate::fuse_mount::unresolved_draft_list(status.mountpoint()),
+        orna_fuse::unresolved_draft_fields(status.mountpoint()),
+        || orna_fuse::unresolved_draft_list(status.mountpoint()),
     )
 }
 

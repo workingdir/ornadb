@@ -52,6 +52,9 @@ use orna_vfs::{
 };
 use sha2::{Digest, Sha256};
 
+#[cfg(test)]
+use orna_cli_testkit::{format3, media_commit};
+
 mod source_write;
 
 mod builder;
@@ -63,14 +66,29 @@ mod row_save;
 mod scratch;
 mod writer;
 
-pub(crate) use crate::runtime_identity;
+#[allow(clippy::wildcard_imports)]
+// the crate root is the test-visible facade over module internals
 pub(crate) use builder::*;
+#[allow(clippy::wildcard_imports)]
 pub(crate) use filesystem::*;
+pub use filesystem::{
+    DraftRetentionStop, EditError, UnmountPreparationError, begin_unmount, cancel_unmount,
+    edit_path, edit_view_digest, has_unresolved_drafts, retain_drafts_for_shutdown,
+    run_editor_on_draft, spawn_editor, spawn_read_only, unmount_dead_mountpoint,
+    unmount_mountpoint, unresolved_draft_fields, unresolved_draft_list,
+};
+#[allow(clippy::wildcard_imports)]
 pub(crate) use historical::*;
+pub(crate) use orna_cli_support::runtime_identity::repository_runtime_identity as runtime_identity;
+#[allow(clippy::wildcard_imports)]
 pub(crate) use projection::*;
+#[allow(clippy::wildcard_imports)]
 pub(crate) use retained::*;
+#[allow(clippy::wildcard_imports)]
 pub(crate) use row_save::*;
+#[allow(clippy::wildcard_imports)]
 pub(crate) use scratch::*;
+#[allow(clippy::wildcard_imports)]
 pub(crate) use writer::*;
 
 // The extended attributes through which a mount's owner is queried and
@@ -78,17 +96,17 @@ pub(crate) use writer::*;
 // them against the mountpoint, so both ends name them here.
 
 /// Set to `1` to stop accepting edits before an unmount, to `0` to resume.
-pub(super) const XATTR_UNMOUNT_QUIESCE: &str = "user.orna.unmount-quiesce";
+pub const XATTR_UNMOUNT_QUIESCE: &str = "user.orna.unmount-quiesce";
 /// Set to `1` to keep every unresolved draft in recovery storage.
-pub(super) const XATTR_RETAIN_DRAFTS: &str = "user.orna.retain-drafts";
+pub const XATTR_RETAIN_DRAFTS: &str = "user.orna.retain-drafts";
 /// `1` while an unresolved draft remains, `0` otherwise.
-pub(super) const XATTR_UNRESOLVED_DRAFTS: &str = "user.orna.unresolved-drafts";
+pub const XATTR_UNRESOLVED_DRAFTS: &str = "user.orna.unresolved-drafts";
 /// One `path<TAB>detail` line per unresolved draft.
-pub(super) const XATTR_UNRESOLVED_DRAFT_LIST: &str = "user.orna.unresolved-draft-list";
+pub const XATTR_UNRESOLVED_DRAFT_LIST: &str = "user.orna.unresolved-draft-list";
 /// One `path<TAB>code<TAB>draft<TAB>detail` line per unresolved draft.
-pub(super) const XATTR_UNRESOLVED_DRAFT_FIELDS: &str = "user.orna.unresolved-draft-fields";
+pub const XATTR_UNRESOLVED_DRAFT_FIELDS: &str = "user.orna.unresolved-draft-fields";
 /// An explicit edit request: `mode NUL path NUL draft NUL digest`.
-pub(super) const XATTR_EDIT_COMMIT: &str = "user.orna.edit-commit";
+pub const XATTR_EDIT_COMMIT: &str = "user.orna.edit-commit";
 
 /// Implementation draft quota for every mounted draft and scratch file: 64 MiB,
 /// the compact publication file bound (ORNA-PUB-001). It is not a VFS spec

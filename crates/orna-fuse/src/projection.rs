@@ -1158,7 +1158,7 @@ pub(crate) fn substitute_text_fields(
     else {
         return Err("mounted row document is not a record".into());
     };
-    let mut edits = Vec::with_capacity(fields.len());
+    let mut edits: Vec<(std::ops::Range<usize>, String)> = Vec::with_capacity(fields.len());
     for field in fields {
         let name = &field.name;
         let entry = entries

@@ -1,8 +1,8 @@
 use super::{TypeCheckSummary, typeck};
 use crate::units::Rational;
 use crate::{
-    DefId, DefKind, ExprKind, ModuleId, ModulePath, Name, Program, SourceId, SourceUnit, lower,
-    print_type,
+    Callee, DefId, DefKind, ExprKind, FnBody, ModuleId, ModulePath, Name, Program, SourceId,
+    SourceUnit, lower, print_type,
 };
 use orna_syntax::parse_module_with_file;
 
@@ -353,6 +353,13 @@ fn a_quantity_and_a_plain_number_are_a_dimension_error() {
 }
 
 #[test]
+fn adding_two_dimensions_is_e5001() {
+    let (program, summary) = typed_families("pub fn run() = 5.metre + 2.second;\n");
+    assert!(!test_accepted(&program, &summary), "{summary:?}");
+    assert!(module_codes(&program).contains(&crate::diag::QUANTITY_DIMENSIONS));
+}
+
+#[test]
 fn the_quotient_of_one_unit_is_a_plain_number() {
     let (program, summary) = typed("pub fn run() = 10.metre / 2.metre;\n");
     assert!(test_accepted(&program, &summary), "{summary:?}");
@@ -426,6 +433,35 @@ fn negation_selects_the_neg_instance() {
     let summary = typeck(&mut program);
     assert!(test_accepted(&program, &summary), "{summary:?}");
     assert_eq!(result(&program, "flip"), "Money");
+}
+
+#[test]
+fn negation_records_the_instance_type_arguments_on_the_call() {
+    let mut program = program(
+        "use core.ops.*;\npub type Box<T> {\n    value: T,\n    impl Neg<Self> {\n        fn neg(self): Self = self;\n    }\n}\npub fn flip(a: Box<Int>): Box<Int> = -a;\n",
+    );
+    let summary = typeck(&mut program);
+    assert!(test_accepted(&program, &summary), "{summary:?}");
+    let flip = definition(&program, "flip");
+    let DefKind::Fn(function) = &program.defs[flip].kind else {
+        panic!("flip is not a function");
+    };
+    let FnBody::Source(body) = function.body else {
+        panic!("flip has no source body");
+    };
+    let targs = program.bodies[body]
+        .exprs
+        .iter()
+        .find_map(|expr| match &expr.kind {
+            ExprKind::Call(call) => match &call.callee {
+                Callee::Source { targs, .. } => Some(targs.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("negation lowers to a source call");
+    let rendered: Vec<String> = targs.iter().map(|ty| print_type(&program, *ty)).collect();
+    assert_eq!(rendered, ["Box<Int>", "Box<Int>", "Int"]);
 }
 
 #[test]

@@ -10,8 +10,7 @@ use orna_value::{
 };
 use orna_vfs::project_key_component;
 
-#[path = "support/format3.rs"]
-mod format3;
+use orna_cli_testkit::format3;
 
 struct UnusedResolver;
 

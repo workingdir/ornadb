@@ -17,9 +17,8 @@ use orna_repository::Repository;
 use orna_runtime::RuntimeState;
 use tempfile::TempDir;
 
-#[path = "support/format3.rs"]
-mod format3;
 use format3::{cli_runtime_identity, format3_repository_for_table};
+use orna_cli_testkit::format3;
 
 const SOURCE: &str = "pub table music(id: Str) { title: Str, artist: Str, }\n\
 pub fn seed() { music.insert({ id: \"london\", title: \"Original\", artist: \"Kieran\" }); }\n\

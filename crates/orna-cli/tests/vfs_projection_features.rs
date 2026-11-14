@@ -18,14 +18,12 @@ use tempfile::TempDir;
 
 #[path = "support/editor_mount.rs"]
 mod editor_mount;
-#[path = "support/format3.rs"]
-mod format3;
-#[path = "support/media_commit.rs"]
-mod media_commit;
 use editor_mount::{
     repository_with_music_rows, repository_with_music_rows_and_modules, require_fuse_or_skip,
     spawn_mount_process,
 };
+use orna_cli_testkit::format3;
+use orna_cli_testkit::media_commit;
 
 const DEEP_SOURCE: &str = "pub fn deep(): Int = 3;\n";
 /// Entries in the held nested list: about 96 KiB of dirents, more than one 32 KiB `getdents`

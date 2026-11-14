@@ -20,15 +20,13 @@ use tempfile::TempDir;
 
 #[path = "support/editor_mount.rs"]
 mod editor_mount;
-#[path = "support/format3.rs"]
-mod format3;
-#[path = "support/media_commit.rs"]
-mod media_commit;
 use editor_mount::{
     MountedProcess, assert_errno, repository_with_music_rows,
     repository_with_music_rows_and_modules, require_fuse_or_skip, retained_drafts,
     spawn_mount_process, spawn_snapshot_mount_process, write_and_sync,
 };
+use orna_cli_testkit::format3;
+use orna_cli_testkit::media_commit;
 
 const EPERM: i32 = 1;
 const EROFS: i32 = 30;

@@ -11,8 +11,7 @@ use std::{
     process::{Command, Output},
 };
 
-#[path = "support/format3.rs"]
-mod format3;
+use orna_cli_testkit::format3;
 
 /// `seed` inserts three rows. A durable `run main.seed` followed by `publish`
 /// commits them to HEAD. `expect_three` divides by the row count, so it succeeds

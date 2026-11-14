@@ -13,9 +13,8 @@ use std::{
 
 use orna_repository::{Repository, TypedKey, relation_admission::CommittedRekey};
 
-#[path = "support/format3.rs"]
-mod format3;
 use format3::*;
+use orna_cli_testkit::format3;
 
 const RELOCATE_SOURCE: &str = r"pub table media(id: Str) {
     title: Str,

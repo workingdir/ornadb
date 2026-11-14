@@ -198,9 +198,20 @@ name = "orna-cli-support"
 layer = 13
 
 [[crate]]
-name = "orna-cli"
+name = "orna-fuse"
 layer = 14
 allowed = ["orna-conformance"]
+
+[[crate]]
+name = "orna-cli-testkit"
+layer = 14
+role = "tool"
+allowed = ["orna-conformance"]
+
+[[crate]]
+name = "orna-cli"
+layer = 14
+allowed = ["orna-conformance", "orna-fuse"]
 
 [[crate]]
 name = "orna-differential"
@@ -253,6 +264,16 @@ reason = "R2: the oracle table reaches the shipped binary through the harness; m
 id = "V4"
 key = "tool:orna-traceability->orna-conformance"
 reason = "a standalone tool depends on the harness; replaced by the orna-corpus facade"
+
+[[known]]
+id = "V-S5-FUSE"
+key = "shipped:orna-fuse->orna-conformance"
+reason = "the mount's editor commits through the candidate validator in orna-conformance; the same debt as V2 relocated into the shipped closure by the orna-cli split (stage 5)"
+
+[[known]]
+id = "V-S5-TESTKIT"
+key = "tool:orna-cli-testkit->orna-conformance"
+reason = "fixture builders validate candidates through the orna-conformance harness; test-only (stage 5)"
 
 [[known]]
 id = "V6"

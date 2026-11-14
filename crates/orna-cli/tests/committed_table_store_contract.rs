@@ -4,8 +4,7 @@
 
 #[path = "support/committed_int_table.rs"]
 mod committed_int_table;
-#[path = "support/format3.rs"]
-mod format3;
+use orna_cli_testkit::format3;
 
 use committed_int_table::{CommittedIntTable, committed_int_table, runtime_key, table_id};
 use orna_exec::contract::{SeedableStore, run_read_contract};

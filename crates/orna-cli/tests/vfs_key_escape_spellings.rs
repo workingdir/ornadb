@@ -23,11 +23,9 @@ use tempfile::TempDir;
 
 #[path = "support/editor_mount.rs"]
 mod editor_mount;
-#[path = "support/format3.rs"]
-mod format3;
-#[path = "support/media_commit.rs"]
-mod media_commit;
 use editor_mount::{repository_with_music_rows, require_fuse_or_skip, spawn_mount_process};
+use orna_cli_testkit::format3;
+use orna_cli_testkit::media_commit;
 
 fn music_row(title: &str) -> String {
     format!("{{ title: \"{title}\", artist: \"Kieran\", }}\n")

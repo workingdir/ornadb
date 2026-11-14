@@ -19,6 +19,8 @@ pub enum Kind {
     ExecutorGap,
     /// The executor charges a different number of steps than the old pipeline for an agreeing run.
     Step,
+    /// The old pipeline answers `ORNA-EVAL-TYPE` for a currency value; the executor evaluates `Money` per spec.
+    Currency,
 }
 
 impl Kind {
@@ -30,6 +32,7 @@ impl Kind {
             Self::Representation => "representation",
             Self::ExecutorGap => "executor-gap",
             Self::Step => "step",
+            Self::Currency => "currency",
         }
     }
 }
@@ -43,6 +46,8 @@ pub struct ExecAllowances {
     executor_gap: Vec<compare::ExecutorGapAllowance>,
     executor_gap_used: Vec<bool>,
     step: Vec<compare::StepAllowance>,
+    currency: Vec<compare::HarnessAllowance>,
+    currency_used: Vec<bool>,
     step_used: Vec<bool>,
 }
 
@@ -55,6 +60,8 @@ impl ExecAllowances {
             .map_err(|e| format!("representation allowances: {e}"))?;
         let executor_gap = compare::load_executor_gap_allowances()
             .map_err(|e| format!("executor-gap allowances: {e}"))?;
+        let currency =
+            compare::load_currency_allowances().map_err(|e| format!("currency allowances: {e}"))?;
         let step = compare::load_step_allowances().map_err(|e| format!("step allowances: {e}"))?;
         Ok(Self {
             harness_used: vec![false; harness.len()],
@@ -63,6 +70,8 @@ impl ExecAllowances {
             representation,
             executor_gap_used: vec![false; executor_gap.len()],
             executor_gap,
+            currency_used: vec![false; currency.len()],
+            currency,
             step_used: vec![false; step.len()],
             step,
         })
@@ -70,7 +79,7 @@ impl ExecAllowances {
 
     /// Classifies an outcome that differs from the old pipeline's. `None` is a mismatch.
     ///
-    /// The order is the ratchet's: harness environment, then representation, then executor gap.
+    /// The order is the ratchet's: harness environment, then representation, then executor gap, then currency.
     pub fn outcome_allowed(
         &mut self,
         case: &Case,
@@ -97,6 +106,9 @@ impl ExecAllowances {
             &mut self.executor_gap_used,
         ) {
             return Some(Kind::ExecutorGap);
+        }
+        if currency_allowed(case, executor, old, &self.currency, &mut self.currency_used) {
+            return Some(Kind::Currency);
         }
         None
     }
@@ -134,16 +146,61 @@ impl ExecAllowances {
             &self.executor_gap,
             &self.executor_gap_used,
         ));
-        stale.extend(self.step.iter().zip(&self.step_used).filter(|(_, used)| !**used).map(
-            |(allowance, _)| {
-                format!(
+        stale.extend(
+            self.step
+                .iter()
+                .zip(&self.step_used)
+                .filter(|(_, used)| !**used)
+                .map(|(allowance, _)| {
+                    format!(
                     "{}: step allowance for old {} and executor {} is stale; remove or update it",
                     allowance.case, allowance.old, allowance.executor
                 )
-            },
-        ));
+                }),
+        );
+        stale.extend(currency_stale(&self.currency, &self.currency_used));
         stale
     }
+}
+
+/// Whether a case's currency disagreement is the old pipeline's `ORNA-EVAL-TYPE` for a currency
+/// value, where the executor returns `Ok`. Matches only the exact case id and old outcome.
+fn currency_allowed(
+    case: &Case,
+    executor: &Result<Vec<u8>, String>,
+    old: Option<&Result<Vec<u8>, String>>,
+    allowances: &[compare::HarnessAllowance],
+    used: &mut [bool],
+) -> bool {
+    let old_type = matches!(old, Some(Err(code)) if code == "ORNA-EVAL-TYPE");
+    if !old_type || !executor.is_ok() {
+        return false;
+    }
+    match allowances
+        .iter()
+        .position(|allowance| allowance.case == case.id)
+    {
+        Some(index) => {
+            used[index] = true;
+            true
+        }
+        None => false,
+    }
+}
+
+/// The currency allowances that no longer cover a run: each must be removed.
+fn currency_stale(allowances: &[compare::HarnessAllowance], used: &[bool]) -> Vec<String> {
+    allowances
+        .iter()
+        .zip(used)
+        .filter(|(_, used)| !**used)
+        .map(|(allowance, _)| {
+            format!(
+                "{}: currency allowance is stale; the case no longer differs, remove it",
+                allowance.case
+            )
+        })
+        .collect()
 }
 
 /// Whether `case`'s disagreement is the H0 observer's missing table store. Either the old outcome

@@ -503,7 +503,7 @@ async fn mount_blob_window_reads_charge_only_intersecting_chunks() {
 
     let (_repository_directory, repository, relation_id, format_context) =
         crate::format3::format3_repository_with_context(
-            include_str!("../../tests/fixtures/media/empty-media-main.orna"),
+            include_str!("../tests/fixtures/media/empty-media-main.orna"),
             "media",
         );
     let (identity, digest) = crate::format3::cli_runtime_identity(&repository);
