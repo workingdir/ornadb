@@ -130,3 +130,57 @@ fn a_stage_over_an_empty_table_yields_no_rows() {
     let source = format!("{NOTE}pub fn run() {{\n    Note.filter(row => row.id > 0)\n}}\n");
     assert_eq!(run(&source), Ok(list(vec![])));
 }
+
+/// Rows whose text order differs from their key order, so a sort that did nothing would fail.
+const SORT_ROWS: &str = "    Note.insert({ id: 1, text: \"z\" });\n    Note.insert({ id: 2, text: \"a\" });\n    Note.insert({ id: 3, text: \"m\" });\n";
+
+#[test]
+fn sort_by_orders_the_table_rows_by_the_key() {
+    let source =
+        format!("{NOTE}pub fn run() {{\n{SORT_ROWS}    Note.sort_by(row => row.text)\n}}\n");
+    assert_eq!(
+        run(&source),
+        Ok(list(vec![
+            note_row(2, "a"),
+            note_row(3, "m"),
+            note_row(1, "z"),
+        ]))
+    );
+}
+
+#[test]
+fn sort_by_is_stable_for_equal_keys() {
+    let source = format!(
+        "{NOTE}pub fn run() {{\n    Note.insert({{ id: 1, text: \"x\" }});\n    Note.insert({{ id: 2, text: \"x\" }});\n    Note.insert({{ id: 3, text: \"a\" }});\n    Note.sort_by(row => row.text)\n}}\n"
+    );
+    assert_eq!(
+        run(&source),
+        Ok(list(vec![
+            note_row(3, "a"),
+            note_row(1, "x"),
+            note_row(2, "x"),
+        ]))
+    );
+}
+
+#[test]
+fn a_filter_before_sort_sorts_only_the_matching_rows() {
+    let source = format!(
+        "{NOTE}pub fn run() {{\n{SORT_ROWS}    Note.filter(row => row.id > 1).sort_by(row => row.text)\n}}\n"
+    );
+    assert_eq!(
+        run(&source),
+        Ok(list(vec![note_row(2, "a"), note_row(3, "m")]))
+    );
+}
+
+#[test]
+fn a_stage_after_sort_runs_over_the_sorted_rows() {
+    let source = format!(
+        "{NOTE}pub fn run() {{\n{SORT_ROWS}    Note.sort_by(row => row.text).take(2)\n}}\n"
+    );
+    assert_eq!(
+        run(&source),
+        Ok(list(vec![note_row(2, "a"), note_row(3, "m")]))
+    );
+}
