@@ -747,6 +747,19 @@ impl ApplicationAuthority {
         }
     }
 
+    /// Evaluates admitted source with `rows` as the contents of every admitted
+    /// table, with no activation snapshot. Each admitted table must have an
+    /// entry in `rows` (`ApplicationError::UnadmittedTable` otherwise); an empty
+    /// vector is an empty table. The observer's fixture store is this form.
+    pub fn evaluate_staged_with_table_rows(
+        &self,
+        application: &AdmittedApplication,
+        arguments: &Environment,
+        rows: RuntimeTableRows,
+    ) -> Result<StagedActivation, ApplicationError> {
+        self.evaluate_staged_over_table_rows(application, arguments, rows, None, None)
+    }
+
     /// Evaluates against `snapshot`'s activation with `rows` as the table
     /// contents. The caller supplies the rows in evaluator form (the form the
     /// admitted schemas expect), typically the snapshot's merged committed and

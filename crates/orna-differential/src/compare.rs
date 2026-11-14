@@ -392,8 +392,8 @@ pub struct ExecShare {
     pub evaluable: usize,
     /// Agreeing runs whose executor step count equals the old pipeline's exactly.
     pub steps_exact: usize,
-    /// Executor runs against a declared table that the old pipeline answers `ORNA-EVAL-NAME`
-    /// because the H0 observer supplies no table store; each is covered by a `[[harness-allowance]]`.
+    /// Executor runs against a declared table that the old pipeline answers `ORNA-EVAL-NAME` or rejects
+    /// statically, because the H0 observer admits only the case's own source; each is covered by a `[[harness-allowance]]`.
     pub old_harness_environment: usize,
 }
 
@@ -465,6 +465,14 @@ pub fn load_representation_allowances() -> Result<Vec<HarnessAllowance>, String>
 pub fn load_currency_allowances() -> Result<Vec<HarnessAllowance>, String> {
     let path = differential_dir().join("exec-share.toml");
     parse_allowances(&read_file(&path)?, "currency-allowance")
+}
+
+/// Reads the `[[not-yet-allowance]]` tables of `tests/differential/exec-share.toml`: the cases the
+/// executor does not run yet, each with the exact reason it names. A changed reason needs its
+/// entry updated, so an entry cannot outlive the gap it records.
+pub fn load_not_yet_allowances() -> Result<Vec<HarnessAllowance>, String> {
+    let path = differential_dir().join("exec-share.toml");
+    parse_allowances(&read_file(&path)?, "not-yet-allowance")
 }
 
 /// Parses the `table` allowances. A missing reason or bead is a load error.
