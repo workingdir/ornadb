@@ -353,6 +353,13 @@ fn a_quantity_and_a_plain_number_are_a_dimension_error() {
 }
 
 #[test]
+fn adding_two_dimensions_is_e5001() {
+    let (program, summary) = typed_families("pub fn run() = 5.metre + 2.second;\n");
+    assert!(!test_accepted(&program, &summary), "{summary:?}");
+    assert!(module_codes(&program).contains(&crate::diag::QUANTITY_DIMENSIONS));
+}
+
+#[test]
 fn the_quotient_of_one_unit_is_a_plain_number() {
     let (program, summary) = typed("pub fn run() = 10.metre / 2.metre;\n");
     assert!(test_accepted(&program, &summary), "{summary:?}");

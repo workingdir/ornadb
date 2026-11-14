@@ -5,7 +5,7 @@ use orna_syntax_ast::SourceSpan as SyntaxSpan;
 
 use crate::{
     Arg, ArgValue, Body, BodyId, Callee, DefId, DefKind, ExprId, ExprKind, FieldRef, FnBody, FnTy,
-    IntrinsicForm, Name, Place, RelOp, TableOp, Ty, TyKind,
+    HirDiagnostic, IntrinsicForm, Name, Place, RelOp, TableOp, Ty, TyKind,
 };
 
 use super::{BodyCheck, Container, NotYetReason, relation_operation, table_operation};
@@ -513,6 +513,19 @@ impl<'a> BodyCheck<'a> {
                 "the relation stage input is not a list, relation or stream in H2a".into(),
             ));
         };
+        if let Some(code) = crate::engine_codes::sum_rejection(self.program, self.resolved(element))
+            .filter(|_| matches!(op, RelOp::Sum))
+        {
+            self.conflicts += 1;
+            self.diagnostics.push(HirDiagnostic::new(
+                code,
+                Box::<str>::from(
+                    "a fold over affine points is not defined: a point is not a summable quantity",
+                ),
+                span,
+            ));
+            return Ok(self.error());
+        }
         match op {
             RelOp::Count => Ok(self.intern(TyKind::Int)),
             RelOp::First | RelOp::Last => Ok(self.intern(TyKind::Option(element))),

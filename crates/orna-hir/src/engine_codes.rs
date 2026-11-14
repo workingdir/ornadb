@@ -3,8 +3,15 @@
 //! Typeck reads these pure functions before it words the generic message, so the code stays kernel-owned (P7-A:
 //! "Codes are stable and kernel-owned"). The library supplies only the text.
 
-use crate::diag::{MONEY_BINARY_FLOAT, MONEY_CURRENCY_MISMATCH, MONEY_FROM_FLOAT};
-use crate::{BinOp, DefId, Program, Ty, TyKind, engine_money};
+use crate::diag::{
+    AFFINE_POINT_OPERATOR, AFFINE_POINT_SUM, MONEY_BINARY_FLOAT, MONEY_CURRENCY_MISMATCH,
+    MONEY_FROM_FLOAT, QUANTITY_DIMENSIONS,
+};
+use crate::{BinOp, DefId, DefKind, Program, Ty, TyKind, engine_money};
+
+/// The affine point type of `core.temperature`, whose `+` and `-` between two points has no instance.
+const TEMPERATURE: &str = "Temperature";
+const TEMPERATURE_MODULE: &str = "core.temperature";
 
 /// Whether `ty` is a binary64 `Float`, plain or carrying a unit key (`Float<kWh>` is `Quantity(Float, _)`).
 fn is_float(program: &Program, ty: Ty) -> bool {
@@ -31,6 +38,13 @@ pub fn operator_rejection(
     left: Ty,
     right: Ty,
 ) -> Option<&'static str> {
+    money_rejection(program, op, left, right)
+        .or_else(|| affine_rejection(program, op, left, right))
+        .or_else(|| dimension_rejection(program, op, left, right))
+}
+
+/// The `Money` classes of `operator_rejection`: `E5003` for two currencies, `E5103` for a `Float` operand.
+fn money_rejection(program: &Program, op: BinOp, left: Ty, right: Ty) -> Option<&'static str> {
     let money_left = engine_money::money_currency(program, left);
     let money_right = engine_money::money_currency(program, right);
     match (money_left, money_right) {
@@ -51,6 +65,46 @@ pub fn operator_rejection(
         }
         _ => None,
     }
+}
+
+/// Whether `ty` is the `core.temperature.Temperature` affine point.
+fn is_temperature(program: &Program, ty: Ty) -> bool {
+    let Some(TyKind::Adt(owner, _)) = program.tys.kind(ty) else {
+        return false;
+    };
+    let definition = &program.defs[*owner];
+    matches!(definition.kind, DefKind::Type(_))
+        && definition.name.as_str() == TEMPERATURE
+        && program.modules[definition.module].path.to_string() == TEMPERATURE_MODULE
+}
+
+/// `E5002`: `+` with two affine points. `point - point` is a `Delta` (the library's `Sub<Self, Delta>` instance), so
+/// only addition is rejected here.
+fn affine_rejection(program: &Program, op: BinOp, left: Ty, right: Ty) -> Option<&'static str> {
+    (matches!(op, BinOp::Add) && is_temperature(program, left) && is_temperature(program, right))
+        .then_some(AFFINE_POINT_OPERATOR)
+}
+
+/// `E5001`: `+` or `-` with two quantities whose units have different dimensions. A quantity and a plain number stay
+/// the `ORNA-UNIT-DIM` class.
+fn dimension_rejection(program: &Program, op: BinOp, left: Ty, right: Ty) -> Option<&'static str> {
+    let (Some(TyKind::Quantity(_, left_key)), Some(TyKind::Quantity(_, right_key))) =
+        (program.tys.kind(left), program.tys.kind(right))
+    else {
+        return None;
+    };
+    (matches!(op, BinOp::Add | BinOp::Sub)
+        && !program
+            .units
+            .key(*left_key)
+            .same_dimension(program.units.key(*right_key)))
+    .then_some(QUANTITY_DIMENSIONS)
+}
+
+/// The published code for a fold (`sum`) over an element type, when the element is an affine point (`E5003`).
+#[must_use]
+pub fn sum_rejection(program: &Program, element: Ty) -> Option<&'static str> {
+    is_temperature(program, element).then_some(AFFINE_POINT_SUM)
 }
 
 /// Whether one `Money` operand with one `Float` operand is the `E5103` class for `op`.
