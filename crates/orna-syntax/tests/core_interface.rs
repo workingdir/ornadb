@@ -2,7 +2,7 @@
 //! declaration grammar. Every declaration is a
 //! body-less `native fn` with an effect clause.
 
-use orna_syntax::parse_module;
+use orna_syntax::parse_interface;
 
 use orna_syntax_ast::Declaration;
 
@@ -90,7 +90,7 @@ fn located(source: &str, diagnostics: &[orna_syntax::SyntaxDiagnostic]) -> Vec<S
 #[test]
 fn generated_core_interface_parses_without_diagnostics() {
     for (path, source) in CORE_FILES {
-        let parsed = parse_module(source);
+        let parsed = parse_interface(source);
         assert!(
             parsed.is_ok(),
             "{path} should parse, got {:#?}",
@@ -102,7 +102,7 @@ fn generated_core_interface_parses_without_diagnostics() {
 #[test]
 fn generated_core_interface_declares_expected_natives_with_effect_clauses() {
     for (path, source) in CORE_FILES {
-        let parsed = parse_module(source);
+        let parsed = parse_interface(source);
         let effects: Vec<_> = parsed
             .value
             .items

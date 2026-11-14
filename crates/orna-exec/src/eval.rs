@@ -15,7 +15,7 @@ use crate::decimal::Decimal;
 use crate::engine_money::{currency_name, is_money_type};
 use crate::error::Stop;
 use crate::frame::{Frame, TypeEnv, type_args};
-use crate::host::{SysSlot, UNSUPPORTED};
+use crate::host::{SysSlot, UNBORN_HEAD, UNSUPPORTED};
 use crate::machine::Machine;
 use crate::natives;
 use crate::ops;
@@ -86,6 +86,7 @@ impl<'p> Machine<'p> {
             ExprKind::Def(def) if matches!(self.program.defs[*def].kind, DefKind::Let(_)) => {
                 self.global(*def)
             }
+            ExprKind::Def(def) if self.is_context_snapshot(*def) => self.context_snapshot(*def),
             ExprKind::Def(def) if self.is_sys_member(*def) => self.sys_member(*def),
             ExprKind::Construct { def, fields }
                 if matches!(self.program.defs[*def].kind, DefKind::Type(_)) =>
@@ -119,6 +120,29 @@ impl<'p> Machine<'p> {
         let definition = &self.program.defs[def];
         self.program.modules[definition.module].origin == orna_hir::ModuleOrigin::Sys
             && matches!(definition.kind, DefKind::Type(_) | DefKind::NativeStatic(_))
+    }
+
+    /// Whether `def` is the root `CWD` or `HEAD` selector (a `core` native static).
+    fn is_context_snapshot(&self, def: DefId) -> bool {
+        let definition = &self.program.defs[def];
+        self.program.modules[definition.module].origin == orna_hir::ModuleOrigin::Core
+            && matches!(definition.kind, DefKind::NativeStatic(_))
+            && matches!(definition.name.as_str(), "CWD" | "HEAD")
+    }
+
+    /// The snapshot `CWD` or `HEAD` names in the activation context (ORNA-STATE-003). The host supplies the
+    /// activation; `HEAD` fails in an unborn repository and never yields an empty synthetic commit.
+    fn context_snapshot(&mut self, def: DefId) -> Result<Value, Stop> {
+        let is_head = self.program.defs[def].name.as_str() == "HEAD";
+        let Some(activation) = self.host.activation() else {
+            return Err(Stop::Error(UNSUPPORTED));
+        };
+        let snapshot = if is_head {
+            activation.head.clone().ok_or(Stop::Error(UNBORN_HEAD))?
+        } else {
+            activation.cwd.clone()
+        };
+        Ok(Value::Snapshot(Rc::new(snapshot)))
     }
 
     /// The value of the `sys` member `def`: a static the host answers now, or a relation handle the pipeline reads
