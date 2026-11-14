@@ -22,9 +22,9 @@ use orna_repository::Repository;
 use orna_runtime::{
     NoFault, RequestIdentity, RequestState, RuntimeState, RuntimeTableIdentity, TableMutation,
     TableObjectId, TerminalOutcome, WriterLease,
-    vfs::{VfsDurableSave, VfsSaveAdmission, VfsSaveCandidate, VfsTableRowReplacement},
 };
 use orna_value::Format3Context;
+use orna_vfs::{VfsDurableSave, VfsSaveAdmission, VfsSaveCandidate, VfsTableRowReplacement};
 
 /// The production table schema identity (ORNA-VFS-019), shared with the mount.
 pub use orna_cli_support::table_schema::committed_table_schema_identity;
@@ -35,7 +35,7 @@ fn vfs_key_component(key: &str) -> (String, KeyComponentText) {
     let canonical_encoding = orna_repository::TypedKey::Text(key.to_owned())
         .canonical_bytes()
         .expect("the fixture key has a canonical encoding");
-    let encoded = orna_runtime::vfs::project_key_component(key, &canonical_encoding);
+    let encoded = orna_vfs::project_key_component(key, &canonical_encoding);
     (
         encoded,
         KeyComponentText {

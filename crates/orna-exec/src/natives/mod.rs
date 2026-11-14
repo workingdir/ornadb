@@ -47,6 +47,8 @@ use crate::link;
 use crate::machine::Machine;
 use crate::value::Value;
 
+pub(crate) use collection::closure::sort_rows;
+
 /// One engine native. It runs on the machine, which holds the limits and the step counter it charges.
 pub(crate) type NativeFn = fn(&mut Machine<'_>, &[Ty], Vec<Value>) -> Result<Value, Stop>;
 

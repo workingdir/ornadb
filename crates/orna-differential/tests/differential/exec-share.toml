@@ -16,7 +16,7 @@
 agreed = 61
 evaluable = 110
 steps-exact = 51
-old-harness-environment = 3
+old-harness-environment = 4
 
 # Cases the executor runs by reading a table field as a function, `map(Contact.field)`, over the attached
 # fixture `Contact` table. The old observer admits that table (`fixture_environment::CONTACTS_SUPPORT`), so the
@@ -24,6 +24,14 @@ old-harness-environment = 3
 # resolves a relation source by a bare table name only. The old pipeline answers `ORNA-EVAL-NAME`; the executor
 # returns the spec result, the empty list (CBOR `0x80`) of an empty table. Not credited as agreement. Closing
 # this needs an evaluator change to dotted field relation sources, outside the observer.
+
+# `valid/pipeline.orna` is a `contacts.Contact` pipeline (filter, map, sort_by) over an empty table. The
+# executor now runs `sort_by`, so it runs the case and returns the spec empty list (CBOR `0x80`). The old
+# observer does not attach the qualified `contacts` table, so it answers `ORNA-EVAL-NAME`. Not credited as agreement.
+[[harness-allowance]]
+case = "valid/pipeline.orna"
+reason = "old observer does not attach the qualified contacts.Contact table; HIR result is the spec empty list (the pipeline runs over an empty Contact table)"
+bead = "ornadb-csenl.21"
 
 [[harness-allowance]]
 case = "valid/computed-field.orna"
