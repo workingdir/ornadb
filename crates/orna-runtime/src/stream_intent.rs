@@ -18,11 +18,11 @@ use crate::stream_store::{
 };
 use libsql::{Connection, TransactionBehavior, params};
 use orna_stream::{
-    AssertionDiagnosticDetail, CancellationClassification, CheckpointKey, CheckpointPrecondition,
-    CommitIntent, CommitResult, DeliveryIdentity, DeliveryLease, DiagnosticCode, FailureIdentity,
-    FailureRecord, FailureStatus, LeasePurpose, Position, RejectReason, SafeDiagnostic,
-    StreamState, StreamStatus,
+    AssertionDiagnosticDetail, CancellationClassification, CheckpointPrecondition, CommitIntent,
+    CommitResult, DeliveryLease, DiagnosticCode, FailureIdentity, FailureRecord, FailureStatus,
+    LeasePurpose, RejectReason, SafeDiagnostic, StreamState, StreamStatus,
 };
+use orna_stream_identity::{CheckpointKey, DeliveryIdentity, Position};
 use orna_value::CwdCapture;
 use std::ops::ControlFlow;
 

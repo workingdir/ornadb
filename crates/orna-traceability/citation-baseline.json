@@ -31,6 +31,7 @@
     "orna-standard-sources",
     "orna-storage",
     "orna-stream",
+    "orna-stream-identity",
     "orna-syntax",
     "orna-syntax-ast",
     "orna-sys-macros",

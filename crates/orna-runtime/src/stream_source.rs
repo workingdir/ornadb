@@ -6,10 +6,8 @@ use crate::stream_run::StreamRunControl;
 use crate::table_snapshot::{PinnedCommittedRows, RuntimeTableRows};
 use crate::table_store::{Mutation, TableMutation, TableObjectId};
 use orna_stream::Checkpoint as StreamCheckpoint;
-use orna_stream::{
-    CheckpointKey, Component, DeliveryIdentity, DiagnosticClass, DiagnosticCode, Position,
-    SafeDiagnostic, StreamFailurePayload,
-};
+use orna_stream::{DiagnosticClass, DiagnosticCode, SafeDiagnostic, StreamFailurePayload};
+use orna_stream_identity::{CheckpointKey, Component, DeliveryIdentity, Position};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::future::{Future, Ready, ready};

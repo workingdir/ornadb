@@ -2,10 +2,11 @@ use std::{fs, path::Path, process::Command};
 
 use orna_repository::Repository;
 use orna_runtime::{
-    CheckpointKey, CheckpointResetRequest, Component, ConsumerIdentity, NoFault, RuntimeIdentity,
-    RuntimeState, StreamAdministrationOutcome, TableMutation,
+    CheckpointResetRequest, NoFault, RuntimeIdentity, RuntimeState, StreamAdministrationOutcome,
+    TableMutation,
 };
 use orna_stream::CheckpointPrecondition;
+use orna_stream_identity::{CheckpointKey, Component, ConsumerIdentity, Position};
 use tempfile::TempDir;
 
 const MAIN: &str = include_str!("fixtures/history_governance_main.orna");
@@ -94,7 +95,7 @@ async fn governance_reads_and_row_attestations_follow_immutable_checkpoint_cuts(
                     version: 0,
                     committed: None,
                 },
-                to: orna_stream::Position {
+                to: Position {
                     token: Component::new("position-one").unwrap(),
                 },
                 reason: "operator rewind".into(),
@@ -181,11 +182,11 @@ async fn governance_reads_and_row_attestations_follow_immutable_checkpoint_cuts(
                 key: key.clone(),
                 expected: CheckpointPrecondition {
                     version: 1,
-                    committed: Some(orna_stream::Position {
+                    committed: Some(Position {
                         token: Component::new("position-one").unwrap(),
                     }),
                 },
-                to: orna_stream::Position {
+                to: Position {
                     token: Component::new("position-two").unwrap(),
                 },
                 reason: "operator\0private detail".into(),

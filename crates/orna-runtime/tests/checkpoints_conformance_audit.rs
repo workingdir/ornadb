@@ -15,10 +15,10 @@ use orna_runtime::{
 };
 use orna_stream::{
     AsyncCheckpointBackend, AsyncFailurePayloadBackend, CheckpointPrecondition, CommitIntent,
-    CommitResult, Component, ConsumerIdentity, DeliveryIdentity, DiagnosticClass, DiagnosticCode,
-    FailureRecord, FailureStatus, LeasePurpose, Position, RejectReason, SafeDiagnostic,
-    StreamFailurePayload,
+    CommitResult, DiagnosticClass, DiagnosticCode, FailureRecord, FailureStatus, LeasePurpose,
+    RejectReason, SafeDiagnostic, StreamFailurePayload,
 };
+use orna_stream_identity::{Component, ConsumerIdentity, DeliveryIdentity, Position};
 use orna_syntax::parse_module;
 use sha2::{Digest, Sha256};
 use tempfile::{Builder, TempDir};

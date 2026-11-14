@@ -53,10 +53,12 @@ use orna_runtime::{
 };
 use orna_storage::RuntimePublicationCoordinator;
 use orna_stream::{
-    AssertionOwnerKind, AsyncCheckpointBackend, CheckpointKey, CheckpointPrecondition,
-    CommitIntent, CommitResult, Component, ConsumerIdentity, DeliveryIdentity, DiagnosticClass,
-    DiagnosticCode, FailureIdentity, FailureRecord, FailureStatus, LeasePurpose, Position,
+    AssertionOwnerKind, AsyncCheckpointBackend, CheckpointPrecondition, CommitIntent, CommitResult,
+    DiagnosticClass, DiagnosticCode, FailureIdentity, FailureRecord, FailureStatus, LeasePurpose,
     SafeDiagnostic,
+};
+use orna_stream_identity::{
+    CheckpointKey, Component, ConsumerIdentity, DeliveryIdentity, Position,
 };
 use orna_syntax::{parse_expression, parse_module};
 use orna_syntax_ast::{
@@ -12890,9 +12892,9 @@ mod list_stream_tests {
         ListStreamSource, RuntimeIdentity, RuntimeState, StreamHandler, StreamHandlerResult,
         StreamItem,
     };
-    use orna_stream::{
-        AsyncCheckpointBackend, CheckpointKey, Component, ConsumerIdentity, DeliveryIdentity,
-        FailureIdentity, Position,
+    use orna_stream::{AsyncCheckpointBackend, FailureIdentity};
+    use orna_stream_identity::{
+        CheckpointKey, Component, ConsumerIdentity, DeliveryIdentity, Position,
     };
     use orna_value::{OvbRaw, Value};
     use std::{path::Path, process::Command};

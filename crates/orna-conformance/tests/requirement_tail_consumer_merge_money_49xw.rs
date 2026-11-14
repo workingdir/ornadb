@@ -1,5 +1,7 @@
 use orna_check::{Catalogue, ModuleInput, Type, analyze_with_catalogue};
-use orna_stream::{CheckpointPositionMerge, Component, Position, merge_checkpoint_position};
+use orna_stream_identity::{
+    CheckpointPositionMerge, Component, Position, merge_checkpoint_position,
+};
 
 fn analyze(source: &str) -> orna_check::Analysis {
     analyze_with_catalogue(
@@ -87,7 +89,7 @@ fn equal_opaque_checkpoints_merge_and_divergent_positions_conflict() {
     );
     assert_eq!(
         merge_checkpoint_position(Some(&base), Some(&left), Some(&right)),
-        CheckpointPositionMerge::Conflict(orna_stream::CheckpointPositionConflict {
+        CheckpointPositionMerge::Conflict(orna_stream_identity::CheckpointPositionConflict {
             base: Some(base),
             left: Some(left),
             right: Some(right),

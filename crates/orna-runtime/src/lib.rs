@@ -43,8 +43,8 @@ use orna_repository::{
 };
 use orna_stream::SafeDiagnostic;
 pub use orna_stream::{
-    AsyncCheckpointBackend, Checkpoint as StreamCheckpoint, CheckpointKey, CheckpointPrecondition,
-    Component, ConsumerIdentity, FailureStatus, Position, StreamFailurePayload,
+    AsyncCheckpointBackend, Checkpoint as StreamCheckpoint, CheckpointPrecondition, FailureStatus,
+    StreamFailurePayload,
 };
 use orna_value::{CanonicalSnapshot, CwdCapture, OvbRaw, RowRef, Snapshot};
 use sha2::{Digest, Sha256};
@@ -2687,11 +2687,13 @@ mod tests {
     use orna_stream::Checkpoint as StreamCheckpoint;
     use orna_stream::{
         AssertionDiagnosticDetail, AssertionOwnerKind, AsyncCheckpointBackend,
-        AsyncFailurePayloadBackend, CancellationClassification, CheckpointKey,
-        CheckpointPrecondition, CommitIntent, CommitResult, Component, ConsumerIdentity,
-        DeliveryIdentity, DeliveryLease, DiagnosticClass, DiagnosticCode, FailureIdentity,
-        FailureRecord, FailureStatus, LeasePurpose, Position, RejectReason, ReplayGrant,
+        AsyncFailurePayloadBackend, CancellationClassification, CheckpointPrecondition,
+        CommitIntent, CommitResult, DeliveryLease, DiagnosticClass, DiagnosticCode,
+        FailureIdentity, FailureRecord, FailureStatus, LeasePurpose, RejectReason, ReplayGrant,
         SafeAssertionWitness, SafeDiagnostic, StreamFailurePayload, StreamState, StreamStatus,
+    };
+    use orna_stream_identity::{
+        CheckpointKey, Component, ConsumerIdentity, DeliveryIdentity, Position,
     };
     use orna_value::{
         AssertionRef, CanonicalValue, CwdCapture, ExpressionRef, FailureRef, ObjectRef, OvbRaw,

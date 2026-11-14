@@ -76,6 +76,7 @@ orna-application = { path = "../orna-application", features = ["test-support"] }
 # target needs the feature while the `orna` binary does not.
 orna-repository = { path = "../orna-repository", features = ["legacy-fixture-writer"] }
 orna-stream = { path = "../orna-stream" }
+orna-stream-identity = { path = "../orna-stream-identity" }
 orna-exec = { path = "../orna-exec", features = ["test-support"] }
 orna-hir = { path = "../orna-hir" }
 [target.'cfg(target_os = "linux")'.dependencies]

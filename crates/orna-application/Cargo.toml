@@ -36,6 +36,7 @@ orna-repository = { path = "../orna-repository" }
 orna-security = { path = "../orna-security" }
 
 [dev-dependencies]
+orna-stream-identity = { path = "../orna-stream-identity" }
 orna-evaluator = { path = "../orna-evaluator", features = ["test-evidence"] }
 futures = "0.3.31"
 orna-application = { path = ".", features = ["test-support"] }

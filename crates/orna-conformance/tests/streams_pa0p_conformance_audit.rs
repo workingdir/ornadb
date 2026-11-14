@@ -62,7 +62,7 @@ use orna_evaluator::Limits;
 use orna_project::ProjectLoader;
 use orna_repository::Repository;
 use orna_runtime::{RuntimeIdentity, RuntimeState};
-use orna_stream::{CheckpointKey, Component, ConsumerIdentity};
+use orna_stream_identity::{CheckpointKey, Component, ConsumerIdentity};
 use orna_value::Raw;
 use orna_value::Value;
 use sha2::{Digest, Sha256};
