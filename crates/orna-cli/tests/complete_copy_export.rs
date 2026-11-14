@@ -16,12 +16,10 @@ use std::{
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
-#[path = "support/format3.rs"]
-mod format3;
 use format3::*;
+use orna_cli_testkit::format3;
 
-#[path = "support/media_commit.rs"]
-mod media_commit;
+use orna_cli_testkit::media_commit;
 
 /// A CLI process with Git routing isolated, so the developer's own Git
 /// configuration cannot decide the outcome.
@@ -83,7 +81,8 @@ fn stderr(output: &Output) -> String {
 
 #[test]
 fn export_check_and_restore_carry_one_snapshot_offline() {
-    let (root, _repository, _relation_id) = empty_format3_repository();
+    let (root, _repository, _relation_id) =
+        empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let project: &Path = root.path();
     let snapshot = String::from_utf8(git_output(project, &["rev-parse", "HEAD"], None))
         .unwrap()
@@ -163,7 +162,8 @@ fn export_check_and_restore_carry_one_snapshot_offline() {
 
 #[test]
 fn export_refuses_a_second_snapshot_into_one_local_repository() {
-    let (root, _repository, _relation_id) = empty_format3_repository();
+    let (root, _repository, _relation_id) =
+        empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let project: &Path = root.path();
 
     // An absent selector and an absent archive are both failures, and neither
@@ -332,7 +332,8 @@ fn commit_snapshot_with_secondary_root(
 
 #[test]
 fn complete_copy_preserves_secondary_native_roots_after_source_removal() {
-    let (root, repository, relation_id) = empty_format3_repository();
+    let (root, repository, relation_id) =
+        empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let source = root.path();
     let source_path = source.to_path_buf();
     let (snapshot, store_root, secondary_root) =
@@ -433,7 +434,8 @@ fn complete_copy_preserves_pinned_dependency_under_replace_ref() {
     const DEPENDENCY_PATH: &str = "deps/reference project";
     const DEPENDENCY_SOURCE: &[u8] = include_bytes!("fixtures/reference-project/main.orna");
 
-    let (root, repository, _) = empty_format3_repository();
+    let (root, repository, _) =
+        empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let source = root.path();
     let source_path = source.to_path_buf();
     let dependency_source = TempDir::new().unwrap();
@@ -610,7 +612,8 @@ fn complete_copy_preserves_pinned_dependency_under_replace_ref() {
 /// Verifies that an independent offline copy retains the format-3 row-to-Blob
 /// graph and exact payload commitment. ORNA-BLOB-019, ORNA-OGB-001, and
 async fn publish_then_history_then_offline_copy_carries_the_publication_commit() {
-    let (root, repository, relation_id) = empty_format3_repository();
+    let (root, repository, relation_id) =
+        empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let project: &Path = root.path();
     let source_repository_path = project.to_path_buf();
     git(
@@ -929,7 +932,8 @@ async fn publish_then_history_then_offline_copy_carries_the_publication_commit()
 /// A repository is only discoverable from a directory inside the worktree.
 #[test]
 fn export_discovers_the_repository_from_a_subdirectory() {
-    let (root, _repository, _relation_id) = empty_format3_repository();
+    let (root, _repository, _relation_id) =
+        empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let project: &Path = root.path();
     let nested = project.join(".orna");
     let archive = project.join("nested-archive");
@@ -952,7 +956,8 @@ fn export_discovers_the_repository_from_a_subdirectory() {
 /// an otherwise incomplete local snapshot exportable.
 #[test]
 fn export_fails_locally_for_a_missing_promisor_object() {
-    let (root, _repository, _) = empty_format3_repository();
+    let (root, _repository, _) =
+        empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let source = root.path();
     std::fs::write(source.join("remote-only.txt"), b"promisor-only payload").unwrap();
     git(source, &["add", "remote-only.txt"]);
@@ -1092,7 +1097,8 @@ fn export_fails_locally_for_a_missing_promisor_object() {
 /// origin are unavailable; restore publishes only the verified local copy.
 #[test]
 fn restore_streams_large_blob_after_source_and_origin_are_gone() {
-    let (root, repository, _) = empty_format3_repository();
+    let (root, repository, _) =
+        empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let source = root.path();
     let outside = TempDir::new().unwrap();
     let unavailable_origin = outside.path().join("unavailable-origin");
@@ -1258,7 +1264,8 @@ fn export_restores_a_legacy_and_a_format3_snapshot_offline() {
     // same repository, so both snapshots live in one archive. It is not a
     // migrated workspace: no CLI step publishes a migrate-copy candidate yet
     // (ornadb-5il1.192).
-    let (migrated_root, _format3, _relation_id) = empty_format3_repository();
+    let (migrated_root, _format3, _relation_id) =
+        empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let migrated_commit = String::from_utf8(git_output(
         migrated_root.path(),
         &["rev-parse", "HEAD"],

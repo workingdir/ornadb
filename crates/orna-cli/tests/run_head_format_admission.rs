@@ -16,9 +16,8 @@ use orna_repository::Repository;
 use orna_runtime::{RuntimeError, RuntimeState, repository_runtime_identity};
 use tempfile::TempDir;
 
-#[path = "support/format3.rs"]
-mod format3;
 use format3::{cli_runtime_identity, git, git_output};
+use orna_cli_testkit::format3;
 
 const DATABASE_ID: &str = "9f237b7e-6844-4498-bcd5-d24641c07449";
 

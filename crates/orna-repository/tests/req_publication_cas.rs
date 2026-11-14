@@ -6,9 +6,9 @@ use orna_storage::{Error, RuntimePublicationCoordinator};
 use orna_sys::{EnvironmentProvider, FilesystemProvider};
 use tempfile::TempDir;
 
-#[path = "../../orna-cli/tests/support/format3.rs"]
+#[path = "../../orna-cli-testkit/src/format3.rs"]
 mod format3;
-#[path = "../../orna-cli/tests/support/media_commit.rs"]
+#[path = "../../orna-cli-testkit/src/media_commit.rs"]
 mod media_commit;
 
 const MEDIA_FIXTURES: &str = concat!(
@@ -49,7 +49,8 @@ async fn publication_cas_race_has_one_winner_and_consistent_state() {
     // head/index race the ref; exactly one advances it, the loser is refused
     // with the typed ref conflict (ORNA-PUB-006: no false success), and the
     // repository stays consistent.
-    let (repository_dir, repository, relation_id) = format3::empty_format3_repository();
+    let (repository_dir, repository, relation_id) =
+        format3::empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     // The winner's locked publish body runs on a loaded runner; a long bound
     // keeps the loser queued so the race outcome, not a timer, decides it.
     let repository = repository.with_coordination_lock_wait(std::time::Duration::from_secs(120));

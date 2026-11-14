@@ -11,9 +11,9 @@ use orna_sys::{EnvironmentProvider, FilesystemProvider};
 use orna_value::{Blob, MediaAnnotation};
 use tempfile::TempDir;
 
-#[path = "../../orna-cli/tests/support/format3.rs"]
+#[path = "../../orna-cli-testkit/src/format3.rs"]
 mod format3;
-#[path = "../../orna-cli/tests/support/media_commit.rs"]
+#[path = "../../orna-cli-testkit/src/media_commit.rs"]
 mod media_commit;
 
 const MEDIA_FIXTURES: &str = concat!(
@@ -52,7 +52,8 @@ fn import_expression(root: &Path) -> String {
 async fn req_upgrade_003_writes_rows_only_to_the_canonical_format3_store() {
     // ORNA-UPGRADE-003: new-format writes use one canonical row store; loose,
     // compact, and hybrid dual-writing is forbidden.
-    let (repository_dir, repository, relation_id) = format3::empty_format3_repository();
+    let (repository_dir, repository, relation_id) =
+        format3::empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let media = TempDir::new().expect("temporary media directory");
     fs::copy(
         Path::new(MEDIA_FIXTURES).join("tone.wav"),

@@ -17,10 +17,8 @@ use orna_value::{
 use sha2::Digest;
 use tempfile::TempDir;
 
-#[path = "support/format3.rs"]
-mod format3;
-#[path = "support/media_commit.rs"]
-mod media_commit;
+use orna_cli_testkit::format3;
+use orna_cli_testkit::media_commit;
 
 const MEDIA_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/media");
 const NOTES_SOURCE: &str = "pub table Music(id: Str) { title: Str, }\n";
