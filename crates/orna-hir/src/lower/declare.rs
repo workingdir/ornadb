@@ -23,7 +23,7 @@ use crate::Idx;
 use crate::resolve::ModuleScope;
 use crate::{
     Def, DefId, DefKind, EffectSet, FnBody, FnDef, IndexVec, Module, ModuleId, ModuleOrigin,
-    ModulePath, Name, Program, SourceId, Visibility,
+    ModulePath, Name, Program, SourceId, UnitDef, Visibility,
 };
 
 use super::{BodyState, SourceUnit};
@@ -219,6 +219,9 @@ pub(crate) struct Builder {
     pub(crate) body_jobs: Vec<super::items::BodyJob>,
     /// Unit-family variant expressions, resolved once every definition is built.
     pub(crate) unit_jobs: Vec<super::units::UnitJob>,
+    /// Each unit family's variant definitions, declared with the family (`declare_family_variants`) so an
+    /// import can name a variant before the family is built.
+    pub(crate) family_variants: BTreeMap<DefId, Vec<DefId>>,
     /// The type `Self` names while an implementation's members are lowered.
     pub(crate) self_ty: Option<crate::Ty>,
     /// The names each module exports through `use module as _;` (ORNA-IMPORT-005).
@@ -251,6 +254,7 @@ impl Builder {
             std_module: None,
             body_jobs: Vec::new(),
             unit_jobs: Vec::new(),
+            family_variants: BTreeMap::new(),
             self_ty: None,
             admission,
         }
@@ -396,6 +400,15 @@ impl Builder {
         span: SyntaxSpan,
         decl: DeclAst,
     ) -> DefId {
+        let family_variants = match &decl {
+            DeclAst::Enum(_, variants, _, true) => Some(
+                variants
+                    .iter()
+                    .map(|variant| (variant.name.clone(), variant.span.clone()))
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        };
         let name = Name::new(name);
         let def = self.allocate(
             module,
@@ -404,6 +417,9 @@ impl Builder {
             span.clone(),
             PendingKind::Unbuilt(Box::new(decl)),
         );
+        if let Some(variants) = family_variants {
+            self.declare_family_variants(module, def, &variants);
+        }
         let occupied = self.scopes[module.index()]
             .values
             .insert(name.clone(), def)
@@ -418,6 +434,34 @@ impl Builder {
             );
         }
         def
+    }
+
+    /// Declares the variants of a unit family with the family itself. A variant's identity is its name and span
+    /// alone, so an import can name it before the family is built (`build_enum` queues each variant's expression).
+    fn declare_family_variants(
+        &mut self,
+        module: ModuleId,
+        family: DefId,
+        variants: &[(String, SyntaxSpan)],
+    ) {
+        let units = variants
+            .iter()
+            .map(|(name, span)| {
+                self.declare_nested(
+                    module,
+                    name,
+                    Visibility::Public,
+                    span.clone(),
+                    DefKind::Unit(UnitDef {
+                        family: Some(family),
+                        factors: Vec::new(),
+                        offset: None,
+                        affine: false,
+                    }),
+                )
+            })
+            .collect();
+        self.family_variants.insert(family, units);
     }
 
     /// Allocates one nested definition (a field, variant or member) that is

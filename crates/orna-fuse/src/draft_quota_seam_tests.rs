@@ -21,7 +21,7 @@ fn default_build_ignores_draft_quota_env() {
     }
     let quota = super::mount_draft_quota().expect("default build has a quota");
     assert!(
-        Arc::ptr_eq(&quota, &orna_runtime::vfs::default_draft_quota()),
+        Arc::ptr_eq(&quota, &orna_vfs::default_draft_quota()),
         "default build must charge the production budget whatever ORNA_DRAFT_QUOTA_BYTES says"
     );
 }

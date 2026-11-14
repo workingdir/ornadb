@@ -17,7 +17,7 @@ tokio::task_local! {
     static ACTIVE_ACTIVATION_STATES: RefCell<Vec<usize>>;
 }
 
-pub(crate) fn runtime_activation_active(state: &RuntimeState) -> bool {
+pub fn runtime_activation_active(state: &RuntimeState) -> bool {
     let state_id = std::ptr::from_ref(state) as usize;
     ACTIVE_ACTIVATION_STATES
         .try_with(|states| states.borrow().contains(&state_id))

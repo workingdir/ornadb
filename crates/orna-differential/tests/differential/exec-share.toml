@@ -16,11 +16,12 @@
 agreed = 55
 evaluable = 110
 steps-exact = 50
-old-harness-environment = 9
+old-harness-environment = 10
 
 # Cases the executor runs against a declared table that the old pipeline answers `ORNA-EVAL-NAME`
 # only because the H0 observer supplies no table store for a module with no rows. The count is a
-# ratchet that may only shrink; each case needs a `[[harness-allowance]]`.
+# ratchet that may only shrink; each case needs a `[[harness-allowance]]`. Each entry must go away
+# when the old observer gets the fixture table store (bead ornadb-cdi8u), which lowers this ceiling.
 [[harness-allowance]]
 case = "valid/minimal-root.orna"
 reason = "the H0 observer supplies no table store for a module with no rows; the executor result is the spec result (example cases run on empty tables, so `count()` is 0)"
@@ -30,6 +31,15 @@ bead = "ornadb-csenl.21"
 # the H0 observer has no table store. The executor reports `ORNA-EVAL-TABLE-ROW` at the store
 # boundary. Where the old pipeline rejects statically (E2002/E2003), the executor does not yet
 # reproduce that rejection; the allowance records the gap, it does not claim parity.
+
+# `valid/pipeline.orna` is a `contacts.Contact` pipeline (filter, map, sort_by) over an empty table. The
+# executor now runs `sort_by`, so it runs the case and returns the spec empty list (CBOR `0x80`). The old
+# H0 observer has no table store, so it answers `ORNA-EVAL-NAME`. Not credited as agreement.
+[[harness-allowance]]
+case = "valid/pipeline.orna"
+reason = "old H0 observer has no table store; HIR result is the spec empty list (the pipeline runs over an empty Contact table)"
+bead = "ornadb-csenl.21"
+
 [[harness-allowance]]
 case = "invalid/computed-field-insert.orna"
 reason = "old pipeline rejects the computed-field insert statically (E2002); the executor reaches the table store, which the H0 observer lacks (ORNA-EVAL-TABLE-ROW). Static rejection parity is an open executor gap."

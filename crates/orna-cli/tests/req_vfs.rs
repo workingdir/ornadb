@@ -8,7 +8,7 @@ use std::sync::Arc;
 #[test]
 /// ORNA-VFS-016: escaped key components round-trip without aliasing reserved names.
 fn typed_key_components_round_trip_reserved_and_escaped_names() {
-    use orna_runtime::vfs::{VfsComponent, project_component, unproject_component};
+    use orna_vfs::{VfsComponent, project_component, unproject_component};
 
     for key in [
         "",
@@ -34,7 +34,7 @@ fn typed_key_components_round_trip_reserved_and_escaped_names() {
 #[test]
 /// ORNA-VFS-004 and ORNA-VFS-013: field path lookup stays inside the captured row and unlink targets preserve row/blob policy.
 fn row_projection_rejects_escapes_and_classifies_unlink_targets() {
-    use orna_runtime::vfs::{
+    use orna_vfs::{
         SnapshotPin, VfsRowProjection, VfsStoredField, VfsUnlinkTarget, project_content_name,
     };
 
@@ -79,9 +79,7 @@ fn row_projection_rejects_escapes_and_classifies_unlink_targets() {
 #[tokio::test]
 /// ORNA-VFS-014, ORNA-VFS-017, and ORNA-VFS-022: private reads are copies and open handles/cursors remain pinned to their generation.
 async fn read_handles_and_readdir_cursors_keep_their_open_generation() {
-    use orna_runtime::vfs::{
-        SnapshotPin, SnapshotReaddirCursor, VfsFileSnapshot, VfsRepositoryCache,
-    };
+    use orna_vfs::{SnapshotPin, SnapshotReaddirCursor, VfsFileSnapshot, VfsRepositoryCache};
 
     let cache = VfsRepositoryCache::new();
     let image = Arc::new(VfsFileSnapshot::new(
@@ -104,7 +102,7 @@ async fn read_handles_and_readdir_cursors_keep_their_open_generation() {
 #[tokio::test]
 /// ORNA-VFS-015 and ORNA-VFS-020: separate file candidates stay private until explicit validated admissions, without evaluation during writes.
 async fn speculative_file_candidates_are_admitted_individually() {
-    use orna_runtime::vfs::{
+    use orna_vfs::{
         ActivationDecision, SnapshotPin, TemporaryRenameOutcome, VfsFileSnapshot,
         VfsRepositoryCache,
     };
