@@ -33,6 +33,7 @@ use orna_syntax::parse_expression;
 use orna_value::CanonicalValue;
 
 use crate::case::{Case, CaseKind, Family, Source};
+use crate::fixture_environment;
 use crate::{CallRecord, InputOutcome, Observation, Route, Write};
 
 /// The step budget every unbounded probe runs with.
@@ -74,15 +75,67 @@ struct Run {
     evaluated: bool,
 }
 
+/// The source the old observer admits for a case: the case's own source, with the fixture `Contact` table
+/// declared in it when the case names the bare `Contact` the old catalogue attaches.
+///
+/// `admit_module` admits only the case's own module header, so an attached table is absent from the evaluator's
+/// table set and the old pipeline answers `ORNA-EVAL-NAME`. The declaration is the one the HIR observer's
+/// `contacts` database supplies (`fixture_environment::CONTACTS_SUPPORT`). A case that names `contacts`, or
+/// declares `Contact` itself, keeps its own source.
+fn with_attached_contact(case: &Case, source: &Source) -> Source {
+    let text = &source.text;
+    let tokens = || {
+        text.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.'))
+            .filter(|token| !token.is_empty())
+    };
+    let names =
+        |name: &str| tokens().any(|token| token == name || token.starts_with(&format!("{name}.")));
+    let words: Vec<&str> = tokens().collect();
+    let declared = words.windows(2).any(|pair| {
+        pair[1] == "Contact"
+            && matches!(
+                pair[0],
+                "type" | "table" | "fn" | "enum" | "record" | "alias"
+            )
+    });
+    let attach = matches!(case.family, Family::Reference)
+        && names("Contact")
+        && !names("contacts")
+        && !declared;
+    if !attach {
+        return source.clone();
+    }
+    Source {
+        path: source.path.clone(),
+        logical_path: source.logical_path.clone(),
+        text: format!("{}{text}", fixture_environment::CONTACTS_SUPPORT),
+    }
+}
+
 /// Observes a module case through admission and staged evaluation.
 fn observe_module(case: &Case) -> Result<Observation, String> {
-    let source = primary(case)?;
+    let original = primary(case)?;
+    let attached = with_attached_contact(case, original);
+    // Spans are relative to the admitted text; the attached declaration is a prefix of it.
+    let offset = attached.text.len() - original.text.len();
+    let source = &attached;
     let catalogue = catalogue_for(case)?;
     let limits = Limits {
         max_steps: STEP_CEILING,
         ..case.limits
     };
-    let run = run_module(case, source, catalogue, limits)?;
+    let mut run = run_module(case, source, catalogue, limits)?;
+    run.calls.retain_mut(|call| {
+        if call.logical_path != source.logical_path {
+            return true;
+        }
+        if call.start < offset {
+            return false;
+        }
+        call.start -= offset;
+        call.end -= offset;
+        true
+    });
     let steps = match (&run.outcome, run.evaluated) {
         (Some(outcome), true) if !is_other_limit(outcome) => {
             measure_steps(case, source, catalogue, outcome)?
@@ -117,7 +170,14 @@ fn run_module(
         if !case.evaluate {
             return Ok(Run::default());
         }
-        match authority.evaluate_staged(&admitted, &case.arguments) {
+        // The fixture table store: every admitted table, empty, as the executor's
+        // `MemoryStore` holds it for a case with no rows.
+        let tables = admitted
+            .table_schemas()
+            .keys()
+            .map(|table| (table.clone(), Vec::new()))
+            .collect();
+        match authority.evaluate_staged_with_table_rows(&admitted, &case.arguments, tables) {
             Ok(activation) => Ok(Run {
                 outcome: Some(Ok(encode(activation.value())?)),
                 writes: writes_of(&activation),
