@@ -23,6 +23,7 @@
     "orna-project",
     "orna-project-repl",
     "orna-protocol",
+    "orna-repl",
     "orna-repository",
     "orna-runtime",
     "orna-vfs",

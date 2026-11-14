@@ -18,6 +18,7 @@ orna-check = { path = "../orna-check" }
 orna-hir = { path = "../orna-hir" }
 orna-evaluator = { path = "../orna-evaluator", features = ["route-trace"] }
 orna-project-repl = { path = "../orna-project-repl" }
+orna-repl = { path = "../orna-repl" }
 orna-standard-sources = { path = "../orna-standard-sources" }
 orna-syntax = { path = "../orna-syntax" }
 orna-syntax-ast = { path = "../orna-syntax-ast" }
@@ -26,5 +27,4 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 [dev-dependencies]
-orna-repl = { path = "../orna-repl" }
 orna-sys = { path = "../orna-sys" }
