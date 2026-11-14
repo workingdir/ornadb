@@ -67,6 +67,15 @@ pub const MONEY_FROM_FLOAT: &str = "E5004";
 /// A `Money` value and a `Float` meet in one arithmetic or comparison operator (hir-host.md B5; `E5103`).
 pub const MONEY_BINARY_FLOAT: &str = "E5103";
 
+/// Two quantities of different dimensions meet in one `+` or `-` (hir-host.md B5; the operator-level `E5001`).
+pub const QUANTITY_DIMENSIONS: &str = "E5001";
+
+/// Two affine points (`core.temperature.Temperature`) meet in one `+` or `-` (hir-host.md B5; `E5002`).
+pub const AFFINE_POINT_OPERATOR: &str = "E5002";
+
+/// A fold (`sum`) over affine points (hir-host.md B5; `E5003`, the absolute-quantity sum class).
+pub const AFFINE_POINT_SUM: &str = "E5003";
+
 /// An inference variable is still unsolved after its body was checked.
 ///
 /// The classification is the requirement that asks inference to name the

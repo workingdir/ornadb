@@ -3,7 +3,7 @@
 
 use orna_syntax_ast::SourceSpan as SyntaxSpan;
 
-use crate::{ArgValue, BinOp, Body, DefId, HirDiagnostic, Ty};
+use crate::{ArgValue, BinOp, Body, DefId, HirDiagnostic, RelOp, Ty};
 
 use super::{BodyCheck, NotYetReason};
 
@@ -64,5 +64,25 @@ impl<'a> BodyCheck<'a> {
         }
         self.coerce_at(body, id, ty, field_ty, span);
         Ok(())
+    }
+
+    /// `E5003` for a fold (`sum`) over affine points: the element is a point, not a summable quantity.
+    pub(super) fn affine_sum_rejection(
+        &mut self,
+        op: RelOp,
+        element: Ty,
+        span: SyntaxSpan,
+    ) -> Option<Ty> {
+        let code = crate::engine_codes::sum_rejection(self.program, self.resolved(element))
+            .filter(|_| matches!(op, RelOp::Sum))?;
+        self.conflicts += 1;
+        self.diagnostics.push(HirDiagnostic::new(
+            code,
+            Box::<str>::from(
+                "a fold over affine points is not defined: a point is not a summable quantity",
+            ),
+            span,
+        ));
+        Some(self.error())
     }
 }
