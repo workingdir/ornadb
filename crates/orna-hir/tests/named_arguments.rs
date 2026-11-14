@@ -116,7 +116,9 @@ fn a_protocol_member_rejects_an_undeclared_label() {
     let source = format!("{GREETER}pub fn f(r: Rounding): Str = r.greet(bogus: \"!\");\n");
     let messages = typed_argument_messages(&source);
     assert!(
-        messages.iter().any(|m| m.contains("no parameter is named `bogus`")),
+        messages
+            .iter()
+            .any(|m| m.contains("no parameter is named `bogus`")),
         "{messages:?}"
     );
 }
@@ -126,7 +128,9 @@ fn a_protocol_member_rejects_an_omitted_required_label() {
     let source = format!("{GREETER}pub fn f(r: Rounding): Str = r.greet(bogus: \"!\");\n");
     let messages = typed_argument_messages(&source);
     assert!(
-        messages.iter().any(|m| m.contains("omits a required parameter")),
+        messages
+            .iter()
+            .any(|m| m.contains("omits a required parameter")),
         "{messages:?}"
     );
 }
