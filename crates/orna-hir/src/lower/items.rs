@@ -51,28 +51,33 @@ pub(crate) enum BodyJob {
 impl Builder {
     /// Builds every signature, then lowers every body.
     pub(crate) fn lower_items(&mut self) {
-        let mut index = 0;
-        while index < self.pending.len() {
-            let def = DefId::new(u32::try_from(index).expect("definition index fits u32"));
-            let ast = match &mut self.pending[index].kind {
-                PendingKind::Unbuilt(_) => {
-                    match std::mem::replace(
-                        &mut self.pending[index].kind,
-                        PendingKind::Built(DefKind::Unit(UnitDef::default())),
-                    ) {
-                        PendingKind::Unbuilt(ast) => Some(ast),
-                        _ => None,
-                    }
-                }
-                _ => None,
-            };
-            if let Some(ast) = ast {
-                self.lowered += 1;
-                self.build_declaration(def, *ast);
+        // Unit declarations are built first: every unit is a candidate for the name lookups of the declarations
+        // that follow (`resolve_unit`), so none may still be unbuilt when another declaration is lowered.
+        for index in 0..self.pending.len() {
+            if matches!(&self.pending[index].kind, PendingKind::Unbuilt(ast) if matches!(**ast, DeclAst::Unit(..)))
+            {
+                self.build_pending(index);
             }
-            index += 1;
+        }
+        // Unit family variants are queued and resolved before any declaration is built, and the units they define are
+        // evaluated before then: a unit suffix in a signature reads the unit's key (units.md 3.3).
+        for (family, module, variants) in self.unbuilt_unit_families() {
+            let units = self
+                .family_variants
+                .get(&family)
+                .cloned()
+                .unwrap_or_default();
+            for (unit, variant) in units.into_iter().zip(&variants) {
+                self.queue_family_unit(module, family, unit, variant);
+            }
         }
         self.resolve_unit_jobs();
+        crate::units::eval::evaluate(self);
+        let mut index = 0;
+        while index < self.pending.len() {
+            self.build_pending(index);
+            index += 1;
+        }
         let jobs = std::mem::take(&mut self.body_jobs);
         for job in jobs {
             self.lowered += 1;
@@ -85,6 +90,27 @@ impl Builder {
                     self_ty,
                 } => self.lower_expression_body(def, body, &expr, self_ty),
             }
+        }
+    }
+
+    /// Builds the declaration at `index` when it is still unbuilt.
+    fn build_pending(&mut self, index: usize) {
+        let def = DefId::new(u32::try_from(index).expect("definition index fits u32"));
+        let ast = match &self.pending[index].kind {
+            PendingKind::Unbuilt(_) => {
+                match std::mem::replace(
+                    &mut self.pending[index].kind,
+                    PendingKind::Built(DefKind::Unit(UnitDef::default())),
+                ) {
+                    PendingKind::Unbuilt(ast) => Some(ast),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        if let Some(ast) = ast {
+            self.lowered += 1;
+            self.build_declaration(def, *ast);
         }
     }
 
@@ -579,10 +605,7 @@ impl Builder {
         let mut lowered = Vec::new();
         if unit_family {
             let units = self.family_variants.get(&def).cloned().unwrap_or_default();
-            for (unit, variant) in units.into_iter().zip(variants) {
-                self.queue_family_unit(module, def, unit, variant);
-                lowered.push(unit);
-            }
+            lowered.extend(units);
         } else {
             for variant in variants {
                 let fields = variant

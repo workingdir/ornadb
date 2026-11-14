@@ -80,7 +80,6 @@ impl Lowering {
         self.builder.resolve_imports();
         self.builder.lower_items();
         let mut program = self.builder.finish();
-        crate::units::eval::run(&mut program);
         crate::effect_pass::run(&mut program);
         crate::rules::run(&mut program);
         program

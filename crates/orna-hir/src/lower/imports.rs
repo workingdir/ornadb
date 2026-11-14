@@ -300,7 +300,7 @@ impl Builder {
     }
 
     /// The variant of a unit family that is called `name`.
-    fn variant_of(&self, family: DefId, name: &Name) -> Option<DefId> {
+    pub(crate) fn variant_of(&self, family: DefId, name: &Name) -> Option<DefId> {
         self.family_variants
             .get(&family)?
             .iter()

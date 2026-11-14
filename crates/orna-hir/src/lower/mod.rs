@@ -56,6 +56,7 @@ use crate::{
 
 pub use admission::{SharedAdmission, SysAdmission, SysMemberStatus};
 pub(crate) use classify::{rel_op as relation_operation, table_op as table_operation};
+pub(crate) use declare::Builder;
 pub use incremental::Lowering;
 pub use prelude::PreludeExports;
 
