@@ -29,6 +29,28 @@ pub(crate) fn is_numeric_literal(base: &AstExpr) -> bool {
     )
 }
 
+/// Rejects `literal.name` when no unit, literal target or built-in postfix of `name` is in scope (ORNA-UNIT-008
+/// step 3). `None` when `base` is not a numeric literal.
+pub(crate) fn unresolved_literal_suffix(
+    builder: &mut Builder,
+    state: &mut BodyState,
+    base: &AstExpr,
+    name: &str,
+    span: &SyntaxSpan,
+) -> Option<ExprId> {
+    if !is_numeric_literal(base) {
+        return None;
+    }
+    let name_span = SyntaxSpan::new(span.end.saturating_sub(name.len()), span.end);
+    builder.diagnose(
+        state.module,
+        UNIT_UNRESOLVED,
+        format!("unit suffix `{name}` is not declared in scope"),
+        name_span,
+    );
+    Some(error_expr(builder, state, span.clone()))
+}
+
 /// Lowers `literal.name`, a numeric literal with a unit suffix, as a call of that unit's constructor, so the
 /// checker types it as the unit. `None` when no unit of that name is in scope; the caller then tries the
 /// builtin postfix table. Several families in scope defining the name are ambiguous and reported by name.

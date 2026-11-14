@@ -19,8 +19,6 @@ use crate::{
     LogicOp, Name, NameTarget, Stmt, Ty, TyKind, UnOp,
 };
 
-use crate::diag::UNIT_UNRESOLVED;
-
 use super::blocks::lower_block;
 use super::calls::{attach_type_arguments, classify_callee};
 use super::classify::ParamInfo;
@@ -240,16 +238,8 @@ fn lower_field(
     if let Some(missing) = missing_module_export(builder, state, base, name, span) {
         return missing;
     }
-    if super::units::is_numeric_literal(base) {
-        // ORNA-UNIT-008 step 3: no unit, literal target or built-in postfix of this name is in scope.
-        let name_span = SyntaxSpan::new(span.end.saturating_sub(name.len()), span.end);
-        builder.diagnose(
-            state.module,
-            UNIT_UNRESOLVED,
-            format!("unit suffix `{name}` is not declared in scope"),
-            name_span,
-        );
-        return error_expr(builder, state, span.clone());
+    if let Some(error) = super::units::unresolved_literal_suffix(builder, state, base, name, span) {
+        return error;
     }
     let member_of_path = qualified_member(builder, state, base, name);
     let base = lower_expr(builder, state, base);
