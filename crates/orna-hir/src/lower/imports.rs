@@ -74,11 +74,7 @@ impl Builder {
     }
 
     /// Applies one `use` declaration.
-    fn apply_use(
-        &mut self,
-        pending: &PendingUse,
-        globs: &mut Globs,
-    ) {
+    fn apply_use(&mut self, pending: &PendingUse, globs: &mut Globs) {
         let importer = pending.module;
         let target_path =
             ModulePath::new(pending.path.iter().map(|segment| Name::new(&segment.name)));
@@ -219,18 +215,17 @@ impl Builder {
                 self.bind_explicit(importer, variant.clone(), unit, pending.span.clone());
                 self.record_import(importer, target_path.clone(), ImportTarget::Def(unit));
                 // `record_import_path` recorded the variant segment as a member path; it names `unit`.
-                if let Some(segment) = pending.path.last() {
-                    if let Some(written) = self.program.modules[importer]
+                if let Some(written) = pending.path.last().and_then(|segment| {
+                    self.program.modules[importer]
                         .name_uses
                         .iter_mut()
                         .rev()
-                        .find(|written| {
-                            written.span.start == segment.span.start
-                                && written.span.end == segment.span.end
+                        .find(|use_site| {
+                            use_site.span.start == segment.span.start
+                                && use_site.span.end == segment.span.end
                         })
-                    {
-                        written.target = NameTarget::Def(unit);
-                    }
+                }) {
+                    written.target = NameTarget::Def(unit);
                 }
                 true
             }

@@ -42,7 +42,9 @@ use orna_syntax_ast::{
 
 use crate::Route;
 use crate::case::{Case, CaseKind, Family};
-use crate::fixture_environment::{ATTACHED_SUPPORT, CURRENCY_SUPPORT, DATABASE_SUPPORT, UNIT_SUPPORT};
+use crate::fixture_environment::{
+    ATTACHED_SUPPORT, CURRENCY_SUPPORT, DATABASE_SUPPORT, UNIT_SUPPORT,
+};
 
 /// The repository's standard modules, parsed once per test process.
 struct StandardModule {
@@ -262,14 +264,8 @@ fn lower_case_as(case: &Case, admitted: bool) -> Result<LoweredProgram, String> 
 }
 
 /// The unit families of `fixture_environment::UNIT_SUPPORT`, whose variants the implicit environment imports.
-const FIXTURE_UNIT_FAMILIES: [&str; 6] = [
-    "Length",
-    "Mass",
-    "Time",
-    "Energy",
-    "Information",
-    "Speed",
-];
+const FIXTURE_UNIT_FAMILIES: [&str; 6] =
+    ["Length", "Mass", "Time", "Energy", "Information", "Speed"];
 
 /// Makes the fixture units visible to a reference module without an import.
 ///

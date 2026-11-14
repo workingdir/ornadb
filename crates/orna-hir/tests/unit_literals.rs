@@ -3,10 +3,7 @@
 //! built-in postfix names is ORNA-UNIT-UNRESOLVED (ORNA-UNIT-008 step 3). Only numeric literals take a unit suffix.
 
 use orna_hir::{
-    ModulePath, Name, Program, SourceId, SourceUnit,
-    diag::UNIT_UNRESOLVED,
-    lower,
-    typeck::typeck,
+    ModulePath, Name, Program, SourceId, SourceUnit, diag::UNIT_UNRESOLVED, lower, typeck::typeck,
 };
 use orna_syntax::parse_module_with_file;
 
@@ -44,17 +41,13 @@ fn codes(program: &Program) -> Vec<&str> {
 
 #[test]
 fn a_literal_of_a_declared_unit_adds_to_a_literal_of_the_same_dimension() {
-    let program = checked(&format!(
-        "{FAMILIES}pub fn ok() = 5.kilometre + 3.metre;\n"
-    ));
+    let program = checked(&format!("{FAMILIES}pub fn ok() = 5.kilometre + 3.metre;\n"));
     assert!(codes(&program).is_empty(), "{:?}", codes(&program));
 }
 
 #[test]
 fn a_literal_of_a_declared_unit_subtracts_from_a_literal_of_the_same_dimension() {
-    let program = checked(&format!(
-        "{FAMILIES}pub fn ok() = 5.kilometre - 3.metre;\n"
-    ));
+    let program = checked(&format!("{FAMILIES}pub fn ok() = 5.kilometre - 3.metre;\n"));
     assert!(codes(&program).is_empty(), "{:?}", codes(&program));
 }
 
