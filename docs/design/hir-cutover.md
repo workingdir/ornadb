@@ -42,7 +42,7 @@ Notes on the table:
 
 ### Diagnostic-ledger status by class
 
-The ledger held 89 rows before the Float primary-key fix (ORNA-KEY-003, E3003). The file's `## expected` section now holds 88 rows. The 104 in the earlier text of this file predates the current corpus and is stale. Class counts come from the reason field of each row and sum to 88.
+The ledger held 89 rows before the Float primary-key fix (ORNA-KEY-003, E3003). The file's `## expected` section held 88 rows before the sys-admin fix and now holds 85. The 104 in the earlier text of this file predates the current corpus and is stale. Class counts come from the reason field of each row and sum to 85.
 
 | Class (reason field) | Before | After | Status |
 |---|---|---|---|
@@ -50,7 +50,7 @@ The ledger held 89 rows before the Float primary-key fix (ORNA-KEY-003, E3003). 
 | checker-only lowering or checking family not ported to HIR | 13 | 12 | open; Float primary key fixed (`invalid/float-key.orna`, now E3003 on both sides, row removed) |
 | D1 strict, INFER-004 SHOULD allows the old behaviour | 10 | 10 | intended difference per spec SHOULD; owner decision pending (Q11) |
 | HIR constraint conflict, copy-pasted "Range membership" reason | 9 | 9 | open; reason text is wrong for these rows (see below) |
-| checker-only system or assertion check not ported to HIR | 7 | 7 | open |
+| checker-only system or assertion check not ported to HIR | 7 | 4 | open; the sys-admin method rows `failure-replay`, `failure-resolve` and `stream-retry` now agree (HIR rejects `ORNA100-E-SYS-ADMIN-METHOD` at typeck, `settle_pending`), and their rows are removed |
 | checker type mismatch; HIR reports arity or constraint conflicts | 4 | 4 | open |
 | HIR unsolved-variable diagnostic; checker has no code for it | 4 | 4 | open |
 | HIR reports `sys` as a module rather than a value | 4 | 4 | open |
@@ -62,7 +62,7 @@ Open items not fixed in this change:
 
 - The 9 rows in the "Range membership" class carry a copy-pasted reason about `0..10` passed to `take`. That text does not describe their cases (for example `valid/money-rate.orna` has no range expression). Each row needs its real HIR cause derived from per-case diagnostics before the reason is rewritten.
 - `valid/lambda-empty-record.orna` is a spec-invalid fixture: ARROW-001 `() => {}` is Unit and array literals are homogeneous (List of T), so HIR's ORNA-INFER-011 is spec-correct. The fixture belongs under `invalid/`; its owner must move it.
-- Next three classes by size after the 28 environment-name rows: checker-only lowering (12), D1 strict INFER-004 (10, owner decision), checker-only system or assertion (7).
+- Next three classes by size after the 28 environment-name rows: checker-only lowering (12), D1 strict INFER-004 (10, owner decision), HIR constraint conflict (9).
 
 ## 2. Consumers and what they call today
 

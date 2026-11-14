@@ -32,6 +32,7 @@ impl Builder {
                 GenericParam {
                     name: crate::Name::new(&generic.name),
                     bounds,
+                    implicit: false,
                 }
             })
             .collect()

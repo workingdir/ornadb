@@ -525,6 +525,7 @@ impl Builder {
                 protocol: def,
                 args: self_args,
             }],
+            implicit: false,
         });
         let mut lowered = Vec::new();
         for member in members {

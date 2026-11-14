@@ -205,6 +205,9 @@ pub struct GenericParam {
     pub name: Name,
     /// Its protocol bounds, resolved to [`DefKind::Protocol`] definitions.
     pub bounds: Vec<Bound>,
+    /// Whether an omitted annotation added it (ORNA-INFER-003). A call never writes an implicit parameter, so
+    /// its type argument is always inferred.
+    pub implicit: bool,
 }
 
 /// One protocol bound on a generic parameter, such as `T: From<Str>`.
