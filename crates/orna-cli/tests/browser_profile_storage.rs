@@ -11,9 +11,8 @@ use std::{
 
 use orna_repository::TypedKey;
 
-#[path = "support/format3.rs"]
-mod format3;
 use format3::*;
+use orna_cli_testkit::format3;
 
 const BROWSER_SOURCE: &str = r"pub table media(id: Str) {
     content: Blob,

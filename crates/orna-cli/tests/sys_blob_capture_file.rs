@@ -33,7 +33,8 @@ use orna_value::{
 /// ORNA-SYS-097).
 #[tokio::test]
 async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
-    let (directory, repository, relation_id) = empty_format3_repository();
+    let (directory, repository, relation_id) =
+        empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let commit = repository.head().unwrap().unwrap();
     let source_table = ProjectLoader::default()
         .resolve_committed_source_table_schema(
@@ -492,7 +493,8 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
 /// `sys.blob.annotate`.
 #[tokio::test]
 async fn captured_files_keep_the_octet_stream_fallback_until_annotated() {
-    let (directory, repository, relation_id) = empty_format3_repository();
+    let (directory, repository, relation_id) =
+        empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let root = directory.path();
     let payload = include_bytes!("fixtures/media/tone.wav");
     // `tone.mp3` has a uniquely mapped suffix, but sys.blob.capture_file's
@@ -633,6 +635,5 @@ impl FaultInjector for FailAt {
     }
 }
 
-#[path = "support/format3.rs"]
-mod format3;
 use format3::*;
+use orna_cli_testkit::format3;

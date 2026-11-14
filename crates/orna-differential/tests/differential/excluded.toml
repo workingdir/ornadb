@@ -115,8 +115,13 @@ reason = "presentation-protocol fixtures are wire payloads with no Orna program 
 
 [[excluded]]
 scope = "crates/orna-repository/tests/fixtures"
-files = 30
+files = 31
 reason = "repository fixtures are format-3 trees, media and ORP-1 vectors committed through the storage path; they need the store path (H6)"
+
+[[excluded]]
+scope = "crates/orna-fuse/tests/fixtures"
+files = 1
+reason = "the empty format-3 media project is a fixture the FUSE tests drive through the mount path; it needs the mount harness, not the corpus loader"
 
 [[excluded]]
 scope = "crates/orna-runtime/tests/fixtures"

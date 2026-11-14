@@ -29,6 +29,7 @@ tempfile = "3.23.0"
 uuid.workspace = true
 
 [dev-dependencies]
+orna-cli-support = { path = "../orna-cli-support" }
 orna-format3 = { path = "../orna-format3", features = ["test-support"] }
 orna-conformance = { path = "../orna-conformance" }
 orna-evaluator = { path = "../orna-evaluator", features = ["test-evidence"] }

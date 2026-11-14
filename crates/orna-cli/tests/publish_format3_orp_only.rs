@@ -12,13 +12,11 @@ use orna_storage::LoosePath;
 use orna_sys::{EnvironmentProvider, FilesystemProvider};
 use tempfile::TempDir;
 
-#[path = "support/format3.rs"]
-mod format3;
 use format3::*;
+use orna_cli_testkit::format3;
 
-#[path = "support/media_commit.rs"]
-mod media_commit;
 use media_commit::commit_capture_pending;
+use orna_cli_testkit::media_commit;
 
 const MEDIA_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/media");
 const SONG_IMPORT_FIXTURE: &str = concat!(
@@ -72,7 +70,8 @@ fn stderr(output: &Output) -> String {
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn publish_format3_orp_only() {
-    let (directory, repository, relation_id) = empty_format3_repository();
+    let (directory, repository, relation_id) =
+        empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let root = directory.path();
     let media = TempDir::new().unwrap();
     std::fs::copy(

@@ -27,14 +27,7 @@ mod cli_serve;
 mod cli_stage;
 mod cli_status;
 #[cfg(test)]
-#[path = "../tests/support/format3.rs"]
-mod format3;
-#[cfg(target_os = "linux")]
-mod fuse_mount;
-#[cfg(test)]
-#[path = "../tests/support/media_commit.rs"]
-#[allow(clippy::duplicate_mod)]
-mod media_commit;
+use orna_cli_testkit::format3;
 mod media_range;
 mod repl;
 mod sys_host;

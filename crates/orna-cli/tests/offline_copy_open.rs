@@ -25,13 +25,11 @@ use orna_sys::{EnvironmentProvider, FilesystemProvider};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
-#[path = "support/format3.rs"]
-mod format3;
 use format3::*;
+use orna_cli_testkit::format3;
 
-#[path = "support/media_commit.rs"]
-mod media_commit;
 use media_commit::commit_capture;
+use orna_cli_testkit::media_commit;
 
 const MEDIA_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/media");
 const SONG_IMPORT_FIXTURE: &str = concat!(
@@ -66,7 +64,8 @@ fn committed_rows(repository: &Repository, relation_id: [u8; 16]) -> Vec<Admitte
 #[allow(clippy::too_many_lines)]
 #[tokio::test]
 async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
-    let (directory, repository, relation_id) = empty_format3_repository();
+    let (directory, repository, relation_id) =
+        empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let source = TempDir::new().unwrap();
     for name in ["tone.wav", "pixel.png"] {
         std::fs::copy(
@@ -429,7 +428,8 @@ async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
 
 #[test]
 fn complete_copy_rejects_a_valid_unlisted_commit_at_admission() {
-    let (directory, repository, _) = empty_format3_repository();
+    let (directory, repository, _) =
+        empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let root = directory.path();
     let archive = root.join("archive");
     let manifest = export_complete_copy(&repository, "HEAD", &archive, &[])

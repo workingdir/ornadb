@@ -10,13 +10,11 @@ use orna_runtime::{RuntimeIdentity, RuntimeState};
 use orna_sys::{EnvironmentProvider, FilesystemProvider};
 use tempfile::TempDir;
 
-#[path = "support/format3.rs"]
-mod format3;
 use format3::*;
+use orna_cli_testkit::format3;
 
-#[path = "support/media_commit.rs"]
-mod media_commit;
 use media_commit::{SourceCaptureRow, commit_source_captures};
+use orna_cli_testkit::media_commit;
 
 const MEDIA_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/media");
 
@@ -56,8 +54,12 @@ async fn req_evol_004_history_diff_compares_logical_blob_annotations_not_layout_
         )
         .unwrap();
     }
-    let (directory, repository, relation_id, format_context) = object_format3_repository();
-    let song_source = object_source_row(source.path(), "song");
+    let (directory, repository, relation_id, format_context) =
+        object_format3_repository(include_str!("fixtures/media/offline-query-main.orna"));
+    let song_source = object_source_row(
+        source.path(),
+        include_str!("fixtures/media/source-song.orna"),
+    );
     let before = String::from_utf8(git_output(directory.path(), &["rev-parse", "HEAD"], None))
         .unwrap()
         .trim()
@@ -284,7 +286,8 @@ async fn req_evol_004_history_diff_compares_logical_blob_annotations_not_layout_
 /// endpoints and compare them instead of refusing.
 #[test]
 fn diff_refuses_endpoints_that_record_different_repositories() {
-    let (directory, _repository, relation_id) = empty_format3_repository();
+    let (directory, _repository, relation_id) =
+        empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let root = directory.path();
     let before = revision(root, "HEAD");
 

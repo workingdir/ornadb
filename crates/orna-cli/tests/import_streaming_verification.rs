@@ -19,9 +19,8 @@ use orna_sys::{EnvironmentProvider, FilesystemProvider};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
-#[path = "support/format3.rs"]
-mod format3;
 use format3::empty_format3_repository;
+use orna_cli_testkit::format3;
 
 #[path = "support/offline_roundtrip.rs"]
 mod offline_roundtrip;
@@ -214,7 +213,8 @@ fn write_large_synthetic_bundle(directory: &Path, size: u64) -> PathBuf {
     drop(file);
     let expected: [u8; 32] = digest.finalize().into();
 
-    let (_repository_directory, repository, relation_id) = empty_format3_repository();
+    let (_repository_directory, repository, relation_id) =
+        empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let capability = repository.capture_capability(relation_id).unwrap();
     // The committed fixture asks to capture up to 16 MiB, and a capture is
     // rejected when that request exceeds the provider byte limit, so the
