@@ -104,7 +104,7 @@ fn run_with(case: &Case, cancel: Option<Arc<AtomicBool>>) -> ExecOutcome {
         return ExecOutcome::NotYet("the owned modules lower with a diagnostic".to_owned());
     }
     // The checker's money, affine and quantity rejections are the case's outcome
-    // (docs/design/hir-host.md B8), and so are the table-write rejections (E2002, E2003, E3010):
+    // (docs/design/hir-host.md B8), and so are the table-write rejections (E2002, E2003, E3002, E3010, E3011, E3013):
     // `typeck` reports every one of them as an owned diagnostic, and the run is lowered and checked once.
     orna_hir::typeck(&mut lowered.program);
     if let Some(Some(code)) = static_rejection(&lowered) {
@@ -245,8 +245,9 @@ fn owned_diagnostics(lowered: &LoweredProgram) -> bool {
 }
 
 /// The checker codes a table write answers before evaluation: a missing required field (E2002), an unknown
-/// field (E2003), and a computed field written on insert (E3010).
-const STATIC_TABLE_WRITE_CODES: [&str; 3] = ["E2002", "E2003", "E3010"];
+/// field (E2003), a primary key changed by `update` (E3002), a computed field written on insert (E3010) or on
+/// `update` (E3011), and an explicit rekey of an automatic key (E3013).
+const STATIC_TABLE_WRITE_CODES: [&str; 6] = ["E2002", "E2003", "E3002", "E3010", "E3011", "E3013"];
 
 /// The static rejection the owned modules' type-pass diagnostics carry, when every one of them is a table-write
 /// code. `Some(None)` is no diagnostic; `Some(Some(code))` is the first sorted code, which is the old pipeline's

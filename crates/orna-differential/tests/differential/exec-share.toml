@@ -13,7 +13,7 @@
 # are not part of `agreed`.
 
 [[exec-share]]
-agreed = 79
+agreed = 82
 evaluable = 110
 steps-exact = 52
 old-harness-environment = 4
@@ -77,30 +77,10 @@ case = "invalid/affine-addition.orna"
 reason = "money or type constructor (H4)"
 bead = "ornadb-csenl.37"
 
-# Cases the executor runs whose update or rekey targets a key the table does not hold. The executor
-# answers the spec result for an absent row. Four disagree with the old pipeline, each for a named
-# reason, and each entry matches only its exact (executor, old) pair, where `old` is an error code or
-# `ok` for an old result; any other disagreement on that case stays a mismatch.
-[[executor-gap-allowance]]
-case = "invalid/key-update.orna"
-executor = "ORNA-EVAL-TABLE-MISSING-ROW"
-old = "E3002"
-reason = "old pipeline rejects the key update statically (E3002); the HIR checker has no equivalent static rule, so the executor runs the update and reports the absent row (ORNA-EVAL-TABLE-MISSING-ROW). Static rejection parity is an open checker gap."
-bead = "ornadb-0xfiw"
-
-[[executor-gap-allowance]]
-case = "invalid/computed-field-update.orna"
-executor = "ORNA-EVAL-TABLE-MISSING-ROW"
-old = "E3011"
-reason = "old pipeline rejects the computed-field update statically (E3011); the HIR checker has no equivalent static rule, so the executor runs the update and reports the absent row (ORNA-EVAL-TABLE-MISSING-ROW). Static rejection parity is an open checker gap."
-bead = "ornadb-0xfiw"
-
-[[executor-gap-allowance]]
-case = "invalid/rekey-auto-id.orna"
-executor = "ORNA-EVAL-TABLE-UNADMITTED"
-old = "E3013"
-reason = "old pipeline rejects the rekey of an auto-generated id statically (E3013); the HIR checker has no equivalent static rule, so the executor reports the rekey as unadmitted (ORNA-EVAL-TABLE-UNADMITTED). Static rejection parity is an open checker gap."
-bead = "ornadb-0xfiw"
+# Cases the executor runs whose outcome disagrees with the old pipeline, each for a named reason. Each entry
+# matches only its exact (executor, old) pair, where `old` is an error code or `ok` for an old result; any other
+# disagreement on that case stays a mismatch. The static table-write rejections (E3002, E3011, E3013) are answered
+# before evaluation, so they need no entry.
 
 # REPL admission (ORNA-REPL-002: `$_` MUST NOT become an implicit global in module source). The
 # executor reports the unresolved `$_` where the old evaluator captured it in a closure, so the old

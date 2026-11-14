@@ -467,7 +467,10 @@ pub native fn format<C impl Currency>(amount: Money<C>, rounding: Rounding, loca
 
 - `observe_exec` already turns a `sys.version.incompatible` lowering diagnostic into the run outcome (PR #9918
   `admission_rejection`). HB8 generalises it: a typeck `E5001`-`E5004`/`E5103` diagnostic on an owned module is the run
-  outcome, because the old pipeline's outcome for an `evaluate` case that its checker rejects is the checker's code.
+  outcome, because the old pipeline's outcome for an `evaluate` case that its checker rejects is the checker's code. The
+  table-write rejections E2002, E2003, E3002, E3010, E3011 and E3013 (`typeck/table_write.rs`) are the same kind of outcome:
+  a write whose key is changed, whose computed field is written, or whose automatic key is rekeyed is rejected before the
+  executor reads the table, so the missing-row and unadmitted runtime codes never surface for these cases.
   `[INFERENCE]` `observe_new::lower_case` may not run `typeck`; HB8 starts by checking and adds the call if not.
 - `valid/currency`: the old outcome is `ORNA-EVAL-TYPE` (measured), the spec result is a `Money<GBP>` value. The
   executor will run it and disagree. It needs an allowance entry with a reason and bead; it cannot raise `agreed`.
