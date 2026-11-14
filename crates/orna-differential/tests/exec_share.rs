@@ -30,6 +30,9 @@ fn executor_agreement_with_the_old_pipeline_only_grows() {
     for case in &corpus.cases {
         match observe_exec::run_case(case) {
             ExecOutcome::NotYet(reason) => {
+                if let Err(mismatch) = allowances.not_yet_check(&case.id, &reason) {
+                    mismatches.push(mismatch);
+                }
                 if reason.ends_with("(H4)") && std::env::var_os("EXEC_SHARE_IDS").is_some() {
                     let old = observe_old::observe(case).map(|observation| observation.outcome);
                     println!("OLD {} => {old:?}", case.id);
@@ -58,6 +61,9 @@ fn executor_agreement_with_the_old_pipeline_only_grows() {
                     continue;
                 }
                 agreed += 1;
+                if std::env::var_os("EXEC_SHARE_IDS").is_some() {
+                    println!("AGREED {}", case.id);
+                }
                 match observation.steps {
                     Some(old) if old == steps => steps_exact += 1,
                     Some(old) => step_differences.push((case.id.clone(), old, steps)),
@@ -76,7 +82,7 @@ fn executor_agreement_with_the_old_pipeline_only_grows() {
     mismatches.extend(allowances.stale());
     let old_harness_environment = allowances.harness_environment_count();
     println!(
-        "old-harness environment: {old_harness_environment} run cases differ only by the H0 observer's missing table store"
+        "old-harness environment: {old_harness_environment} run cases differ only by the H0 observer's admitted-table environment"
     );
     println!(
         "executor agreement: {agreed}/{ran} run cases agree with the old pipeline ({} cases in the corpus)",

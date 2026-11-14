@@ -113,7 +113,7 @@ pub const DATABASE_SUPPORT: [(&str, &str); 3] = [
 /// `Contact.full_name` is the spec's computed-field example
 /// (`full_name: Str => "{first} {last}"`, ORNA-FIELD-010); the old catalogue
 /// records only that the field is computed.
-const CONTACTS_SUPPORT: &str = "\
+pub(crate) const CONTACTS_SUPPORT: &str = "\
 pub table Contact(id: Str = \"generated\") {
     first: Str = \"\",
     last: Str = \"\",

@@ -76,24 +76,23 @@ name = "orna-conformance"
 [crate.files]
 "src/lib.rs" = 2962
 "src/main.rs" = 1981
-"src/semantic_adapter.rs" = 13779
 [crate.functions]
 "src/lib.rs::execute_reference_project_runtime_adapter" = 208
 "src/lib.rs::run_fixture" = 123
 "src/lib.rs::validate" = 253
-"src/semantic_adapter.rs::admit_recorded_rows" = 168
-"src/semantic_adapter.rs::admit_transaction_project_with" = 203
-"src/semantic_adapter.rs::admitted_transaction_module" = 174
-"src/semantic_adapter.rs::evaluate_module_assertion_continuation" = 233
-"src/semantic_adapter.rs::evaluate_module_assertion_rows_continuation" = 121
-"src/semantic_adapter.rs::execute_running_table_request_with_success_terminal_with_faults" = 151
-"src/semantic_adapter.rs::handle_inner_with_budget" = 467
-"src/semantic_adapter.rs::relation_aggregate" = 132
-"src/semantic_adapter.rs::relation_quantifier" = 188
-"src/semantic_adapter.rs::running_table_continuation_fault_recovers_as_proven" = 152
-"src/semantic_adapter.rs::running_table_continuation_rejects_foreign_and_stale_capabilities_without_writes" = 125
-"src/semantic_adapter.rs::typed_composite_scan_orders_components_and_rejects_invalid_cursors" = 145
-"src/semantic_adapter.rs::validate_changed" = 125
+"src/semantic_adapter/durable_stream.rs::admit_recorded_rows" = 168
+"src/semantic_adapter/admission.rs::admit_transaction_project_with" = 203
+"src/semantic_adapter/project_graph.rs::admitted_transaction_module" = 174
+"src/semantic_adapter/assertions.rs::evaluate_module_assertion_continuation" = 233
+"src/semantic_adapter/assertions.rs::evaluate_module_assertion_rows_continuation" = 121
+"src/semantic_adapter/durable.rs::execute_running_table_request_with_success_terminal_with_faults" = 151
+"src/semantic_adapter/table_effects.rs::handle_inner_with_budget" = 467
+"src/semantic_adapter/relation.rs::relation_aggregate" = 132
+"src/semantic_adapter/relation.rs::relation_quantifier" = 188
+"src/semantic_adapter/tests/durable/mod.rs::running_table_continuation_fault_recovers_as_proven" = 152
+"src/semantic_adapter/tests/durable/mod.rs::running_table_continuation_rejects_foreign_and_stale_capabilities_without_writes" = 125
+"src/semantic_adapter/tests/transaction_admission.rs::typed_composite_scan_orders_components_and_rejects_invalid_cursors" = 145
+"src/semantic_adapter/candidates.rs::validate_changed" = 125
 "src/vector_suites.rs::float_vectors" = 137
 "src/vector_suites.rs::path_vectors" = 122
 

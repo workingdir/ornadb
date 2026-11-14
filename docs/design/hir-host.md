@@ -62,7 +62,7 @@ constructor`, 1 each `as_of`, `engine native not ported`, `field access ... (H2)
 | `valid/presentation-watch` (`std.ui.Table(sys.rt.streams)`) | `sys.version.incompatible` | `Page` not exported, `sys` not a value | HA1, plus `std.ui` (separate native family, not in this document) |
 | `valid/sys-storage` (`sys.Storage \| filter(..)`) | `ORNA-EVAL-UNSUPPORTED` | `sys` not a value | HA1, HA2, then HA5 (linked relation with no data) |
 | `valid/cwd-head` (`contacts.Contact.as_of(CWD) \| count`) | `ORNA-EVAL-NAME` (harness has no store) | runs, stops at `as_of` | HA6, as a `[[harness-allowance]]` |
-| `invalid/legacy-sys-runtime`, `legacy-sys-storage-call`, `mutate-sys-commit` | checker codes (`ORNA100-E-SYS-RUNTIME`, `ORNA100-E-SYS-STORAGE-CALL`, `E7001`) | `ORNA-S022-UNSUPPORTED` | H3 checker rules, not this document |
+| `invalid/legacy-sys-runtime`, `legacy-sys-storage-call`, `mutate-sys-commit` | checker codes (`ORNA100-E-SYS-RUNTIME`, `ORNA100-E-SYS-STORAGE-CALL`, `E7001`) | the same codes, lowered statically (section 0.4) | none; agrees with the old pipeline |
 
 So the first blocker is **lowering**: `lower/namespace.rs` refuses to treat `sys.<name>` as a module export
 (`namespace_member` and `missing_module_export` both return `None` for a `ModuleOrigin::Sys` module), the field
@@ -83,6 +83,19 @@ add, `E5003` absolute quantity sum and currency mismatch, `E5004` `Money<C>(Floa
 operand). `diagnostic_codes_differing.txt` records `E5001`, `E5002`, `E5003` and `E5004` as `=> (none)` or
 `ORNA-S012-UNRESOLVED` for six cases. The environment ratchet puts `Money`, `GBP`, `EUR`, `USD` in
 `CURRENCY_AND_UNIT` (`orna-differential/src/environment.rs:98`).
+
+### 0.4 Static `sys` rejections (ORNA-SYS-005, ORNA-SYS-120, E7001)
+
+Three static `sys` rejections are the spec's own codes, so lowering reports them directly instead of
+`ORNA-S022-UNSUPPORTED`. Each applies only to the exact path named, so any other `sys` path stays unrepresented:
+
+- `sys.runtime.*` reports `ORNA100-E-SYS-RUNTIME` (ORNA-SYS-005: the member is renamed `sys.rt`, not aliased).
+- The path `sys.storage` used as a callee reports `ORNA100-E-SYS-STORAGE-CALL` (ORNA-SYS-120: a grouping namespace).
+- A row mutator on any portable `sys` relation reports `E7001` (portable `sys` rows are read-only; the checker publishes this code).
+
+The codes are mirrored as string constants in `crates/orna-hir/src/diag.rs` (the checker owns the same strings in
+`crates/orna-check/src/diagnostics.rs`; `orna-check` depends on `orna-hir`, so the strings cannot be imported). The
+executor treats only these four codes as a shared static outcome (`orna-differential/src/observe_exec.rs`).
 
 --------------------------------------------------------------------------
 
@@ -496,6 +509,8 @@ independent except HB7 (needs HA3). Within a part the order is the dependency or
 | HB6 executor Money values and arithmetic | `ornadb-csenl.38` | HB2, HB3 | `orna-exec` `engine_money.rs`, `natives/money.rs`, `natives/mod.rs`, `eval.rs`, `registry_test.rs` | `native_money.rs`: sums, `amount`, compare, currency-id test against `valid/money-serialization` bytes | tests pass; first step records whether the derived currency id matches the old one |
 | HB7 `quantize`, `allocate`, `format` | `ornadb-csenl.39` | HB6, HA3 | `core/money.orna`, `natives/money_round.rs` | all six rounding rules; `allocate(100.GBP, [1,1,1])` sums to 100; `format` takes the locale from the host | `registry_test` passes |
 | HB8 harness outcome for `E50xx`, allowances, ratchets | `ornadb-csenl.40` | HB5, HB6 | `observe_exec.rs`, `exec-share.toml` | exec_share, diagnostic_codes, typed_share ratchets | `invalid/currency-addition`, `affine-addition`, `incompatible-dimensions` agree; `valid/currency` allowance recorded |
+
+**HB8 status: NOT MET.** `invalid/currency-addition` agrees on HIR, which is 1 of the 3 acceptance cases. `invalid/affine-addition` (old E5002) and `invalid/incompatible-dimensions` (old E5001) are not yet run on HIR; they are `not-yet-allowance` entries owned by `ornadb-csenl.37` (HB5) and `ornadb-2bga0` (builtin Duration is not a declared Quantity). `valid/currency` is recorded as a `currency-allowance` naming `ornadb-csenl.40`. The C3 criteria (a) and (b) in `hir-cutover.md` remain unmet.
 
 ### 3.3 Open decisions
 

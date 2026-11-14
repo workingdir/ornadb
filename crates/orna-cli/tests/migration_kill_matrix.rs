@@ -86,10 +86,11 @@ use std::{
 
 use orna_repository::{PublicationJournalStage, Repository, RepositoryFormat};
 use orna_runtime::{
-    CheckpointKey, Component, ConsumerIdentity, ListStreamSource, RuntimeIdentity, RuntimeState,
-    StreamCheckpoint, StreamHandler, StreamHandlerResult, StreamItem, StreamMutationBatch,
-    WriterLease, runtime_identity_for_database_id,
+    ListStreamSource, RuntimeIdentity, RuntimeState, StreamCheckpoint, StreamHandler,
+    StreamHandlerResult, StreamItem, StreamMutationBatch, WriterLease,
+    runtime_identity_for_database_id,
 };
+use orna_stream_identity::{CheckpointKey, Component, ConsumerIdentity};
 use sha2::{Digest as _, Sha256};
 use tempfile::TempDir;
 
