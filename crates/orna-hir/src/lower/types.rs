@@ -13,9 +13,8 @@
 
 use orna_syntax_ast::TypeExpr;
 
+use super::declare::{Builder, UnitLookup};
 use crate::{DefId, EffectRow, FnTy, ModuleId, Name, NameTarget, ParamIdx, Ty, TyKind};
-
-use super::declare::Builder;
 
 /// A language-defined type constructor with no declaration.
 fn builtin(name: &str) -> Option<&'static str> {
@@ -114,6 +113,9 @@ fn lower_named(
     arguments: &[TypeExpr],
     span: &orna_syntax_ast::SourceSpan,
 ) -> Ty {
+    if let Some(ty) = lower_quantity(builder, module, generics, path, arguments, span) {
+        return ty;
+    }
     let args = arguments
         .iter()
         .map(|argument| lower_type(builder, module, generics, argument))
@@ -210,6 +212,81 @@ fn lower_named(
             builder.program.tys.error()
         }
     }
+}
+/// Lowers a numeric type applied to a unit, `Decimal<kWh>` or `Quantity<Decimal, kWh>` (units.md section 3.4), to
+/// [`TyKind::Quantity`] in that unit's key. `None` when the written type has another form, or names no unit, so the
+/// generic path lowers it. The unit is resolved first, so that path records no use twice. The key is read from the
+/// unit table being evaluated: lowering runs after unit evaluation, and the program's table is only filled when
+/// lowering finishes. A unit whose definition is broken has no key; its diagnostic is already recorded.
+fn lower_quantity(
+    builder: &mut Builder,
+    module: ModuleId,
+    generics: &[Name],
+    path: &[String],
+    arguments: &[TypeExpr],
+    span: &orna_syntax_ast::SourceSpan,
+) -> Option<Ty> {
+    let [head] = path else {
+        return None;
+    };
+    let (number_expr, unit) = match (head.as_str(), arguments) {
+        ("Int" | "Decimal" | "Float", [unit]) => (None, unit),
+        ("Quantity", [number, unit]) => (Some(number), unit),
+        _ => return None,
+    };
+    let TypeExpr::Name {
+        path: unit_path,
+        arguments: unit_arguments,
+        span: unit_span,
+    } = unit
+    else {
+        return None;
+    };
+    let [unit_name] = unit_path.as_slice() else {
+        return None;
+    };
+    if !unit_arguments.is_empty() {
+        return None;
+    }
+    let name = Name::new(unit_name);
+    let def = match builder.resolve_unit(module, &name) {
+        UnitLookup::Found(def) => def,
+        UnitLookup::Ambiguous(_) => {
+            builder.diagnose(
+                module,
+                crate::diag::AMBIGUOUS,
+                format!("unit `{name}` is ambiguous"),
+                unit_span.clone(),
+            );
+            return Some(builder.program.tys.error());
+        }
+        UnitLookup::None => return None,
+    };
+    let number = match number_expr {
+        None => lower_builtin(builder, module, head, span)?,
+        Some(number) => lower_type(builder, module, generics, number),
+    };
+    if !matches!(
+        builder.program.tys.kind(number),
+        Some(TyKind::Int | TyKind::Decimal | TyKind::Float)
+    ) {
+        return Some(builder.program.tys.error());
+    }
+    super::record_use(
+        &mut builder.program,
+        module,
+        unit_span.clone(),
+        name,
+        crate::UseContext::Type,
+        NameTarget::Def(def),
+    );
+    // A unit with no key is one the evaluator did not key (a broken definition, already diagnosed, or an affine
+    // unit such as core `C`, which the evaluator does not key yet). Its number type stands, so the written type
+    // lowers as before with no further diagnostic.
+    Some(match builder.unit_eval.table.unit_key(def) {
+        Some(key) => builder.program.tys.intern(TyKind::Quantity(number, key)),
+        None => number,
+    })
 }
 
 /// Lowers a builtin scalar spelling and records its use; `None` when the spelling is not builtin.
