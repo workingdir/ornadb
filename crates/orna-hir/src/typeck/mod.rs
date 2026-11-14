@@ -894,9 +894,16 @@ impl<'a> BodyCheck<'a> {
         rhs: ExprId,
         span: SyntaxSpan,
     ) -> Result<Ty, NotYetReason> {
+        // A currency literal's lowered `Money<C>` is read before inference overwrites the operand's type (hir-host.md B4).
+        let lowered_left = body.exprs[lhs].ty;
+        let lowered_right = body.exprs[rhs].ty;
         let left = self.infer_expr(body, lhs, None)?;
         let right = self.infer_expr(body, rhs, None)?;
-        if let Some(error) = self.money_operator_rejection(op, left, right, span.clone()) {
+        let money_left = self.money_operand(lowered_left, left);
+        let money_right = self.money_operand(lowered_right, right);
+        if let Some(error) =
+            self.money_operator_rejection(op, money_left, money_right, span.clone())
+        {
             return Ok(error);
         }
         if let Some(result) = self.quantity_binary(body, op, left, right, rhs, span.clone()) {

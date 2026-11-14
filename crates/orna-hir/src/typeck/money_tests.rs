@@ -36,6 +36,16 @@ fn adding_two_currencies_is_e5003() {
 }
 
 #[test]
+fn adding_currency_literals_of_two_currencies_is_e5003() {
+    let found = check("pub fn bad() = 10.GBP + 5.EUR;\n");
+    assert_eq!(
+        found,
+        vec![MONEY_CURRENCY_MISMATCH.to_string()],
+        "{found:?}"
+    );
+}
+
+#[test]
 fn ordering_two_currencies_is_e5003() {
     let found = check("pub fn bad(a: Money<GBP>, b: Money<EUR>): Bool = a < b;\n");
     assert_eq!(
