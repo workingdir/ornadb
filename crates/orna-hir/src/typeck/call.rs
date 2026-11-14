@@ -513,6 +513,9 @@ impl<'a> BodyCheck<'a> {
                 "the relation stage input is not a list, relation or stream in H2a".into(),
             ));
         };
+        if let Some(error) = self.affine_sum_rejection(op, element, span.clone()) {
+            return Ok(error);
+        }
         match op {
             RelOp::Count => Ok(self.intern(TyKind::Int)),
             RelOp::First | RelOp::Last => Ok(self.intern(TyKind::Option(element))),
