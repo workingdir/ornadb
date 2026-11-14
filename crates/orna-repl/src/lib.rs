@@ -24,4 +24,5 @@ mod standard;
 
 pub use driver::{run_lines, submit};
 pub use error::ReplError;
+pub use render::result as render_result;
 pub use session::{Session, Staged};

@@ -35,6 +35,7 @@ use orna_cli_testkit::format3;
 mod media_range;
 mod project_run;
 mod repl;
+mod repl_hir;
 mod repl_request;
 mod repl_run;
 mod repl_session;

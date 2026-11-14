@@ -1,4 +1,15 @@
-use super::*;
+#[cfg(test)]
+use super::repl_request::FIRST_SYS_DISPATCH_RUNNING;
+use super::{
+    AdmittedReplSession, ApplicationError, Arc, BufReader, CanonicalValue, ColorMode, Diagnostic,
+    Endpoint, Limits, PinnedCommittedRows, QueryObservationRegistration, Rc, RefCell,
+    ReplEvaluationFailure, ReplSnapshotSessionLoader, ReplTransactionScope, ReplTransactions,
+    ReplWriterInputs, RequestIdentity, Reserved, StageOutcome, StagedTableActivation,
+    TableActivationError, ValidatedTableRequestActivationCommit, committed_rows_at,
+    diagnostic_documentation, ensure_writer, io, project_declares_assertions, repl,
+    repl_effect_failure, repl_request_fingerprint, repl_session, request_nonce, runtime_identity,
+    transactional_loaded_project_candidate_validator,
+};
 
 #[allow(clippy::too_many_lines)]
 pub(crate) fn run_repl_input(
@@ -367,28 +378,15 @@ where
     }
     match submitter(session, source) {
         Ok(Some(value)) => {
-            let rendered = repl::inspect(&value);
-            let (result, ty) = rendered
-                .rsplit_once(" : ")
-                .unwrap_or((rendered.as_str(), ""));
-            write_styled(writer, AnsiColor::Green, result.as_bytes(), color_enabled)
-                .and_then(|()| {
-                    if ty.is_empty() {
-                        Ok(())
-                    } else {
-                        writer.write_all(b" : ")?;
-                        write_styled(writer, AnsiColor::Dim, ty.as_bytes(), color_enabled)
-                    }
-                })
-                .and_then(|()| writer.write_all(b"\n"))
-                .map_err(|_| {
+            repl::write_rendered_value(writer, &repl::inspect(&value), color_enabled).map_err(
+                |_| {
                     Diagnostic::target(
                         "E2200",
                         "REPL console I/O failed",
                         "check the terminal input and output streams, then start a new session",
                     )
-                })?;
-            Ok(())
+                },
+            )
         }
         Ok(None) => Ok(()),
         Err(failure) => {
@@ -396,25 +394,27 @@ where
                 .detail
                 .is_some()
                 .then(|| repl::render_repl_failure(&failure, source));
-            let mut diagnostic = diagnostic_documentation(&failure.code).map_or_else(
-                || {
-                    Diagnostic::unavailable(
-                        "REPL expression could not be evaluated",
-                        "revise the expression using names and values available in this REPL session",
-                    )
-                },
-                |documentation| {
-                    Diagnostic::target(
-                        documentation.code,
-                        documentation.title,
-                        documentation.help,
-                    )
-                },
-            );
-            diagnostic.body = body;
-            Err(diagnostic)
+            Err(repl_failure_diagnostic(&failure.code, body))
         }
     }
+}
+
+/// The diagnostic an expression or console failure reports: the documented
+/// title and help for `code`, with the located `body` when there is one.
+pub(crate) fn repl_failure_diagnostic(code: &str, body: Option<String>) -> Diagnostic {
+    let mut diagnostic = diagnostic_documentation(code).map_or_else(
+        || {
+            Diagnostic::unavailable(
+                "REPL expression could not be evaluated",
+                "revise the expression using names and values available in this REPL session",
+            )
+        },
+        |documentation| {
+            Diagnostic::target(documentation.code, documentation.title, documentation.help)
+        },
+    );
+    diagnostic.body = body;
+    diagnostic
 }
 pub(crate) fn run_repl(
     endpoint: &Endpoint,
@@ -427,6 +427,9 @@ pub(crate) fn run_repl(
             "remote REPL sessions are unavailable",
             "use a local Git worktree until the Orna transport is available",
         ));
+    }
+    if crate::repl_hir::enabled() {
+        return crate::repl_hir::run_repl_hir(endpoint, expression, color_mode);
     }
     let mut runtime = repl_session(endpoint)?;
     let color_enabled = color_mode.stdout_enabled();

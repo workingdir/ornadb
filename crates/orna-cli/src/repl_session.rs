@@ -173,6 +173,13 @@ pub(crate) fn repl_runtime(
 }
 
 pub(crate) fn repl_session(endpoint: &Endpoint) -> Result<ReplRuntime, Diagnostic> {
+    repl_runtime(repl_repository(endpoint)?)
+}
+
+/// The repository a REPL endpoint binds to, or `None` for the core-only session.
+pub(crate) fn repl_repository(
+    endpoint: &Endpoint,
+) -> Result<Option<orna_repository::Repository>, Diagnostic> {
     let repository = match endpoint {
         // The legacy implicit local REPL remains core-only when no worktree is
         // present. Keep the successful discovery result as session authority.
@@ -191,7 +198,7 @@ pub(crate) fn repl_session(endpoint: &Endpoint) -> Result<ReplRuntime, Diagnosti
         // ORNA-REPL-AT instead of failing before the command loop starts.
         Endpoint::UnixSocket(_) | Endpoint::RemoteTls(_) => None,
     };
-    repl_runtime(repository)
+    Ok(repository)
 }
 
 pub(crate) fn repl_session_error(error: &ReplError) -> Diagnostic {
