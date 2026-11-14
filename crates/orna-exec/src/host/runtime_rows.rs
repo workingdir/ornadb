@@ -82,7 +82,7 @@ impl Host for RuntimeHostRows {
         self.inner.store()
     }
 
-    fn store_at(&mut self, at: &Snapshot) -> Result<Box<dyn TableStore + '_>, HostFailure> {
+    fn store_at(&mut self, at: &Snapshot) -> Result<Box<dyn TableStore>, HostFailure> {
         self.inner.store_at(at)
     }
 
