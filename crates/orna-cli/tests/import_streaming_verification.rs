@@ -12,10 +12,11 @@ use std::{
 };
 
 use orna_evaluator::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
+use orna_host_fs::FilesystemProvider;
 use orna_repository::offline_copy::{
     OfflineHistoryEntry, OfflineRow, PAYLOAD_BUFFER_BYTES, write_offline_copy,
 };
-use orna_sys::{EnvironmentProvider, FilesystemProvider};
+use orna_sys::EnvironmentProvider;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 

@@ -1,9 +1,10 @@
 use std::{fs, path::Path, process::Command, sync::Barrier, thread};
 
 use orna_evaluator::SysHostBindingRegistry;
+use orna_host_fs::FilesystemProvider;
 use orna_runtime::RuntimeState;
 use orna_storage::{Error, RuntimePublicationCoordinator};
-use orna_sys::{EnvironmentProvider, FilesystemProvider};
+use orna_sys::EnvironmentProvider;
 use tempfile::TempDir;
 
 #[path = "../../orna-cli-testkit/src/format3.rs"]

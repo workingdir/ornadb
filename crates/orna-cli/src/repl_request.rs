@@ -1,10 +1,11 @@
 use super::{
-    EnvironmentProvider, FilesystemProvider, REPL_EFFECT_UNCERTAIN, Rc, RefCell,
-    RequestAdmissionCapability, RequestIdentity, RuntimeIdentity, RuntimeState,
-    RuntimeTableIdentity, SysHostBindingRegistry, TerminalOutcome, WriterLease,
-    legacy_bare_module_candidates, legacy_bare_module_table, repl, repl_effect_cancelled,
-    repl_effect_failure, repl_effect_uncertain, repl_lease_failure, settlement_cause,
+    EnvironmentProvider, REPL_EFFECT_UNCERTAIN, Rc, RefCell, RequestAdmissionCapability,
+    RequestIdentity, RuntimeIdentity, RuntimeState, RuntimeTableIdentity, SysHostBindingRegistry,
+    TerminalOutcome, WriterLease, legacy_bare_module_candidates, legacy_bare_module_table, repl,
+    repl_effect_cancelled, repl_effect_failure, repl_effect_uncertain, repl_lease_failure,
+    settlement_cause,
 };
+use orna_host_fs::FilesystemProvider;
 
 #[cfg(test)]
 thread_local! {

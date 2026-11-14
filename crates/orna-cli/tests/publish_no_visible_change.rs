@@ -16,12 +16,13 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 use orna_evaluator::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
+use orna_host_fs::FilesystemProvider;
 use orna_repository::Repository;
 use orna_runtime::{
     NoFault, RequestIdentity, RequestState, RuntimeState, TableMutation, TableObjectId,
     TerminalOutcome, WriterLease,
 };
-use orna_sys::{EnvironmentProvider, FilesystemProvider};
+use orna_sys::EnvironmentProvider;
 use tempfile::TempDir;
 
 use format3::*;

@@ -1,13 +1,14 @@
 use std::{fs, path::Path, process::Command};
 
 use orna_evaluator::SysHostBindingRegistry;
+use orna_host_fs::FilesystemProvider;
 use orna_repository::{
     LEGACY_ANNOTATION_DEFAULT_MEDIA_TYPE, LegacyAnnotationCandidate, MigrationAnnotationDefaults,
     migration_copy::{LEGACY_ANNOTATION_DEFAULT_FORMAT, LegacyAnnotationInventory},
 };
 use orna_runtime::RuntimeState;
 use orna_storage::{LoosePath, RuntimePublicationCoordinator};
-use orna_sys::{EnvironmentProvider, FilesystemProvider};
+use orna_sys::EnvironmentProvider;
 use orna_value::{Blob, MediaAnnotation};
 use tempfile::TempDir;
 

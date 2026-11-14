@@ -8,12 +8,13 @@ use std::{
 };
 
 use orna_evaluator::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
+use orna_host_fs::FilesystemProvider;
 use orna_project::ProjectLoader;
 use orna_runtime::{
     FaultInjector, FaultPoint, RequestIdentity, RequestState, RuntimeError, RuntimeIdentity,
     RuntimeState, TableMutation, TableObjectId, TerminalOutcome,
 };
-use orna_sys::{EnvironmentProvider, FilesystemProvider};
+use orna_sys::EnvironmentProvider;
 use orna_value::{
     AvailabilityState, Blob, BlobResolver, ContentIdentity, ContentReference, ContextValue,
     Error as BlobError, Format3Context, Format3Quota, GitHash, NativeOid, OwnerLifetime, Snapshot,

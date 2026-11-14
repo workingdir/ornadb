@@ -26,12 +26,13 @@ use std::{
 };
 
 use orna_evaluator::SysHostBindingRegistry;
+use orna_host_fs::FilesystemProvider;
 use orna_repository::Repository;
 use orna_runtime::{
     NoFault, RequestIdentity, RequestState, RuntimeState, RuntimeTableIdentity, TableMutation,
     TableObjectId, TerminalOutcome,
 };
-use orna_sys::{EnvironmentProvider, FilesystemProvider};
+use orna_sys::EnvironmentProvider;
 use orna_value::{Raw, Value};
 use tempfile::TempDir;
 

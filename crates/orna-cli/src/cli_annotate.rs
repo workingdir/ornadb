@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use orna_sys::{CaptureFileError, CaptureFileStream, FilesystemProvider};
+use orna_host_fs::{CaptureFileError, CaptureFileStream, FilesystemProvider};
 use orna_value::{MimeRegistry, encode_ovb2_reader_to_writer};
 
 use super::Diagnostic;

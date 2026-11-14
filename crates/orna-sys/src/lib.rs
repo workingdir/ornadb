@@ -117,12 +117,6 @@ pub use host_process::{ProcessProvider, ProcessProviderError, ProcessRequest, Pr
 mod host_clock;
 pub use host_clock::{ClockProvider, ClockProviderError};
 
-mod host_filesystem;
-pub use host_filesystem::{
-    CaptureFileError, CaptureFileStream, FilesystemProvider, FilesystemProviderError,
-    HostFilesystemMetadata,
-};
-
 mod host_network;
 pub use host_network::{HostHttpHandle, HostHttpResponse, HttpProvider, HttpProviderError};
 

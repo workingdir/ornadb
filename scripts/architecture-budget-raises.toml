@@ -561,7 +561,7 @@ reason = "pure split of orna-repository lib.rs along its seams: this method move
 bead = "ornadb-kdfff"
 
 [[raise]]
-path = "crates/orna-sys/src/host_filesystem.rs"
+path = "crates/orna-host-fs/src/lib.rs"
 new_limit = 2600
 reason = "stage S2 replaces the embedded JSON payloads with typed declaration attributes and # Preconditions doc prose; the facts are unchanged"
 bead = "ornadb-ouxeq.3"

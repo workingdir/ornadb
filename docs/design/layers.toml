@@ -127,7 +127,11 @@ layer = 5
 [[crate]]
 name = "orna-sys"
 layer = 6
-allowed = ["orna-security"]
+allowed = ["orna-security", "orna-host-fs"]
+
+[[crate]]
+name = "orna-host-fs"
+layer = 6
 
 [[crate]]
 name = "orna-security"
@@ -289,6 +293,11 @@ reason = "R1: optional internal edge; removed by the HostPort trait (stage 05a)"
 id = "V7"
 key = "optional:orna-evaluator->orna-sys"
 reason = "R1: optional internal edge; removed by the HostPort trait (stage 05a)"
+
+[[known]]
+id = "V7b"
+key = "optional:orna-evaluator->orna-host-fs"
+reason = "R1: optional internal edge, same feature gate as orna-sys (system-host-bindings); removed by the HostPort trait (stage 05a)"
 
 [[known]]
 id = "V9"

@@ -643,7 +643,7 @@ async fn publish_then_history_then_offline_copy_carries_the_publication_commit()
         .await
         .unwrap();
     let capability = repository.capture_capability(relation_id).unwrap();
-    let mut filesystem = orna_sys::FilesystemProvider::with_limits(1 << 20, 16).unwrap();
+    let mut filesystem = orna_host_fs::FilesystemProvider::with_limits(1 << 20, 16).unwrap();
     filesystem.allow_root(source.path()).unwrap();
     let mut bindings =
         orna_evaluator::SysHostBindingRegistry::new(orna_sys::EnvironmentProvider::default())

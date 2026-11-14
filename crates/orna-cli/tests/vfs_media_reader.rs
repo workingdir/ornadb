@@ -17,9 +17,10 @@ use std::{
 };
 
 use orna_evaluator::SysHostBindingRegistry;
+use orna_host_fs::FilesystemProvider;
 use orna_repository::Repository;
 use orna_runtime::RuntimeState;
-use orna_sys::{EnvironmentProvider, FilesystemProvider};
+use orna_sys::EnvironmentProvider;
 use rustix::fs::{Advice, fadvise};
 use tempfile::TempDir;
 

@@ -5,8 +5,9 @@
 use std::path::Path;
 
 use orna_evaluator::SysHostBindingRegistry;
+use orna_host_fs::FilesystemProvider;
 use orna_runtime::{RuntimeIdentity, RuntimeState};
-use orna_sys::{EnvironmentProvider, FilesystemProvider};
+use orna_sys::EnvironmentProvider;
 use orna_value::decode_rov3_blob_metadata;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;

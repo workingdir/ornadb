@@ -24,7 +24,7 @@ struct Collector {
 }
 
 fn collect_host_operations(
-    source_root: &Path,
+    source_roots: &[&Path],
 ) -> Result<BTreeMap<String, HostOperationDescriptor>, String> {
     fn visit_sources(root: &Path, collector: &mut Collector) -> Result<(), String> {
         let mut entries = fs::read_dir(root)
@@ -48,7 +48,9 @@ fn collect_host_operations(
     }
 
     let mut collector = Collector::default();
-    visit_sources(source_root, &mut collector)?;
+    for source_root in source_roots {
+        visit_sources(source_root, &mut collector)?;
+    }
     if !collector.errors.is_empty() {
         return Err(collector.errors.join("\n"));
     }
@@ -60,9 +62,9 @@ fn collect_host_operations(
 }
 
 pub fn generate_typed_host_registry(
-    source_root: &Path,
+    source_roots: &[&Path],
 ) -> Result<SystemHostOperationRegistry, String> {
-    let operations = collect_host_operations(source_root)?;
+    let operations = collect_host_operations(source_roots)?;
     let mut roles = BTreeMap::<String, HostProviderRole>::new();
     for operation in operations.values() {
         let entry = roles
@@ -111,8 +113,8 @@ pub fn serialize_host_registry(registry: &SystemHostOperationRegistry) -> Result
 }
 
 /// Regenerates the host registry for parity test targets.
-pub fn generate_host_registry(source_root: &Path) -> Result<String, String> {
-    let registry = generate_typed_host_registry(source_root)?;
+pub fn generate_host_registry(source_roots: &[&Path]) -> Result<String, String> {
+    let registry = generate_typed_host_registry(source_roots)?;
     serialize_host_registry(&registry)
 }
 

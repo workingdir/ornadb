@@ -6,8 +6,9 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 use orna_evaluator::SysHostBindingRegistry;
+use orna_host_fs::FilesystemProvider;
 use orna_runtime::{RuntimeIdentity, RuntimeState};
-use orna_sys::{EnvironmentProvider, FilesystemProvider};
+use orna_sys::EnvironmentProvider;
 use tempfile::TempDir;
 
 use format3::*;

@@ -11,8 +11,9 @@ use std::{
 use tempfile::TempDir;
 
 use orna_evaluator::SysHostBindingRegistry;
+use orna_host_fs::FilesystemProvider;
 use orna_runtime::RuntimeState;
-use orna_sys::{EnvironmentProvider, FilesystemProvider};
+use orna_sys::EnvironmentProvider;
 
 use orna_cli_testkit::format3;
 use orna_cli_testkit::media_commit;

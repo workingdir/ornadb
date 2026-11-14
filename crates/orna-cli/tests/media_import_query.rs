@@ -11,6 +11,7 @@ use std::{
 };
 
 use orna_evaluator::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
+use orna_host_fs::FilesystemProvider;
 use orna_repository::{
     KeyRange, NativeObjectKind, OrpBlobBinding, Repository, RowRevision, TypedKey,
     raw_content_bytes_digested,
@@ -19,7 +20,7 @@ use orna_runtime::{
     NoFault, RequestIdentity, RequestState, RuntimeIdentity, RuntimeState, TableMutation,
     TableObjectId, TerminalOutcome,
 };
-use orna_sys::{EnvironmentProvider, FilesystemProvider};
+use orna_sys::EnvironmentProvider;
 use orna_value::{
     BlobMetadata, BlobMetadataFilter, compare_blob_metadata, decode_rov3_blob_metadata,
     selected_suffix,

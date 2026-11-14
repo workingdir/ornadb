@@ -15,13 +15,14 @@
 use std::{path::Path, process::Command};
 
 use orna_evaluator::SysHostBindingRegistry;
+use orna_host_fs::FilesystemProvider;
 use orna_repository::{
     AdmittedRow, FormatContextError, GitHashAlgorithm, KeyRange, NativeOid, RangeVerification,
     Repository, TypedKey,
     complete_copy::{CompleteCopyReadError, export_complete_copy, read_complete_copy_manifest},
 };
 use orna_runtime::{RuntimeIdentity, RuntimeState};
-use orna_sys::{EnvironmentProvider, FilesystemProvider};
+use orna_sys::EnvironmentProvider;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 

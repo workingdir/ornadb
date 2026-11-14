@@ -14,10 +14,11 @@ use std::{
 };
 
 use orna_evaluator::SysHostBindingRegistry;
+use orna_host_fs::FilesystemProvider;
 use orna_repository::{AdmittedRow, FormatContextError, KeyRange, Repository};
 use orna_runtime::{PublicationFreeze, RuntimeState, WriterLease};
 use orna_storage::{PublicationChurn, RuntimePublicationCoordinator};
-use orna_sys::{EnvironmentProvider, FilesystemProvider};
+use orna_sys::EnvironmentProvider;
 use tempfile::TempDir;
 
 #[path = "../../orna-cli-testkit/src/format3.rs"]
