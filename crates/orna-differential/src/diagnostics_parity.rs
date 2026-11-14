@@ -304,6 +304,13 @@ pub fn case_reason(case: &str, code: &str) -> Option<&'static str> {
             "OPEN: HIR reports Locale and Str cannot both hold at the format argument; the checker accepts it \
              (the same stdlib format signature question)",
         ),
+        _ => spec_reason(name, code),
+    }
+}
+
+/// Reasons for the remaining cases, split from `case_reason` to keep each function under the line budget.
+fn spec_reason(name: &str, code: &str) -> Option<&'static str> {
+    match (name, code) {
         ("lambda-empty-record.orna", "ORNA-INFER-011") => Some(
             "FIXTURE SPEC-INVALID: the fixture passes Unit where the lambda takes the empty record {}; ARROW-001(1) \
              and RECORD-002 do not admit it, so HIR's rejection is the spec verdict. This slice does not change \
