@@ -1892,6 +1892,7 @@ dependencies = [
  "num-bigint 0.4.8",
  "orna-base",
  "orna-evaluator",
+ "orna-exec",
  "orna-repository",
  "orna-stream",
  "orna-syntax",

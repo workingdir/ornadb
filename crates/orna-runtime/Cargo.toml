@@ -12,6 +12,7 @@ crash-barriers = ["orna-repository/crash-barriers"]
 
 [dependencies]
 ed25519-dalek = { version = "2.2.0", default-features = false, features = ["std"] }
+orna-exec = { path = "../orna-exec" }
 libsql = { version = "0.9.29", default-features = false, features = ["core"] }
 num-bigint = "0.4.6"
 orna-base = { path = "../orna-base" }
