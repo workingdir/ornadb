@@ -1462,6 +1462,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "orna-citation-ratchet"
+version = "1.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "orna-cli"
 version = "0.1.0"
 dependencies = [
@@ -2066,6 +2074,7 @@ dependencies = [
 name = "orna-traceability"
 version = "1.0.0"
 dependencies = [
+ "orna-citation-ratchet",
  "orna-conformance",
  "orna-sys",
  "serde",

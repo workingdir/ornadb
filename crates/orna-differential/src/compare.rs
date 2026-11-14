@@ -492,7 +492,7 @@ pub struct ExecutorGapAllowance {
     pub case: String,
     /// The error code the executor answers.
     pub executor: String,
-    /// The error code the old pipeline answers.
+    /// The error code the old pipeline answers, or `ok` when the old pipeline returns a result.
     pub old: String,
     /// Why the two answers differ and what the executor is missing.
     pub reason: String,

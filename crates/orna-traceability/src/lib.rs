@@ -1,8 +1,6 @@
 //! Bounded, logical traceability for the published Orna 1.1.0 reference bundle.
 //! The report intentionally contains identifiers and statuses, never source bodies or host paths.
 
-pub mod citation_ratchet;
-
 use orna_conformance::{
     EngineWitnesses, EvidenceStatus, ImplementationEvidenceAggregate,
     ImplementationEvidenceOverlay, ImplementationEvidenceSource, ScenarioExecutionWitnesses, Stage,
