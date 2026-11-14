@@ -26,6 +26,17 @@ pub struct Call {
     pub piped: bool,
 }
 
+/// A labelled argument of a member call whose parameters are not yet known. See [`Callee::Pending`].
+#[derive(Clone, Debug)]
+pub struct NamedArg {
+    /// The label, as written.
+    pub name: crate::Name,
+    /// The value the argument supplies.
+    pub value: ExprId,
+    /// The argument's span, for diagnostics.
+    pub span: orna_syntax_ast::SourceSpan,
+}
+
 /// What a call invokes.
 #[derive(Clone, Debug)]
 pub enum Callee {
@@ -78,6 +89,10 @@ pub enum Callee {
         base: ExprId,
         /// The member name, as written.
         name: crate::Name,
+        /// The labelled arguments. Their parameters are unknown until typing settles the member, so typing binds
+        /// them against the settled callee's declared parameters (ORNA-EVAL-ARGUMENT for an unknown or duplicate
+        /// label, or a missing required parameter).
+        named: Box<[NamedArg]>,
     },
     /// An enum variant, nominal or `Money<C>` constructor.
     Ctor {

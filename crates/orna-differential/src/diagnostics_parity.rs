@@ -335,12 +335,10 @@ fn spec_reason(name: &str, code: &str) -> Option<&'static str> {
              is right is not established",
         ),
         ("legacy-checkpoint-reset-method.orna", "ORNA-EVAL-ARGUMENT") => Some(
-            "both reject: HIR reports no parameter is named `to`; the checker reports ORNA100-E-SYS-ADMIN-METHOD \
-             (system rows are read-only; use sys.admin.reset_checkpoint)",
+            "both reject with ORNA100-E-SYS-ADMIN-METHOD (system rows are read-only; use sys.admin.reset_checkpoint); OPEN: HIR also reports ORNA-EVAL-ARGUMENT (no parameter is named `to`) because it binds named arguments at lowering, before the receiver type is known",
         ),
         ("legacy-stream-skip-method.orna", "ORNA-EVAL-ARGUMENT") => Some(
-            "both reject: HIR reports no parameter is named `reason`; the checker reports ORNA100-E-SYS-ADMIN-METHOD \
-             (system rows are read-only; use sys.admin.skip_failure)",
+            "both reject with ORNA100-E-SYS-ADMIN-METHOD (system rows are read-only; use sys.admin.skip_failure); OPEN: HIR also reports ORNA-EVAL-ARGUMENT (no parameter is named `reason`) because it binds named arguments at lowering, before the receiver type is known",
         ),
         ("legacy-tryfrom.orna", "ORNA-S021-TYPE") => Some(
             "both reject: the checker reports a generic protocol instantiation it cannot validate (ORNA-S021-TYPE); \

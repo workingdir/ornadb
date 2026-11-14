@@ -20,7 +20,7 @@ use crate::{
 };
 
 use super::blocks::lower_block;
-use super::calls::{attach_type_arguments, classify_callee};
+use super::calls::{attach_type_arguments, classify_callee, defer_named_arguments};
 use super::classify::ParamInfo;
 use super::control::lower_control;
 use super::declare::Builder;
@@ -851,6 +851,7 @@ fn lower_call(
             )
         })
         .collect::<Vec<_>>();
+    let (lowered, callee) = defer_named_arguments(builder, module, callee, lowered);
     let placeholder = error_expr(builder, state, span.clone());
     let (args, piped) = builder.bind_arguments(
         module,

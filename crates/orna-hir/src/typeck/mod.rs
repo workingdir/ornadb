@@ -44,6 +44,7 @@ use crate::{
 };
 
 mod call;
+mod call_targs;
 mod case;
 #[cfg(test)]
 mod case_tests;
@@ -61,6 +62,7 @@ mod generics_tests;
 mod money;
 #[cfg(test)]
 mod money_tests;
+mod named_args;
 mod nominal;
 #[cfg(test)]
 mod null_compare_tests;
@@ -70,6 +72,7 @@ mod operator;
 mod option_pattern_tests;
 mod protocol;
 mod quantity;
+mod sys_admin;
 mod table_fields;
 mod table_write;
 #[cfg(test)]
@@ -547,6 +550,7 @@ impl<'a> BodyCheck<'a> {
         generics.extend((0..added).map(|offset| GenericParam {
             name: Name::new(&format!("T{}", first + offset)),
             bounds: Vec::new(),
+            implicit: true,
         }));
         ty
     }
