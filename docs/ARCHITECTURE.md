@@ -22,6 +22,9 @@ undocumented edge.
 The planned split of the largest crates into smaller shared crates, with measured
 sizes and slice order, is in [design/crate-split-plan.md](design/crate-split-plan.md).
 
+The second wave of that split (wave-2 candidates, measured after wave 1, with slice
+order and blockers) is in [design/crate-split-plan-wave2.md](design/crate-split-plan-wave2.md).
+
 ## 2. The layer table
 
 A crate may depend only on a crate in a lower layer. A same-layer dependency is

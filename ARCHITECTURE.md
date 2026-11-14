@@ -44,7 +44,7 @@ into `orna-base` and `orna-value` in stage 03.
 | 11 | project and live lease | orna-project, orna-project-repl, orna-live-lease |
 | 12 | presentation | orna-protocol, orna-serving, orna-live |
 | 13 | engine | orna-application |
-| 14 | edges | orna-cli, orna-fuse, orna-cli-testkit, orna-differential, orna-lsp, orna-conformance, orna-traceability, orna-table |
+| 14 | edges | orna-cli, orna-fuse, orna-cli-testkit, orna-differential, orna-lsp, orna-conformance, orna-traceability, orna-citation-ratchet, orna-table |
 | 15 | archive | orna-compat-v1 |
 
 `docs/design/layers.toml` is the machine-readable table and the source of truth;

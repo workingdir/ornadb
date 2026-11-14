@@ -1,0 +1,12 @@
+[package]
+name = "orna-citation-ratchet"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.95"
+license.workspace = true
+description = "Requirement citation ratchet for the OrnaDB reference bundle (tool, never linked into the shipped binary)"
+publish = false
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"

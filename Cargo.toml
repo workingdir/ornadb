@@ -3,6 +3,7 @@ members = [
     "crates/orna-base",
     "crates/orna-application",
     "crates/orna-cbor",
+    "crates/orna-citation-ratchet",
     "crates/orna-cli",
     "crates/orna-cli-support",
     "crates/orna-fuse",

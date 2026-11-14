@@ -240,7 +240,12 @@ role = "oracle"
 [[crate]]
 name = "orna-traceability"
 layer = 14
-allowed = ["orna-conformance"]
+allowed = ["orna-conformance", "orna-citation-ratchet"]
+
+[[crate]]
+name = "orna-citation-ratchet"
+layer = 14
+role = "tool"
 
 [[crate]]
 name = "orna-compat-v1"

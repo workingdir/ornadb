@@ -466,10 +466,14 @@ name = "orna-table"
 [[crate]]
 name = "orna-traceability"
 [crate.files]
-"src/citation_ratchet.rs" = 1611
-"src/lib.rs" = 2101
+"src/lib.rs" = 2099
 [crate.functions]
 "src/lib.rs::generate_inner" = 122
+
+[[crate]]
+name = "orna-citation-ratchet"
+[crate.files]
+"src/lib.rs" = 1611
 
 [[crate]]
 name = "orna-value"

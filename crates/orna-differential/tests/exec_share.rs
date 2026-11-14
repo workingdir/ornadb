@@ -45,11 +45,11 @@ fn executor_agreement_with_the_old_pipeline_only_grows() {
                         continue;
                     }
                 };
-                if observation.outcome.as_ref() != Some(&outcome) {
-                    if allowances
-                        .outcome_allowed(case, &outcome, observation.outcome.as_ref())
-                        .is_none()
-                    {
+                if observation.outcome != outcome {
+                    let allowed = outcome.as_ref().and_then(|executor| {
+                        allowances.outcome_allowed(case, executor, observation.outcome.as_ref())
+                    });
+                    if allowed.is_none() {
                         mismatches.push(format!(
                             "{}: executor {outcome:?}, old {:?}",
                             case.id, observation.outcome
