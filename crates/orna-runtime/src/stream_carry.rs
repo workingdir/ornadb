@@ -352,11 +352,23 @@ fn legacy_consumer_identity(row: &CheckpointRow) -> Result<[u8; 32], RuntimeErro
 /// Format-3 consumer identity: SOV-3 domain digest over the natural consumer
 /// identity components. Code revision is excluded.
 fn format3_consumer_identity(row: &CheckpointRow) -> Result<[u8; 32], RuntimeError> {
+    consumer_identity_digest(&row.principal, &row.root, &row.function, &row.binding)
+}
+
+/// The SOV-3 digest of the four natural consumer identity components, in
+/// `orna.consumer.v3` order. Shared with the `sys.Run`/`sys.Stream` projection so
+/// both name one consumer identically.
+pub(crate) fn consumer_identity_digest(
+    principal: &str,
+    root: &str,
+    function: &str,
+    binding: &str,
+) -> Result<[u8; 32], RuntimeError> {
     let payload = Raw::Array(vec![
-        Raw::Text(row.principal.clone()),
-        Raw::Text(row.root.clone()),
-        Raw::Text(row.function.clone()),
-        Raw::Text(row.binding.clone()),
+        Raw::Text(principal.to_owned()),
+        Raw::Text(root.to_owned()),
+        Raw::Text(function.to_owned()),
+        Raw::Text(binding.to_owned()),
     ]);
     sov3_context_free_domain_digest("orna.consumer.v3", &payload)
         .map_err(|_| RuntimeError::RecoveryInvalid)

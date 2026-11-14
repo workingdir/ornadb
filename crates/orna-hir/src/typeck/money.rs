@@ -8,6 +8,17 @@ use crate::{ArgValue, BinOp, Body, DefId, HirDiagnostic, RelOp, Ty};
 use super::{BodyCheck, NotYetReason};
 
 impl<'a> BodyCheck<'a> {
+    /// The type the Money precheck sees for an operand. A currency literal is lowered as `Money<C>` with `C` already
+    /// on the node (hir-host.md B4), while its constructor call infers a fresh currency; the lowered type is used only
+    /// when it names a currency, so no other operand's type changes.
+    pub(super) fn money_operand(&self, lowered: Ty, inferred: Ty) -> Ty {
+        if crate::engine_money::money_currency(self.program, lowered).is_some() {
+            lowered
+        } else {
+            inferred
+        }
+    }
+
     /// Records the published code for a `Money` operator rejection and returns the error type, or returns `None` when
     /// the operands are not a rejected Money shape.
     pub(super) fn money_operator_rejection(

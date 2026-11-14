@@ -59,6 +59,15 @@ impl Decimal {
     ///
     /// `ORNA-EVAL-LIMIT` when the scale or the shift exceeds [`MAX_EXPONENT`].
     pub(crate) fn round_to_scale(&self, scale: usize) -> Result<Self, Stop> {
+        self.round_to_scale_with(scale, RoundingMode::HalfEven)
+    }
+
+    /// `self` rounded to `scale` digits after the point under `mode`. The errors are those of [`Self::round_to_scale`].
+    pub(crate) fn round_to_scale_with(
+        &self,
+        scale: usize,
+        mode: RoundingMode,
+    ) -> Result<Self, Stop> {
         if scale > MAX_EXPONENT {
             return Err(Stop::Error("ORNA-EVAL-LIMIT"));
         }
@@ -67,9 +76,26 @@ impl Decimal {
             self.coefficient() * BigInt::from(10u8).pow(digits(&shift)?)
         } else {
             let divisor = BigInt::from(10u8).pow(digits(&-shift)?);
-            round_with(RoundingMode::HalfEven, self.coefficient(), &divisor)
+            round_with(mode, self.coefficient(), &divisor)
         };
         Self::new(coefficient, -BigInt::from(scale))
+    }
+
+    /// `self` as an integer count of `10^-scale` units, or `None` when `self` has a finer digit than `scale`.
+    ///
+    /// # Errors
+    ///
+    /// `ORNA-EVAL-LIMIT` when the shift exceeds [`MAX_EXPONENT`].
+    pub(crate) fn scaled_units(&self, scale: usize) -> Result<Option<BigInt>, Stop> {
+        let shift = self.exponent10() + BigInt::from(scale);
+        if shift.sign() == Sign::Plus || shift.is_zero() {
+            return Ok(Some(
+                self.coefficient() * BigInt::from(10u8).pow(digits(&shift)?),
+            ));
+        }
+        let divisor = BigInt::from(10u8).pow(digits(&-shift)?);
+        let (quotient, remainder) = self.coefficient().div_rem(&divisor);
+        Ok(remainder.is_zero().then_some(quotient))
     }
 }
 

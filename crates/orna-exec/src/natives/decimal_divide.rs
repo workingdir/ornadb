@@ -13,7 +13,7 @@ use crate::natives::values::exactly;
 use crate::value::Value;
 
 /// The `core.Rounding` members and the mode each one selects.
-const MODES: [(&str, RoundingMode); 6] = [
+pub(super) const MODES: [(&str, RoundingMode); 6] = [
     ("half_even", RoundingMode::HalfEven),
     ("half_up", RoundingMode::HalfUp),
     ("toward_zero", RoundingMode::TowardZero),
@@ -48,7 +48,7 @@ pub(super) fn divide(
 }
 
 /// The mode a payload-free `core.Rounding` member selects, or `ORNA-EVAL-TYPE` for any other value.
-fn rounding_mode(rounding: &Value) -> Result<RoundingMode, Stop> {
+pub(super) fn rounding_mode(rounding: &Value) -> Result<RoundingMode, Stop> {
     let Value::Enum {
         variant_id,
         payload: None,

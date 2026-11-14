@@ -45,7 +45,7 @@ pub use globals::{Globals, evaluate_global};
 pub use host::FixtureHost;
 pub use host::{
     ActivationContext, Host, HostFailure, HostInfo, HostInstant, HostManifest, HostRuntimeMode,
-    ProgramCatalog, RowSource, StoreHost, SysSlot,
+    ProgramCatalog, RowSource, RuntimeHostRows, StoreHost, SysSlot,
 };
 pub use machine::{
     ExecLimits, Measured, Run, measure_entry, measure_entry_in, measure_entry_with_host,
