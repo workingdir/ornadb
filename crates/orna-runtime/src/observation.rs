@@ -19,10 +19,8 @@ use crate::stream_store::{
 };
 use crate::{RuntimeState, opaque_reference_key, row_reference_raw};
 use libsql::{Connection, TransactionBehavior, params};
-use orna_stream::{
-    CheckpointKey, CommitResult, ConsumerIdentity, DeliveryIdentity, FailureIdentity,
-    FailureRecord, SafeDiagnostic, StreamStatus,
-};
+use orna_stream::{CommitResult, FailureIdentity, FailureRecord, SafeDiagnostic, StreamStatus};
+use orna_stream_identity::{CheckpointKey, ConsumerIdentity, DeliveryIdentity};
 use orna_value::{
     CheckpointRef, CwdCapture, FailureRef, InvocationRef, OvbRaw, RowRef, RunRef, SYS_RUN_TABLE_ID,
     SYS_STREAM_TABLE_ID, SnapshotRef, StreamRef, Value, checkpoint_reference, failure_reference,

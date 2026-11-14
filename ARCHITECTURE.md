@@ -31,7 +31,7 @@ into `orna-base` and `orna-value` in stage 03.
 |---|---|---|
 | 0 | primitives | orna-base |
 | 1 | value | orna-value, orna-cbor, orna-sys-model, orna-unicode |
-| 2 | syntax | orna-syntax, orna-intrinsics, orna-sys-codegen, orna-cursor |
+| 2 | syntax, stream identity | orna-syntax, orna-intrinsics, orna-sys-codegen, orna-cursor, orna-stream-identity |
 | 3 | identity and IR | orna-hir, orna-sys-id, orna-standard-sources, orna-sys-macros |
 | 4 | analysis | orna-check |
 | 5 | evaluation | orna-evaluator, orna-repl |

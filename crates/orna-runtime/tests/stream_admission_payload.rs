@@ -24,10 +24,10 @@ use orna_runtime::{
     StreamSourceKind, StreamSourcePoll, StreamStep, WriterLease,
 };
 use orna_stream::{
-    AsyncCheckpointBackend, CheckpointPrecondition, CommitIntent, CommitResult, Component,
-    ConsumerIdentity, DeliveryIdentity, DiagnosticClass, DiagnosticCode, LeasePurpose, Position,
-    RejectReason, SafeDiagnostic, StreamFailurePayload,
+    AsyncCheckpointBackend, CheckpointPrecondition, CommitIntent, CommitResult, DiagnosticClass,
+    DiagnosticCode, LeasePurpose, RejectReason, SafeDiagnostic, StreamFailurePayload,
 };
+use orna_stream_identity::{Component, ConsumerIdentity, DeliveryIdentity, Position};
 use tempfile::{Builder, TempDir};
 use tokio::sync::Notify;
 
@@ -112,7 +112,7 @@ enum NextMode {
 }
 
 struct CountedSource {
-    key: orna_stream::CheckpointKey,
+    key: orna_stream_identity::CheckpointKey,
     item: Option<StreamItem>,
     payload_calls: Arc<AtomicUsize>,
     mode: Option<NextMode>,
@@ -120,7 +120,7 @@ struct CountedSource {
 
 impl CountedSource {
     fn immediate(
-        key: orna_stream::CheckpointKey,
+        key: orna_stream_identity::CheckpointKey,
         delivery: DeliveryIdentity,
         payload_calls: Arc<AtomicUsize>,
     ) -> Self {
@@ -136,7 +136,7 @@ impl CountedSource {
     }
 
     fn blocked(
-        key: orna_stream::CheckpointKey,
+        key: orna_stream_identity::CheckpointKey,
         delivery: DeliveryIdentity,
         payload_calls: Arc<AtomicUsize>,
         started: Arc<Notify>,
@@ -171,7 +171,7 @@ impl StreamSource for CountedSource {
         }
     }
 
-    fn checkpoint_key(&self) -> orna_stream::CheckpointKey {
+    fn checkpoint_key(&self) -> orna_stream_identity::CheckpointKey {
         self.key.clone()
     }
 

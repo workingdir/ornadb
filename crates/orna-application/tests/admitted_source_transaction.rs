@@ -7,10 +7,11 @@ use orna_live_lease::LiveApplicationWorkSupervisor;
 use orna_protocol::{Envelope, Message, PresentationContext, ResultStatus};
 use orna_repository::Repository;
 use orna_runtime::{
-    Component, ConsumerIdentity, FaultInjector, FaultPoint, RequestIdentity, RequestState,
-    RunObservationRegistration, RuntimeError, RuntimeIdentity, RuntimeState, StagedTableActivation,
-    TerminalOutcome, WriterLease,
+    FaultInjector, FaultPoint, RequestIdentity, RequestState, RunObservationRegistration,
+    RuntimeError, RuntimeIdentity, RuntimeState, StagedTableActivation, TerminalOutcome,
+    WriterLease,
 };
+use orna_stream_identity::{Component, ConsumerIdentity};
 use orna_value::{CanonicalValue, OvbRaw};
 use std::{
     fs,

@@ -244,7 +244,7 @@ fn diagnostics(corpus: &Corpus) -> DiagnosticsSection {
         if expected.contains(&line) {
             matched += 1;
             for code in old.symmetric_difference(new) {
-                let reason = diagnostics_parity::recorded_reason(code).unwrap_or("UNRECORDED");
+                let reason = diagnostics_parity::reason_for(case, code).unwrap_or("UNRECORDED");
                 *ledger.entry((code.clone(), reason.to_owned())).or_default() += 1;
             }
         } else {

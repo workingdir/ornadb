@@ -21,11 +21,11 @@ use libsql::{Connection, params};
 use orna_stream::Checkpoint as StreamCheckpoint;
 use orna_stream::{
     AssertionDiagnosticCode, AssertionDiagnosticDetail, AsyncCheckpointBackend,
-    AsyncFailurePayloadBackend, CheckpointKey, CommitIntent, CommitResult, Component,
-    ConsumerIdentity, DeliveryIdentity, DeliveryLease, DiagnosticClass, DiagnosticCode,
-    FailureIdentity, FailureRecord, FailureStatus, LeasePurpose, ReplayGrant, SafeAssertionWitness,
-    SafeDiagnostic, StreamFailurePayload, StreamStatus,
+    AsyncFailurePayloadBackend, CommitIntent, CommitResult, DeliveryLease, DiagnosticClass,
+    DiagnosticCode, FailureIdentity, FailureRecord, FailureStatus, LeasePurpose, ReplayGrant,
+    SafeAssertionWitness, SafeDiagnostic, StreamFailurePayload, StreamStatus,
 };
+use orna_stream_identity::{CheckpointKey, Component, ConsumerIdentity, DeliveryIdentity};
 use orna_value::{AssertionRef, CwdCapture, ExpressionRef, ObjectRef, SafeText, SourceSpan};
 use std::future::Future;
 use std::pin::Pin;
