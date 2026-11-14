@@ -266,7 +266,13 @@ impl Builder {
             }
             orna_syntax_ast::UnitDefinition::Base => false,
         };
-        if affine_clause {
+        // Affine and offset clauses are library unit forms (units.md 8.5). The engine-embedded interface modules
+        // declare them (core.units); a user or project module still gets S022.
+        let embedded = matches!(
+            self.program.modules[module].origin,
+            crate::ModuleOrigin::Core | crate::ModuleOrigin::Sys
+        );
+        if affine_clause && !embedded {
             let span = self.pending[def.index()].span.clone();
             self.diagnose(
                 module,
