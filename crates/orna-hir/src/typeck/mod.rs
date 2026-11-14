@@ -62,6 +62,7 @@ mod generics_tests;
 mod money;
 #[cfg(test)]
 mod money_tests;
+mod named_args;
 mod nominal;
 #[cfg(test)]
 mod null_compare_tests;

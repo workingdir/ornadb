@@ -19,7 +19,7 @@ use orna_syntax_ast::SourceSpan as SyntaxSpan;
 
 use orna_syntax_ast::{Expr as AstExpr, TypeExpr};
 
-use crate::{Callee, DefId, ExprId, ExprKind, FieldRef, Name, NameTarget, TableOp};
+use crate::{Callee, DefId, ExprId, ExprKind, FieldRef, ModuleId, Name, NameTarget, TableOp};
 
 use super::BodyState;
 use super::classify::{Classified, ParamInfo};
@@ -45,16 +45,16 @@ fn param(name: &str, has_default: bool) -> ParamInfo {
     }
 }
 
-/// The labelled parameters of a member call the receiver's type settles, after its receiver. Only `divide` has any:
-/// `core.decimal.divide(value, scale:, rounding:)` on a `Decimal` receiver.
-fn pending_params(name: &Name) -> Option<Vec<ParamInfo>> {
-    (name.as_str() == "divide").then(|| {
-        vec![
-            param("value", false),
-            param("scale", false),
-            param("rounding", false),
-        ]
-    })
+/// A member call whose meaning the receiver's type decides; its labels bind at typing.
+fn pending_callee(base: ExprId, name: Name) -> (Callee, Option<Vec<ParamInfo>>) {
+    (
+        Callee::Pending {
+            base,
+            name,
+            named: Box::new([]),
+        },
+        None,
+    )
 }
 
 /// Whether a callee starts concurrent bodies: the lambdas it receives run as
@@ -91,8 +91,7 @@ pub(crate) fn classify_callee(
     if let AstExpr::Field { base, name, .. } = callee {
         let base = lower_expr(builder, state, base);
         let name = Name::new(name);
-        let params = pending_params(&name);
-        return Some((Callee::Pending { base, name }, params));
+        return Some(pending_callee(base, name));
     }
     let value = lower_expr(builder, state, callee);
     Some((Callee::Value { callee: value }, None))
@@ -203,8 +202,7 @@ fn classify_path(
         .collect::<Vec<_>>();
     if state.local(&names[0]).is_some() {
         let base = lower_path_value(builder, state, &segments[..segments.len() - 1]);
-        let params = pending_params(&last);
-        return Some((Callee::Pending { base, name: last }, params));
+        return Some(pending_callee(base, last));
     }
     if segments
         .first()
@@ -342,8 +340,7 @@ fn classify_member_path(
     // A relation stage on a table path (`Note.take(0)`) is the member call `rows.take(0)` with the table as the
     // receiver: typeck settles the stage and places the receiver at argument 0, as a pipe does.
     let base = lower_path_value(builder, state, &segments[..segments.len() - 1]);
-    let params = pending_params(&last);
-    Some((Callee::Pending { base, name: last }, params))
+    Some(pending_callee(base, last))
 }
 
 /// Reports a path whose root name does not resolve.
@@ -456,4 +453,44 @@ pub(crate) fn attach_type_arguments(
         other => other,
     };
     (callee, lowered)
+}
+
+/// Splits a member call's labelled arguments off its positional ones. Typing binds the labelled ones once the
+/// receiver's type settles the member, so they stay unbound on the callee; the positional ones bind here, in order.
+/// A positional argument after a labelled one is an error, as for any call.
+pub(crate) fn defer_named_arguments(
+    builder: &mut Builder,
+    module: ModuleId,
+    callee: crate::Callee,
+    lowered: Vec<(Option<Name>, ExprId, SyntaxSpan)>,
+) -> (Vec<(Option<Name>, ExprId, SyntaxSpan)>, crate::Callee) {
+    let crate::Callee::Pending { base, name, .. } = callee else {
+        return (lowered, callee);
+    };
+    let mut positional = Vec::new();
+    let mut named = Vec::new();
+    for (label, value, span) in lowered {
+        match label {
+            Some(label) => named.push(crate::NamedArg {
+                name: label,
+                value,
+                span,
+            }),
+            None if named.is_empty() => positional.push((None, value, span)),
+            None => builder.diagnose(
+                module,
+                crate::diag::ARGUMENT,
+                "a positional argument follows a named argument",
+                span,
+            ),
+        }
+    }
+    (
+        positional,
+        crate::Callee::Pending {
+            base,
+            name,
+            named: named.into_boxed_slice(),
+        },
+    )
 }

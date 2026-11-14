@@ -58,7 +58,7 @@ pub use body::{
     Arm, AssignOp, BinOp, Body, Capture, Expr, ExprKind, FieldRef, InterpPart, Lit, Local, LogicOp,
     Place, Stmt, UnOp,
 };
-pub use call::{Arg, ArgValue, Call, Callee, IntrinsicForm, RelOp, TableOp};
+pub use call::{Arg, ArgValue, Call, Callee, IntrinsicForm, NamedArg, RelOp, TableOp};
 pub use def::{
     AssertionDef, Bound, Def, DefKind, DimensionDef, EnumDef, FieldDef, FieldInitializer, FnBody,
     FnDef, GenericParam, ImplDef, LetDef, NativeAbi, NativeBinding, NativeDecl, NativeKey,

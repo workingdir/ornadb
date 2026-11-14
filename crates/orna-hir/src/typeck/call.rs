@@ -69,11 +69,11 @@ impl<'a> BodyCheck<'a> {
         span: SyntaxSpan,
     ) -> Result<Ty, NotYetReason> {
         let pending = match &call.callee {
-            Callee::Pending { base, name } => Some((*base, name.clone())),
+            Callee::Pending { base, name, named } => Some((*base, name.clone(), named.clone())),
             _ => None,
         };
         let mut protocol_member = false;
-        if let Some((base, name)) = pending {
+        if let Some((base, name, named)) = pending {
             let Some(settled) = self.settle_pending(body, base, &name, span.clone())? else {
                 return Ok(self.error());
             };
@@ -90,6 +90,9 @@ impl<'a> BodyCheck<'a> {
                 call.piped = true;
             }
             call.callee = settled;
+            if !named.is_empty() && !self.bind_named_arguments(call, &named, span.clone()) {
+                return Ok(self.error());
+            }
         }
         if !self.complete_targs(call, span.clone()) {
             return Ok(self.error());
