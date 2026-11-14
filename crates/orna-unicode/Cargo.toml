@@ -8,4 +8,5 @@ publish = false
 description = "Unicode 16.0.0 case folding, normalization and case-property tables shared by OrnaDB layers"
 
 [dependencies]
+unicode-case-mapping = "=1.0.0"
 unicode-normalization = "=0.1.24"

@@ -5,9 +5,9 @@
 use std::rc::Rc;
 
 use orna_hir::Ty;
+use orna_unicode::simple_case::{lowercase, uppercase, white_space};
 use unicode_normalization::UnicodeNormalization;
 
-use super::unicode_case::{lowercase, uppercase, white_space};
 use crate::error::Stop;
 use crate::machine::Machine;
 use crate::value::Value;
