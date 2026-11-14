@@ -19,11 +19,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use orna_evaluator::SysHostBindingRegistry;
+use orna_host_fs::FilesystemProvider;
 use orna_repository::{
     AdmittedRow, KeyRange, NativeGraphContext, NativeObjectKind, NativeOid, Repository, TypedKey,
 };
 use orna_runtime::RuntimeState;
-use orna_sys::{EnvironmentProvider, FilesystemProvider};
+use orna_sys::EnvironmentProvider;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 

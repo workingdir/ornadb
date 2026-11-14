@@ -171,11 +171,12 @@ fn generated_artifact_determinism_matrix_matches_embedded_and_build_outputs() {
     );
     let out_dir = Path::new(env!("OUT_DIR"));
     let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let host_registry_json = build_host::generate_host_registry(&source_root)
+    let host_fs_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../orna-host-fs/src");
+    let host_registry_json = build_host::generate_host_registry(&[&source_root, &host_fs_root])
         .expect("annotated native host operations regenerate deterministically");
     assert_eq!(
         host_registry_json,
-        build_host::generate_host_registry(&source_root)
+        build_host::generate_host_registry(&[&source_root, &host_fs_root])
             .expect("second native host operation registry projection"),
         "host operation registry bytes are stable across independent source walks"
     );
@@ -1545,7 +1546,9 @@ fn generated_provider_schema_drift_cannot_weaken_identifier_guard() {
     );
 
     let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let host_registry_json = build_host::generate_host_registry(&source_root)
+
+    let host_fs_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../orna-host-fs/src");
+    let host_registry_json = build_host::generate_host_registry(&[&source_root, &host_fs_root])
         .expect("host registry regenerates alongside the provider schema");
     let host_schema_json = build_host::generate_host_registry_schema()
         .expect("host operation schema regenerates alongside provider schema");
@@ -1777,7 +1780,9 @@ fn generated_provider_schema_accepts_reordered_operation_and_role_rows() {
 fn generated_artifact_drift_probe_rejects_tampered_outputs_and_stale_modules() {
     let regenerated = regenerate();
     let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let host_registry_json = build_host::generate_host_registry(&source_root).unwrap();
+    let host_fs_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../orna-host-fs/src");
+    let host_registry_json =
+        build_host::generate_host_registry(&[&source_root, &host_fs_root]).unwrap();
     let host_schema_json = build_host::generate_host_registry_schema().unwrap();
     let provider_schema_json = build_provider::generate_provider_registry_schema().unwrap();
     let out_dir = Path::new(env!("OUT_DIR"));

@@ -4,17 +4,17 @@ use std::sync::{Arc, Mutex};
 
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
+use orna_host_fs::{CaptureFileError, FilesystemProvider};
 use orna_repository::{
     CapturedBlobCandidate, GraphError, OrpBlobBinding, RepositoryCaptureCapability,
 };
 use orna_syntax_ast::Expr;
 use orna_sys::{
-    CaptureFileError, ClockProvider, EnvironmentDispatchValue, EnvironmentProvider,
-    EnvironmentProviderError, FailureCode, FilesystemProvider, HostHttpResponse, HostOperation,
-    HostOperationDescriptor, HostProvider, HttpProvider, OperationContract, OperationId, Origin,
-    ProcessProvider, ProviderDiagnostic, ProviderFailure, ProviderOffer, SemanticRoleContract,
-    SysEffect, SysFailureCode, SysFunction, SysFunctionBinding, SysFunctionHost,
-    SystemOperationProvider, TypeId, TypedValue,
+    ClockProvider, EnvironmentDispatchValue, EnvironmentProvider, EnvironmentProviderError,
+    FailureCode, HostHttpResponse, HostOperation, HostOperationDescriptor, HostProvider,
+    HttpProvider, OperationContract, OperationId, Origin, ProcessProvider, ProviderDiagnostic,
+    ProviderFailure, ProviderOffer, SemanticRoleContract, SysEffect, SysFailureCode, SysFunction,
+    SysFunctionBinding, SysFunctionHost, SystemOperationProvider, TypeId, TypedValue,
 };
 use orna_value::{Blob, ContextValue, Error as ValueError, ValueFormat};
 use orna_value::{CanonicalValue, OvbRaw, SafeText};

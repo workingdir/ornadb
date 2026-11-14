@@ -35,7 +35,7 @@ into `orna-base` and `orna-value` in stage 03.
 | 3 | identity and IR | orna-hir, orna-sys-id, orna-standard-sources, orna-sys-macros |
 | 4 | analysis | orna-check |
 | 5 | evaluation | orna-evaluator |
-| 6 | hosts (I/O) | orna-sys, orna-security |
+| 6 | hosts (I/O) | orna-host-fs, orna-sys, orna-security |
 | 7 | formats and planning | orna-evolution, orna-format3, orna-stream |
 | 8 | repository layout | orna-repository |
 | 9 | durable state | orna-runtime |

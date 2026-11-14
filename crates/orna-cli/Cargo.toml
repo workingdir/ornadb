@@ -44,6 +44,7 @@ orna-syntax = { path = "../orna-syntax" }
 orna-syntax-ast = { path = "../orna-syntax-ast" }
 orna-sys-id = { path = "../orna-sys-id" }
 orna-sys = { path = "../orna-sys" }
+orna-host-fs = { path = "../orna-host-fs" }
 orna-value = { path = "../orna-value" }
 serde_json = "1.0.151"
 getrandom = "0.3.4"

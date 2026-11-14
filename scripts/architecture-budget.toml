@@ -426,9 +426,13 @@ name = "orna-syntax"
 "src/parser.rs::validate_token_grammar" = 129
 
 [[crate]]
+name = "orna-host-fs"
+[crate.files]
+"src/lib.rs" = 2301
+
+[[crate]]
 name = "orna-sys"
 [crate.files]
-"src/host_filesystem.rs" = 2301
 "src/introspection.rs" = 17855
 "src/provider.rs" = 1354
 "src/system_api.rs" = 1529

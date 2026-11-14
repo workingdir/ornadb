@@ -121,9 +121,7 @@ use orna_runtime::{
     RuntimeTableIdentity, RuntimeTableRows, StagedTableActivation, TableActivationError,
     TableObjectId, TerminalOutcome, ValidatedTableRequestActivationCommit, WriterLease,
 };
-use orna_sys::{
-    EnvironmentProvider, FilesystemProvider, RuntimeMode, StdSnapshotPin, SysHostContext,
-};
+use orna_sys::{EnvironmentProvider, RuntimeMode, StdSnapshotPin, SysHostContext};
 use orna_value::{CanonicalValue, OvbRaw, Value};
 use sha2::{Digest, Sha256};
 

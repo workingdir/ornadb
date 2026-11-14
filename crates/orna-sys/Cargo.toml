@@ -20,6 +20,7 @@ bench = false
 
 [dependencies]
 orna-base = { path = "../orna-base" }
+orna-host-fs = { path = "../orna-host-fs" }
 orna-security = { path = "../orna-security" }
 orna-sys-id = { path = "../orna-sys-id" }
 orna-sys-macros = { path = "../orna-sys-macros" }

@@ -8,9 +8,10 @@ use std::{
 };
 
 use orna_evaluator::SysHostBindingRegistry;
+use orna_host_fs::FilesystemProvider;
 use orna_repository::{GitHashAlgorithm, NativeOid, Repository, TypedKey};
 use orna_runtime::{RuntimeState, RuntimeTableIdentity, TableObjectId};
-use orna_sys::{EnvironmentProvider, FilesystemProvider};
+use orna_sys::EnvironmentProvider;
 use orna_value::{
     BlobMetadata, NativeOid as ValueNativeOid, ROV3_BLOB_TAG, Raw, decode_canonical_storage_value,
 };

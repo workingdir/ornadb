@@ -512,7 +512,7 @@ async fn mount_blob_window_reads_charge_only_intersecting_chunks() {
         .unwrap();
     let writer = runtime.acquire_lease(identity.repository_id).await.unwrap();
     let capability = repository.capture_capability(relation_id).unwrap();
-    let mut provider = orna_sys::FilesystemProvider::with_limits(payload_len, 16).unwrap();
+    let mut provider = orna_host_fs::FilesystemProvider::with_limits(payload_len, 16).unwrap();
     provider.allow_root(source.path()).unwrap();
     let mut bindings =
         orna_evaluator::SysHostBindingRegistry::new(orna_sys::EnvironmentProvider::default())

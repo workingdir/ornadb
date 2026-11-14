@@ -10,7 +10,8 @@ use std::{
 };
 
 use orna_evaluator::SysHostBindingRegistry;
-use orna_sys::{EnvironmentProvider, FilesystemProvider, HttpProvider};
+use orna_host_fs::FilesystemProvider;
+use orna_sys::{EnvironmentProvider, HttpProvider};
 use orna_value::Raw;
 use orna_value::{CanonicalValue, OvbRaw};
 

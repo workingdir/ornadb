@@ -12,10 +12,11 @@ use orna_cli_testkit::format3;
 use orna_evaluator::{
     Environment, Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects,
 };
+use orna_host_fs::FilesystemProvider;
 use orna_project::{ProjectLoader, SourceRowRequest, admit_source_row};
 use orna_repository::{GitCommitRef, Repository};
 use orna_runtime::{NoFault, RuntimeState, TableObjectId};
-use orna_sys::{EnvironmentProvider, FilesystemProvider};
+use orna_sys::EnvironmentProvider;
 use orna_value::{
     AvailabilityState, BlobResolver, ContentReference, ContextValue, Error as ValueError,
     Format3Context, Format3Quota, GitHash, NativeOid, OwnerLifetime, Snapshot, ValueFormat,

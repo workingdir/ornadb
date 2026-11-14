@@ -135,7 +135,15 @@ fn main() {
         artifacts.api_selection_json,
     )
     .expect("write generated native sys API selection");
-    let typed_host_registry = build_host::generate_typed_host_registry(&source_root)
+    // Host operations annotated in `orna-host-fs` are part of this registry.
+    let host_fs_source_root = manifest.join("../orna-host-fs/src");
+    let host_fs_sources = rust_sources(&host_fs_source_root).expect("walk orna-host-fs source");
+    for source in &host_fs_sources {
+        println!("cargo:rerun-if-changed={}", source.display());
+    }
+    println!("cargo:rerun-if-changed={}", host_fs_source_root.display());
+    let host_source_roots = [source_root.as_path(), host_fs_source_root.as_path()];
+    let typed_host_registry = build_host::generate_typed_host_registry(&host_source_roots)
         .expect("annotated native sys host operations form a valid typed registry");
     let host_registry = build_host::serialize_host_registry(&typed_host_registry)
         .expect("serialize typed native sys host-operation registry");
