@@ -46,17 +46,19 @@ fn codes(program: &Program) -> Vec<&str> {
 
 #[test]
 fn a_user_unit_shadows_the_core_unit_of_the_same_name() {
-    // `m` is declared by core.units; the user's `m` must win, so `1.m` is not ambiguous.
-    let user = "pub unit m : Length base;\npub fn run() = 1.m;\n";
-    let program = checked(&[("main", user)]);
+    // `m` is declared by core.units and by the `lib` module. `main` has no own `m`, so both candidates are
+    // program-wide; the core one must drop out and `1.m` must not be ambiguous.
+    let lib = "pub dim Length;\npub unit m : Length base;\n";
+    let main = "pub fn run() = 1.m;\n";
+    let program = checked(&[("lib", lib), ("main", main)]);
     assert!(!codes(&program).contains(&AMBIGUOUS), "{:?}", codes(&program));
 }
 
 #[test]
 fn two_user_modules_declaring_one_unit_stay_ambiguous() {
-    let first = "pub unit q : Length base;\n";
-    let second = "pub unit q : Length base;\n";
-    let user = "pub fn run() = 1.q;\n";
-    let program = checked(&[("first", first), ("second", second), ("main", user)]);
+    let first = "pub dim Length;\npub unit q : Length base;\n";
+    let second = "pub dim Length;\npub unit q : Length base;\n";
+    let main = "pub fn run() = 1.q;\n";
+    let program = checked(&[("first", first), ("second", second), ("main", main)]);
     assert!(codes(&program).contains(&AMBIGUOUS), "{:?}", codes(&program));
 }
