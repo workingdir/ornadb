@@ -42,7 +42,7 @@ use orna_syntax_ast::{
 
 use crate::Route;
 use crate::case::{Case, CaseKind, Family};
-use crate::fixture_environment::{ATTACHED_SUPPORT, CURRENCY_SUPPORT, DATABASE_SUPPORT};
+use crate::fixture_environment::{ATTACHED_SUPPORT, CURRENCY_SUPPORT, DATABASE_SUPPORT, UNIT_SUPPORT};
 
 /// The repository's standard modules, parsed once per test process.
 struct StandardModule {
@@ -68,14 +68,14 @@ static STANDARD_MODULES: LazyLock<Vec<StandardModule>> = LazyLock::new(|| {
         .collect()
 });
 
-/// The fixture's unit namespace, which the old catalogue supplies to reference
-/// cases only (`catalogue_for`). A reference case reaches it through `use
-/// fixture.units.*;`, so it is lowered as an unowned module.
+/// The fixture's unit namespace, which reference cases reach through `use fixture.units.*;`. The new pipeline reads
+/// its declaration form (`fixture_environment::UNIT_SUPPORT`); the old catalogue reads the legacy form
+/// (`orna_check::FIXTURE_UNIT_SUPPORT`) for its own reference cases.
 static FIXTURE_UNITS: LazyLock<StandardModule> = LazyLock::new(|| {
     let logical = "fixture/units.orna".to_owned();
     StandardModule {
         path: module_path_of(&logical),
-        tree: parse_module_with_file(orna_check::FIXTURE_UNIT_SUPPORT, logical.clone()).value,
+        tree: parse_module_with_file(UNIT_SUPPORT, logical.clone()).value,
         logical,
     }
 });

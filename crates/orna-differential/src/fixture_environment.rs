@@ -39,6 +39,40 @@ pub table Payment {
 }
 ";
 
+/// The fixture unit namespace the reference cases reach through `use fixture.units.*;`, in the declaration form of
+/// units.md section 2. The old checker reads its own legacy declaration (`orna_check::FIXTURE_UNIT_SUPPORT`); the new
+/// pipeline reads this one. Temperature is not declared: an affine unit is a library type on HIR (section 8.5).
+pub const UNIT_SUPPORT: &str = "\
+pub enum Length {
+    m,
+    mile = 1609.344 m,
+    impl Unit {}
+}
+pub enum Mass {
+    kg,
+    impl Unit {}
+}
+pub enum Time {
+    s,
+    hour = 3600 s,
+    impl Unit {}
+}
+pub enum Energy {
+    J = kg * m^2 / s^2,
+    kWh = 3600000 J,
+    impl Unit {}
+}
+pub enum Information {
+    B,
+    MiB = 1048576 B,
+    impl Unit {}
+}
+pub enum Speed {
+    mph = 0.44704 m / s,
+    impl Unit {}
+}
+";
+
 /// The fixture currencies the old catalogue supplies to every reference module (`GBP`, `EUR`, `USD`,
 /// with `Money` from `core.money`'s root environment). Each is a nominal type implementing `Currency`
 /// with its code and minor digits, as ORNA-MONEY-004 requires. Reached through `use fixture.currencies.*;`.

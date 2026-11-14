@@ -18,6 +18,17 @@ use crate::{
     Name, NameTarget, ParamIdx, UnitDef, UnitFactor, UseContext, Visibility,
 };
 
+/// Whether `base` is a numeric literal, the only base a unit suffix applies to (ORNA-UNIT-008).
+pub(crate) fn is_numeric_literal(base: &AstExpr) -> bool {
+    matches!(
+        base,
+        AstExpr::Literal {
+            kind: LiteralKind::Integer | LiteralKind::Decimal | LiteralKind::Float,
+            ..
+        }
+    )
+}
+
 /// Lowers `literal.name`, a numeric literal with a unit suffix, as a call of that unit's constructor, so the
 /// checker types it as the unit. `None` when no unit of that name is in scope; the caller then tries the
 /// builtin postfix table. Several families in scope defining the name are ambiguous and reported by name.
@@ -28,13 +39,7 @@ pub(crate) fn lower_suffix_unit(
     name: &str,
     span: &SyntaxSpan,
 ) -> Option<ExprId> {
-    if !matches!(
-        base,
-        AstExpr::Literal {
-            kind: LiteralKind::Integer | LiteralKind::Decimal | LiteralKind::Float,
-            ..
-        }
-    ) {
+    if !is_numeric_literal(base) {
         return None;
     }
     let suffix = Name::new(name);

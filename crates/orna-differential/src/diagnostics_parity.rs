@@ -128,6 +128,11 @@ pub fn recorded_reason(code: &str) -> Option<&'static str> {
         "ORNA-S010-IMPORT" => {
             Some("HIR import diagnostic the checker does not report under this code; unclassified")
         }
+        "ORNA-UNIT-UNRESOLVED" => Some(
+            "HIR reports a numeric literal's suffix that no unit of the unit fixture declares (ORNA-UNIT-008 step 3); \
+             the affine unit C is a library type on HIR (units.md section 8.5), not a declared unit, so its \
+             E5002/E5003 come from the affine rule the checker runs and HIR does not port",
+        ),
         "ORNA-S012-UNRESOLVED" => Some(
             "HIR resolves environment-only names (fixture tables, currency and unit names, connectors, \
              harness names) that the checker resolves from its observer catalogue, and reports missing \
