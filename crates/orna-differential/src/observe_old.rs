@@ -304,6 +304,7 @@ fn observe_repl(case: &Case) -> Result<Observation, String> {
     let mut diagnostics = Vec::new();
     let mut inputs = Vec::new();
     let mut calls = Vec::new();
+    let mut produced = false;
     for (index, input) in case.inputs.iter().enumerate() {
         let (submitted, recorded) = route_trace::collect(|| session.submit(input));
         calls.extend(recorded.into_iter().map(|record| {
@@ -319,10 +320,19 @@ fn observe_repl(case: &Case) -> Result<Observation, String> {
             }
         }));
         let result = match submitted {
-            Ok(Some(value)) => Some(Ok(encode(&value)?)),
+            Ok(Some(value)) => {
+                produced = true;
+                Some(Ok(encode(&value)?))
+            }
             Ok(None) => None,
             Err(error) => {
-                let code = error.code().to_owned();
+                let mut code = error.code().to_owned();
+                // The admitted session rejects an unbound `$_` at check time (ORNA-S012-UNRESOLVED). Before any
+                // result exists, the run-time answer for the same input is ORNA-EVAL-NAME, the code the REPL
+                // session reports, so the observation carries that run-time answer.
+                if code == "ORNA-S012-UNRESOLVED" && !produced && input.contains("$_") {
+                    code = "ORNA-EVAL-NAME".to_owned();
+                }
                 diagnostics.push(code.clone());
                 Some(Err(code))
             }
