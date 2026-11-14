@@ -98,9 +98,9 @@ pub(crate) fn lower_type(
                 effects: EffectRow::Hidden,
             }))
         }
-        // `A * B` and `A / B` are dimension products. H1 keeps the base type
-        // of the left operand; the dimension algebra arrives in H2.
-        TypeExpr::Product { lhs, .. } => lower_type(builder, module, generics, lhs),
+        TypeExpr::Product { lhs, op, rhs, .. } => {
+            lower_product(builder, module, generics, lhs, op, rhs)
+        }
     }
 }
 
@@ -287,6 +287,108 @@ fn lower_quantity(
         Some(key) => builder.program.tys.intern(TyKind::Quantity(number, key)),
         None => number,
     })
+}
+
+/// The numeric kind a unit-carrying spelling such as `Decimal<kWh>` measures, or `None` for any other spelling.
+fn numeric_builtin(spelling: &str) -> Option<TyKind> {
+    Some(match spelling {
+        "Int" => TyKind::Int,
+        "Float" => TyKind::Float,
+        "Decimal" => TyKind::Decimal,
+        _ => return None,
+    })
+}
+
+/// The unit key of a written unit name such as `kWh`, or `None` when the written type is not a bare unit name or the
+/// name does not resolve to a unit with a key.
+fn unit_operand(
+    builder: &mut Builder,
+    module: ModuleId,
+    expr: &TypeExpr,
+) -> Option<crate::ids::UnitKeyId> {
+    let TypeExpr::Name {
+        path, arguments, ..
+    } = expr
+    else {
+        return None;
+    };
+    let [name] = path.as_slice() else {
+        return None;
+    };
+    if !arguments.is_empty() {
+        return None;
+    }
+    let lookup = builder.resolve_unit(module, &Name::new(name));
+    let super::declare::UnitLookup::Found(unit) = lookup else {
+        return None;
+    };
+    builder.unit_eval.table.unit_key(unit)
+}
+
+/// The `Rate` library type of `core.rate`, when that module is loaded.
+fn rate_def(builder: &Builder) -> Option<DefId> {
+    let path = crate::ModulePath::new([Name::new("core"), Name::new("rate")]);
+    let module = *builder.by_path.get(&path)?;
+    builder.program.modules[module]
+        .exports
+        .get(&Name::new("Rate"))
+        .copied()
+}
+
+/// Lowers `lhs * rhs` or `lhs / rhs` in type position (ORNA-MONEY-003, units.md section 8.3).
+///
+/// `Money<C> / U` with a bare unit `U` is the library type `Rate<C, Quantity<Decimal, U>>`. A product whose right
+/// operand is a bare unit combines that unit's key with the left operand's unit key; the result is the left operand's
+/// numeric type in the combined key, or the plain numeric type when the combined key is dimensionless. Any other
+/// product keeps the left operand, as H1 did.
+fn lower_product(
+    builder: &mut Builder,
+    module: ModuleId,
+    generics: &[Name],
+    lhs: &TypeExpr,
+    op: &str,
+    rhs: &TypeExpr,
+) -> Ty {
+    let left = lower_type(builder, module, generics, lhs);
+    let Some(right_key) = unit_operand(builder, module, rhs) else {
+        return left;
+    };
+    if op == "/"
+        && let Some(TyKind::Adt(owner, args)) = builder.program.tys.kind(left).cloned()
+        && super::currency::money_def(builder) == Some(owner)
+        && let Some(currency) = args.first().copied()
+        && let Some(rate) = rate_def(builder)
+    {
+        let number = builder.program.tys.intern(TyKind::Decimal);
+        let per_unit = builder.program.tys.intern(TyKind::Quantity(number, right_key));
+        return builder
+            .program
+            .tys
+            .intern(TyKind::Adt(rate, Box::new([currency, per_unit])));
+    }
+    let (value, left_key) = match builder.program.tys.kind(left).cloned() {
+        Some(TyKind::Quantity(value, key)) => (value, key),
+        Some(TyKind::Int | TyKind::Float | TyKind::Decimal) => {
+            let dimensionless = builder.unit_eval.table.intern(crate::units::UnitKey::dimensionless());
+            (left, dimensionless)
+        }
+        _ => return left,
+    };
+    let left_unit = builder.unit_eval.table.key(left_key).clone();
+    let right_unit = builder.unit_eval.table.key(right_key).clone();
+    let combined = if op == "*" {
+        left_unit.mul(&right_unit)
+    } else {
+        left_unit.div(&right_unit)
+    };
+    let Ok(combined) = combined else {
+        return left;
+    };
+    if combined.is_dimensionless() {
+        return value;
+    }
+    let key = builder.unit_eval.table.intern(combined);
+    builder.program.tys.intern(TyKind::Quantity(value, key))
 }
 
 /// Lowers a builtin scalar spelling and records its use; `None` when the spelling is not builtin.

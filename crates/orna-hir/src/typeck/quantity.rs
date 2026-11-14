@@ -10,6 +10,7 @@ use orna_syntax_ast::SourceSpan as SyntaxSpan;
 
 use super::{BodyCheck, NotYetReason};
 use crate::diag::{INFER_CONFLICT, UNIT_DIM, UNIT_INEXACT, UNIT_LIMIT, UNIT_POW};
+use crate::engine_money;
 use crate::ids::UnitKeyId;
 use crate::units::print::key_text;
 use crate::units::{KeyError, Rational, UnitKey};
@@ -131,6 +132,9 @@ impl<'a> BodyCheck<'a> {
         {
             return None;
         }
+        if let Some(money) = self.money_rate_product(op, lhs, rhs) {
+            return Some(money);
+        }
         let left = self.operand(lhs)?;
         let right = self.operand(rhs)?;
         let result = if matches!(op, BinOp::Pow) {
@@ -189,6 +193,36 @@ impl<'a> BodyCheck<'a> {
             Ok(ty) => ty,
             Err(fail) => self.report(fail, span),
         })
+    }
+
+    /// The money-rate product (ORNA-MONEY-003, units.md section 8.3): a `Decimal` quantity in unit `U` times a
+    /// `Rate<C, U>` in the same unit is `Money<C>`, in either operand order. `None` for any other operands, which the
+    /// ordinary quantity typing then handles.
+    fn money_rate_product(&mut self, op: BinOp, lhs: Ty, rhs: Ty) -> Option<Ty> {
+        if !matches!(op, BinOp::Mul) {
+            return None;
+        }
+        let (lhs, rhs) = (self.resolved(lhs), self.resolved(rhs));
+        let (quantity, rate) = if self.is_quantity(lhs) {
+            (lhs, rhs)
+        } else {
+            (rhs, lhs)
+        };
+        let Some(TyKind::Quantity(value, key)) = self.kind_of(quantity) else {
+            return None;
+        };
+        if !matches!(self.kind_of(value), Some(TyKind::Decimal)) {
+            return None;
+        }
+        let (currency, per_unit) = engine_money::rate_parts(self.program, rate)?;
+        let Some(TyKind::Quantity(_, rate_key)) = self.kind_of(per_unit) else {
+            return None;
+        };
+        if rate_key != key {
+            return None;
+        }
+        let money = engine_money::library_def(self.program, "core.money", "Money")?;
+        Some(self.intern(TyKind::Adt(money, Box::new([currency]))))
     }
 
     fn is_quantity(&self, ty: Ty) -> bool {

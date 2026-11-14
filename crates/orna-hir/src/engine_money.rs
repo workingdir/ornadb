@@ -125,3 +125,28 @@ pub fn money_currency(program: &Program, ty: Ty) -> Option<Ty> {
     }
     args.first().copied()
 }
+
+/// The exported definition `name` of the library module at the dotted path `module`, when that module is loaded.
+#[must_use]
+pub fn library_def(program: &Program, module: &str, name: &str) -> Option<DefId> {
+    let module = program
+        .modules
+        .iter()
+        .find(|candidate| candidate.path.to_string() == module)?;
+    module.exports.get(&crate::Name::new(name)).copied()
+}
+
+/// The `core.rate.Rate` type: `Rate<C, U>` is the exact price of currency `C` per one unit `U` (ORNA-MONEY-003).
+#[must_use]
+pub fn rate_parts(program: &Program, ty: Ty) -> Option<(Ty, Ty)> {
+    let Some(TyKind::Adt(owner, args)) = program.tys.kind(ty) else {
+        return None;
+    };
+    if Some(*owner) != library_def(program, "core.rate", "Rate") {
+        return None;
+    }
+    match &**args {
+        [currency, per_unit] => Some((*currency, *per_unit)),
+        _ => None,
+    }
+}
