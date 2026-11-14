@@ -94,3 +94,54 @@ fn recorded_targs(program: &Program, name: &str) -> Vec<String> {
     };
     targs.iter().map(|ty| print_type(program, *ty)).collect()
 }
+
+/// The `ORNA-INFER-*` codes of the test module's diagnostics, in report order.
+fn infer_codes(program: &Program) -> Vec<String> {
+    program.modules[test_module(program)]
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.code.to_string())
+        .collect()
+}
+
+#[test]
+fn an_explicit_type_argument_fills_the_declared_parameter_only() {
+    // `value` is unannotated, so the private function gains an implicit parameter (ORNA-INFER-003). The call writes
+    // the declared `T` and the implicit parameter is inferred from the argument.
+    let mut program = program(
+        "fn generic<T>(value) = value;\n\
+         pub fn run(): Int = generic<Int>(2);\n",
+    );
+    let summary = typeck(&mut program);
+    assert!(test_accepted(&program, &summary), "{summary:?}");
+    assert!(
+        infer_codes(&program).is_empty(),
+        "{:?}",
+        infer_codes(&program)
+    );
+    assert_eq!(result(&program, "run"), "Int");
+    assert_eq!(recorded_targs(&program, "run"), ["Int", "Int"]);
+}
+
+#[test]
+fn an_unsolved_declared_type_argument_is_underconstrained() {
+    // The declared `T` appears in no parameter or result, so no argument solves it (ORNA-INFER-007).
+    let mut program = program(
+        "fn generic<T>(value) = value;\n\
+         pub fn run(): Int = generic(2);\n",
+    );
+    let summary = typeck(&mut program);
+    assert!(!test_accepted(&program, &summary), "{summary:?}");
+    assert_eq!(infer_codes(&program), ["ORNA-INFER-007"]);
+}
+
+#[test]
+fn a_type_argument_count_that_is_not_the_declared_count_is_a_conflict() {
+    let mut program = program(
+        "pub fn id<T>(value: T): T = value;\n\
+         pub fn run(): Int = id<Int, Int>(2);\n",
+    );
+    let summary = typeck(&mut program);
+    assert!(!test_accepted(&program, &summary), "{summary:?}");
+    assert_eq!(infer_codes(&program), ["ORNA-INFER-011"]);
+}

@@ -168,3 +168,39 @@ fn a_sys_native_resolves_by_its_one_one_spelling() {
         with_code(&program, crate::diag::UNRESOLVED)
     );
 }
+
+#[test]
+fn a_legacy_method_on_a_read_only_sys_row_is_rejected_for_sys_admin() {
+    // `Failure.replay`, `Failure.resolve` and `Stream.retry` write a portable system row (ORNA100-E-SYS-ADMIN-METHOD).
+    let source = "pub fn a(failure: sys.Failure) = failure.replay();\n\
+                  pub fn b(failure: sys.Failure) = failure.resolve();\n\
+                  pub fn c(stream: sys.Stream) = stream.retry();\n";
+    let mut program = lower_source(source);
+    typeck(&mut program);
+    let found = with_code(&program, crate::diag::SYS_ADMIN_METHOD);
+    assert_eq!(found.len(), 3, "{found:?}");
+    assert!(
+        found
+            .iter()
+            .any(|(_, d)| spanned(source, d).contains("failure.replay()"))
+    );
+    assert!(
+        found
+            .iter()
+            .any(|(_, d)| spanned(source, d).contains("failure.resolve()"))
+    );
+    assert!(
+        found
+            .iter()
+            .any(|(_, d)| spanned(source, d).contains("stream.retry()"))
+    );
+}
+
+#[test]
+fn a_sys_row_method_that_is_not_a_legacy_write_is_not_an_admin_rejection() {
+    // Only the named legacy writes are rejected; an unknown member on the same row is not a legacy admin method.
+    let source = "pub fn a(stream: sys.Stream) = stream.count();\n";
+    let mut program = lower_source(source);
+    typeck(&mut program);
+    assert!(with_code(&program, crate::diag::SYS_ADMIN_METHOD).is_empty());
+}

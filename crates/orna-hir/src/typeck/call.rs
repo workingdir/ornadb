@@ -91,7 +91,9 @@ impl<'a> BodyCheck<'a> {
             }
             call.callee = settled;
         }
-        self.record_inferred_targs(call, span.clone());
+        if !self.complete_targs(call, span.clone()) {
+            return Ok(self.error());
+        }
         match &call.callee {
             Callee::Source { def, targs } => {
                 self.source_call_ty(body, call, *def, targs, span, protocol_member)
@@ -148,42 +150,6 @@ impl<'a> BodyCheck<'a> {
         }
     }
 
-    /// D1/D5: a generic call that omits its type arguments gets one inference variable per generic parameter. The
-    /// variables are recorded in the callee, so the finishing pass replaces them with the solved types.
-    fn record_inferred_targs(&mut self, call: &mut crate::Call, span: SyntaxSpan) {
-        let (def, targs) = match &mut call.callee {
-            Callee::Source { def, targs }
-            | Callee::Native { def, targs }
-            | Callee::Sys { def, targs } => (*def, targs),
-            _ => return,
-        };
-        if !targs.is_empty() {
-            return;
-        }
-        let count = match self.program.defs.get(def).map(|d| &d.kind) {
-            Some(DefKind::Fn(function)) => function.generics.len(),
-            _ => return,
-        };
-        if count == 0 {
-            return;
-        }
-        *targs = (0..count)
-            .map(|_| self.infer.new_var(&mut self.program.tys, span.clone()))
-            .collect();
-    }
-
-    /// Replaces solved inference variables in the type arguments of a generic callee.
-    pub(super) fn zonk_callee_targs(&mut self, callee: &mut Callee) {
-        if let Callee::Source { targs, .. }
-        | Callee::Native { targs, .. }
-        | Callee::Sys { targs, .. } = callee
-        {
-            for targ in targs.iter_mut() {
-                *targ = self.zonk(*targ);
-            }
-        }
-    }
-
     /// Settles a member call whose meaning the receiver's type decides.
     ///
     /// `Ok(None)` means the selection was ambiguous and the conflict is recorded.
@@ -196,6 +162,15 @@ impl<'a> BodyCheck<'a> {
     ) -> Result<Option<Callee>, NotYetReason> {
         let base_ty = self.infer_expr(body, base, None)?;
         let resolved = self.resolved(base_ty);
+        if let Some(message) = self.legacy_sys_admin_message(resolved, name.as_str()) {
+            self.conflicts += 1;
+            self.diagnostics.push(crate::HirDiagnostic::new(
+                crate::diag::SYS_ADMIN_METHOD,
+                message,
+                span,
+            ));
+            return Ok(None);
+        }
         if let Some(TyKind::Relation(inner)) = self.kind_of(resolved) {
             if let Some(TyKind::Adt(table, _)) = self.kind_of(inner)
                 && matches!(self.program.defs[table].kind, DefKind::Table(_))

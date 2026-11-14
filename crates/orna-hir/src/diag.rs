@@ -29,6 +29,9 @@ pub const UNSUPPORTED: &str = "ORNA-S022-UNSUPPORTED";
 pub const SYS_VERSION_INCOMPATIBLE: &str = "sys.version.incompatible";
 /// The renamed `sys.runtime` member is not an alias; the unrecognised member MUST produce this code (ORNA-SYS-005).
 pub const LEGACY_SYS_RUNTIME: &str = "ORNA100-E-SYS-RUNTIME";
+/// A legacy method on a read-only `sys` row (`Checkpoint.reset`, `Failure.replay`, `Stream.skip`, ...); the row is
+/// changed only through `sys.admin` (Orna-1.1.0.md "Portable system rows are read-only").
+pub const SYS_ADMIN_METHOD: &str = "ORNA100-E-SYS-ADMIN-METHOD";
 /// `sys.storage` is a grouping namespace, not a callable selector (ORNA-SYS-120).
 pub const SYS_STORAGE_CALL: &str = "ORNA100-E-SYS-STORAGE-CALL";
 /// A unit name that names no unit of a family or unit declaration in scope (units.md ORNA-UNIT-UNRESOLVED).
