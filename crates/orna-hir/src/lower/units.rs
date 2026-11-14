@@ -15,8 +15,41 @@ use super::exprs::{error_expr, lower_expr, push};
 use crate::diag::{AMBIGUOUS, UNIT_UNRESOLVED};
 use crate::{
     Arg, ArgValue, Call, Callee, DefId, DefKind, DimensionDef, ExprId, ExprKind, Idx, ModuleId,
-    Name, NameTarget, ParamIdx, UnitDef, UnitFactor, UseContext, Visibility,
+    Name, NameTarget, ParamIdx, UnitDef, UnitFactor, UseContext,
 };
+
+/// Whether `base` is a numeric literal, the only base a unit suffix applies to (ORNA-UNIT-008).
+pub(crate) fn is_numeric_literal(base: &AstExpr) -> bool {
+    matches!(
+        base,
+        AstExpr::Literal {
+            kind: LiteralKind::Integer | LiteralKind::Decimal | LiteralKind::Float,
+            ..
+        }
+    )
+}
+
+/// Rejects `literal.name` when no unit, literal target or built-in postfix of `name` is in scope (ORNA-UNIT-008
+/// step 3). `None` when `base` is not a numeric literal.
+pub(crate) fn unresolved_literal_suffix(
+    builder: &mut Builder,
+    state: &mut BodyState,
+    base: &AstExpr,
+    name: &str,
+    span: &SyntaxSpan,
+) -> Option<ExprId> {
+    if !is_numeric_literal(base) {
+        return None;
+    }
+    let name_span = SyntaxSpan::new(span.end.saturating_sub(name.len()), span.end);
+    builder.diagnose(
+        state.module,
+        UNIT_UNRESOLVED,
+        format!("unit suffix `{name}` is not declared in scope"),
+        name_span,
+    );
+    Some(error_expr(builder, state, span.clone()))
+}
 
 /// Lowers `literal.name`, a numeric literal with a unit suffix, as a call of that unit's constructor, so the
 /// checker types it as the unit. `None` when no unit of that name is in scope; the caller then tries the
@@ -28,13 +61,7 @@ pub(crate) fn lower_suffix_unit(
     name: &str,
     span: &SyntaxSpan,
 ) -> Option<ExprId> {
-    if !matches!(
-        base,
-        AstExpr::Literal {
-            kind: LiteralKind::Integer | LiteralKind::Decimal | LiteralKind::Float,
-            ..
-        }
-    ) {
+    if !is_numeric_literal(base) {
         return None;
     }
     let suffix = Name::new(name);
@@ -121,25 +148,15 @@ pub(crate) fn family_dimension(variants: &[EnumVariant], lowered: &[DefId]) -> D
 }
 
 impl Builder {
-    /// Declares one variant of a unit family as a unit. A derived variant queues its expression.
-    pub(crate) fn build_family_unit(
+    /// Queues the expression of one pre-declared unit-family variant (`declare_family_variants`). A derived
+    /// variant's expression is resolved once every definition exists.
+    pub(crate) fn queue_family_unit(
         &mut self,
         module: ModuleId,
         family: DefId,
+        unit: DefId,
         variant: &EnumVariant,
-    ) -> DefId {
-        let unit = self.declare_nested(
-            module,
-            &variant.name,
-            Visibility::Public,
-            variant.span.clone(),
-            DefKind::Unit(UnitDef {
-                family: Some(family),
-                factors: Vec::new(),
-                offset: None,
-                affine: false,
-            }),
-        );
+    ) {
         if let Some(expr) = &variant.unit {
             self.unit_jobs.push(UnitJob {
                 unit,
@@ -148,7 +165,6 @@ impl Builder {
                 expr: expr.clone(),
             });
         }
-        unit
     }
 
     /// Resolves every queued derived-unit expression into factors, once all definitions exist.

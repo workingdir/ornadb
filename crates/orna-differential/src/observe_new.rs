@@ -42,7 +42,9 @@ use orna_syntax_ast::{
 
 use crate::Route;
 use crate::case::{Case, CaseKind, Family};
-use crate::fixture_environment::{ATTACHED_SUPPORT, CURRENCY_SUPPORT, DATABASE_SUPPORT};
+use crate::fixture_environment::{
+    ATTACHED_SUPPORT, CURRENCY_SUPPORT, DATABASE_SUPPORT, UNIT_SUPPORT,
+};
 
 /// The repository's standard modules, parsed once per test process.
 struct StandardModule {
@@ -68,14 +70,14 @@ static STANDARD_MODULES: LazyLock<Vec<StandardModule>> = LazyLock::new(|| {
         .collect()
 });
 
-/// The fixture's unit namespace, which the old catalogue supplies to reference
-/// cases only (`catalogue_for`). A reference case reaches it through `use
-/// fixture.units.*;`, so it is lowered as an unowned module.
+/// The fixture's unit namespace, which reference cases reach through `use fixture.units.*;`. The new pipeline reads
+/// its declaration form (`fixture_environment::UNIT_SUPPORT`); the old catalogue reads the legacy form
+/// (`orna_check::FIXTURE_UNIT_SUPPORT`) for its own reference cases.
 static FIXTURE_UNITS: LazyLock<StandardModule> = LazyLock::new(|| {
     let logical = "fixture/units.orna".to_owned();
     StandardModule {
         path: module_path_of(&logical),
-        tree: parse_module_with_file(orna_check::FIXTURE_UNIT_SUPPORT, logical.clone()).value,
+        tree: parse_module_with_file(UNIT_SUPPORT, logical.clone()).value,
         logical,
     }
 });
@@ -261,16 +263,26 @@ fn lower_case_as(case: &Case, admitted: bool) -> Result<LoweredProgram, String> 
     }
 }
 
+/// The unit families of `fixture_environment::UNIT_SUPPORT`, whose variants the implicit environment imports.
+const FIXTURE_UNIT_FAMILIES: [&str; 6] =
+    ["Length", "Mass", "Time", "Energy", "Information", "Speed"];
+
 /// Makes the fixture units visible to a reference module without an import.
 ///
-/// The old catalogue supplies the fixture unit names to every reference module
-/// (`C`, `mph`, `kWh`), and the corpus uses them with no `use`. HIR resolves a
-/// bare name only through an import, so the observer adds the import the
-/// catalogue supplies implicitly. The spliced item carries the snippet's spans,
-/// which hold no call or diagnostic.
+/// The old catalogue supplies the fixture unit names to every reference module (`C`, `mph`, `kWh`, `MiB`, ...),
+/// and the corpus uses them with no `use`. HIR resolves a bare name only through an import, and a variant is in
+/// scope only by importing its family, so the observer adds one `use fixture.units.<Family>.*;` per family the
+/// catalogue supplies implicitly. The spliced item carries the snippet's spans, which hold no call or diagnostic.
+/// `C` is not a fixture unit: the embedded `core.units` declares it, so the observer imports that one name.
 fn import_fixture_units(tree: &mut SyntaxTree, attached_roots: &[&str]) {
     let mut text =
         String::from("use fixture.units.*;\nuse fixture.currencies.*;\nuse fixture.attached.*;\n");
+    text.extend(
+        FIXTURE_UNIT_FAMILIES
+            .iter()
+            .map(|family| format!("use fixture.units.{family}.*;\n")),
+    );
+    text.push_str("use core.units.{C};\n");
     if attached_roots.contains(&"contacts") {
         text.push_str("use contacts.*;\n");
     }

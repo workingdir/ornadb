@@ -238,6 +238,9 @@ fn lower_field(
     if let Some(missing) = missing_module_export(builder, state, base, name, span) {
         return missing;
     }
+    if let Some(error) = super::units::unresolved_literal_suffix(builder, state, base, name, span) {
+        return error;
+    }
     let member_of_path = qualified_member(builder, state, base, name);
     let base = lower_expr(builder, state, base);
     if let Some(member) = member_of_path

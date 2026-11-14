@@ -217,3 +217,68 @@ fn a_unit_family_names_a_suffix_before_the_builtin_postfix() {
         Callee::Ctor { def } if program.defs[def].name.as_str() == "day" && matches!(program.defs[def].kind, DefKind::Unit(_))
     ));
 }
+
+/// Lowers `user`, which imports the `Length` family of module `units` with `tail` and runs `body`.
+fn lower_family_import(tail: &str, body: &str) -> Program {
+    let user = format!("use units.Length{tail};\npub fn run(): Int = {body};\n");
+    lower_modules(&[("units", LENGTH), ("user", &user)])
+}
+
+#[test]
+fn a_named_family_variant_import_binds_the_unit_suffix() {
+    let program = lower_family_import(".kilometre", "5.kilometre");
+    let module = &program.modules[module_of(&program, "user")];
+    assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+    let run = defined(&program, "user", "run");
+    assert!(matches!(
+        &root_of(&program, run).kind,
+        ExprKind::Call(call) if matches!(
+            call.callee,
+            Callee::Ctor { def } if program.defs[def].name.as_str() == "kilometre"
+        )
+    ));
+}
+
+#[test]
+fn a_braced_family_variant_import_binds_each_named_variant() {
+    let program = lower_family_import(".{kilometre, metre}", "5.metre");
+    let module = &program.modules[module_of(&program, "user")];
+    assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+    let run = defined(&program, "user", "run");
+    assert!(matches!(
+        &root_of(&program, run).kind,
+        ExprKind::Call(call) if matches!(
+            call.callee,
+            Callee::Ctor { def } if program.defs[def].name.as_str() == "metre"
+        )
+    ));
+}
+
+#[test]
+fn a_glob_family_variant_import_binds_every_variant() {
+    let program = lower_family_import(".*", "5.kilometre");
+    let module = &program.modules[module_of(&program, "user")];
+    assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+    let run = defined(&program, "user", "run");
+    assert!(matches!(
+        &root_of(&program, run).kind,
+        ExprKind::Call(call) if matches!(
+            call.callee,
+            Callee::Ctor { def } if program.defs[def].name.as_str() == "kilometre"
+        )
+    ));
+}
+
+#[test]
+fn a_family_import_of_an_unknown_variant_is_reported() {
+    let program = lower_family_import(".parsec", "5");
+    let module = &program.modules[module_of(&program, "user")];
+    assert!(
+        module
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "ORNA-S010-IMPORT"),
+        "{:?}",
+        module.diagnostics
+    );
+}
