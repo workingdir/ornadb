@@ -14,9 +14,9 @@ use crate::link;
 /// Declarations of `core.collection` the registry does not bind yet. Calling one reports that it is not ported.
 const UNPORTED_COLLECTION: &[&str] = &["bucket_by"];
 
-fn lowered() -> Program {
-    let source = "use core.collection;\npub fn run(): Int = 0;\n";
-    let parsed = parse_module_with_file(source, "test.orna");
+fn lowered(module: &str) -> Program {
+    let source = format!("use {module};\npub fn run(): Int = 0;\n");
+    let parsed = parse_module_with_file(&source, "test.orna");
     assert!(
         parsed.is_ok(),
         "test source must parse: {:?}",
@@ -63,7 +63,7 @@ fn bound(program: &Program, module: &str) -> BTreeSet<String> {
 
 #[test]
 fn every_declared_collection_native_is_bound_except_the_unported_ones() {
-    let program = lowered();
+    let program = lowered("core.collection");
     let declared = declared(&program, "core.collection");
     let bound = bound(&program, "core.collection");
     assert!(
@@ -80,4 +80,12 @@ fn every_declared_collection_native_is_bound_except_the_unported_ones() {
         .map(|name| (*name).to_owned())
         .collect();
     assert_eq!(unbound, expected);
+}
+
+#[test]
+fn every_declared_stats_native_is_bound() {
+    let program = lowered("core.stats");
+    let declared = declared(&program, "core.stats");
+    assert!(!declared.is_empty(), "core.stats declares engine natives");
+    assert_eq!(bound(&program, "core.stats"), declared);
 }
