@@ -31,6 +31,10 @@ const PORTED: &[(&str, &str)] = &[
         "core.money",
         include_str!("../../../orna-hir/interface/core/money.orna"),
     ),
+    (
+        "core.stats",
+        include_str!("../../../orna-hir/interface/core/stats.orna"),
+    ),
 ];
 
 /// The names of the `pub native fn` declarations one interface source states.
