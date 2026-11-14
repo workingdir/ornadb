@@ -12,12 +12,15 @@ use orna_repository::{
     ProtectedContentTransfer, RepositoryCaptureCapability,
 };
 
+use orna_stream::SafeDiagnostic;
+use orna_value::CwdCapture;
+
 use super::{ActivationCandidate, CandidateSnapshot, EditDraftError};
-use crate::{
-    CwdCapture, FaultInjector, ProtectedContentTransferEvidence, RuntimeActivationContext,
-    RuntimeError, RuntimeQueryError, RuntimeState, RuntimeTableActivationSnapshot,
-    RuntimeTableIdentity, SafeDiagnostic, TableActivationCandidateValidator, TableActivationError,
-    TableMutation, TableSchemaIdentity, ValidatedTableActivationCommit, WriterLease,
+use orna_runtime::{
+    FaultInjector, ProtectedContentTransferEvidence, RuntimeActivationContext, RuntimeError,
+    RuntimeQueryError, RuntimeState, RuntimeTableActivationSnapshot, RuntimeTableIdentity,
+    TableActivationCandidateValidator, TableActivationError, TableMutation, TableSchemaIdentity,
+    ValidatedTableActivationCommit, WriterLease,
 };
 
 /// One complete VFS row replacement routed into the runtime's validated table
@@ -287,7 +290,7 @@ impl TableActivationCandidateValidator for ContentPinCandidateValidator {
         self.inner.tables()
     }
 
-    fn table_object_ids(&self) -> BTreeMap<String, crate::TableObjectId> {
+    fn table_object_ids(&self) -> BTreeMap<String, orna_runtime::TableObjectId> {
         self.inner.table_object_ids()
     }
 
@@ -299,13 +302,13 @@ impl TableActivationCandidateValidator for ContentPinCandidateValidator {
         self.inner.schema_identity()
     }
 
-    fn validate(&mut self, rows: &crate::RuntimeTableRows) -> Result<(), SafeDiagnostic> {
+    fn validate(&mut self, rows: &orna_runtime::RuntimeTableRows) -> Result<(), SafeDiagnostic> {
         self.inner.validate(rows)
     }
 
     fn validate_content_pins(
         &mut self,
-        rows: &crate::RuntimeTableRows,
+        rows: &orna_runtime::RuntimeTableRows,
         transfers: &[ProtectedContentTransfer],
     ) -> bool {
         self.inner.validate_content_pins(rows, &[])
@@ -330,11 +333,11 @@ impl TableActivationCandidateValidator for LiveSchemaCandidateValidator {
         self.inner.tables()
     }
 
-    fn table_object_ids(&self) -> BTreeMap<String, crate::TableObjectId> {
+    fn table_object_ids(&self) -> BTreeMap<String, orna_runtime::TableObjectId> {
         self.inner.table_object_ids()
     }
 
-    fn committed_rows(&self) -> Option<&crate::PinnedCommittedRows> {
+    fn committed_rows(&self) -> Option<&orna_runtime::PinnedCommittedRows> {
         self.inner.committed_rows()
     }
 
@@ -346,13 +349,13 @@ impl TableActivationCandidateValidator for LiveSchemaCandidateValidator {
         (self.read)()
     }
 
-    fn validate(&mut self, rows: &crate::RuntimeTableRows) -> Result<(), SafeDiagnostic> {
+    fn validate(&mut self, rows: &orna_runtime::RuntimeTableRows) -> Result<(), SafeDiagnostic> {
         self.inner.validate(rows)
     }
 
     fn validate_changed(
         &mut self,
-        rows: &crate::RuntimeTableRows,
+        rows: &orna_runtime::RuntimeTableRows,
         changed_tables: &std::collections::BTreeSet<String>,
     ) -> Result<(), SafeDiagnostic> {
         self.inner.validate_changed(rows, changed_tables)
@@ -364,7 +367,7 @@ impl TableActivationCandidateValidator for LiveSchemaCandidateValidator {
 
     fn validate_content_pins(
         &mut self,
-        rows: &crate::RuntimeTableRows,
+        rows: &orna_runtime::RuntimeTableRows,
         transfers: &[ProtectedContentTransfer],
     ) -> bool {
         self.inner.validate_content_pins(rows, transfers)
@@ -382,7 +385,7 @@ impl<'a, S: Send + Sync + 'static> VfsSaveAdmission<'a, S> {
         save: VfsDurableSave,
         faults: &'a dyn FaultInjector,
     ) -> Result<Self, TableActivationError> {
-        if crate::activation::runtime_activation_active(runtime) {
+        if orna_runtime::runtime_activation_active(runtime) {
             return Err(TableActivationError::Runtime(RuntimeError::AdminBusy));
         }
         let writer = runtime
@@ -457,7 +460,7 @@ impl<'a, S: Send + Sync + 'static> VfsSaveAdmission<'a, S> {
         &self,
         candidate: VfsSaveCandidate,
     ) -> Result<CwdCapture, TableActivationError> {
-        if crate::activation::runtime_activation_active(self.runtime) {
+        if orna_runtime::runtime_activation_active(self.runtime) {
             return Err(TableActivationError::Runtime(RuntimeError::AdminBusy));
         }
         let VfsSaveCandidate {

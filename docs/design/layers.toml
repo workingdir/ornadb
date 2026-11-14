@@ -154,6 +154,11 @@ name = "orna-runtime"
 layer = 9
 
 [[crate]]
+name = "orna-vfs"
+layer = 9
+allowed = ["orna-runtime"]
+
+[[crate]]
 name = "orna-storage"
 layer = 10
 

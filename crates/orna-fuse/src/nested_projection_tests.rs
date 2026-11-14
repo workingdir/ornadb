@@ -41,8 +41,8 @@ fn names(value: &Raw) -> Option<Vec<String>> {
 fn record_fields_are_listed_under_escaped_names() {
     let value = record(&[("a b", text("x")), ("n", Raw::Int(2.into()))]);
     let expected = vec![
-        orna_runtime::vfs::project_field_name("a b"),
-        orna_runtime::vfs::project_field_name("n"),
+        orna_vfs::project_field_name("a b"),
+        orna_vfs::project_field_name("n"),
     ];
     assert_eq!(names(&value), Some(expected));
 }
@@ -58,7 +58,7 @@ fn tuples_and_lists_are_listed_by_position() {
 #[test]
 fn text_keyed_maps_list_escaped_keys() {
     let map = Raw::Map(vec![(text("k/1"), text("v"))]);
-    let expected = vec![orna_runtime::vfs::project_component("k/1")];
+    let expected = vec![orna_vfs::project_component("k/1")];
     assert_eq!(names(&map), Some(expected));
 }
 
@@ -76,7 +76,7 @@ fn present_optional_projects_its_payload_and_absent_has_no_children() {
     let absent = optional(false, Raw::Null);
     assert_eq!(
         names(&present),
-        Some(vec![orna_runtime::vfs::project_field_name("a")])
+        Some(vec![orna_vfs::project_field_name("a")])
     );
     assert_eq!(names(&absent), None);
 }

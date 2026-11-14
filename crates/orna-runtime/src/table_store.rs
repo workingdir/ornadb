@@ -48,7 +48,7 @@ impl PartialEq for PendingContentPin {
 impl Eq for PendingContentPin {}
 
 impl ProtectedContentTransferEvidence {
-    pub(crate) fn from_transfer(transfer: &ProtectedContentTransfer) -> Self {
+    pub fn from_transfer(transfer: &ProtectedContentTransfer) -> Self {
         Self {
             repository_id: *transfer.repository_id(),
             database_id: *transfer.database_id(),

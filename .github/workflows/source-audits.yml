@@ -163,7 +163,7 @@ jobs:
         run: cargo test --locked -p orna-evaluator --lib blob_equality_recurses_into_compound_values
 
       - name: Prove final-vector VFS path components
-        run: cargo test --locked -p orna-runtime --test final_vector_paths
+        run: cargo test --locked -p orna-vfs --test final_vector_paths
 
       - name: Execute the conformance harness vector suites
         run: >-

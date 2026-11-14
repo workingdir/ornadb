@@ -15,7 +15,7 @@
 # (169 cases), the evaluator's expression fixtures (42), the REPL admission
 # fixtures (14) and the pinned standard modules (77). 5,399 programs were excluded
 # at H0; the embedded interface tree (18, including the hand-written core.money (Money and the Currency protocol, loaded at the root environment), core.range, core.display, core.temperature and core.units), the native parser
-# fixtures (27) and the unit-family parser fixtures (12) were added later, so 5,463 programs are excluded here. The
+# fixtures (27) and the unit-family parser fixtures (12) were added later, and the orna-vfs save fixtures (4) moved in with the VFS split, so 5,467 programs are excluded here. The
 # follow-up PRs move them across family by family.
 
 [[excluded]]
@@ -127,6 +127,11 @@ reason = "the empty format-3 media project is a fixture the FUSE tests drive thr
 scope = "crates/orna-runtime/tests/fixtures"
 files = 285
 reason = "runtime fixtures are table-store and publication cases with rows and committed identities; they need the case row path (H6)"
+
+[[excluded]]
+scope = "crates/orna-vfs/tests/fixtures"
+files = 4
+reason = "VFS fixtures are save and publication cases with rows and committed identities; they need the case row path (H6)"
 
 [[excluded]]
 scope = "crates/orna-storage/tests/fixtures"

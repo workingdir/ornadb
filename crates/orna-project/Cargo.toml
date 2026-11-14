@@ -16,6 +16,7 @@ orna-value = { path = "../orna-value" }
 orna-unicode = { path = "../orna-unicode" }
 num-bigint = "0.4.6"
 orna-runtime = { path = "../orna-runtime" }
+orna-vfs = { path = "../orna-vfs" }
 orna-exec = { path = "../orna-exec" }
 unicode-normalization = "=0.1.24"
 

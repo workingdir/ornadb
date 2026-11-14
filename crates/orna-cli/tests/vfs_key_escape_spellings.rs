@@ -18,7 +18,7 @@
 
 use std::path::Path;
 
-use orna_runtime::vfs::{VfsComponent, project_component, unproject_component};
+use orna_vfs::{VfsComponent, project_component, unproject_component};
 use tempfile::TempDir;
 
 #[path = "support/editor_mount.rs"]
