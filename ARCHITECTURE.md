@@ -39,6 +39,7 @@ into `orna-base` and `orna-value` in stage 03.
 | 7 | formats and planning | orna-evolution, orna-format3, orna-stream |
 | 8 | repository layout | orna-repository |
 | 9 | durable state | orna-runtime |
+| 9 | projected files | orna-vfs |
 | 10 | publication | orna-storage |
 | 11 | project and live lease | orna-project, orna-project-repl, orna-live-lease |
 | 12 | presentation | orna-protocol, orna-serving, orna-live |

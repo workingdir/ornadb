@@ -40,6 +40,7 @@ orna-sys-id = { path = "../orna-sys-id" }
 orna-syntax = { path = "../orna-syntax" }
 orna-syntax-ast = { path = "../orna-syntax-ast" }
 orna-value = { path = "../orna-value" }
+orna-vfs = { path = "../orna-vfs" }
 
 [dev-dependencies]
 orna-cli-testkit = { path = "../orna-cli-testkit" }

@@ -866,7 +866,7 @@ fn retain_source_candidate(
         let end = start.saturating_add(length).min(candidate.len());
         Ok(candidate[start..end].to_vec())
     };
-    let mut charge = orna_runtime::vfs::QuotaCharge::empty(&writer.retained_drafts.quota);
+    let mut charge = orna_vfs::QuotaCharge::empty(&writer.retained_drafts.quota);
     let retained = writer.retained_drafts.retain(
         path,
         cause,
