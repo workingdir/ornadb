@@ -13,7 +13,7 @@
 # are not part of `agreed`.
 
 [[exec-share]]
-agreed = 55
+agreed = 66
 evaluable = 110
 steps-exact = 50
 old-harness-environment = 10
@@ -103,8 +103,8 @@ bead = "ornadb-csenl.40"
 
 # Cases the executor runs whose update or rekey targets a key the table does not hold. The executor
 # answers the spec result for an absent row. Four disagree with the old pipeline, each for a named
-# reason, and each entry matches only its exact (executor, old) error-code pair; any other
-# disagreement on that case stays a mismatch.
+# reason, and each entry matches only its exact (executor, old) pair, where `old` is an error code or
+# `ok` for an old result; any other disagreement on that case stays a mismatch.
 [[executor-gap-allowance]]
 case = "invalid/key-update.orna"
 executor = "ORNA-EVAL-TABLE-MISSING-ROW"
@@ -132,3 +132,31 @@ executor = "ORNA-EVAL-TABLE-MISSING-ROW"
 old = "ORNA-EVAL-TABLE-SNAPSHOT"
 reason = "the H0 observer supplies no captured table snapshot, so the old pipeline answers ORNA-EVAL-TABLE-SNAPSHOT for the rekey; the executor answers the spec result for rekeying an absent key (ORNA-EVAL-TABLE-MISSING-ROW). The old side is the observer environment."
 bead = "ornadb-csenl.21"
+
+# REPL admission (ORNA-REPL-002: `$_` MUST NOT become an implicit global in module source). The
+# executor reports the unresolved `$_` where the old evaluator captured it in a closure, so the old
+# side returns a result and the executor returns ORNA-S012-UNRESOLVED. The spec answer is the executor's.
+[[executor-gap-allowance]]
+case = "crates/orna-conformance/tests/fixtures/repl-admission/retained-result.orna"
+executor = "ORNA-S012-UNRESOLVED"
+old = "ok"
+reason = "REPL `$_` read in a function body: the old evaluator captures the last result in the closure and returns it, but ORNA-REPL-002 forbids `$_` as an implicit global in module source; the executor reports it unresolved. The old answer is the non-spec behaviour."
+bead = "ornadb-csenl.23.1"
+
+# The pinned stdlib has no `std.net.http.get` (only start, wait, cancel, send), so the call does not
+# resolve. The executor answers ORNA-S012-UNRESOLVED; the old pipeline classifies effects by name
+# before resolution and answers ORNA-REPL-EFFECT. Once the stdlib exports the function, the executor
+# answers ORNA-REPL-EFFECT at commit (the session's effect check) and these entries must go.
+[[executor-gap-allowance]]
+case = "crates/orna-conformance/tests/fixtures/repl-admission/effect.orna"
+executor = "ORNA-S012-UNRESOLVED"
+old = "ORNA-REPL-EFFECT"
+reason = "std.net.http.get is absent from the pinned stdlib std/net/http.orna, so the executor reports it unresolved (ORNA-S012-UNRESOLVED); the old pipeline classifies the effect by name before resolution (ORNA-REPL-EFFECT). Stdlib export gap."
+bead = "ornadb-csenl.23.3"
+
+[[executor-gap-allowance]]
+case = "crates/orna-evaluator/tests/fixtures/admitted_repl_effectful_http.orna"
+executor = "ORNA-S012-UNRESOLVED"
+old = "ORNA-REPL-EFFECT"
+reason = "same stdlib export gap as repl-admission/effect.orna: std.net.http.get is absent from the pinned stdlib, so the executor reports it unresolved; the old pipeline answers ORNA-REPL-EFFECT by name."
+bead = "ornadb-csenl.23.3"
