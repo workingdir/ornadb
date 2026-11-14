@@ -51,25 +51,17 @@ pub(crate) enum BodyJob {
 impl Builder {
     /// Builds every signature, then lowers every body.
     pub(crate) fn lower_items(&mut self) {
+        // Unit declarations are built first: every unit is a candidate for the name lookups of the declarations
+        // that follow (`resolve_unit`), so none may still be unbuilt when another declaration is lowered.
+        for index in 0..self.pending.len() {
+            if matches!(&self.pending[index].kind, PendingKind::Unbuilt(ast) if matches!(**ast, DeclAst::Unit(..)))
+            {
+                self.build_pending(index);
+            }
+        }
         let mut index = 0;
         while index < self.pending.len() {
-            let def = DefId::new(u32::try_from(index).expect("definition index fits u32"));
-            let ast = match &mut self.pending[index].kind {
-                PendingKind::Unbuilt(_) => {
-                    match std::mem::replace(
-                        &mut self.pending[index].kind,
-                        PendingKind::Built(DefKind::Unit(UnitDef::default())),
-                    ) {
-                        PendingKind::Unbuilt(ast) => Some(ast),
-                        _ => None,
-                    }
-                }
-                _ => None,
-            };
-            if let Some(ast) = ast {
-                self.lowered += 1;
-                self.build_declaration(def, *ast);
-            }
+            self.build_pending(index);
             index += 1;
         }
         self.resolve_unit_jobs();
@@ -85,6 +77,27 @@ impl Builder {
                     self_ty,
                 } => self.lower_expression_body(def, body, &expr, self_ty),
             }
+        }
+    }
+
+    /// Builds the declaration at `index` when it is still unbuilt.
+    fn build_pending(&mut self, index: usize) {
+        let def = DefId::new(u32::try_from(index).expect("definition index fits u32"));
+        let ast = match &self.pending[index].kind {
+            PendingKind::Unbuilt(_) => {
+                match std::mem::replace(
+                    &mut self.pending[index].kind,
+                    PendingKind::Built(DefKind::Unit(UnitDef::default())),
+                ) {
+                    PendingKind::Unbuilt(ast) => Some(ast),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        if let Some(ast) = ast {
+            self.lowered += 1;
+            self.build_declaration(def, *ast);
         }
     }
 
