@@ -59,12 +59,25 @@ impl Builder {
                 self.build_pending(index);
             }
         }
+        // Unit family variants are queued and resolved before any declaration is built, and the units they define are
+        // evaluated before then: a unit suffix in a signature reads the unit's key (units.md 3.3).
+        for (family, module, variants) in self.unbuilt_unit_families() {
+            let units = self
+                .family_variants
+                .get(&family)
+                .cloned()
+                .unwrap_or_default();
+            for (unit, variant) in units.into_iter().zip(&variants) {
+                self.queue_family_unit(module, family, unit, variant);
+            }
+        }
+        self.resolve_unit_jobs();
+        crate::units::eval::evaluate(self);
         let mut index = 0;
         while index < self.pending.len() {
             self.build_pending(index);
             index += 1;
         }
-        self.resolve_unit_jobs();
         let jobs = std::mem::take(&mut self.body_jobs);
         for job in jobs {
             self.lowered += 1;
@@ -592,10 +605,7 @@ impl Builder {
         let mut lowered = Vec::new();
         if unit_family {
             let units = self.family_variants.get(&def).cloned().unwrap_or_default();
-            for (unit, variant) in units.into_iter().zip(variants) {
-                self.queue_family_unit(module, def, unit, variant);
-                lowered.push(unit);
-            }
+            lowered.extend(units);
         } else {
             for variant in variants {
                 let fields = variant

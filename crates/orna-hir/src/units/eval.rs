@@ -1,98 +1,102 @@
 //! Evaluation of unit definitions into keys (units.md sections 3.3 and 3.5, ORNA-UNIT-009, -010, -013, -019).
 //!
-//! Runs once, after lowering. A base unit's key is its own axis. A derived unit's key is the product of its factors,
-//! each factor's key raised to its written exponent and scaled by its coefficient, with `/` dividing the whole term.
-//! A unit whose definition is broken, or depends on one, has no key; the lowering diagnostic or the cycle diagnostic
-//! says why.
+//! Runs during lowering, once every unit declaration and derived unit expression is resolved and before any
+//! declaration signature is lowered, so a unit suffix in a signature reads the unit's key. A base unit's key is its
+//! own axis. A derived unit's key is the product of its factors, each factor's key raised to its written exponent and
+//! scaled by its coefficient, with `/` dividing the whole term. A unit whose definition is broken, or depends on one,
+//! has no key; the lowering diagnostic or the cycle diagnostic says why.
+//!
+//! Evaluation is incremental: [`UnitEval`] keeps every finished unit, so a later pass evaluates only what it has not
+//! seen, and each diagnostic is reported once.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::{Exponents, KeyError, MAX_EXPONENT, Rational, UnitKey, UnitTable};
 use crate::diag::{UNIT_CYCLE, UNIT_DIM, UNIT_LIMIT};
-use crate::{
-    DefId, DefKind, DimensionDef, EnumDef, HirDiagnostic, ModuleId, Program, UnitDef, UnitFactor,
-};
+use crate::ids::Idx;
+use crate::lower::Builder;
+use crate::{DefId, HirDiagnostic, ModuleId, UnitDef, UnitFactor};
 
 type Found = (ModuleId, HirDiagnostic);
 
-/// Computes every unit key and family dimension of `program`, interns the keys and records the diagnostics.
-pub(crate) fn run(program: &mut Program) {
-    let (table, found) = Evaluator::new(program).evaluate();
-    program.units = table;
-    for (module, diagnostic) in found {
-        program.modules[module].diagnostics.push(diagnostic);
-    }
-}
-
 /// The state of one unit during evaluation: `Visiting` while its factors are being evaluated, then `Done`.
+#[derive(Clone)]
 enum Slot {
     Visiting,
     Done(Option<UnitKey>),
 }
 
-struct Evaluator<'p> {
-    program: &'p Program,
+/// The evaluation state a lowering keeps across passes: the interned keys and every unit already finished.
+#[derive(Clone, Default)]
+pub(crate) struct UnitEval {
     slots: BTreeMap<DefId, Slot>,
+    reported: BTreeSet<(DefId, &'static str)>,
+    pub(crate) table: UnitTable,
+}
+
+/// Evaluates every unit of `builder` not yet finished, interns the keys and records the diagnostics.
+pub(crate) fn evaluate(builder: &mut Builder) {
+    let mut state = std::mem::take(&mut builder.unit_eval);
+    let found = {
+        let mut evaluator = Evaluator {
+            builder: &*builder,
+            state: &mut state,
+            found: Vec::new(),
+        };
+        evaluator.run();
+        evaluator.found
+    };
+    builder.unit_eval = state;
+    for (module, diagnostic) in found {
+        builder.program.modules[module].diagnostics.push(diagnostic);
+    }
+}
+
+struct Evaluator<'a> {
+    builder: &'a Builder,
+    state: &'a mut UnitEval,
     found: Vec<Found>,
 }
 
-impl<'p> Evaluator<'p> {
-    fn new(program: &'p Program) -> Self {
-        Self {
-            program,
-            slots: BTreeMap::new(),
-            found: Vec::new(),
+impl Evaluator<'_> {
+    fn run(&mut self) {
+        for unit in self.builder.unit_defs() {
+            self.key_of(unit);
         }
-    }
-
-    fn evaluate(mut self) -> (UnitTable, Vec<Found>) {
-        let program = self.program;
-        for unit in program.defs.indices() {
-            if matches!(program.defs[unit].kind, DefKind::Unit(_)) {
-                self.key_of(unit);
-            }
-        }
-        let dimensions = self.check_families();
-        let mut table = UnitTable::default();
-        for (unit, slot) in &self.slots {
-            if let Slot::Done(Some(key)) = slot {
-                let id = table.intern(key.clone());
-                table.bind_unit(*unit, id);
-            }
-        }
-        for (family, dimension) in dimensions {
-            table.bind_family(family, dimension);
-        }
-        (table, self.found)
+        self.check_families();
     }
 
     /// The key of `unit`, computed once. A unit found on the stack is a cycle, reported at that unit.
     fn key_of(&mut self, unit: DefId) -> Option<UnitKey> {
-        if matches!(self.slots.get(&unit), Some(Slot::Visiting)) {
-            let message = format!("unit `{}` depends on itself", name_of(self.program, unit));
+        if matches!(self.state.slots.get(&unit), Some(Slot::Visiting)) {
+            let message = format!("unit `{}` depends on itself", name_of(self.builder, unit));
             self.report(unit, UNIT_CYCLE, message);
             return None;
         }
-        if let Some(Slot::Done(key)) = self.slots.get(&unit) {
+        if let Some(Slot::Done(key)) = self.state.slots.get(&unit) {
             return key.clone();
         }
-        self.slots.insert(unit, Slot::Visiting);
+        self.state.slots.insert(unit, Slot::Visiting);
         let key = self.compute(unit);
-        self.slots.insert(unit, Slot::Done(key.clone()));
+        if let Some(key) = &key {
+            let id = self.state.table.intern(key.clone());
+            self.state.table.bind_unit(unit, id);
+        }
+        self.state.slots.insert(unit, Slot::Done(key.clone()));
         key
     }
 
     fn compute(&mut self, unit: DefId) -> Option<UnitKey> {
-        let program = self.program;
-        let DefKind::Unit(UnitDef {
+        let builder = self.builder;
+        let Some(UnitDef {
             family: Some(family),
             factors,
             ..
-        }) = &program.defs[unit].kind
+        }) = builder.unit_def(unit)
         else {
             return None;
         };
-        if base_axis(program, *family) == Some(unit) {
+        if builder.family_axis(*family) == Some(unit) {
             return Some(UnitKey::base(unit));
         }
         if factors.is_empty() {
@@ -136,27 +140,26 @@ impl<'p> Evaluator<'p> {
         Ok(Some(term))
     }
 
-    /// Checks every family against its dimension (ORNA-UNIT-010) and returns the dimensions of the families that
-    /// have one. A base family's dimension is its base unit's axis; a derived family's is its variants' common one.
-    fn check_families(&mut self) -> Vec<(DefId, Exponents)> {
-        let program = self.program;
+    /// Checks every family against its dimension (ORNA-UNIT-010) and binds the dimensions of the families that have
+    /// one. A base family's dimension is its base unit's axis; a derived family's is its variants' common one.
+    fn check_families(&mut self) {
+        let builder = self.builder;
         let mut families: BTreeMap<DefId, Vec<DefId>> = BTreeMap::new();
-        for unit in program.defs.indices() {
-            if let DefKind::Unit(UnitDef {
+        for unit in builder.unit_defs() {
+            if let Some(UnitDef {
                 family: Some(family),
                 ..
-            }) = &program.defs[unit].kind
+            }) = builder.unit_def(unit)
             {
                 families.entry(*family).or_default().push(unit);
             }
         }
-        let mut dimensions = Vec::new();
         for (family, units) in families {
             let keys = units
                 .into_iter()
                 .filter_map(|unit| self.key_of(unit).map(|key| (unit, key)))
                 .collect::<Vec<_>>();
-            let dimension = match base_axis(program, family) {
+            let dimension = match builder.family_axis(family) {
                 Some(axis) => match self.key_of(axis) {
                     Some(key) => key.exponents().clone(),
                     None => continue,
@@ -170,37 +173,28 @@ impl<'p> Evaluator<'p> {
                 if key.exponents() != &dimension {
                     let message = format!(
                         "unit `{}` has dimension {} but its family `{}` has dimension {}",
-                        name_of(program, *unit),
-                        show(program, key.exponents()),
-                        name_of(program, family),
-                        show(program, &dimension),
+                        name_of(builder, *unit),
+                        show(builder, key.exponents()),
+                        name_of(builder, family),
+                        show(builder, &dimension),
                     );
                     self.report(*unit, UNIT_DIM, message);
                 }
             }
-            dimensions.push((family, dimension));
+            self.state.table.bind_family(family, dimension);
         }
-        dimensions
     }
 
+    /// Records a diagnostic on `unit` once: a later pass re-checks the same units and must not repeat it.
     fn report(&mut self, unit: DefId, code: &'static str, message: String) {
-        let program = self.program;
-        let def = &program.defs[unit];
+        if !self.state.reported.insert((unit, code)) {
+            return;
+        }
+        let def = &self.builder.pending[unit.index()];
         self.found.push((
             def.module,
             HirDiagnostic::new(code, message, def.span.clone()),
         ));
-    }
-}
-
-/// The axis of a base family: the one bare variant its dimension declares. `None` for a derived family.
-fn base_axis(program: &Program, family: DefId) -> Option<DefId> {
-    match &program.defs[family].kind {
-        DefKind::Enum(EnumDef {
-            dimension: Some(DimensionDef { unit: Some(axis) }),
-            ..
-        }) => Some(*axis),
-        _ => None,
     }
 }
 
@@ -231,19 +225,19 @@ fn describe(error: KeyError) -> String {
     }
 }
 
-fn name_of(program: &Program, def: DefId) -> &str {
-    program.defs[def].name.as_str()
+fn name_of(builder: &Builder, def: DefId) -> &str {
+    builder.pending[def.index()].name.as_str()
 }
 
 /// A dimension printed over its axes' names: `metre*second^-1`, or `1` when dimensionless.
-fn show(program: &Program, exponents: &Exponents) -> String {
+fn show(builder: &Builder, exponents: &Exponents) -> String {
     if exponents.is_dimensionless() {
         return "1".to_owned();
     }
     exponents
         .iter()
         .map(|(axis, exponent)| {
-            let name = name_of(program, axis);
+            let name = name_of(builder, axis);
             if exponent == 1 {
                 name.to_owned()
             } else {
