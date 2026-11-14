@@ -9,3 +9,4 @@ publish = false
 
 [dependencies]
 orna-value = { path = "../orna-value" }
+orna-stream-identity = { path = "../orna-stream-identity" }

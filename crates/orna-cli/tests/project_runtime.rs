@@ -5,9 +5,8 @@ use std::{
 };
 
 use orna_repository::{Repository, inspect_metadata};
-use orna_runtime::{
-    CheckpointKey, Component, ConsumerIdentity, Mutation, NoFault, RuntimeIdentity, RuntimeState,
-};
+use orna_runtime::{Mutation, NoFault, RuntimeIdentity, RuntimeState};
+use orna_stream_identity::{CheckpointKey, Component, ConsumerIdentity};
 use orna_value::Raw;
 use orna_value::{CanonicalValue, OvbRaw, Value};
 use sha2::{Digest, Sha256};

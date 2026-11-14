@@ -4,10 +4,10 @@ use std::{path::PathBuf, process::Command};
 
 use orna_repository::Repository;
 use orna_runtime::{
-    CheckpointKey, CheckpointResetRequest, Component, ConsumerIdentity, RuntimeIdentity,
-    RuntimeState, StreamAdministrationOutcome,
+    CheckpointResetRequest, RuntimeIdentity, RuntimeState, StreamAdministrationOutcome,
 };
-use orna_stream::{CheckpointPrecondition, Position};
+use orna_stream::CheckpointPrecondition;
+use orna_stream_identity::{CheckpointKey, Component, ConsumerIdentity, Position};
 use tempfile::{Builder, TempDir};
 
 fn repository() -> (TempDir, Repository) {

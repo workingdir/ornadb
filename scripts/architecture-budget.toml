@@ -410,7 +410,7 @@ name = "orna-storage"
 [[crate]]
 name = "orna-stream"
 [crate.files]
-"src/lib.rs" = 2843
+"src/lib.rs" = 2625
 
 [[crate]]
 name = "orna-syntax"

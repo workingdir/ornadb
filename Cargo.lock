@@ -1419,6 +1419,7 @@ dependencies = [
  "orna-repository",
  "orna-runtime",
  "orna-security",
+ "orna-stream-identity",
  "orna-syntax",
  "orna-syntax-ast",
  "orna-sys-id",
@@ -1498,6 +1499,7 @@ dependencies = [
  "orna-serving",
  "orna-storage",
  "orna-stream",
+ "orna-stream-identity",
  "orna-syntax",
  "orna-syntax-ast",
  "orna-sys",
@@ -1581,6 +1583,7 @@ dependencies = [
  "orna-serving",
  "orna-storage",
  "orna-stream",
+ "orna-stream-identity",
  "orna-syntax",
  "orna-syntax-ast",
  "orna-sys",
@@ -1780,6 +1783,7 @@ dependencies = [
  "orna-security",
  "orna-serving",
  "orna-stream",
+ "orna-stream-identity",
  "orna-sys-id",
  "orna-value",
 ]
@@ -1922,6 +1926,7 @@ dependencies = [
  "orna-exec",
  "orna-repository",
  "orna-stream",
+ "orna-stream-identity",
  "orna-syntax",
  "orna-syntax-ast",
  "orna-sys",
@@ -1982,8 +1987,13 @@ dependencies = [
 name = "orna-stream"
 version = "1.0.0"
 dependencies = [
+ "orna-stream-identity",
  "orna-value",
 ]
+
+[[package]]
+name = "orna-stream-identity"
+version = "1.0.0"
 
 [[package]]
 name = "orna-syntax"

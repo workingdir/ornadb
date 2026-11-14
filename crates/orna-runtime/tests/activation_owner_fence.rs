@@ -16,10 +16,10 @@ use std::{
 
 use orna_repository::Repository;
 use orna_runtime::{
-    ActivationError, ActivationWork, CheckpointKey, Component, ConsumerIdentity, NoFault,
-    RuntimeError, RuntimeIdentity, RuntimeState, StreamAdministrationOutcome, TableMutation,
-    run_table_activation,
+    ActivationError, ActivationWork, NoFault, RuntimeError, RuntimeIdentity, RuntimeState,
+    StreamAdministrationOutcome, TableMutation, run_table_activation,
 };
+use orna_stream_identity::{CheckpointKey, Component, ConsumerIdentity};
 use orna_sys::SysFailureCode;
 use tempfile::{Builder, TempDir};
 

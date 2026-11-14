@@ -11,13 +11,15 @@ use std::{
 
 use orna_repository::Repository;
 use orna_runtime::{
-    CheckpointKey, CheckpointResetAudit, CheckpointResetProvider, CheckpointResetRequest,
-    Component, ConsumerIdentity, FailureStatus, RuntimeError, RuntimeIdentity, RuntimeState,
-    StreamAdministrationOutcome,
+    CheckpointResetAudit, CheckpointResetProvider, CheckpointResetRequest, FailureStatus,
+    RuntimeError, RuntimeIdentity, RuntimeState, StreamAdministrationOutcome,
 };
 use orna_stream::{
-    AsyncCheckpointBackend, CheckpointPrecondition, CommitIntent, CommitResult, DeliveryIdentity,
-    DiagnosticClass, DiagnosticCode, LeasePurpose, Position, SafeDiagnostic, StreamFailurePayload,
+    AsyncCheckpointBackend, CheckpointPrecondition, CommitIntent, CommitResult, DiagnosticClass,
+    DiagnosticCode, LeasePurpose, SafeDiagnostic, StreamFailurePayload,
+};
+use orna_stream_identity::{
+    CheckpointKey, Component, ConsumerIdentity, DeliveryIdentity, Position,
 };
 use orna_sys::SysFailureCode;
 use tempfile::{Builder, TempDir};

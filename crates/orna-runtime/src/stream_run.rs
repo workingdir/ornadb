@@ -26,11 +26,12 @@ use crate::stream_store::{
 use libsql::{Transaction, TransactionBehavior, params};
 use orna_stream::Checkpoint as StreamCheckpoint;
 use orna_stream::{
-    AssertionDiagnosticDetail, AsyncCheckpointBackend, AsyncFailurePayloadBackend, CheckpointKey,
-    CheckpointPrecondition, CommitIntent, CommitResult, DeliveryIdentity, DeliveryLease,
-    DiagnosticClass, DiagnosticCode, FailureIdentity, FailureRecord, FailureStatus, LeasePurpose,
-    RejectReason, SafeDiagnostic, StreamFailurePayload, StreamStatus,
+    AssertionDiagnosticDetail, AsyncCheckpointBackend, AsyncFailurePayloadBackend,
+    CheckpointPrecondition, CommitIntent, CommitResult, DeliveryLease, DiagnosticClass,
+    DiagnosticCode, FailureIdentity, FailureRecord, FailureStatus, LeasePurpose, RejectReason,
+    SafeDiagnostic, StreamFailurePayload, StreamStatus,
 };
+use orna_stream_identity::{CheckpointKey, DeliveryIdentity};
 use sha2::{Digest, Sha256};
 use std::fmt;
 use std::future::Future;

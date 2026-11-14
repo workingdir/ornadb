@@ -13,10 +13,8 @@ use crate::stream_intent::apply_stream_intent_tx;
 use crate::stream_store::{load_stream_pause_reason, store_stream_pause_reason, stream_key_id};
 use libsql::{Connection, TransactionBehavior, params};
 use orna_stream::Checkpoint as StreamCheckpoint;
-use orna_stream::{
-    CheckpointKey, CheckpointPrecondition, CommitIntent, CommitResult, Position, RejectReason,
-    StreamStatus,
-};
+use orna_stream::{CheckpointPrecondition, CommitIntent, CommitResult, RejectReason, StreamStatus};
+use orna_stream_identity::{CheckpointKey, Position};
 use orna_value::{CwdCapture, SafeText, Value, validate_stream_reference};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;

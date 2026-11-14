@@ -9,9 +9,9 @@ use orna_repository::Repository;
 use orna_runtime::{
     ListStreamSource, RuntimeIdentity, RuntimeState, StreamHandler, StreamHandlerResult, StreamItem,
 };
-use orna_stream::{
-    AsyncCheckpointBackend, CheckpointKey, Component, ConsumerIdentity, DeliveryIdentity,
-    FailureIdentity, Position,
+use orna_stream::{AsyncCheckpointBackend, FailureIdentity};
+use orna_stream_identity::{
+    CheckpointKey, Component, ConsumerIdentity, DeliveryIdentity, Position,
 };
 use orna_value::{OvbRaw, Value};
 use std::{path::Path, process::Command};

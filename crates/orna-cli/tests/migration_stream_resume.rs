@@ -15,18 +15,21 @@ use std::{
 
 use orna_repository::{Repository, RepositoryFormat};
 use orna_runtime::{
-    CheckpointKey, CheckpointPrecondition, CheckpointResetAudit, CheckpointResetRequest, Component,
-    ConsumerIdentity, ListStreamSource, Position, RequestIdentity, RunObservationRegistration,
-    RuntimeError, RuntimeIdentity, RuntimeState, StreamCheckpoint, StreamHandler,
-    StreamHandlerResult, StreamItem, StreamMutationBatch, StreamObservationRegistration,
-    StreamStep, TerminalOutcome, WriterLease, import_stream_carry, migration_copy_runtime_identity,
-    read_stream_carry, repository_runtime_identity, runtime_identity_for_database_id,
+    CheckpointPrecondition, CheckpointResetAudit, CheckpointResetRequest, ListStreamSource,
+    RequestIdentity, RunObservationRegistration, RuntimeError, RuntimeIdentity, RuntimeState,
+    StreamCheckpoint, StreamHandler, StreamHandlerResult, StreamItem, StreamMutationBatch,
+    StreamObservationRegistration, StreamStep, TerminalOutcome, WriterLease, import_stream_carry,
+    migration_copy_runtime_identity, read_stream_carry, repository_runtime_identity,
+    runtime_identity_for_database_id,
 };
 use orna_runtime::{
     StreamFailurePayload, StreamRunControl, StreamSource, StreamSourceDescriptor, StreamSourceKind,
     StreamSourcePoll,
 };
-use orna_stream::{DeliveryIdentity, SafeDiagnostic};
+use orna_stream::SafeDiagnostic;
+use orna_stream_identity::{
+    CheckpointKey, Component, ConsumerIdentity, DeliveryIdentity, Position,
+};
 use tempfile::TempDir;
 
 fn git_output(directory: &Path, arguments: &[&str]) -> Vec<u8> {

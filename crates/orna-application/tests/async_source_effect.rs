@@ -10,10 +10,11 @@ use orna_live_lease::LiveApplicationWorkSupervisor;
 use orna_protocol::{DatabaseContext, Message, PresentationContext, ResultStatus};
 use orna_repository::Repository;
 use orna_runtime::{
-    CheckpointKey, Component, ConsumerIdentity, Mutation, NoFault, RunObservationRegistration,
-    StreamAdministrationOutcome, StreamObservationRegistration, WriterLease,
+    Mutation, NoFault, RunObservationRegistration, StreamAdministrationOutcome,
+    StreamObservationRegistration, WriterLease,
 };
 use orna_runtime::{RuntimeIdentity, RuntimeState};
+use orna_stream_identity::{CheckpointKey, Component, ConsumerIdentity};
 use orna_sys_id::SysFailureCode;
 use orna_value::{CanonicalValue, OvbRaw};
 use std::{
