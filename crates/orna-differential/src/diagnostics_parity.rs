@@ -165,6 +165,15 @@ pub fn recorded_reason(code: &str) -> Option<&'static str> {
         {
             Some("checker-only system or assertion check not ported to HIR")
         }
+        "E5001" => Some(
+            "HIR types the corpus unit literals as plain numbers, not Quantity, so the E5001 dimension rule never sees two quantities",
+        ),
+        "E5002" => Some(
+            "HIR types the corpus literal (20.C) as a plain number, not Temperature, so the E5002 affine-point rule never sees two points",
+        ),
+        "E5003" => Some(
+            "HIR types the corpus operands as plain numbers, not Temperature, so the E5003 affine-sum rule never fires; the currency case is checked as an ORNA-INFER-011 constraint instead",
+        ),
         code if code.starts_with('E') && code.len() == 5 => {
             Some("checker-only lowering or checking family not ported to HIR")
         }
