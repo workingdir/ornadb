@@ -35,8 +35,6 @@ mod sys_blob;
 mod text;
 mod time;
 mod time_format;
-mod unicode_16_case_properties;
-mod unicode_case;
 mod values;
 mod window;
 

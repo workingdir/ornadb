@@ -14,7 +14,7 @@ num-integer = "0.1.47"
 num-traits = "0.2.19"
 libm = "0.2.16"
 sha2 = "0.10.9"
-unicode-case-mapping = "=1.0.0"
+orna-unicode = { path = "../orna-unicode" }
 unicode-normalization = "=0.1.24"
 num-bigint = "0.4.6"
 orna-hir = { path = "../orna-hir" }
