@@ -315,8 +315,12 @@ fn executor_gap_stale(allowances: &[compare::ExecutorGapAllowance], used: &[bool
         .collect()
 }
 
+/// The `old` value of an executor-gap allowance whose old pipeline run returned a result, not an error.
+const OLD_OK: &str = "ok";
+
 /// Whether `case`'s disagreement is a listed executor gap: the executor answers the listed error
-/// code and the old pipeline answers the listed error code. Any other disagreement stays a mismatch.
+/// code and the old pipeline answers the listed error code, or the listed `ok` when it returns a
+/// result. Any other disagreement stays a mismatch.
 fn executor_gap_allowed(
     case: &Case,
     executor: &Result<Vec<u8>, String>,
@@ -324,13 +328,18 @@ fn executor_gap_allowed(
     allowances: &[compare::ExecutorGapAllowance],
     used: &mut [bool],
 ) -> bool {
-    let (Err(executor_code), Some(Err(old_code))) = (executor, old) else {
+    let Err(executor_code) = executor else {
         return false;
+    };
+    let old_code = match old {
+        Some(Err(code)) => code.as_str(),
+        Some(Ok(_)) => OLD_OK,
+        None => return false,
     };
     match allowances.iter().position(|allowance| {
         allowance.case == case.id
             && allowance.executor == *executor_code
-            && allowance.old == *old_code
+            && allowance.old == old_code
     }) {
         Some(index) => {
             used[index] = true;
