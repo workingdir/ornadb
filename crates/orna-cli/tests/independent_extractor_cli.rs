@@ -21,13 +21,11 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
-#[path = "support/format3.rs"]
-mod format3;
 use format3::*;
+use orna_cli_testkit::format3;
 
-#[path = "support/media_commit.rs"]
-mod media_commit;
 use media_commit::commit_capture;
+use orna_cli_testkit::media_commit;
 #[path = "support/product.rs"]
 mod product;
 use product::{admitted_relations, commit_source, initialized_database, query_rows, repl_writes};
@@ -135,7 +133,8 @@ fn extracted_field(row: &Value, index: u64) -> &Value {
 #[allow(clippy::too_many_lines)]
 #[tokio::test]
 async fn extractor_recovers_modules_schema_rows_and_blob_bytes_from_an_export() {
-    let (directory, repository, relation_id) = empty_format3_repository();
+    let (directory, repository, relation_id) =
+        empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     // Transitional (bead ornadb-5il1.413): the format-3 fixture commits the
     // legacy .orna/object-identities.cbor sidecar, and the product's publish
     // carries it into HEAD. ORNA-META-001 forbids that tracked entry, and this
@@ -532,7 +531,8 @@ fn assert_extracted_snapshot(
 #[allow(clippy::too_many_lines)]
 #[tokio::test]
 async fn extractor_walks_the_native_store_of_each_snapshot_in_a_two_snapshot_copy() {
-    let (directory, repository, relation_id) = empty_format3_repository();
+    let (directory, repository, relation_id) =
+        empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     drop_legacy_identity_sidecar(directory.path());
     let source = TempDir::new().unwrap();
     for name in ["tone.wav", "pixel.png"] {

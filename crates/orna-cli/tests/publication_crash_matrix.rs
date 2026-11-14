@@ -21,9 +21,8 @@ use orna_storage::RuntimePublicationCoordinator;
 use orna_sys::{EnvironmentProvider, FilesystemProvider};
 use tempfile::TempDir;
 
-#[path = "support/format3.rs"]
-mod format3;
 use format3::*;
+use orna_cli_testkit::format3;
 
 const MEDIA_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/media");
 const REIMPORT_FIXTURE: &str = include_str!("fixtures/media/reimport-image-capture.orna");
@@ -58,7 +57,8 @@ async fn commit_capture(
     // Format 3 keeps rows only in `.orna/store` (ORNA-REPO-004): the row
     // source is the fixture document, never a committed file.
     let logical_path = "Object/image.orna";
-    let row_source = object_source_row(media_root, "image");
+    let row_source =
+        object_source_row(media_root, include_str!("fixtures/media/source-image.orna"));
     let loader = ProjectLoader::default();
     let project = loader
         .load_committed_snapshot(repository, source_commit)
@@ -384,7 +384,8 @@ async fn seeded_project() -> (
         source.path().join("pixel.png"),
     )
     .unwrap();
-    let (directory, repository, relation_id, format_context) = object_format3_repository();
+    let (directory, repository, relation_id, format_context) =
+        object_format3_repository(include_str!("fixtures/media/offline-query-main.orna"));
     let base = repository.head().unwrap().unwrap();
     let (identity, digest) = cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, identity, digest)
@@ -2473,7 +2474,8 @@ async fn capture_and_row_commit_recover_after_process_kill() {
         let payload = vec![0x6d; 128 * 1024];
         let source_path = source.path().join("capture.bin");
         std::fs::write(&source_path, &payload).unwrap();
-        let (directory, repository, relation_id, format_context) = object_format3_repository();
+        let (directory, repository, relation_id, format_context) =
+            object_format3_repository(include_str!("fixtures/media/offline-query-main.orna"));
         let root = directory.path();
         std::fs::write(root.join("unrelated-tracked.txt"), b"committed baseline\n").unwrap();
         git(root, &["add", "--", "unrelated-tracked.txt"]);
@@ -2690,7 +2692,8 @@ fn capture_chunk_unrooted_by_bypassing_prune_fails_closed() {
         .collect();
     let source_path = source.path().join("capture.bin");
     std::fs::write(&source_path, &payload).unwrap();
-    let (directory, repository, relation_id, format_context) = object_format3_repository();
+    let (directory, repository, relation_id, format_context) =
+        object_format3_repository(include_str!("fixtures/media/offline-query-main.orna"));
     let root = directory.path();
     let base = head(&repository);
     let schema_root = hex(format_context.schema_root().as_bytes());
@@ -2754,7 +2757,8 @@ fn capture_paused_refuses_coordinated_gc_then_completes_verified() {
         .collect();
     let source_path = source.path().join("capture.bin");
     std::fs::write(&source_path, &payload).unwrap();
-    let (directory, repository, relation_id, format_context) = object_format3_repository();
+    let (directory, repository, relation_id, format_context) =
+        object_format3_repository(include_str!("fixtures/media/offline-query-main.orna"));
     let root = directory.path();
     let base = head(&repository);
     let schema_root = hex(format_context.schema_root().as_bytes());

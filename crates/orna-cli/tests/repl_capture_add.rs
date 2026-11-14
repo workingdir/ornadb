@@ -470,9 +470,8 @@ fn repl_root_main_alias_targets_root_namespace_without_user_main() {
         .expect("function returns a value");
     assert_eq!(value.raw(), &Raw::Int(2.into()));
 }
-#[path = "support/format3.rs"]
-mod format3;
 use format3::*;
+use orna_cli_testkit::format3;
 
 const CONTACT_SOURCE: &str = "pub table Contact(id: Str) { name: Str, }\n";
 

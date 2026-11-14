@@ -32,3 +32,34 @@ fn point_plus_point_is_rejected() {
         "a point plus a point must not type"
     );
 }
+
+fn check_codes(body: &str) -> Vec<String> {
+    let source = format!("{USE}{body}");
+    let mut program = program(&source);
+    typeck(&mut program);
+    program.modules[super::tests::test_module(&program)]
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.code.to_string())
+        .collect()
+}
+
+#[test]
+fn point_plus_point_is_e5002() {
+    let found = check_codes("pub fn bad(a: Temperature, b: Temperature): Temperature = a + b;\n");
+    assert_eq!(
+        found,
+        vec![crate::diag::AFFINE_POINT_OPERATOR.to_string()],
+        "{found:?}"
+    );
+}
+
+#[test]
+fn summing_affine_points_is_e5003() {
+    let found = check_codes("pub fn bad(values: [Temperature]) = values | sum;\n");
+    assert_eq!(
+        found,
+        vec![crate::diag::AFFINE_POINT_SUM.to_string()],
+        "{found:?}"
+    );
+}

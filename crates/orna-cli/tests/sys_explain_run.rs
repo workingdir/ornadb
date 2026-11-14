@@ -7,8 +7,7 @@ use orna_repository::Repository;
 use orna_runtime::RuntimeState;
 use orna_value::{OvbRaw, Value};
 
-#[path = "support/format3.rs"]
-mod format3;
+use orna_cli_testkit::format3;
 
 fn orna(directory: &std::path::Path, arguments: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_orna"))

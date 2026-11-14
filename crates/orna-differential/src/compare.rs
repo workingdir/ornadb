@@ -460,6 +460,13 @@ pub fn load_representation_allowances() -> Result<Vec<HarnessAllowance>, String>
     parse_allowances(&read_file(&path)?, "representation-allowance")
 }
 
+/// Reads the `[[currency-allowance]]` tables of `tests/differential/exec-share.toml`: the cases whose
+/// old pipeline answers `ORNA-EVAL-TYPE` for a currency value the executor evaluates to `Money` per spec.
+pub fn load_currency_allowances() -> Result<Vec<HarnessAllowance>, String> {
+    let path = differential_dir().join("exec-share.toml");
+    parse_allowances(&read_file(&path)?, "currency-allowance")
+}
+
 /// Parses the `table` allowances. A missing reason or bead is a load error.
 fn parse_allowances(source: &str, table: &str) -> Result<Vec<HarnessAllowance>, String> {
     let document = toml_lite::parse(source)?;

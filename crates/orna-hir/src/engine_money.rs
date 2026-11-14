@@ -11,6 +11,9 @@ use crate::{DefId, DefKind, Program, Ty, TyKind};
 /// The name of the currency protocol, in the engine's `core.money` module and in a user's own declaration.
 const CURRENCY: &str = "Currency";
 
+/// The name of the `core.money` value type whose amount is one `Decimal` in one currency.
+const MONEY: &str = "Money";
+
 /// Whether `protocol` is the currency protocol under the Q-B1 default.
 #[must_use]
 pub fn is_currency_protocol(program: &Program, protocol: DefId) -> bool {
@@ -101,4 +104,24 @@ fn collect_failures(program: &Program, ty: Ty, failures: &mut Vec<Ty>) {
         }
         _ => {}
     }
+}
+
+/// Whether `def` is `core.money.Money`, the value whose amount is a `Decimal` in one currency (hir-host.md B6).
+#[must_use]
+pub fn is_money_def(program: &Program, def: DefId) -> bool {
+    let definition = &program.defs[def];
+    definition.name.as_str() == MONEY
+        && program.modules[definition.module].path.to_string() == "core.money"
+}
+
+/// The currency type argument of `ty` when `ty` is `core.money.Money<C>`.
+#[must_use]
+pub fn money_currency(program: &Program, ty: Ty) -> Option<Ty> {
+    let Some(TyKind::Adt(owner, args)) = program.tys.kind(ty) else {
+        return None;
+    };
+    if !is_money_def(program, *owner) {
+        return None;
+    }
+    args.first().copied()
 }
