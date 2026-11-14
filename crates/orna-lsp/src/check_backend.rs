@@ -93,7 +93,8 @@ fn hir_findings(loaded: &LoadedProject) -> Vec<Finding> {
         loaded.standard_sources(),
         &reference_prelude(),
     );
-    let (diagnostics, origins) = hir_check::located_diagnostics(&checked.findings);
+    let (diagnostics, origins) =
+        hir_check::checker_located_diagnostics(&checked.findings, loaded.modules());
     diagnostics
         .iter()
         .zip(origins)
