@@ -13,6 +13,7 @@
     "orna-evolution",
     "orna-format3",
     "orna-fuse",
+    "orna-host-fs",
     "orna-hir",
     "orna-intrinsics",
     "orna-live",

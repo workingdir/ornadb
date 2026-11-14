@@ -19,7 +19,7 @@ required-features = ["route-trace"]
 
 [features]
 default = ["system-host-bindings"]
-system-host-bindings = ["dep:orna-sys", "dep:orna-repository"]
+system-host-bindings = ["dep:orna-sys", "dep:orna-host-fs", "dep:orna-repository"]
 # Unstable test seam: exposes EffectGate::admit_unbound_for_test to dependent test suites.
 test-evidence = []
 browser-wasm = ["getrandom/wasm_js", "dep:uuid", "uuid/js"]
@@ -45,6 +45,7 @@ orna-repository = { path = "../orna-repository", optional = true }
 orna-standard-sources = { path = "../orna-standard-sources" }
 orna-check = { path = "../orna-check" }
 orna-sys = { path = "../orna-sys", optional = true }
+orna-host-fs = { path = "../orna-host-fs", optional = true }
 orna-syntax = { path = "../orna-syntax" }
 orna-syntax-ast = { path = "../orna-syntax-ast" }
 orna-value = { path = "../orna-value" }

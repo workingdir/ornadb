@@ -2523,8 +2523,9 @@ async fn admit_production_rows_into(
     relation_id: [u8; 16],
 ) -> AdmittedProductionRows {
     use orna_evaluator::SysHostBindingRegistry;
+    use orna_host_fs::FilesystemProvider;
     use orna_runtime::RuntimeState;
-    use orna_sys::{EnvironmentProvider, FilesystemProvider};
+    use orna_sys::EnvironmentProvider;
 
     let media_fixtures = concat!(
         env!("CARGO_MANIFEST_DIR"),

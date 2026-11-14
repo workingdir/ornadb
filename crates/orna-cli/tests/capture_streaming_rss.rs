@@ -12,7 +12,8 @@ use std::collections::BTreeMap;
 use std::{fs::File, io::Write, path::Path};
 
 use orna_evaluator::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
-use orna_sys::{EnvironmentProvider, FilesystemProvider};
+use orna_host_fs::FilesystemProvider;
+use orna_sys::EnvironmentProvider;
 use orna_value::{Blob, ValueFormat};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;

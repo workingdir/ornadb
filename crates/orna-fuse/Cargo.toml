@@ -36,6 +36,7 @@ orna-repository = { path = "../orna-repository" }
 orna-runtime = { path = "../orna-runtime" }
 orna-storage = { path = "../orna-storage" }
 orna-sys = { path = "../orna-sys" }
+orna-host-fs = { path = "../orna-host-fs" }
 orna-sys-id = { path = "../orna-sys-id" }
 orna-syntax = { path = "../orna-syntax" }
 orna-syntax-ast = { path = "../orna-syntax-ast" }

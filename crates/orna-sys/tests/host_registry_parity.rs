@@ -2,12 +2,13 @@ use std::{collections::BTreeMap, path::Path};
 
 use orna_syntax::parse_module;
 
+use orna_host_fs::{CaptureFileError, FilesystemProviderError};
 use orna_syntax_ast::Declaration;
 use orna_sys::{
-    CaptureFileError, ClockProviderError, EnvironmentDispatchValue, EnvironmentProvider,
-    EnvironmentProviderError, FilesystemProviderError, HttpProviderError, ProcessProviderError,
-    system_host_binding_modules_json, system_host_binding_stubs, system_host_operation_registry,
-    system_host_operation_registry_json, system_host_operation_registry_schema_json,
+    ClockProviderError, EnvironmentDispatchValue, EnvironmentProvider, EnvironmentProviderError,
+    HttpProviderError, ProcessProviderError, system_host_binding_modules_json,
+    system_host_binding_stubs, system_host_operation_registry, system_host_operation_registry_json,
+    system_host_operation_registry_schema_json,
 };
 
 use orna_sys_codegen::build_host;
@@ -15,8 +16,9 @@ use orna_sys_codegen::build_host;
 #[test]
 fn embedded_host_registry_matches_deterministic_annotated_method_projection() {
     let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let first = build_host::generate_host_registry(&source_root).unwrap();
-    let second = build_host::generate_host_registry(&source_root).unwrap();
+    let host_fs_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../orna-host-fs/src");
+    let first = build_host::generate_host_registry(&[&source_root, &host_fs_root]).unwrap();
+    let second = build_host::generate_host_registry(&[&source_root, &host_fs_root]).unwrap();
     assert_eq!(first, second, "host registry generation is deterministic");
     assert_eq!(first, system_host_operation_registry_json());
     let out_dir = Path::new(env!("OUT_DIR"));
@@ -149,7 +151,8 @@ fn embedded_host_registry_matches_deterministic_annotated_method_projection() {
 #[test]
 fn generated_host_binding_artifacts_are_registry_backed_and_parse_as_orna_modules() {
     let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let host_registry = build_host::generate_typed_host_registry(&source_root)
+    let host_fs_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../orna-host-fs/src");
+    let host_registry = build_host::generate_typed_host_registry(&[&source_root, &host_fs_root])
         .expect("native host operations regenerate as a typed registry from Rust annotations");
     let host_registry_json = build_host::serialize_host_registry(&host_registry)
         .expect("typed host registry serializes deterministically");
@@ -349,7 +352,9 @@ fn generated_tuple_return_provider_bindings_match_schema_and_typed_rows() {
     ];
 
     let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let registry_json = build_host::generate_host_registry(&source_root)
+
+    let host_fs_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../orna-host-fs/src");
+    let registry_json = build_host::generate_host_registry(&[&source_root, &host_fs_root])
         .expect("tuple-return provider registry regenerates from Rust annotations");
     assert_eq!(registry_json, system_host_operation_registry_json());
     let schema_json = build_host::generate_host_registry_schema()

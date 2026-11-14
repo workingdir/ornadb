@@ -2,8 +2,9 @@
 mod pinned_io_std;
 
 use orna_evaluator::{Limits, SysHostBindingRegistry};
+use orna_host_fs::FilesystemProvider;
 use orna_project_repl::AdmittedReplSession;
-use orna_sys::{EnvironmentProvider, FilesystemProvider};
+use orna_sys::EnvironmentProvider;
 use orna_value::CanonicalValue;
 use orna_value::Raw;
 

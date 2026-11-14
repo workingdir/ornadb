@@ -2,8 +2,9 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use orna_evaluator::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
+use orna_host_fs::FilesystemProvider;
 use orna_repository::offline_copy::{OfflineCopy, write_offline_copy};
-use orna_sys::{EnvironmentProvider, FilesystemProvider};
+use orna_sys::EnvironmentProvider;
 use tempfile::TempDir;
 
 use format3::*;

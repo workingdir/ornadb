@@ -11,6 +11,7 @@ use std::{
 use orna_evaluator::{
     ActivationEffectReport, Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects,
 };
+use orna_host_fs::FilesystemProvider;
 use orna_repository::Repository;
 use orna_runtime::{
     FaultInjector, FaultPoint, NoFault, RecoveryDisposition, RequestIdentity, RequestOwner,
@@ -18,7 +19,7 @@ use orna_runtime::{
     WriterLease,
 };
 use orna_storage::RuntimePublicationCoordinator;
-use orna_sys::{EnvironmentProvider, FilesystemProvider};
+use orna_sys::EnvironmentProvider;
 use tempfile::TempDir;
 
 use format3::*;

@@ -39,6 +39,7 @@ members = [
     "crates/orna-stream",
     "crates/orna-syntax",
     "crates/orna-syntax-ast",
+    "crates/orna-host-fs",
     "crates/orna-sys",
     "crates/orna-sys-codegen",
     "crates/orna-sys-id",

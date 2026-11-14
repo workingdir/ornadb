@@ -1479,6 +1479,7 @@ dependencies = [
  "orna-exec",
  "orna-fuse",
  "orna-hir",
+ "orna-host-fs",
  "orna-live",
  "orna-project",
  "orna-project-repl",
@@ -1625,6 +1626,7 @@ dependencies = [
  "num-integer",
  "num-traits",
  "orna-check",
+ "orna-host-fs",
  "orna-intrinsics",
  "orna-project",
  "orna-project-repl",
@@ -1698,6 +1700,7 @@ dependencies = [
  "orna-cli-testkit",
  "orna-conformance",
  "orna-evaluator",
+ "orna-host-fs",
  "orna-project",
  "orna-repository",
  "orna-runtime",
@@ -1724,6 +1727,16 @@ dependencies = [
  "orna-value",
  "unicode-casefold",
  "unicode-normalization",
+]
+
+[[package]]
+name = "orna-host-fs"
+version = "1.0.0"
+dependencies = [
+ "orna-base",
+ "orna-sys-macros",
+ "rustix 0.38.44",
+ "tempfile",
 ]
 
 [[package]]
@@ -1870,6 +1883,7 @@ dependencies = [
  "orna-conformance",
  "orna-evaluator",
  "orna-format3",
+ "orna-host-fs",
  "orna-project",
  "orna-runtime",
  "orna-storage",
@@ -1984,6 +1998,7 @@ name = "orna-sys"
 version = "1.1.0"
 dependencies = [
  "orna-base",
+ "orna-host-fs",
  "orna-security",
  "orna-syntax",
  "orna-syntax-ast",
