@@ -81,6 +81,17 @@ fn run_with(case: &Case, cancel: Option<Arc<AtomicBool>>) -> ExecOutcome {
     if owned_diagnostics(&lowered) {
         return ExecOutcome::NotYet("the owned modules lower with a diagnostic".to_owned());
     }
+    let mut typed = match observe_new::lower_case_admitted(case) {
+        Ok(typed) => typed,
+        Err(error) => return ExecOutcome::NotYet(error),
+    };
+    orna_hir::typeck(&mut typed.program);
+    if let Some(Some(code)) = static_rejection(&typed) {
+        return ExecOutcome::Ran {
+            outcome: Err(code.to_owned()),
+            steps: 0,
+        };
+    }
     let Some(entry) = entry_name(case) else {
         return ExecOutcome::NotYet("the module case has no entry function".to_owned());
     };
@@ -159,6 +170,29 @@ fn owned_diagnostics(lowered: &LoweredProgram) -> bool {
         .modules
         .iter_enumerated()
         .any(|(module, found)| lowered.owned[module.index()] && !found.diagnostics.is_empty())
+}
+
+/// The checker codes a table write answers before evaluation: a missing required field (E2002), an unknown
+/// field (E2003), and a computed field written on insert (E3010).
+const STATIC_TABLE_WRITE_CODES: [&str; 3] = ["E2002", "E2003", "E3010"];
+
+/// The static rejection the owned modules' type-pass diagnostics carry, when every one of them is a table-write
+/// code. `Some(None)` is no diagnostic; `Some(Some(code))` is the first sorted code, which is the old pipeline's
+/// outcome for the same set; `None` is a diagnostic outside the table-write codes.
+fn static_rejection(lowered: &LoweredProgram) -> Option<Option<&'static str>> {
+    let mut first: Option<&'static str> = None;
+    for (module, found) in lowered.program.modules.iter_enumerated() {
+        if !lowered.owned[module.index()] {
+            continue;
+        }
+        for diagnostic in &found.diagnostics {
+            let code = STATIC_TABLE_WRITE_CODES
+                .into_iter()
+                .find(|known| *known == diagnostic.code)?;
+            first = Some(first.map_or(code, |current| current.min(code)));
+        }
+    }
+    Some(first)
 }
 
 /// The definition `entry` names in the case's primary module.

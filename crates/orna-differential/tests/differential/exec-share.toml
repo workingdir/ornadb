@@ -13,45 +13,18 @@
 # are not part of `agreed`.
 
 [[exec-share]]
-agreed = 56
+agreed = 61
 evaluable = 110
 steps-exact = 51
-old-harness-environment = 8
+old-harness-environment = 3
 
-# Cases the executor runs over a table the old pipeline cannot reach from its admitted module. The old
-# observer admits only the case's own source, so a table the case reaches only through the attached
-# fixture (`Contact`) is absent from the old admitted table set. Each such case answers `ORNA-EVAL-NAME`
-# or a static rejection on the old side. The count is a ratchet that may only shrink; each case needs a
-# `[[harness-allowance]]`.
-[[harness-allowance]]
-case = "invalid/computed-field-insert.orna"
-reason = "old pipeline rejects the computed-field insert statically (E2002); the executor runs the insert against the attached Contact table and reports ORNA-EVAL-TABLE-ROW. Static rejection parity is an open executor gap."
-bead = "ornadb-csenl.21"
+# Cases the executor runs by reading a table field as a function, `map(Contact.field)`, over the attached
+# fixture `Contact` table. The old observer admits that table (`fixture_environment::CONTACTS_SUPPORT`), so the
+# old pipeline reaches the table; the dotted `Contact.full_name` does not resolve in the old evaluator, which
+# resolves a relation source by a bare table name only. The old pipeline answers `ORNA-EVAL-NAME`; the executor
+# returns the spec result, the empty list (CBOR `0x80`) of an empty table. Not credited as agreement. Closing
+# this needs an evaluator change to dotted field relation sources, outside the observer.
 
-[[harness-allowance]]
-case = "invalid/duplicate-key.orna"
-reason = "old pipeline answers ORNA-EVAL-NAME for the attached Contact table, which admit_module does not admit from the case's own source; the executor runs the second insert and reports the spec duplicate-key error (ORNA-EVAL-TABLE-DUPLICATE-KEY)."
-bead = "ornadb-csenl.21"
-
-[[harness-allowance]]
-case = "invalid/missing-required-field.orna"
-reason = "old pipeline rejects the missing required field statically (E2002); the executor runs the insert against the attached Contact table and reports ORNA-EVAL-TABLE-ROW. Static rejection parity is an open executor gap."
-bead = "ornadb-csenl.21"
-
-[[harness-allowance]]
-case = "invalid/unknown-field.orna"
-reason = "old pipeline rejects the unknown field statically (E2003); the executor runs the insert against the attached Contact table and reports ORNA-EVAL-TABLE-ROW. Static rejection parity is an open executor gap."
-bead = "ornadb-csenl.21"
-
-[[harness-allowance]]
-case = "valid/effectful-expression.orna"
-reason = "old pipeline answers ORNA-EVAL-NAME for the attached Contact table, which admit_module does not admit from the case's own source; the executor runs the insert and returns the spec record (defaults applied: id \"generated\", emails []). Not credited as agreement."
-bead = "ornadb-csenl.21"
-
-# Cases the executor runs by reading a table field as a function, `map(Contact.field)`, over the table. The
-# old evaluator resolves a relation source by a bare table name only: the dotted `Contact.full_name` does not
-# resolve, so the old pipeline answers `ORNA-EVAL-NAME` even with the empty table bound. The executor returns
-# the spec result, the empty list (CBOR `0x80`) of an empty table. Not credited as agreement.
 [[harness-allowance]]
 case = "valid/computed-field.orna"
 reason = "old evaluator resolves only a bare table name as a relation source, so the dotted `Contact.full_name` answers ORNA-EVAL-NAME over the empty table; the executor maps the computed field over zero rows and returns the empty list the spec defines"
@@ -109,3 +82,17 @@ executor = "ORNA-EVAL-TABLE-UNADMITTED"
 old = "E3013"
 reason = "old pipeline rejects the rekey of an auto-generated id statically (E3013); the HIR checker has no equivalent static rule, so the executor reports the rekey as unadmitted (ORNA-EVAL-TABLE-UNADMITTED). Static rejection parity is an open checker gap."
 bead = "ornadb-0xfiw"
+
+# Agreeing cases whose step counts differ from the old pipeline. The outcomes agree; these entries only admit the
+# step-count difference, and each is not counted as exact step parity.
+[[step-allowance]]
+case = "invalid/duplicate-key.orna"
+old = 9
+executor = 15
+reason = "the outcomes agree (ORNA-EVAL-TABLE-DUPLICATE-KEY) over the attached Contact table; the executor charges 15 steps where the old pipeline charges 9 for the same run. The table-write step charge is not reconciled."
+
+[[step-allowance]]
+case = "valid/effectful-expression.orna"
+old = 3
+executor = 7
+reason = "the outcomes agree (the spec record of the attached Contact insert); the executor charges 7 steps where the old pipeline charges 3 for the same run. The table-write step charge is not reconciled."
