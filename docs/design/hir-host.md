@@ -354,6 +354,10 @@ shadowing the protocol an error, costs nothing to switch to: the predicate is th
   currency id from the application's trusted `NominalDefinition` (`orna-evaluator/src/lib.rs:530-545`), not from a
   derivation. The first step of slice HB6 is to read how the application assigns it and to record the equality (or the
   difference) in a test against `valid/money-serialization`'s golden bytes before any value is built.
+- **Operator calls (HB6).** A `+`, `-`, `<`, or `in` on a nominal operand lowers to a `Callee::Source` whose `targs` are
+  the instance's protocol arguments, then `Self`, then the receiver's own type arguments (`typeck/operator.rs`
+  `Implementation::targs`). The executor binds the instance's type parameters from these, so a generic receiver such as
+  `Money<GBP>` runs without a caller environment. Unary `-` and every binary and membership operator use this path.
 
 ### B5. The `E5001`, `E5002`, `E5003` rules
 

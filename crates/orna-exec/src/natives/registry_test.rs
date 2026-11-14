@@ -27,14 +27,21 @@ const PORTED: &[(&str, &str)] = &[
         "core.encoding.base64",
         include_str!("../../../orna-hir/interface/core/encoding/base64.orna"),
     ),
+    (
+        "core.money",
+        include_str!("../../../orna-hir/interface/core/money.orna"),
+    ),
 ];
 
 /// The names of the `pub native fn` declarations one interface source states.
 fn declared(source: &str) -> Vec<&str> {
     source
         .lines()
-        .filter_map(|line| line.strip_prefix("pub native fn "))
-        .map(|rest| rest.split('(').next().unwrap_or_default().trim())
+        .filter_map(|line| {
+            line.strip_prefix("pub native fn ")
+                .or_else(|| line.strip_prefix("native fn "))
+        })
+        .map(|rest| rest.split(['(', '<']).next().unwrap_or_default().trim())
         .filter(|name| !name.is_empty())
         .collect()
 }
