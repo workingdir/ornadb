@@ -22,17 +22,20 @@ use crate::{DefId, Import, ImportTarget, ModuleId, ModuleOrigin, ModulePath, Nam
 
 use super::declare::{Builder, PendingUse};
 
+/// A wildcard import awaiting its candidates: the importer, the names it may take, and where it was written.
+type Globs = Vec<(ModuleId, Vec<(Name, DefId)>, orna_syntax_ast::SourceSpan)>;
+
 impl Builder {
     /// Resolves every `use` declaration into the importing module's scope.
     pub(crate) fn resolve_imports(&mut self) {
         let uses = std::mem::take(&mut self.uses);
-        let mut globs: Vec<(ModuleId, ModuleId, orna_syntax_ast::SourceSpan)> = Vec::new();
+        let mut globs: Globs = Vec::new();
         for pending in &uses {
             self.apply_use(pending, &mut globs);
         }
         let mut importers: Vec<(ModuleId, orna_syntax_ast::SourceSpan)> = Vec::new();
-        for (importer, target, span) in globs {
-            self.collect_glob(importer, target);
+        for (importer, exports, span) in globs {
+            self.collect_glob(importer, exports);
             if !importers.iter().any(|(seen, _)| *seen == importer) {
                 importers.push((importer, span));
             }
@@ -71,11 +74,7 @@ impl Builder {
     }
 
     /// Applies one `use` declaration.
-    fn apply_use(
-        &mut self,
-        pending: &PendingUse,
-        globs: &mut Vec<(ModuleId, ModuleId, orna_syntax_ast::SourceSpan)>,
-    ) {
+    fn apply_use(&mut self, pending: &PendingUse, globs: &mut Globs) {
         let importer = pending.module;
         let target_path =
             ModulePath::new(pending.path.iter().map(|segment| Name::new(&segment.name)));
@@ -86,12 +85,14 @@ impl Builder {
         }
         let Some(target) = self.by_path.get(&target_path).copied() else {
             self.record_import_path(pending);
-            self.diagnose(
-                importer,
-                crate::diag::IMPORT,
-                "imported module is unavailable",
-                pending.span.clone(),
-            );
+            if !self.apply_family_use(pending, &target_path, globs) {
+                self.diagnose(
+                    importer,
+                    crate::diag::IMPORT,
+                    "imported module is unavailable",
+                    pending.span.clone(),
+                );
+            }
             return;
         };
         self.record_import_path(pending);
@@ -171,10 +172,150 @@ impl Builder {
                 }
             }
             UseTail::Glob { .. } => {
-                globs.push((importer, target, pending.span.clone()));
+                let exports = self.program.modules[target]
+                    .exports
+                    .iter()
+                    .map(|(name, def)| (name.clone(), *def))
+                    .collect();
+                globs.push((importer, exports, pending.span.clone()));
                 self.record_import(importer, target_path, ImportTarget::Module(target));
             }
         }
+    }
+
+    /// Applies a `use` that names variants of a unit family: `use m.Family.kWh;`, `use m.Family.{kWh, mph};`
+    /// or `use m.Family.*;`. A variant is a member of its family, not a module export, so the family is the
+    /// export and its variants come from `family_variants`. Returns `false` when the path names no unit
+    /// family, leaving the diagnosis to the caller.
+    fn apply_family_use(
+        &mut self,
+        pending: &PendingUse,
+        target_path: &ModulePath,
+        globs: &mut Globs,
+    ) -> bool {
+        let importer = pending.module;
+        let segments = target_path.segments();
+        match &pending.tail {
+            UseTail::None => {
+                let Some((variant, family_path)) = segments.split_last() else {
+                    return false;
+                };
+                let Some(family) = self.family_at(family_path) else {
+                    return false;
+                };
+                let Some(unit) = self.variant_of(family, variant) else {
+                    self.diagnose(
+                        importer,
+                        crate::diag::IMPORT,
+                        "named import is unavailable or private",
+                        pending.span.clone(),
+                    );
+                    return true;
+                };
+                self.bind_explicit(importer, variant.clone(), unit, pending.span.clone());
+                self.record_import(importer, target_path.clone(), ImportTarget::Def(unit));
+                // `record_import_path` recorded the variant segment as a member path; it names `unit`.
+                if let Some(written) = pending.path.last().and_then(|segment| {
+                    self.program.modules[importer]
+                        .name_uses
+                        .iter_mut()
+                        .rev()
+                        .find(|use_site| {
+                            use_site.span.start == segment.span.start
+                                && use_site.span.end == segment.span.end
+                        })
+                }) {
+                    written.target = NameTarget::Def(unit);
+                }
+                true
+            }
+            UseTail::Names(names) => {
+                let Some(family) = self.family_at(segments) else {
+                    return false;
+                };
+                for name in names {
+                    let spelling = Name::new(&name.name);
+                    match self.variant_of(family, &spelling) {
+                        Some(unit) => {
+                            self.bind_explicit(importer, spelling.clone(), unit, name.span.clone());
+                            self.record_import(
+                                importer,
+                                target_path.clone(),
+                                ImportTarget::Def(unit),
+                            );
+                            super::record_use(
+                                &mut self.program,
+                                importer,
+                                name.span.clone(),
+                                spelling,
+                                crate::UseContext::Import,
+                                NameTarget::Def(unit),
+                            );
+                        }
+                        None => {
+                            super::record_use(
+                                &mut self.program,
+                                importer,
+                                name.span.clone(),
+                                spelling,
+                                crate::UseContext::Import,
+                                NameTarget::Unresolved,
+                            );
+                            self.diagnose(
+                                importer,
+                                crate::diag::IMPORT,
+                                "named import is unavailable or private",
+                                name.span.clone(),
+                            );
+                        }
+                    }
+                }
+                true
+            }
+            UseTail::Glob { .. } => {
+                let Some(family) = self.family_at(segments) else {
+                    return false;
+                };
+                globs.push((
+                    importer,
+                    self.family_variant_list(family),
+                    pending.span.clone(),
+                ));
+                self.record_import(importer, target_path.clone(), ImportTarget::Def(family));
+                true
+            }
+            UseTail::Alias { .. } => false,
+        }
+    }
+
+    /// The unit family that `path` names: its last segment is an enum-family export of the module the rest
+    /// names.
+    fn family_at(&self, path: &[Name]) -> Option<DefId> {
+        let (last, module_path) = path.split_last()?;
+        let module = *self
+            .by_path
+            .get(&ModulePath::new(module_path.iter().cloned()))?;
+        let def = *self.program.modules[module].exports.get(last)?;
+        self.family_variants.contains_key(&def).then_some(def)
+    }
+
+    /// The variant of a unit family that is called `name`.
+    fn variant_of(&self, family: DefId, name: &Name) -> Option<DefId> {
+        self.family_variants
+            .get(&family)?
+            .iter()
+            .copied()
+            .find(|variant| self.pending[variant.index()].name == *name)
+    }
+
+    /// Every variant of a unit family, by name: the candidates of a wildcard import of the family.
+    fn family_variant_list(&self, family: DefId) -> Vec<(Name, DefId)> {
+        self.family_variants
+            .get(&family)
+            .into_iter()
+            .flatten()
+            .map(|variant| (self.pending[variant.index()].name.clone(), *variant))
+            .collect()
     }
 
     /// A `use sys...[as alias]` declaration: the built-in namespace has no
@@ -282,8 +423,7 @@ impl Builder {
     }
 
     /// Collects one wildcard import's exports as candidates.
-    fn collect_glob(&mut self, importer: ModuleId, target: ModuleId) {
-        let exports = self.program.modules[target].exports.clone();
+    fn collect_glob(&mut self, importer: ModuleId, exports: Vec<(Name, DefId)>) {
         let scope = &mut self.scopes[importer.index()];
         for (name, def) in exports {
             if scope.local_names.contains(&name) || scope.values.contains_key(&name) {
