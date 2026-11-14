@@ -42,7 +42,7 @@ Notes on the table:
 
 ### Diagnostic-ledger status by class
 
-The ledger held 89 rows before the Float primary-key fix (ORNA-KEY-003, E3003). The file's `## expected` section held 88 rows before the sys-admin fix, 85 after it, and 84 now, after main removed the `incompatible-dimensions` row when builtin Duration was routed through the E5001 dimension rule (`ornadb-2bga0`). The 104 in the earlier text of this file predates the current corpus and is stale. Class counts come from the reason field of each row and sum to 84.
+The ledger held 89 rows before the Float primary-key fix (ORNA-KEY-003, E3003). The file's `## expected` section held 88 rows before the sys-admin fix, 85 after it, 84 after main removed the `incompatible-dimensions` row when builtin Duration was routed through the E5001 dimension rule (`ornadb-2bga0`), and 82 now, after the deferred named-argument binding removed the `legacy-checkpoint-reset-method` and `legacy-stream-skip-method` rows. The 104 in the earlier text of this file predates the current corpus and is stale. Class counts come from the reason field of each row; the 84 row count in the previous revision predates the removal of those two rows.
 
 | Class (reason field) | Before | After | Status |
 |---|---|---|---|
@@ -50,11 +50,11 @@ The ledger held 89 rows before the Float primary-key fix (ORNA-KEY-003, E3003). 
 | checker-only lowering or checking family not ported to HIR | 13 | 12 | open; Float primary key fixed (`invalid/float-key.orna`, now E3003 on both sides, row removed) |
 | D1 strict, INFER-004 SHOULD allows the old behaviour | 10 | 10 | intended difference per spec SHOULD; owner decision pending (Q11) |
 | HIR constraint conflict, copy-pasted "Range membership" reason | 9 | 9 | open; reason text is wrong for these rows (see below) |
-| checker-only system or assertion check not ported to HIR | 7 | 4 | open; the sys-admin method rows `failure-replay`, `failure-resolve` and `stream-retry` now agree (HIR rejects `ORNA100-E-SYS-ADMIN-METHOD` at typeck, `settle_pending`), and their rows are removed |
+| checker-only system or assertion check not ported to HIR | 7 | 2 | open; the sys-admin method rows `failure-replay`, `failure-resolve`, `stream-retry`, `legacy-checkpoint-reset-method` and `legacy-stream-skip-method` now agree (HIR rejects `ORNA100-E-SYS-ADMIN-METHOD` at typeck, `legacy_sys_admin_message`), and their rows are removed |
 | checker type mismatch; HIR reports arity or constraint conflicts | 4 | 4 | open |
 | HIR unsolved-variable diagnostic; checker has no code for it | 4 | 4 | open |
 | HIR reports `sys` as a module rather than a value | 4 | 4 | open |
-| HIR binds named arguments only against statically known labels | 4 | 4 | spec-consistent; open for member, std and relation callees |
+| HIR binds named arguments only against statically known labels | 4 | 4 | spec-consistent; member callees of user protocols bind deferred labels at typeck (`Callee::Pending`); open for std and relation callees |
 | HIR import diagnostic the checker does not report under this code | 3 | 3 | open |
 | units and quantities (Temperature, `20.C`, builtin Duration) | 3 | 2 | open; builtin Duration dimension routing landed on main (`ornadb-2bga0`), which removed the `incompatible-dimensions` row |
 
