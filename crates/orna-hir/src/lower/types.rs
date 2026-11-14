@@ -360,7 +360,10 @@ fn lower_product(
         && let Some(rate) = rate_def(builder)
     {
         let number = builder.program.tys.intern(TyKind::Decimal);
-        let per_unit = builder.program.tys.intern(TyKind::Quantity(number, right_key));
+        let per_unit = builder
+            .program
+            .tys
+            .intern(TyKind::Quantity(number, right_key));
         return builder
             .program
             .tys
@@ -369,7 +372,10 @@ fn lower_product(
     let (value, left_key) = match builder.program.tys.kind(left).cloned() {
         Some(TyKind::Quantity(value, key)) => (value, key),
         Some(TyKind::Int | TyKind::Float | TyKind::Decimal) => {
-            let dimensionless = builder.unit_eval.table.intern(crate::units::UnitKey::dimensionless());
+            let dimensionless = builder
+                .unit_eval
+                .table
+                .intern(crate::units::UnitKey::dimensionless());
             (left, dimensionless)
         }
         _ => return left,

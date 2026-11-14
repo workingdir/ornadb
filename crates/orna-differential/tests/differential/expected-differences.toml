@@ -806,3 +806,11 @@ first = "examples.valid.reviewed-commit::publish=Opaque+MayFail"
 second = "examples.valid.reviewed-commit::publish=StorageAdmin+MayFail"
 reason = "HA1 lowers `sys` value paths through admission, so this case now types and reaches the effect comparison. The HIR does not yet represent the sys admin call `sys.admin.commit_reviewed(...)`, so its effect is Opaque and the StorageAdmin effect the checker reads is absent. Closes when sys module calls are lowered with their admission effect (a later slice)"
 bead = "ornadb-csenl.25"
+
+[[difference]]
+case = "valid/money-rate.orna"
+field = "public-signature"
+first = "examples.valid.money-rate::cost=cost(Quantity, Tariff) -> Money<GBP>"
+second = "examples.valid.money-rate::cost=cost(Quantity<Decimal, Energy.kWh>, Tariff) -> Money<GBP>"
+reason = "the HIR signature renders the unit-typed quantity parameter `Quantity<Decimal, Energy.kWh>`, which the checker prints as the bare `Quantity`; the unit is declared in the case and both pipelines agree on the typed result `Money<GBP>`. The checker's rendering is not a second semantic difference, so the entry records the HIR spelling rather than a fix."
+bead = "ornadb-csenl.18"
