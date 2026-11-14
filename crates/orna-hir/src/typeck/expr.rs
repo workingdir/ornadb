@@ -361,8 +361,9 @@ impl<'a> BodyCheck<'a> {
         let cond_ty = self.infer_expr(body, cond, Some(bool_ty))?;
         self.unify(cond_ty, bool_ty, span.clone());
         let Some(els) = els else {
-            self.infer_expr(body, then, None)?;
             let unit = self.intern(TyKind::Unit);
+            let then_ty = self.infer_expr(body, then, Some(unit))?;
+            self.unify(then_ty, unit, span.clone());
             return Ok(match expected {
                 Some(expected) => self.coerce(unit, expected, span),
                 None => unit,
