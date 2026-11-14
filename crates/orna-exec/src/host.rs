@@ -16,6 +16,10 @@ use crate::store::{MemoryStore, TableStore};
 mod catalog;
 pub use catalog::{HostInfo, HostRuntimeMode, ProgramCatalog};
 
+#[path = "host/runtime_rows.rs"]
+mod runtime_rows;
+pub use runtime_rows::RuntimeHostRows;
+
 /// The code a host answers for a member, or a capability, it does not provide.
 pub(crate) const UNSUPPORTED: &str = "ORNA-EVAL-UNSUPPORTED";
 
