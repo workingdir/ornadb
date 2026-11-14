@@ -20,19 +20,14 @@ their source. Anything not measured is marked `not measured`.
 | Ratchet | Test | Measured now | Recorded in file | What the test enforces |
 |---|---|---|---|---|
 | Diagnostic codes, old checker vs HIR | `crates/orna-differential/tests/diagnostic_codes.rs`, 211 cases, 0 skipped | 104 cases differ | 104 rows under `## expected` in `crates/orna-differential/tests/diagnostic_codes_differing.txt` | the differing set equals the expected rows exactly; a listed case that now agrees fails as stale |
-| Executor agreement (H4) | `crates/orna-differential/tests/exec_share.rs`, corpus of 226 cases | 48 of 62 run cases agree; 110 evaluable; 48 of 48 agreeing run cases have exact step parity | `agreed = 48`, `evaluable = 110`, `steps-exact = 48`, and 14 allowances (9 `harness-allowance`, 1 `representation-allowance`, 4 `executor-gap-allowance`) in `crates/orna-differential/tests/differential/exec-share.toml` | `agreed` and `steps-exact` may only grow; `evaluable` is the denominator |
+| Executor agreement (H4) | `crates/orna-differential/tests/exec_share.rs`, corpus of 226 cases | 54 of 70 run cases agree; 110 evaluable; 49 of 54 agreeing run cases have exact step parity | `agreed = 54`, `evaluable = 110`, `steps-exact = 49`, `old-harness-environment = 10`, and 15 allowances (10 `harness-allowance`, 1 `representation-allowance`, 4 `executor-gap-allowance`) in `crates/orna-differential/tests/differential/exec-share.toml` | `agreed` and `steps-exact` may only grow; `old-harness-environment` may only shrink; `evaluable` is the denominator |
 | Typed share (H2) | `crates/orna-differential/tests/typed_share.rs` | 49 of 104 old-accepted cases typed; 14 not lowered; 108 old-rejected cases excluded | `typed = 35`, `lowered = 104` in `crates/orna-differential/tests/differential/typed-share.toml` | see the comparator note below |
 | REPL inline (H8) | `crates/orna-differential/tests/repl_inline_differential.rs` | 15 of 48 runnable fixtures agree; 104 fixtures in total; 56 excluded; 33 expected disagreements | `AGREED_FLOOR = 15` in the test; 33 rows under `## expected` in `crates/orna-differential/tests/repl_inline_differing.txt`, each with a one-line reason; 56 excluded in `crates/orna-differential/tests/repl_inline_exclusions.txt` | `agreed >= 15`; the disagreement set equals the 33 rows |
 | Expected differences (harness allowlist) | `crates/orna-differential/tests/differential/expected-differences.toml` | 98 `[[difference]]` and 9 `[[environment]]` entries; 856 lines | 107 `reason` and 107 `bead` fields | not checked: no test found that verifies each cited bead exists (gap G19) |
 
 Notes on the table:
 
-- **Executor arithmetic.** The 14 non-agreeing run cases equal the 14 allowances
-  (9 + 1 + 4), and 48 + 14 = 62. The test prints a breakdown of reasons (for
-  example "the case is not evaluated: 116", "the case binds rows, arguments or
-  inputs (H5/H8): 14"); those printed counts are over the whole corpus, not over
-  the 14 non-agreeing run cases, and they are not reconciled to the allowance
-  file here.
+- **Executor arithmetic.** The 16 non-agreeing run cases (70 - 54) are the 15 ratchet allowances (10 + 1 + 4) and the one `currency-allowance` (`valid/currency.orna`), which the ratchet count does not include. The test's printed reason breakdown sums to 156, which matches neither 70 nor 226; the test does not state its denominator, and this doc does not reconcile it.
 - **Typed-share comparator (fixed, gap G3).** `typed_share_ratchet` in
   `crates/orna-differential/src/compare.rs` fails when `typed` falls, when `typed`
   rises, and when `lowered` changes. The recorded `typed` is 51, the value measured
@@ -107,7 +102,7 @@ Each criterion is a number that a command prints or a file records.
 |---|---|---|---|
 | C1 `orna check` | H3 | (a) diagnostic-code differing rows = 0, or each remaining row names a bead and the owner accepts it as an intended difference (decision Q11); (b) every row has a reason field (gap G2, fixed in this PR); (c) the shadow report shows zero unlisted differences on two consecutive nightly runs (section 4); (d) criterion C6 holds | 102 rows, each with a reason field; no nightly shadow report |
 | C2 assertion gate (`assertion_gate.rs`) | H9 step 1 | (a) a switch exists (gap G6); (b) the gate's own tests pass with the HIR backend; (c) zero shadow differences on two consecutive nightly runs | no switch; calls `orna_check::analyze_with_providers` directly |
-| C3 `orna run` (executor) | H4 to H6 | (a) `agreed + allowances = evaluable` with every allowance naming a bead; (b) `steps-exact = agreed`; (c) zero shadow differences on two consecutive nightly runs; (d) the step re-baseline of `hir.md` section 6.4 is recorded in the flip PR | agreed 48; evaluable 110; allowances 9 + 1 + 4 = 14; steps 48 of 48 |
+| C3 `orna run` (executor) | H4 to H6 | (a) `agreed + allowances = evaluable` with every allowance naming a bead; (b) `steps-exact = agreed`; (c) zero shadow differences on two consecutive nightly runs; (d) the step re-baseline of `hir.md` section 6.4 is recorded in the flip PR | agreed 54; evaluable 110; allowances 10 + 1 + 4 = 15; steps 49 of 54 |
 | C4 REPL | H8 | (a) `agreed` equals the 48 runnable fixtures (currently 15); (b) the 33 expected rows are empty, or each names a bead; (c) the 56 excluded fixtures stay listed in `repl_inline_exclusions.txt` with a reason; (d) zero shadow differences on two consecutive nightly runs | 15 of 48; 33 expected; 56 excluded |
 | C5 `serve` and mount | H9 steps 4 and 5 | (a) a switch exists (gap G7); (b) the serve and mount tests pass with HIR; (c) zero shadow differences on two consecutive nightly runs. None of the three ratchet files of section 1 covers these two entry points (gap G7) | no switch; no ratchet |
 | C6 typed share | H2 | `typed` equals the measured value on the old-accepted corpus, and `typed-share.toml` records it in the same PR | measured 51 of 104; file records 51; comparator exact both ways (gap G3, fixed in this PR) |
@@ -307,7 +302,7 @@ Each decision is stated so that the answer is an option letter or a short phrase
 | G1 | C1 | 104 differing diagnostic-code rows | `ornadb-csenl.18` (H3, "effects pass and checker rules on HIR; orna check on HIR") | open |
 | G2 | C1(b), C8 | diagnostic-code rows had no reason field | none | fixed in this PR: each row carries a reason; the test fails on a row without one |
 | G3 | C6 | `typed-share.toml` recorded 35; measured 51. The comparator did not fail when `typed` rose | `ornadb-csenl.17` (H2, "Ty, inference and expression typing on HIR, diffed against the checker") | fixed in this PR: file records 51; comparator exact both ways |
-| G4 | C3 | exec agreement 48 of 110 evaluable; 14 allowances (9 harness, 1 representation, 4 executor-gap) | `ornadb-csenl.19` (H4, "orna-exec pure core"), `.20` (H5, "Host trait, core/sys native declarations"), `.21` (H6, "TableStore, cursors and one mutation path"), `ornadb-0xfiw` (executor gap) | each allowance names its bead in `exec-share.toml` |
+| G4 | C3 | exec agreement 54 of 110 evaluable; 15 allowances (10 harness, 1 representation, 4 executor-gap) | `ornadb-csenl.19` (H4, "orna-exec pure core"), `.20` (H5, "Host trait, core/sys native declarations"), `.21` (H6, "TableStore, cursors and one mutation path"), `ornadb-0xfiw` (executor gap) | each allowance names its bead in `exec-share.toml`; the harness count falls when the old observer gets a table store (`ornadb-cdi8u`) |
 | G5 | C4 | REPL 15 of 48 runnable agree; 33 expected rows | `ornadb-csenl.23` (H8, "REPL as incremental module on HIR") | open |
 | G6 | C2 | the assertion gate has no HIR switch; it calls `orna_check` directly | none | propose a bead under `ornadb-csenl.24` |
 | G7 | C5 | `orna run`, REPL, serve and mount have no switch; serve and mount have no corpus ratchet | none | propose beads under `ornadb-csenl.24` |
@@ -345,6 +340,7 @@ All runs at `0f1e5961d` in a worktree with a private `CARGO_TARGET_DIR`.
   differences: 0. Stale ledger entries: 0"; diagnostic codes 211 compared (109 agree,
   102 expected); executor 63 compared (49 agree, 14 expected); REPL inline 48 compared
   (15 agree, 33 expected).
+- `cargo test -p orna-differential --test exec_share -- --nocapture` after the `sort_by` stage (H4): exit 0. Output: "old-harness environment: 10"; "executor agreement: 54/70 run cases agree with the old pipeline (226 cases in the corpus)"; "exact step parity: 49/54". Before the stage: 54/69, 49/54, 9.
 - Counts: `wc -l` and `find ... -name '*.rs' | xargs cat | wc -l` for every line
   count in sections 1, 2 and 6. `awk` count of the `## expected` rows in both
   differing files (104 and 33). `grep -c` for the `[[difference]]`, `[[environment]]`,
