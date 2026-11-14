@@ -316,10 +316,6 @@ fn spec_reason(name: &str, code: &str) -> Option<&'static str> {
              and RECORD-002 do not admit it, so HIR's rejection is the spec verdict. This slice does not change \
              the fixture",
         ),
-        ("money-rate.orna", "ORNA-INFER-011") => Some(
-            "OPEN REAL HIR GAP: Decimal * Money<GBP> is admitted by ORNA-MONEY-003 and accepted by the checker; HIR \
-             reports the operator is not defined for Decimal and Money<GBP>",
-        ),
         ("ranges.orna", "ORNA-INFER-011") => Some(
             "FIXTURE SPEC-INVALID: the fixture passes a range where take(rows, count: Int) takes Int \
              (09-standard-library.md:31); HIR's rejection is the spec verdict and the checker accepts it",

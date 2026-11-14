@@ -433,9 +433,15 @@ let cost = 3.kilowatt_hour * price;        // Money<GBP>, 0.90: library impl of 
 let bad2 = price * price;                  // error: no impl Mul<Rate<GBP, _>, Rate<GBP, _>>
 ```
 
-`Energy` must be in scope for `kilowatt_hour` (section 8.3). The check of MONEY-003 is the
-library impl of `Mul` on `Rate<C, U>`: it converts the quantity to the rate's unit with `to`
-(ORNA-UNIT-015) and multiplies the number. The kernel has no money rule.
+`Energy` must be in scope for `kilowatt_hour` (section 8.3). The check of MONEY-003 is, for
+now, a native typeck rule, not the library impl of `Mul` on `Rate<C, U>` that section 8.3
+describes: `crates/orna-hir/src/typeck/quantity.rs` (`rate_times_quantity` and
+`money_over_quantity`) types `Rate<C, U> * quantity` as `Money<C>` in either operand order, and
+`Money<C> / quantity` as `Rate<C, U>`, for a `Decimal` or `Int` quantity. The quantity converts
+to the rate's unit exactly (ORNA-UNIT-015): an `Int` widens to `Decimal` when the ratio is not an
+integer (ORNA-UNIT-016), and a ratio with no finite decimal form is ORNA-UNIT-INEXACT. A dimension
+mismatch is ORNA-UNIT-DIM. The library impl of `Mul` is deferred to H2c-2, which needs the operator
+impls on `Money` and `Rate` (section 11.2).
 
 ### 7.5 Data size and a user rate
 
