@@ -32,11 +32,11 @@ use orna_runtime::{
     TableMutation, WriterLease,
 };
 use orna_stream::{
-    AsyncCheckpointBackend, Checkpoint, CommitIntent, CommitResult, Component, ConsumerIdentity,
-    DeliveryIdentity, DiagnosticClass, DiagnosticCode, FailureIdentity, FailureRecord,
-    FailureStatus, LeasePurpose, Position, RejectReason, ReplayGrant, SafeDiagnostic,
-    StreamFailurePayload,
+    AsyncCheckpointBackend, Checkpoint, CommitIntent, CommitResult, DiagnosticClass,
+    DiagnosticCode, FailureIdentity, FailureRecord, FailureStatus, LeasePurpose, RejectReason,
+    ReplayGrant, SafeDiagnostic, StreamFailurePayload,
 };
+use orna_stream_identity::{Component, ConsumerIdentity, DeliveryIdentity, Position};
 use sha2::{Digest, Sha256};
 use tempfile::{Builder, TempDir};
 use tokio::sync::Notify;
@@ -289,7 +289,7 @@ struct CountingHandler {
 }
 
 struct CountingSource {
-    key: orna_stream::CheckpointKey,
+    key: orna_stream_identity::CheckpointKey,
     polls: usize,
 }
 
@@ -310,7 +310,7 @@ impl StreamSource for CountingSource {
         }
     }
 
-    fn checkpoint_key(&self) -> orna_stream::CheckpointKey {
+    fn checkpoint_key(&self) -> orna_stream_identity::CheckpointKey {
         self.key.clone()
     }
 
@@ -368,7 +368,7 @@ impl StreamHandler for RecordingCommitHandler {
 }
 
 struct OneItemSource {
-    key: orna_stream::CheckpointKey,
+    key: orna_stream_identity::CheckpointKey,
     item: Option<StreamItem>,
     polls: usize,
 }
@@ -390,7 +390,7 @@ impl StreamSource for OneItemSource {
         }
     }
 
-    fn checkpoint_key(&self) -> orna_stream::CheckpointKey {
+    fn checkpoint_key(&self) -> orna_stream_identity::CheckpointKey {
         self.key.clone()
     }
 

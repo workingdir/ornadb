@@ -38,6 +38,7 @@ members = [
     "crates/orna-standard-sources",
     "crates/orna-storage",
     "crates/orna-stream",
+    "crates/orna-stream-identity",
     "crates/orna-syntax",
     "crates/orna-syntax-ast",
     "crates/orna-host-fs",

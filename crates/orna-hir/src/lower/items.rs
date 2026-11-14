@@ -309,6 +309,17 @@ impl Builder {
         }
     }
 
+    /// Whether a primary-key component is `Float`, directly or through a tuple element (ORNA-KEY-003).
+    fn is_float_key_component(&self, ty: crate::Ty) -> bool {
+        match self.program.tys.kind(ty) {
+            Some(crate::TyKind::Float) => true,
+            Some(crate::TyKind::Tuple(elements)) => elements
+                .iter()
+                .any(|element| self.is_float_key_component(*element)),
+            _ => false,
+        }
+    }
+
     /// Builds a table's fields, keys, assertions and implementations.
     fn build_table(
         &mut self,
@@ -324,6 +335,14 @@ impl Builder {
                 Some(annotation) => super::types::lower_type(self, module, &[], annotation),
                 None => self.program.tys.error(),
             };
+            if self.is_float_key_component(ty) {
+                self.diagnose(
+                    module,
+                    crate::diag::PRIMARY_KEY_FLOAT,
+                    "Float is not a valid primary-key type",
+                    parameter.span.clone(),
+                );
+            }
             let field = self.declare_nested(
                 module,
                 &parameter_name(&parameter.pattern, index),

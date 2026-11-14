@@ -16,7 +16,7 @@ use crate::table_store::{
 };
 use libsql::params;
 use num_bigint::{BigInt, Sign};
-use orna_stream::CheckpointKey;
+use orna_stream_identity::CheckpointKey;
 use orna_value::{CanonicalSnapshot, CwdCapture, Snapshot};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;

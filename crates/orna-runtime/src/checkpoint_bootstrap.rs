@@ -10,7 +10,7 @@ use crate::stream_store::{
 use libsql::{TransactionBehavior, params};
 use orna_repository::{GitCommitRef, Repository};
 use orna_stream::Checkpoint as StreamCheckpoint;
-use orna_stream::CheckpointKey;
+use orna_stream_identity::CheckpointKey;
 
 impl RuntimeState {
     /// Bootstraps from the selected immutable fetched commit and performs the

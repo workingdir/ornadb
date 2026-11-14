@@ -32,7 +32,7 @@ use std::io::ErrorKind;
 
 use libsql::{Builder, Connection, TransactionBehavior, params};
 use orna_repository::{MigrationContinuityRecord, Repository, StreamCheckpointIdentityPredecessor};
-use orna_stream::{Component, ConsumerIdentity};
+use orna_stream_identity::{Component, ConsumerIdentity};
 use orna_value::{Raw, sov3_context_free_domain_digest};
 use sha2::{Digest as _, Sha256};
 

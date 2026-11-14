@@ -25,6 +25,7 @@ orna-syntax = { path = "../orna-syntax" }
 orna-syntax-ast = { path = "../orna-syntax-ast" }
 orna-runtime = { path = "../orna-runtime" }
 orna-stream = { path = "../orna-stream" }
+orna-stream-identity = { path = "../orna-stream-identity" }
 orna-sys-id = { path = "../orna-sys-id" }
 orna-sys = { path = "../orna-sys" }
 orna-storage = { path = "../orna-storage", features = ["compact-writer-fixtures"] }

@@ -33,7 +33,7 @@ use orna_protocol::{
     TargetKind, canonical_request_fingerprint,
 };
 use orna_runtime::{
-    Component, ConsumerIdentity, FaultInjector, RecoveryDisposition, RequestIdentity, RequestOwner,
+    FaultInjector, RecoveryDisposition, RequestIdentity, RequestOwner,
     RequestState as DurableRequestState, RequestStatus as DurableRequestStatus,
     RunObservationRegistration, RuntimeActivationContext, RuntimeError, RuntimeState,
     StagedTableActivation, TableActivationCandidateValidator, TableActivationError, TableMutation,
@@ -46,6 +46,7 @@ use orna_security::{
 };
 use orna_serving::{Error as ServingError, Origin as ServingOrigin, Serving};
 use orna_stream::{DiagnosticClass, DiagnosticCode, SafeDiagnostic};
+use orna_stream_identity::{Component, ConsumerIdentity};
 use orna_sys_id::SysFailureCode;
 use orna_value::{
     CanonicalSnapshot, CanonicalValue, Diagnostic as FoundationDiagnostic, DiagnosticSeverity,

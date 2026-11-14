@@ -5,12 +5,12 @@ use std::{fs, path::Path, process::Command};
 
 use orna_repository::Repository;
 use orna_runtime::{
-    ActivationError, ActivationWork, Checkpoint, Component, ConsumerIdentity, FaultInjector,
-    FaultPoint, NoFault, PublicationCommitId, RequestIdentity, RequestState,
-    RunObservationRegistration, RuntimeError, RuntimeIdentity, RuntimeState, RuntimeTableIdentity,
-    TableMutation, TableObjectId, TerminalOutcome, WriterLease,
-    run_admitted_table_request_activation,
+    ActivationError, ActivationWork, Checkpoint, FaultInjector, FaultPoint, NoFault,
+    PublicationCommitId, RequestIdentity, RequestState, RunObservationRegistration, RuntimeError,
+    RuntimeIdentity, RuntimeState, RuntimeTableIdentity, TableMutation, TableObjectId,
+    TerminalOutcome, WriterLease, run_admitted_table_request_activation,
 };
+use orna_stream_identity::{Component, ConsumerIdentity};
 use orna_syntax::parse_module;
 use orna_syntax_ast::Declaration;
 use tempfile::TempDir;
