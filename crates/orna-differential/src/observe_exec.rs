@@ -109,13 +109,13 @@ fn run_with(case: &Case, cancel: Option<Arc<AtomicBool>>) -> ExecOutcome {
     orna_hir::typeck(&mut lowered.program);
     if let Some(Some(code)) = static_rejection(&lowered) {
         return ExecOutcome::Ran {
-            outcome: Err(code.to_owned()),
+            outcome: Some(Err(code.to_owned())),
             steps: 0,
         };
     }
     if let Some(code) = checker_rejection(&lowered) {
         return ExecOutcome::Ran {
-            outcome: Err(code.to_owned()),
+            outcome: Some(Err(code.to_owned())),
             steps: 0,
         };
     }
