@@ -83,3 +83,23 @@ fn the_energy_times_rate_is_money_in_the_rate_currency() {
     let program = lower_one(&source);
     assert_eq!(user_diagnostics(&program), Vec::<String>::new());
 }
+
+/// `Decimal<m> / s` in type position is the quantity in the combined key `m/s`, and the quotient of two quantities
+/// with those keys has that type.
+#[test]
+fn a_quotient_of_unit_quantities_combines_their_keys() {
+    let source = "\
+pub enum Length {
+    m,
+    impl Unit {}
+}
+pub enum Time {
+    s,
+    impl Unit {}
+}
+pub fn speed(distance: Decimal<m>, time: Decimal<s>): Decimal<m> / s =
+    distance / time;
+";
+    let program = lower_one(source);
+    assert_eq!(user_diagnostics(&program), Vec::<String>::new());
+}
