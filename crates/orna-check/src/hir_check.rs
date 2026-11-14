@@ -6,6 +6,7 @@
 //! those findings to the diagnostics and origins the old `Analysis` reports,
 //! so a caller can compare the two checkers code by code.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use orna_hir::{
@@ -15,12 +16,12 @@ use orna_hir::{
 use orna_syntax::parse_module_with_file;
 use orna_syntax_ast::SourceSpan as SyntaxSpan;
 use orna_syntax_ast::SyntaxTree;
-use orna_value::Diagnostic;
+use orna_value::{Diagnostic, SafeText};
 
 use crate::StandardDependencyProfile;
 use crate::located::DiagnosticOrigin;
 use crate::system_api::{PathResolution, SystemMember, embedded_system_api};
-use crate::{DIAG_PARSE, ModuleInput, diag};
+use crate::{DIAG_PARSE, DIAG_UNRESOLVED, ModuleInput, UNRESOLVED_NAME_NOTE, diag};
 
 /// The host's `sys` admission, read from the embedded catalogue and the
 /// production providers linked into this build (`system_api.rs`).
@@ -239,4 +240,77 @@ pub fn located_diagnostics(findings: &[HirFinding]) -> (Vec<Diagnostic>, Vec<Dia
         })
         .collect();
     (diagnostics, origins)
+}
+
+/// Converts findings to the diagnostics and origins the checker reports, so the
+/// language server publishes HIR findings where it published the checker's.
+///
+/// The checker reports every diagnostic against the top-level item it checked
+/// (`located.rs`), so each origin here is the span of the enclosing item of
+/// `modules`; a finding outside every item keeps its own span. An unresolved
+/// bare name takes the checker's wording and note (`name cannot be resolved`,
+/// `unresolved name: X`). Other findings keep their HIR code and message.
+/// `origins[i]` belongs to `diagnostics[i]`.
+#[must_use]
+pub fn checker_located_diagnostics(
+    findings: &[HirFinding],
+    modules: &[ModuleInput],
+) -> (Vec<Diagnostic>, Vec<DiagnosticOrigin>) {
+    let mut items_by_module = BTreeMap::<&str, Vec<SyntaxSpan>>::new();
+    findings
+        .iter()
+        .map(|finding| {
+            let items = items_by_module
+                .entry(finding.logical_path.as_str())
+                .or_insert_with(|| {
+                    modules
+                        .iter()
+                        .find(|module| module.logical_path == finding.logical_path)
+                        .map(|module| top_level_spans(&module.source, &module.logical_path))
+                        .unwrap_or_default()
+                });
+            let anchor = items
+                .iter()
+                .find(|item| item.start <= finding.span.start && finding.span.end <= item.end)
+                .unwrap_or(&finding.span);
+            let origin = DiagnosticOrigin {
+                logical_path: Some(finding.logical_path.clone()),
+                primary: Some(anchor.start..anchor.end),
+            };
+            (checker_diagnostic(finding), origin)
+        })
+        .unzip()
+}
+
+/// The spans of the top-level items of one module, as the parser recovers them.
+fn top_level_spans(source: &str, logical: &str) -> Vec<SyntaxSpan> {
+    parse_module_with_file(source, logical.to_owned())
+        .value
+        .items
+        .iter()
+        .map(|item| item.span.clone())
+        .collect()
+}
+
+/// The checker's diagnostic for one HIR finding.
+fn checker_diagnostic(finding: &HirFinding) -> Diagnostic {
+    match unresolved_bare_name(finding) {
+        Some(name) => diag(DIAG_UNRESOLVED, "name cannot be resolved").with_note(
+            SafeText::new(format!("{UNRESOLVED_NAME_NOTE}{name}"))
+                .expect("identifier text is safe"),
+        ),
+        None => diag(finding.code, finding.message.clone()),
+    }
+}
+
+/// The name of a HIR `` `name` is not in scope `` unresolved-name finding.
+fn unresolved_bare_name(finding: &HirFinding) -> Option<&str> {
+    if finding.code != DIAG_UNRESOLVED {
+        return None;
+    }
+    let name = finding
+        .message
+        .strip_prefix('`')?
+        .strip_suffix("` is not in scope")?;
+    (!name.is_empty() && !name.contains('`')).then_some(name)
 }

@@ -179,7 +179,7 @@ pub(crate) fn check(project: &Project, open: &[OpenModule<'_>]) -> ProjectCheck 
                     .or_default()
                     .push(analysis::source_diagnostic(
                         mapper.range(&span),
-                        orna_check::DIAG_IMPORT,
+                        orna_hir::diag::IMPORT,
                         "imported module is unavailable",
                         &["use a captured standard dependency or remove the import"],
                     ));

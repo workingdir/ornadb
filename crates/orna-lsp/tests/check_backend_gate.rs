@@ -74,20 +74,15 @@ fn valid_document_publishes_no_semantic_diagnostics_under_every_backend() {
 }
 
 #[test]
-fn unresolved_name_is_published_by_the_checker_and_shadow_and_by_hir_at_the_use() {
+fn unresolved_name_is_published_by_the_checker_and_by_hir_at_the_same_range() {
     let source = "pub fn fine(): Int = 1;\npub fn uses(): Int = missing_name + 1;\n";
-    let checker = [json!({
+    let expected = [json!({
         "code": "ORNA-S012-UNRESOLVED",
         "range": range_of(source, "uses"),
     })];
-    // Gap G8: HIR anchors the diagnostic on the unresolved name, not the declaration.
-    let hir = [json!({
-        "code": "ORNA-S012-UNRESOLVED",
-        "range": range_of(source, "missing_name"),
-    })];
-    assert_published(Backend::Default, source, &checker);
-    assert_published(Backend::Shadow, source, &checker);
-    assert_published(Backend::Hir, source, &hir);
+    assert_published(Backend::Default, source, &expected);
+    assert_published(Backend::Shadow, source, &expected);
+    assert_published(Backend::Hir, source, &expected);
 }
 
 #[test]
@@ -97,10 +92,11 @@ fn type_mismatch_is_published_by_the_checker_and_shadow_and_by_hir_as_an_inferen
         "code": "ORNA-S021-TYPE",
         "range": range_of(source, "wrong"),
     })];
-    // Gap G8: HIR reports the mismatch with its own code, on the literal.
+    // Gap G8: HIR keeps its own code (ORNA-INFER-011) but takes the checker's
+    // item anchor, so only the code differs from the checker's ORNA-S021-TYPE.
     let hir = [json!({
         "code": "ORNA-INFER-011",
-        "range": range_of(source, "\"text\""),
+        "range": range_of(source, "wrong"),
     })];
     assert_published(Backend::Default, source, &checker);
     assert_published(Backend::Shadow, source, &checker);

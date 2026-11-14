@@ -11,6 +11,7 @@ mod lsp_client;
 
 use lsp_client::{Client, Project, range_of};
 use serde_json::Value;
+use std::path::Path;
 
 fn codes_and_messages(diagnostics: &[Value]) -> Vec<(String, String)> {
     diagnostics
@@ -33,13 +34,35 @@ fn pair(code: &str, message: &str) -> (String, String) {
 /// Opens `main.orna` of a fresh project holding `source` and returns the
 /// diagnostics published for it.
 fn check_main(source: &str) -> Vec<Value> {
+    check_main_with(source, false)
+}
+
+/// Checks `source` as `main.orna` with the HIR backend switched on or off.
+fn check_main_with(source: &str, hir: bool) -> Vec<Value> {
     let project = Project::new(&[("main.orna", source)]);
     let uri = project.uri("main.orna");
-    let mut client = Client::start();
+    let off = Path::new("0");
+    let on = Path::new("1");
+    let flag = if hir { on } else { off };
+    let mut client = Client::start_with_env(&[("ORNA_LSP_HIR", flag), ("ORNA_LSP_SHADOW", off)]);
     client.open(&uri, source);
     let diagnostics = client.diagnostics_at(&uri, 1);
     client.shutdown();
     diagnostics
+}
+
+#[test]
+fn hir_unresolved_name_publishes_the_checker_message_and_anchor() {
+    let source = "pub fn fine(): Int = 1;\npub fn uses(): Int = missing_name + 1;\n";
+    let checker = check_main_with(source, false);
+    let hir = check_main_with(source, true);
+    assert_eq!(
+        codes_and_messages(&hir),
+        [pair("ORNA-S012-UNRESOLVED", "name cannot be resolved")]
+    );
+    assert_eq!(codes_and_messages(&hir), codes_and_messages(&checker));
+    assert_eq!(hir[0]["range"], range_of(source, "uses"));
+    assert_eq!(hir[0]["range"], checker[0]["range"]);
 }
 
 #[test]
