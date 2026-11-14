@@ -24,9 +24,8 @@ use orna_runtime::{
 use orna_sys::{EnvironmentProvider, FilesystemProvider};
 use tempfile::TempDir;
 
-#[path = "support/format3.rs"]
-mod format3;
 use format3::*;
+use orna_cli_testkit::format3;
 
 const MEDIA_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/media");
 const REIMPORT_FIXTURE: &str = concat!(
@@ -106,7 +105,8 @@ async fn commit_capture(
     // Format 3 keeps rows only in `.orna/store` (ORNA-REPO-004): the row
     // source is the fixture document, never a committed file.
     let logical_path = format!("Object/{source_key}.orna");
-    let row_source = object_source_row(media_root, source_key);
+    let row_source =
+        object_source_row(media_root, include_str!("fixtures/media/source-image.orna"));
     let row_source = row_source.as_str();
 
     let value = evaluate_expression_ovb2_with_effects(
@@ -201,7 +201,8 @@ async fn publish_rejects_noncanonical_source_key_before_candidate_changes() {
         source.path().join("pixel.png"),
     )
     .unwrap();
-    let (directory, repository, relation_id, format_context) = object_format3_repository();
+    let (directory, repository, relation_id, format_context) =
+        object_format3_repository(include_str!("fixtures/media/offline-query-main.orna"));
     let root_path = directory.path();
     let source_commit = repository.head().unwrap().unwrap();
     let (runtime_identity, initial_digest) = cli_runtime_identity(&repository);
@@ -302,7 +303,8 @@ async fn publish_stores_a_new_format3_row_from_its_typed_key_without_source_look
         source.path().join("pixel.png"),
     )
     .unwrap();
-    let (directory, repository, relation_id, format_context) = object_format3_repository();
+    let (directory, repository, relation_id, format_context) =
+        object_format3_repository(include_str!("fixtures/media/offline-query-main.orna"));
     let root_path = directory.path();
     let source_commit = repository.head().unwrap().unwrap();
     let (runtime_identity, initial_digest) = cli_runtime_identity(&repository);
@@ -376,7 +378,8 @@ async fn publishing_a_range_with_no_visible_change_consumes_it_without_a_commit(
         source.path().join("pixel.png"),
     )
     .unwrap();
-    let (directory, repository, relation_id, format_context) = object_format3_repository();
+    let (directory, repository, relation_id, format_context) =
+        object_format3_repository(include_str!("fixtures/media/offline-query-main.orna"));
     let root_path = directory.path();
     let source_commit = repository.head().unwrap().unwrap();
     // `orna publish` opens the runtime through the repository's own identity,
@@ -529,7 +532,8 @@ async fn publish_recovers_ref_advanced_journal_before_selecting_pending_tail() {
         source.path().join("pixel.png"),
     )
     .unwrap();
-    let (directory, repository, relation_id, format_context) = object_format3_repository();
+    let (directory, repository, relation_id, format_context) =
+        object_format3_repository(include_str!("fixtures/media/offline-query-main.orna"));
     let root_path = directory.path();
     let source_commit = repository.head().unwrap().unwrap();
     let deleted_path = root_path.join("delete-me.orna");

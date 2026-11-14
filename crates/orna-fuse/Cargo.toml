@@ -1,0 +1,50 @@
+[package]
+name = "orna-fuse"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license.workspace = true
+publish = false
+
+# The FUSE mount the `orna` binary serves for a committed project. Linux only;
+# the crate root is gated on the target.
+
+[features]
+test-seams = []
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+
+[dependencies]
+getrandom = "0.3.4"
+sha2 = "0.10"
+tempfile = "3.23.0"
+tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread", "signal", "time"] }
+orna-base = { path = "../orna-base" }
+orna-check = { path = "../orna-check" }
+orna-cli-support = { path = "../orna-cli-support" }
+orna-conformance = { path = "../orna-conformance" }
+orna-evaluator = { path = "../orna-evaluator" }
+orna-project = { path = "../orna-project" }
+orna-repository = { path = "../orna-repository" }
+orna-runtime = { path = "../orna-runtime" }
+orna-storage = { path = "../orna-storage" }
+orna-sys = { path = "../orna-sys" }
+orna-sys-id = { path = "../orna-sys-id" }
+orna-syntax = { path = "../orna-syntax" }
+orna-syntax-ast = { path = "../orna-syntax-ast" }
+orna-value = { path = "../orna-value" }
+
+[dev-dependencies]
+orna-cli-testkit = { path = "../orna-cli-testkit" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+fuser = { version = "0.18.0", default-features = false }
+libc = "0.2"
+rustix = { version = "0.38.44", features = ["fs", "process"] }

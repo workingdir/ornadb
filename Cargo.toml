@@ -5,6 +5,8 @@ members = [
     "crates/orna-cbor",
     "crates/orna-cli",
     "crates/orna-cli-support",
+    "crates/orna-fuse",
+    "crates/orna-cli-testkit",
     "crates/archive/orna-compat-v1",
     "crates/orna-unicode",
     "crates/orna-intrinsics",

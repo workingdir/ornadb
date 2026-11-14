@@ -15,6 +15,7 @@ mod decimal;
 mod decimal_round;
 mod dispatch;
 mod engine_display;
+mod engine_money;
 mod engine_order;
 mod error;
 mod eval;

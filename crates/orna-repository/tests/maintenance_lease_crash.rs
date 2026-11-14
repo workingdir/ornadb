@@ -25,9 +25,9 @@ use orna_storage::RuntimePublicationCoordinator;
 use orna_sys::{EnvironmentProvider, FilesystemProvider};
 use tempfile::TempDir;
 
-#[path = "../../orna-cli/tests/support/format3.rs"]
+#[path = "../../orna-cli-testkit/src/format3.rs"]
 mod format3;
-#[path = "../../orna-cli/tests/support/media_commit.rs"]
+#[path = "../../orna-cli-testkit/src/media_commit.rs"]
 mod media_commit;
 
 const MEDIA_FIXTURES: &str = concat!(
@@ -149,7 +149,8 @@ fn announce_and_block() {
 fn shared_lease_holder_killed_releases_boundary() {
     // A shared holder (capture or prepare) blocks the exclusive boundary; once
     // it is SIGKILLed the kernel drops its lease and the boundary proceeds.
-    let (root, repository, _relation_id) = format3::empty_format3_repository();
+    let (root, repository, _relation_id) =
+        format3::empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let repository = repository.with_coordination_lock_wait(BUSY_WAIT);
     let boundary = || repository.with_maintenance_boundary(|| Ok::<(), RepositoryError>(()));
     let mut holder = Holder::spawn(root.path(), "shared");
@@ -165,7 +166,8 @@ fn shared_lease_holder_killed_releases_boundary() {
 fn exclusive_boundary_holder_killed_releases_lease() {
     // An exclusive boundary blocks every lease; SIGKILL during the boundary must
     // not leave the repository stuck in the busy state.
-    let (root, repository, _relation_id) = format3::empty_format3_repository();
+    let (root, repository, _relation_id) =
+        format3::empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let repository = repository.with_coordination_lock_wait(BUSY_WAIT);
     let mut holder = Holder::spawn(root.path(), "exclusive");
     assert!(
@@ -284,7 +286,8 @@ async fn prepared_publication_holds_shared_lease_until_publish() {
     // ORNA-CAP-006: the shared lease taken by prepare is kept on the coordinator
     // until publish anchors the candidate, so a boundary cannot prune it in
     // between. Publish then releases the lease.
-    let (_root, repository, relation_id) = format3::empty_format3_repository();
+    let (_root, repository, relation_id) =
+        format3::empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let repository = repository.with_coordination_lock_wait(BUSY_WAIT);
     let mut coordinator = prepare_publication(&repository, relation_id).await;
     assert!(
@@ -308,7 +311,8 @@ async fn publish_fails_closed_on_candidate_pruned_before_publish() {
     // boundary, so a bypassing `git prune --expire=now` is unsupported. The
     // defence that remains: publish must fail closed on an absent candidate and
     // must not move the head.
-    let (root, repository, relation_id) = format3::empty_format3_repository();
+    let (root, repository, relation_id) =
+        format3::empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let repository = repository.with_coordination_lock_wait(BUSY_WAIT);
     let mut coordinator = prepare_publication(&repository, relation_id).await;
     let candidate = coordinator.candidate().commit().as_str().to_owned();

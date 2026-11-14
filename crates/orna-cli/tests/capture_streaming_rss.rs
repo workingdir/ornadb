@@ -6,8 +6,7 @@
 //! byte count (for example 10737418240) to run the same check at that size.
 #![cfg(target_os = "linux")]
 
-#[path = "support/format3.rs"]
-mod format3;
+use orna_cli_testkit::format3;
 
 use std::collections::BTreeMap;
 use std::{fs::File, io::Write, path::Path};
@@ -41,7 +40,8 @@ fn product_capture_streams_a_source_larger_than_its_memory_budget() {
         source_bytes > PEAK_RSS_BOUND,
         "the source must exceed the memory bound for the check to prove streaming"
     );
-    let (directory, repository, relation_id) = empty_format3_repository();
+    let (directory, repository, relation_id) =
+        empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let media = TempDir::new_in(directory.path()).expect("create the capture root");
     let expected = write_fixture(&media.path().join("large.bin"), source_bytes);
 

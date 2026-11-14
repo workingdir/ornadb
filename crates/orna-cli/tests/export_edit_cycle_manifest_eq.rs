@@ -9,8 +9,7 @@ use orna_repository::offline_copy::{OfflineCopy, OfflineRow, write_offline_copy}
 use orna_value::Blob;
 use tempfile::TempDir;
 
-#[path = "support/format3.rs"]
-mod format3;
+use orna_cli_testkit::format3;
 
 #[path = "support/offline_roundtrip.rs"]
 mod offline_roundtrip;

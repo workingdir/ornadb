@@ -27,9 +27,8 @@ use orna_value::{
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
-#[path = "support/format3.rs"]
-mod format3;
 use format3::*;
+use orna_cli_testkit::format3;
 
 const MEDIA_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/media");
 const SONG_IMPORT_FIXTURE: &str = concat!(
@@ -112,7 +111,8 @@ struct MediaListing {
 #[allow(clippy::too_many_lines)]
 #[tokio::test]
 async fn song_and_image_import_commit_through_capture_and_list_without_payloads() {
-    let (directory, repository, relation_id) = empty_format3_repository();
+    let (directory, repository, relation_id) =
+        empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     // Import from a scratch copy so the source files can be removed afterwards.
     let source = TempDir::new().unwrap();
     for name in ["tone.wav", "pixel.png"] {
@@ -273,7 +273,8 @@ async fn song_and_image_import_commit_through_capture_and_list_without_payloads(
 
 #[tokio::test]
 async fn history_pages_cover_every_revision_once_across_imported_rows() {
-    let (directory, repository, relation_id) = empty_format3_repository();
+    let (directory, repository, relation_id) =
+        empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let source = TempDir::new().unwrap();
     std::fs::copy(
         Path::new(MEDIA_FIXTURES).join("tone.wav"),
@@ -372,7 +373,8 @@ async fn history_pages_cover_every_revision_once_across_imported_rows() {
 /// commit headers and tree listings are read; no blob is opened or pinned.
 #[tokio::test]
 async fn author_filter_keeps_every_revision_of_each_imported_row() {
-    let (directory, repository, relation_id) = empty_format3_repository();
+    let (directory, repository, relation_id) =
+        empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let source = TempDir::new().unwrap();
     std::fs::copy(
         Path::new(MEDIA_FIXTURES).join("tone.wav"),
@@ -466,7 +468,8 @@ async fn author_filter_keeps_every_revision_of_each_imported_row() {
 
 #[tokio::test]
 async fn since_cut_keeps_only_newer_revisions_of_each_imported_row() {
-    let (directory, repository, relation_id) = empty_format3_repository();
+    let (directory, repository, relation_id) =
+        empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let source = TempDir::new().unwrap();
     std::fs::copy(
         Path::new(MEDIA_FIXTURES).join("tone.wav"),
@@ -557,7 +560,8 @@ async fn since_cut_keeps_only_newer_revisions_of_each_imported_row() {
 
 #[tokio::test]
 async fn limit_walk_matches_the_truncated_full_walk_for_each_imported_row() {
-    let (directory, repository, relation_id) = empty_format3_repository();
+    let (directory, repository, relation_id) =
+        empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let source = TempDir::new().unwrap();
     std::fs::copy(
         Path::new(MEDIA_FIXTURES).join("tone.wav"),
@@ -896,7 +900,8 @@ async fn import_media(
 
 #[tokio::test]
 async fn deleting_a_committed_media_row_removes_it_from_listing_and_filters() {
-    let (_directory, repository, relation_id) = empty_format3_repository();
+    let (_directory, repository, relation_id) =
+        empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let source = TempDir::new().unwrap();
     for name in ["tone.wav", "pixel.png"] {
         std::fs::copy(
@@ -972,7 +977,8 @@ async fn deleting_a_committed_media_row_removes_it_from_listing_and_filters() {
 
 #[tokio::test]
 async fn history_json_lists_each_revision_with_exactly_the_four_keys() {
-    let (directory, repository, relation_id) = empty_format3_repository();
+    let (directory, repository, relation_id) =
+        empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let source = TempDir::new().unwrap();
     for name in ["tone.wav", "pixel.png"] {
         std::fs::copy(
@@ -1052,7 +1058,8 @@ async fn history_json_lists_each_revision_with_exactly_the_four_keys() {
 
 #[tokio::test]
 async fn history_rejects_negative_and_out_of_range_limits_before_listing() {
-    let (directory, repository, relation_id) = empty_format3_repository();
+    let (directory, repository, relation_id) =
+        empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let source = TempDir::new().unwrap();
     std::fs::copy(
         Path::new(MEDIA_FIXTURES).join("tone.wav"),
@@ -1102,7 +1109,8 @@ async fn history_rejects_negative_and_out_of_range_limits_before_listing() {
 
 #[tokio::test]
 async fn history_since_excludes_the_named_boundary_commit_end_to_end() {
-    let (directory, repository, relation_id) = empty_format3_repository();
+    let (directory, repository, relation_id) =
+        empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let source = TempDir::new().unwrap();
     std::fs::copy(
         Path::new(MEDIA_FIXTURES).join("pixel.png"),
@@ -1191,7 +1199,8 @@ async fn history_since_excludes_the_named_boundary_commit_end_to_end() {
 
 #[tokio::test]
 async fn history_on_an_emptied_catalogue_is_refused_with_no_listing() {
-    let (directory, repository, relation_id) = empty_format3_repository();
+    let (directory, repository, relation_id) =
+        empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let source = TempDir::new().unwrap();
     std::fs::copy(
         Path::new(MEDIA_FIXTURES).join("tone.wav"),
@@ -1246,7 +1255,8 @@ async fn history_on_an_emptied_catalogue_is_refused_with_no_listing() {
 /// listing is available from an unrelated working directory.
 #[tokio::test]
 async fn history_reads_the_named_db_endpoint_from_an_unrelated_directory() {
-    let (directory, repository, relation_id) = empty_format3_repository();
+    let (directory, repository, relation_id) =
+        empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let source = TempDir::new().unwrap();
     std::fs::copy(
         Path::new(MEDIA_FIXTURES).join("tone.wav"),
@@ -1322,7 +1332,8 @@ async fn history_reads_the_named_db_endpoint_from_an_unrelated_directory() {
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn history_at_pins_the_named_snapshot_instead_of_head() {
-    let (directory, repository, relation_id) = empty_format3_repository();
+    let (directory, repository, relation_id) =
+        empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let source = TempDir::new().unwrap();
     for name in ["tone.wav", "pixel.png"] {
         std::fs::copy(
@@ -1586,7 +1597,8 @@ fn canonical_blob_metadata(row: &[u8]) -> BlobMetadata {
 
 #[tokio::test]
 async fn listing_projects_suffix_column_for_song_and_image_rows() {
-    let (_directory, repository, relation_id) = empty_format3_repository();
+    let (_directory, repository, relation_id) =
+        empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let source = TempDir::new().unwrap();
     for name in ["tone.wav", "pixel.png"] {
         std::fs::copy(
@@ -1654,7 +1666,8 @@ async fn listing_projects_suffix_column_for_song_and_image_rows() {
 
 #[tokio::test]
 async fn negated_media_type_filter_excludes_only_the_named_type() {
-    let (_directory, repository, relation_id) = empty_format3_repository();
+    let (_directory, repository, relation_id) =
+        empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let source = TempDir::new().unwrap();
     for name in ["tone.wav", "pixel.png"] {
         std::fs::copy(
@@ -1724,7 +1737,8 @@ async fn negated_media_type_filter_excludes_only_the_named_type() {
 
 #[tokio::test]
 async fn sort_orders_mixed_media_types_by_type_then_length() {
-    let (_directory, repository, relation_id) = empty_format3_repository();
+    let (_directory, repository, relation_id) =
+        empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let source = TempDir::new().unwrap();
     for name in ["tone.wav", "pixel.png"] {
         std::fs::copy(
@@ -1824,7 +1838,8 @@ fn song_revisions_limited_to(
 /// charges zero media payload bytes for the whole listing.
 #[tokio::test]
 async fn query_lists_committed_media_metadata_and_charges_no_payload_bytes() {
-    let (directory, repository, relation_id) = empty_format3_repository();
+    let (directory, repository, relation_id) =
+        empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let source = TempDir::new().unwrap();
     for name in ["tone.wav", "pixel.png"] {
         std::fs::copy(
@@ -2012,7 +2027,8 @@ async fn query_lists_committed_media_metadata_and_charges_no_payload_bytes() {
 /// payload byte.
 #[tokio::test]
 async fn query_at_pins_the_named_snapshot_and_reads_no_media_payload() {
-    let (directory, repository, relation_id) = empty_format3_repository();
+    let (directory, repository, relation_id) =
+        empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let source = TempDir::new().unwrap();
     for name in ["tone.wav", "pixel.png"] {
         std::fs::copy(
@@ -2227,7 +2243,8 @@ fn query_json(directory: &Path, arguments: &[&str]) -> serde_json::Value {
 
 #[tokio::test]
 async fn zero_limit_history_walk_returns_no_revisions() {
-    let (directory, repository, relation_id) = empty_format3_repository();
+    let (directory, repository, relation_id) =
+        empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let source = TempDir::new().unwrap();
     for name in ["tone.wav", "pixel.png"] {
         std::fs::copy(
@@ -2296,7 +2313,8 @@ async fn zero_limit_history_walk_returns_no_revisions() {
 /// media payload bytes.
 #[tokio::test]
 async fn query_predicate_over_annotation_coordinates_reads_no_media_payload() {
-    let (directory, repository, relation_id) = empty_format3_repository();
+    let (directory, repository, relation_id) =
+        empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let source = TempDir::new().unwrap();
     for name in ["tone.wav", "pixel.png"] {
         std::fs::copy(
@@ -2786,7 +2804,8 @@ async fn gate_b_production_import_of_mib_file_reads_zero_payload_on_metadata_upd
 #[allow(clippy::too_many_lines)]
 #[cfg(target_os = "linux")]
 async fn run_gate_b_import_and_metadata_update(payload_bytes: u64, import: GateBImport) {
-    let (directory, repository, relation_id) = empty_format3_repository();
+    let (directory, repository, relation_id) =
+        empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let source = TempDir::new_in(directory.path()).expect("create disposable input directory");
     for name in ["tone.wav", "pixel.png"] {
         std::fs::copy(

@@ -3,8 +3,7 @@ use std::sync::Arc;
 #[test]
 fn default_build_ignores_draft_quota_env() {
     const CHILD_MARKER: &str = "ORNA_DRAFT_QUOTA_SEAM_CHILD";
-    const TEST_NAME: &str =
-        "fuse_mount::draft_quota_seam_tests::default_build_ignores_draft_quota_env";
+    const TEST_NAME: &str = "draft_quota_seam_tests::default_build_ignores_draft_quota_env";
     if std::env::var_os(CHILD_MARKER).is_none() {
         let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
             .args(["--exact", TEST_NAME, "--nocapture"])

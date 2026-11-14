@@ -32,10 +32,8 @@ use tempfile::TempDir;
 
 #[path = "support/editor_mount.rs"]
 mod editor_mount;
-#[path = "support/format3.rs"]
-mod format3;
-#[path = "support/media_commit.rs"]
-mod media_commit;
+use orna_cli_testkit::format3;
+use orna_cli_testkit::media_commit;
 
 const BINARY: &str = env!("CARGO_BIN_EXE_orna");
 /// The ordinary frontend source a project installs (Gate G / DESIGN S5a).

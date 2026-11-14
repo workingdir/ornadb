@@ -16,7 +16,8 @@ const MEDIA_ROOT_PLACEHOLDER: &str = "__MEDIA_ROOT__";
 /// Captures `pixel.png` from `media` through the fixture's `.orna` source and
 /// returns it as an offline row keyed `song`.
 pub fn edit_capture_row(fixture: &Path, media: &Path) -> OfflineRow {
-    let (_directory, repository, relation_id) = empty_format3_repository();
+    let (_directory, repository, relation_id) =
+        empty_format3_repository(include_str!("../fixtures/media/empty-media-main.orna"));
     let capability = repository.capture_capability(relation_id).unwrap();
     let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
     filesystem.allow_root(media).unwrap();

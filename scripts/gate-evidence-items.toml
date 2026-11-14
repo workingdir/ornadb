@@ -174,7 +174,7 @@ limitations = [
 gate = "B"
 id = "B4"
 title = "Seek and range reads verify bytes and report whole-object overfetch"
-select = [{ record = "workspace-rest", package = "orna-repository", target = "lib", test = "range_reads_report_whole_chunk_overfetch_against_requested_bytes" }, { record = "workspace-cli", package = "orna-cli", target = "bin:orna", test = "mount_blob_window_reads_charge_only_intersecting_chunks" }]
+select = [{ record = "workspace-rest", package = "orna-repository", target = "lib", test = "range_reads_report_whole_chunk_overfetch_against_requested_bytes" }, { record = "workspace-cli", package = "orna-fuse", target = "lib", test = "mount_blob_window_reads_charge_only_intersecting_chunks" }]
 counters = ["^Gate B: range "]
 
 [[item]]
@@ -469,7 +469,7 @@ title = "Kernel caching does not leak private drafts into another handle or gene
 select = [
   { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_isolation", test = "unsynced_draft_is_invisible_to_second_open_and_after_child_exec_and_sigkill_remount" },
   { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_isolation", test = "repeated_observer_reads_never_show_private_draft_and_read_handles_pin_generation" },
-  { record = "workspace-cli", package = "orna-cli", target = "bin:orna", test = "editor_open_flags_bypass_kernel_cache_without_writeback_capability" },
+  { record = "workspace-cli", package = "orna-fuse", target = "lib", test = "editor_open_flags_bypass_kernel_cache_without_writeback_capability" },
   { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_integration", test = "cwd_mount_read_only_blob_opens_share_no_cached_pages_across_generations" },
   { record = "workspace-cli", package = "orna-cli", target = "test:vfs_mount_isolation", test = "read_only_text_opens_share_no_cached_pages_across_generations" },
 ]
@@ -634,7 +634,7 @@ select = [{ record = "workspace-cli", package = "orna-cli", target = "test:secon
 gate = "H"
 id = "H1"
 title = "Structured local drafts: FUSE editor drafts are listed with their code and removed only by an accepted edit"
-select = [{ record = "workspace-cli", package = "orna-cli", target = "bin:orna", test = "draft_list_lines_carry_the_code_and_draft_id" }, { record = "workspace-cli", package = "orna-cli", target = "bin:orna", test = "accepted_edit_removes_its_draft_and_refusals_retain_it" }, { record = "claims-client-drafts", package = "workspace", target = "check:client-drafts" }]
+select = [{ record = "workspace-cli", package = "orna-cli", target = "bin:orna", test = "draft_list_lines_carry_the_code_and_draft_id" }, { record = "workspace-cli", package = "orna-fuse", target = "lib", test = "accepted_edit_removes_its_draft_and_refusals_retain_it" }, { record = "claims-client-drafts", package = "workspace", target = "check:client-drafts" }]
 limitations = ["Covers FUSE editor drafts only. Structured local drafts for the Orna-authored browser profile are one of Gate H's later separately claimed profiles (ACCEPTANCE.md Gate H, lines 79-85); the product does not claim that profile, ORNA-APP-018 sits under it (source/39-source-hosted-apps.md:41-46), and no client draft store exists. `claims-client-drafts` checks that the product prose does not claim typed client drafts or their recovery after a reconnect or restart (ornadb-jf1z1)."]
 
 [[item]]
