@@ -360,6 +360,13 @@ fn adding_two_dimensions_is_e5001() {
 }
 
 #[test]
+fn adding_a_duration_to_a_non_time_quantity_is_e5001() {
+    let (program, summary) = typed_families("pub fn run() = 90.days + 4.metre;\n");
+    assert!(!test_accepted(&program, &summary), "{summary:?}");
+    assert!(module_codes(&program).contains(&crate::diag::QUANTITY_DIMENSIONS));
+}
+
+#[test]
 fn the_quotient_of_one_unit_is_a_plain_number() {
     let (program, summary) = typed("pub fn run() = 10.metre / 2.metre;\n");
     assert!(test_accepted(&program, &summary), "{summary:?}");
