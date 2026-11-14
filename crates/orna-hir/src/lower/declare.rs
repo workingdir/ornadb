@@ -219,6 +219,8 @@ pub(crate) struct Builder {
     pub(crate) body_jobs: Vec<super::items::BodyJob>,
     /// Unit-family variant expressions, resolved once every definition is built.
     pub(crate) unit_jobs: Vec<super::units::UnitJob>,
+    /// The unit keys and family dimensions evaluated so far, carried across lowering passes (units.md 3.3).
+    pub(crate) unit_eval: crate::units::eval::UnitEval,
     /// Each unit family's variant definitions, declared with the family (`declare_family_variants`) so an
     /// import can name a variant before the family is built.
     pub(crate) family_variants: BTreeMap<DefId, Vec<DefId>>,
@@ -254,6 +256,7 @@ impl Builder {
             std_module: None,
             body_jobs: Vec::new(),
             unit_jobs: Vec::new(),
+            unit_eval: Default::default(),
             family_variants: BTreeMap::new(),
             self_ty: None,
             admission,
@@ -741,6 +744,7 @@ impl Builder {
             });
             self.program.bodies.push(body);
         }
+        self.program.units = std::mem::take(&mut self.unit_eval.table);
         self.program
     }
 }

@@ -10,7 +10,7 @@ use orna_syntax_ast::SourceSpan as SyntaxSpan;
 use orna_syntax_ast::{EnumVariant, Expr as AstExpr, LiteralKind, UnitExpr, UnitTerm};
 
 use super::BodyState;
-use super::declare::{Builder, PendingKind, UnitLookup};
+use super::declare::{Builder, DeclAst, PendingKind, UnitLookup};
 use super::exprs::{error_expr, lower_expr, push};
 use crate::diag::{AMBIGUOUS, UNIT_UNRESOLVED};
 use crate::{
@@ -148,6 +148,65 @@ pub(crate) fn family_dimension(variants: &[EnumVariant], lowered: &[DefId]) -> D
 }
 
 impl Builder {
+    /// Every built unit definition, in definition order.
+    pub(crate) fn unit_defs(&self) -> Vec<DefId> {
+        self.pending
+            .iter()
+            .enumerate()
+            .filter_map(|(index, pending)| match pending.kind {
+                PendingKind::Built(DefKind::Unit(_)) => {
+                    Some(DefId::new(u32::try_from(index).ok()?))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The built unit definition `def`, or `None` while it is not a unit or not yet built.
+    pub(crate) fn unit_def(&self, def: DefId) -> Option<&UnitDef> {
+        match &self.pending.get(def.index())?.kind {
+            PendingKind::Built(DefKind::Unit(unit)) => Some(unit),
+            _ => None,
+        }
+    }
+
+    /// The base axis of a unit family: the bare variant its dimension declares. `None` for a derived family.
+    pub(crate) fn family_axis(&self, family: DefId) -> Option<DefId> {
+        match &self.pending.get(family.index())?.kind {
+            PendingKind::Built(DefKind::Enum(enumeration)) => enumeration.dimension.as_ref()?.unit,
+            PendingKind::Unbuilt(ast) => match &**ast {
+                DeclAst::Enum(_, variants, _, true) => self
+                    .family_variants
+                    .get(&family)?
+                    .iter()
+                    .zip(variants)
+                    .find(|(_, variant)| variant.unit.is_none())
+                    .map(|(unit, _)| *unit),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Every unit family not yet built, with its module and variant syntax, in definition order.
+    pub(crate) fn unbuilt_unit_families(&self) -> Vec<(DefId, ModuleId, Vec<EnumVariant>)> {
+        self.pending
+            .iter()
+            .enumerate()
+            .filter_map(|(index, pending)| match &pending.kind {
+                PendingKind::Unbuilt(ast) => match &**ast {
+                    DeclAst::Enum(_, variants, _, true) => Some((
+                        DefId::new(u32::try_from(index).ok()?),
+                        pending.module,
+                        variants.clone(),
+                    )),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Queues the expression of one pre-declared unit-family variant (`declare_family_variants`). A derived
     /// variant's expression is resolved once every definition exists.
     pub(crate) fn queue_family_unit(
@@ -241,12 +300,11 @@ impl Builder {
         let name = Name::new(term.name.as_str());
         let member = match &term.family {
             Some(family) => match self.resolve_bare(job.module, &Name::new(family.as_str())) {
-                NameTarget::Def(base) => self.member_def(base, &name),
+                NameTarget::Def(base) => self.variant_of(base, &name),
                 _ => None,
             },
-            None => self.member_def(job.family, &name),
-        }
-        .filter(|def| self.is_unit(*def));
+            None => self.variant_of(job.family, &name),
+        };
         match (member, &term.family) {
             (Some(unit), _) => UnitLookup::Found(unit),
             (None, Some(_)) => UnitLookup::None,
