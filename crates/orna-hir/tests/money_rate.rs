@@ -3,7 +3,7 @@
 //! `Money<GBP> / kWh` is a `Rate<GBP, kWh>`, and `Decimal<kWh> * Rate<GBP, kWh>` is a `Money<GBP>`. Both operand orders
 //! of the product are the same exact amount, because the rate's impl is found for a quantity on either side.
 
-use orna_hir::diag::{MONEY_BINARY_FLOAT, UNIT_DIM, UNIT_INEXACT};
+use orna_hir::diag::{INFER_CONFLICT, MONEY_BINARY_FLOAT, UNIT_DIM, UNIT_INEXACT};
 use orna_hir::typeck::typeck;
 use orna_hir::{ModulePath, Name, Program, SourceId, SourceUnit, lower};
 use orna_syntax::parse_module_with_file;
@@ -222,7 +222,12 @@ fn money_over_energy_is_not_money() {
         "pub fn per_unit(cost: Money<GBP>, energy: Decimal<kWh>): Money<GBP> = cost / energy;\n",
     );
     let program = lower_one(&source);
-    assert!(!user_diagnostics(&program).is_empty());
+    assert_eq!(
+        user_codes(&program),
+        vec![INFER_CONFLICT],
+        "{:?}",
+        user_diagnostics(&program)
+    );
 }
 
 /// A `Float` quantity never enters the money-rate product (ORNA-MONEY-003), so the operator is `E5103`.
@@ -243,7 +248,12 @@ fn a_float_energy_times_rate_is_rejected() {
 fn a_rate_times_a_rate_is_rejected() {
     let source = rate_source("pub fn square(tariff: Tariff) = tariff.rate * tariff.rate;\n");
     let program = lower_one(&source);
-    assert!(!user_diagnostics(&program).is_empty());
+    assert_eq!(
+        user_codes(&program),
+        vec![INFER_CONFLICT],
+        "{:?}",
+        user_diagnostics(&program)
+    );
 }
 
 /// `Decimal<kWh> / Money<GBP>` has no rate form: only `Money<C> / U` is a rate (units.md section 8.3).
@@ -252,5 +262,10 @@ fn an_energy_over_money_is_rejected() {
     let source =
         rate_source("pub fn bad(energy: Decimal<kWh>, cost: Money<GBP>) = energy / cost;\n");
     let program = lower_one(&source);
-    assert!(!user_diagnostics(&program).is_empty());
+    assert_eq!(
+        user_codes(&program),
+        vec![INFER_CONFLICT],
+        "{:?}",
+        user_diagnostics(&program)
+    );
 }
