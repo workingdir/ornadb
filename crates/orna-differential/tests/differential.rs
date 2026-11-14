@@ -29,14 +29,13 @@ const EXCLUDED_PROGRAMS: usize = 5465;
 ///
 /// This is the harness's fidelity measure: a valid fixture is rejected because
 /// the case carries no environment for it, not because the fixture is wrong.
-/// Measured at H0: 15 `ORNA-EVAL-NAME` (a relation source whose rows the case
-/// does not carry), 11 `sys.version.incompatible` (the binary attaches a
-/// `SysHostContext` per activation, and a deterministic one has not been
-/// defined yet), and 11 others (four `ORNA-EVAL-UNSUPPORTED`, three
-/// `ORNA-S021-TYPE`, one each of `E2002`, `ORNA-EVAL-TABLE-SNAPSHOT`,
-/// `ORNA-EVAL-TYPE` and `ORNA-EVAL-VALUE`). The number is a ratchet: follow-up
-/// PRs carry the environments and lower it deliberately.
-const REFERENCE_VALID_REJECTED: usize = 37;
+/// Measured at H0 (as lowered by ornadb-cdi8u): 14 `ORNA-EVAL-NAME` (a relation source whose rows the
+/// case does not carry), 11 `sys.version.incompatible` (the binary attaches a `SysHostContext` per
+/// activation, and a deterministic one has not been defined yet), and 11 others (four
+/// `ORNA-EVAL-UNSUPPORTED`, three `ORNA-S021-TYPE`, one each of `E2002`, `ORNA-EVAL-TABLE-MISSING-ROW`,
+/// `ORNA-EVAL-TYPE` and `ORNA-EVAL-VALUE`). The number is a ratchet: follow-up PRs carry the
+/// environments and lower it deliberately.
+const REFERENCE_VALID_REJECTED: usize = 36;
 
 /// The old pipeline's outcome tally, per family and per published expectation.
 type Tally = BTreeMap<(String, &'static str, String), usize>;

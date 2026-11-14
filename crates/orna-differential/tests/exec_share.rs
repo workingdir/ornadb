@@ -76,7 +76,7 @@ fn executor_agreement_with_the_old_pipeline_only_grows() {
     mismatches.extend(allowances.stale());
     let old_harness_environment = allowances.harness_environment_count();
     println!(
-        "old-harness environment: {old_harness_environment} run cases differ only by the H0 observer's missing table store"
+        "old-harness environment: {old_harness_environment} run cases differ only by the H0 observer's admitted-table environment"
     );
     println!(
         "executor agreement: {agreed}/{ran} run cases agree with the old pipeline ({} cases in the corpus)",

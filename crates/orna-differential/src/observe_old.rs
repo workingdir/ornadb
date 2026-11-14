@@ -117,7 +117,14 @@ fn run_module(
         if !case.evaluate {
             return Ok(Run::default());
         }
-        match authority.evaluate_staged(&admitted, &case.arguments) {
+        // The fixture table store: every admitted table, empty, as the executor's
+        // `MemoryStore` holds it for a case with no rows.
+        let tables = admitted
+            .table_schemas()
+            .keys()
+            .map(|table| (table.clone(), Vec::new()))
+            .collect();
+        match authority.evaluate_staged_with_table_rows(&admitted, &case.arguments, tables) {
             Ok(activation) => Ok(Run {
                 outcome: Some(Ok(encode(activation.value())?)),
                 writes: writes_of(&activation),
