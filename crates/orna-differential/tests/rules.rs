@@ -11,9 +11,9 @@ use orna_differential::case::{Case, CaseKind, Corpus};
 use orna_differential::{compare, observe_checker, observe_new};
 use orna_hir::ModuleOrigin;
 
-/// The codes the HIR rules pass owns: namespace (E1008, E1009, S002, S003)
-/// and assertion (A091-002, A091-003, A091-007, A091-012).
-const FAMILY: [&str; 8] = [
+/// The codes the HIR rules pass owns: namespace (E1008, E1009, S002, S003),
+/// assertion (A091-002, A091-003, A091-007, A091-012) and durable consumer (E9101).
+const FAMILY: [&str; 9] = [
     "E1008",
     "E1009",
     "ORNA-S002-NAMESPACE",
@@ -22,6 +22,7 @@ const FAMILY: [&str; 8] = [
     "ORNA-A091-003",
     "ORNA-A091-007",
     "ORNA-A091-012",
+    "E9101",
 ];
 
 fn in_family(code: &str) -> bool {

@@ -4,7 +4,8 @@
 //! The pass runs after the effect pass, so every function's effect set is
 //! final when an assertion is judged. It covers the namespace rules (S002,
 //! S003, E1008, E1009) and the owner-pipe, effect and scope rules of
-//! assertions (A091-002, A091-003, A091-007, A091-012). Only source modules
+//! assertions (A091-002, A091-003, A091-007, A091-012), and the durable
+//! consumer duplicate of `parallel` (E9101). Only source modules
 //! (`ModuleOrigin::Project`) are checked: `core`, `sys` and the pinned `std`
 //! are implementation declarations.
 //!
@@ -13,6 +14,7 @@
 //! types need the type pass and stay "not yet on HIR" (A091-004).
 
 mod assertions;
+mod consumers;
 mod namespace;
 
 use crate::{HirDiagnostic, ModuleId, Program};
@@ -21,6 +23,7 @@ use crate::{HirDiagnostic, ModuleId, Program};
 pub(crate) fn run(program: &mut Program) {
     let mut found = namespace::check(program);
     found.extend(assertions::check(program));
+    found.extend(consumers::check(program));
     for (module, diagnostic) in found {
         program.modules[module].diagnostics.push(diagnostic);
     }
