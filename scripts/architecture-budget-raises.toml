@@ -86,70 +86,58 @@ reason = "pure split of fuse_mount.rs along its implementation seams; the 12008-
 bead = "ornadb-ahzrn"
 
 [[raise]]
-path = "crates/orna-fuse/src/filesystem.rs"
-new_limit = 4596
-reason = "pure split of fuse_mount.rs along its implementation seams; the 12008-line parent shrank to 203 lines"
-bead = "ornadb-ahzrn"
-
-[[raise]]
-path = "crates/orna-fuse/src/filesystem.rs::commit_blob_candidate"
-new_limit = 169
-reason = "pure split of fuse_mount.rs along its implementation seams; the 12008-line parent shrank to 203 lines"
-bead = "ornadb-ahzrn"
-
-[[raise]]
-path = "crates/orna-fuse/src/filesystem.rs::create"
-new_limit = 139
-reason = "pure split of fuse_mount.rs along its implementation seams; the 12008-line parent shrank to 203 lines"
-bead = "ornadb-ahzrn"
-
-[[raise]]
-path = "crates/orna-fuse/src/filesystem.rs::from_snapshot"
-new_limit = 173
-reason = "pure split of fuse_mount.rs along its implementation seams; the 12008-line parent shrank to 203 lines"
-bead = "ornadb-ahzrn"
-
-[[raise]]
-path = "crates/orna-fuse/src/filesystem.rs::open"
-new_limit = 346
-reason = "pure split of fuse_mount.rs along its implementation seams; the 12008-line parent shrank to 203 lines"
-bead = "ornadb-ahzrn"
-
-[[raise]]
-path = "crates/orna-fuse/src/filesystem.rs::prepare_edit"
-new_limit = 176
-reason = "pure split of fuse_mount.rs along its implementation seams; the 12008-line parent shrank to 203 lines"
-bead = "ornadb-ahzrn"
-
-[[raise]]
-path = "crates/orna-fuse/src/filesystem.rs::read"
-new_limit = 162
-reason = "pure split of fuse_mount.rs along its implementation seams; the 12008-line parent shrank to 203 lines"
-bead = "ornadb-ahzrn"
-
-[[raise]]
-path = "crates/orna-fuse/src/filesystem.rs::rename"
-new_limit = 338
-reason = "pure split of fuse_mount.rs along its implementation seams; the 12008-line parent shrank to 203 lines"
-bead = "ornadb-ahzrn"
-
-[[raise]]
-path = "crates/orna-fuse/src/filesystem.rs::retain_all_drafts"
-new_limit = 280
-reason = "pure split of fuse_mount.rs along its implementation seams; the 12008-line parent shrank to 203 lines"
-bead = "ornadb-ahzrn"
-
-[[raise]]
-path = "crates/orna-fuse/src/filesystem.rs::setattr"
+path = "crates/orna-fuse/src/filesystem/attributes.rs::fuse_setattr"
 new_limit = 132
-reason = "pure split of fuse_mount.rs along its implementation seams; the 12008-line parent shrank to 203 lines"
-bead = "ornadb-ahzrn"
+reason = "W2-03 move-only split of filesystem.rs; body unchanged (orig setattr 132 lines), now a fuse_setattr inherent method"
+bead = "ornadb-g9d7z.19"
 
 [[raise]]
-path = "crates/orna-fuse/src/filesystem.rs::unresolved_drafts_of"
+path = "crates/orna-fuse/src/filesystem/create_rename.rs::fuse_create"
+new_limit = 139
+reason = "W2-03 move-only split of filesystem.rs; body unchanged (orig create 139 lines), now a fuse_create inherent method"
+bead = "ornadb-g9d7z.19"
+
+[[raise]]
+path = "crates/orna-fuse/src/filesystem/create_rename.rs::fuse_rename"
+new_limit = 338
+reason = "W2-03 move-only split of filesystem.rs; body unchanged (orig rename 338 lines), now a fuse_rename inherent method"
+bead = "ornadb-g9d7z.19"
+
+[[raise]]
+path = "crates/orna-fuse/src/filesystem/file_handles.rs::fuse_open"
+new_limit = 352
+reason = "W2-03 move-only split of filesystem.rs; orig open 346 lines, +6 from rustfmt wrapping the pub(crate) signature"
+bead = "ornadb-g9d7z.19"
+
+[[raise]]
+path = "crates/orna-fuse/src/filesystem/file_handles.rs::fuse_read"
+new_limit = 162
+reason = "W2-03 move-only split of filesystem.rs; body unchanged (orig read 162 lines), now a fuse_read inherent method"
+bead = "ornadb-g9d7z.19"
+
+[[raise]]
+path = "crates/orna-fuse/src/filesystem/lifecycle.rs::from_snapshot"
+new_limit = 173
+reason = "W2-03 move-only split of filesystem.rs; body unchanged (orig from_snapshot 173 lines)"
+bead = "ornadb-g9d7z.19"
+
+[[raise]]
+path = "crates/orna-fuse/src/filesystem/mod.rs::prepare_edit"
+new_limit = 179
+reason = "W2-03 move-only split of filesystem.rs; body unchanged (orig prepare_edit 179 lines)"
+bead = "ornadb-g9d7z.19"
+
+[[raise]]
+path = "crates/orna-fuse/src/filesystem/unresolved.rs::retain_all_drafts"
+new_limit = 280
+reason = "W2-03 move-only split of filesystem.rs; body unchanged (orig retain_all_drafts 280 lines)"
+bead = "ornadb-g9d7z.19"
+
+[[raise]]
+path = "crates/orna-fuse/src/filesystem/unresolved.rs::unresolved_drafts_of"
 new_limit = 131
-reason = "pure split of fuse_mount.rs along its implementation seams; the 12008-line parent shrank to 203 lines"
-bead = "ornadb-ahzrn"
+reason = "W2-03 move-only split of filesystem.rs; body unchanged (orig unresolved_drafts_of 131 lines)"
+bead = "ornadb-g9d7z.19"
 
 [[raise]]
 path = "crates/orna-fuse/src/projection.rs"
