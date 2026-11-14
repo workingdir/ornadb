@@ -1,11 +1,10 @@
-//! The Unicode 16.0.0 text rules the `core.text` natives share: the White_Space property and the simple case mappings
-//! with the Final_Sigma context rule. Copied from the old evaluator's helpers, so the profile does not depend on the
-//! toolchain's own Unicode tables.
+//! The Unicode 16.0.0 simple case mappings and the White_Space property, with the Final_Sigma context rule. Moved from
+//! `orna-exec` (L1) so the profile does not depend on the toolchain's own Unicode tables.
 
-use super::unicode_16_case_properties::{is_case_ignorable, is_cased};
+use crate::case_properties::{is_case_ignorable, is_cased};
 
 /// The White_Space property of Unicode 16.0.0, listed explicitly.
-pub(super) fn white_space(value: char) -> bool {
+pub fn white_space(value: char) -> bool {
     matches!(
         value,
         '\u{0009}'..='\u{000D}'
@@ -23,7 +22,7 @@ pub(super) fn white_space(value: char) -> bool {
 }
 
 /// The lowercase mapping of `value`, with Greek capital sigma becoming final sigma where the context requires it.
-pub(super) fn lowercase(value: &str) -> String {
+pub fn lowercase(value: &str) -> String {
     let mut output = String::with_capacity(value.len());
     let scalars = value.chars().collect::<Vec<_>>();
     for (index, scalar) in scalars.iter().copied().enumerate() {
@@ -59,7 +58,7 @@ fn is_final_sigma(scalars: &[char], index: usize) -> bool {
 }
 
 /// The uppercase mapping of `value`, scalar by scalar.
-pub(super) fn uppercase(value: &str) -> String {
+pub fn uppercase(value: &str) -> String {
     let mut output = String::with_capacity(value.len());
     for scalar in value.chars() {
         let mapping = unicode_case_mapping::to_uppercase(scalar);
@@ -72,4 +71,39 @@ pub(super) fn uppercase(value: &str) -> String {
         }
     }
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{lowercase, uppercase, white_space};
+
+    #[test]
+    fn final_sigma_applies_only_at_word_end() {
+        assert_eq!(lowercase("ΟΔΟΣ"), "οδος");
+        assert_eq!(lowercase("ΣΑ"), "σα");
+        assert_eq!(lowercase("Σ"), "σ");
+    }
+
+    #[test]
+    fn final_sigma_skips_case_ignorable_scalars() {
+        // U+0301 COMBINING ACUTE ACCENT is Case_Ignorable, so the cased base still governs the context.
+        assert_eq!(lowercase("ΟΔΟΣ\u{0301}"), "οδος\u{0301}");
+    }
+
+    #[test]
+    fn case_mappings_expand_multi_scalar_results() {
+        assert_eq!(uppercase("ß"), "SS");
+        assert_eq!(uppercase("ﬁ"), "FI");
+        assert_eq!(lowercase("İ"), "i\u{0307}");
+    }
+
+    #[test]
+    fn white_space_matches_unicode_16_list() {
+        for value in ['\t', '\n', ' ', '\u{0085}', '\u{00A0}', '\u{3000}'] {
+            assert!(white_space(value), "{value:?}");
+        }
+        for value in ['a', '\u{200B}', '\u{FEFF}'] {
+            assert!(!white_space(value), "{value:?}");
+        }
+    }
 }

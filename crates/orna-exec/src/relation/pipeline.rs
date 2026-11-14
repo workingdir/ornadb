@@ -11,13 +11,14 @@ use num_traits::ToPrimitive;
 use orna_hir::{
     ArgValue, Body, Call, Callee, DefId, DefKind, ExprId, ExprKind, FieldRef, Program, RelOp,
 };
+use orna_value::Snapshot;
 
 use crate::error::Stop;
 use crate::frame::Frame;
 use crate::host::SysSlot;
 use crate::machine::Machine;
 use crate::raw_value;
-use crate::store::{CursorId, Direction, KeyBounds};
+use crate::store::{CursorId, Direction, KeyBounds, TableStore};
 use crate::table::{decode_row, field_of_row, store_invariant};
 use crate::value::{RelHandle, Value};
 
@@ -170,9 +171,12 @@ fn stream<'p>(
             }
             Ok(())
         }
-        Source::Table(table) => scan_table(machine, *table, stages, &mut counts, sink),
+        Source::Table(table) => scan_table(machine, *table, None, stages, &mut counts, sink),
         Source::Handle(handle) => match &**handle {
             RelHandle::Sys { slot } => scan_sys(machine, *slot, stages, &mut counts, sink),
+            RelHandle::Table { table, at } => {
+                scan_table(machine, *table, Some(at), stages, &mut counts, sink)
+            }
         },
     }
 }
@@ -319,22 +323,40 @@ fn count_argument<'p>(
     count.to_usize().ok_or(Stop::Error("ORNA-EVAL-LIMIT"))
 }
 
-/// Walks every row of `table` through the stages, closing the cursor on every path.
+/// Walks every row of `table` through the stages, closing the cursor on every path. The rows come from `at` when the
+/// handle names a snapshot, and from the live store otherwise.
 fn scan_table<'p>(
     machine: &mut Machine<'p>,
     table: DefId,
+    at: Option<&Snapshot>,
     stages: &[Stage],
     counts: &mut [usize],
     sink: &mut Sink<'_, 'p>,
 ) -> Result<(), Stop> {
-    let cursor = machine
-        .host
-        .store()
-        .scan(table, KeyBounds::all(), Direction::Forward)
-        .map_err(|error| store_invariant(&error))?;
-    let outcome = walk_table(machine, cursor, stages, counts, sink);
-    machine.host.store().close(cursor);
-    outcome
+    match at {
+        None => {
+            let cursor = machine
+                .host
+                .store()
+                .scan(table, KeyBounds::all(), Direction::Forward)
+                .map_err(|error| store_invariant(&error))?;
+            let outcome = walk_table(machine, None, cursor, stages, counts, sink);
+            machine.host.store().close(cursor);
+            outcome
+        }
+        Some(at) => {
+            let mut pinned = machine
+                .host
+                .store_at(at)
+                .map_err(|failure| Stop::Error(failure.code))?;
+            let cursor = pinned
+                .scan(table, KeyBounds::all(), Direction::Forward)
+                .map_err(|error| store_invariant(&error))?;
+            let outcome = walk_table(machine, Some(pinned.as_mut()), cursor, stages, counts, sink);
+            pinned.close(cursor);
+            outcome
+        }
+    }
 }
 
 /// Reads the rows of the `sys` relation in `slot` from the host, one at a time, until the pipeline stops.
@@ -364,6 +386,7 @@ fn scan_sys<'p>(
 /// Reads the rows of an open cursor one at a time, charging a step for each, until the pipeline stops.
 fn walk_table<'p>(
     machine: &mut Machine<'p>,
+    mut pinned: Option<&mut dyn TableStore>,
     cursor: CursorId,
     stages: &[Stage],
     counts: &mut [usize],
@@ -371,12 +394,11 @@ fn walk_table<'p>(
 ) -> Result<(), Stop> {
     loop {
         machine.tick(1)?;
-        let row = match machine
-            .host
-            .store()
-            .next(cursor)
-            .map_err(|error| store_invariant(&error))?
-        {
+        let next = match pinned.as_deref_mut() {
+            Some(store) => store.next(cursor),
+            None => machine.host.store().next(cursor),
+        };
+        let row = match next.map_err(|error| store_invariant(&error))? {
             None => return Ok(()),
             Some(stored) => raw_value::record(decode_row(stored.row)?),
         };

@@ -1665,9 +1665,9 @@ dependencies = [
  "orna-hir",
  "orna-syntax",
  "orna-syntax-ast",
+ "orna-unicode",
  "orna-value",
  "sha2 0.10.9",
- "unicode-case-mapping",
  "unicode-normalization",
 ]
 
@@ -2067,6 +2067,7 @@ dependencies = [
 name = "orna-unicode"
 version = "1.0.0"
 dependencies = [
+ "unicode-case-mapping",
  "unicode-normalization",
 ]
 
