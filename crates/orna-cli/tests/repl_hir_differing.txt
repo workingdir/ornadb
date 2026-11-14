@@ -11,9 +11,9 @@
 orna-evaluator/src/fixtures/repl-inline-fn-echo-value-value-da0be3af.orna SPEC unannotated fn parameter generalised to a generic (ORNA-INFER-003, FN-008, FN-011); old ORNA-S020 limitation
 orna-evaluator/src/fixtures/repl-inline-fn-f-int-text-c1b5b853.orna DIAG type mismatch reported as ORNA-INFER-011 not ORNA-S021
 orna-evaluator/src/fixtures/repl-inline-fn-generic-t-value-value-25ca40f0.orna SPEC declared generic with an unannotated parameter generalised (ORNA-INFER-003, GENERIC-001); old ORNA-S020 limitation
-orna-evaluator/src/fixtures/repl-inline-fn-last-45d0d77e.orna NOVALUE fn-last reports ORNA-EVAL-UNSUPPORTED where old reports unresolved $_
-orna-evaluator/src/fixtures/repl-inline-fn-previous-95c9ccff.orna NOVALUE fn-previous reports ORNA-EVAL-UNSUPPORTED where old reports unresolved $_
-orna-evaluator/src/fixtures/repl-inline-fn-twice-value-value-value-303b1146.orna NOVALUE fn-twice prints empty output where old prints nothing; HIR reports ORNA-INFER-007
+orna-evaluator/src/fixtures/repl-inline-fn-last-45d0d77e.orna DIAG both paths reject `$_` in a fn body (ORNA-REPL-002); HIR reports ORNA-EVAL-UNSUPPORTED where old reports ORNA-S012
+orna-evaluator/src/fixtures/repl-inline-fn-previous-95c9ccff.orna DIAG both paths reject `$_` in a fn body (ORNA-REPL-002); HIR reports ORNA-EVAL-UNSUPPORTED where old reports ORNA-S012
+orna-evaluator/src/fixtures/repl-inline-fn-twice-value-value-value-303b1146.orna SPEC underconstrained declared fn must be diagnosed (ORNA-INFER-007); HIR rejects, old accepts silently
 orna-evaluator/src/fixtures/repl-inline-let-broken-missing-94d25d6f.orna DIAG unresolved name diagnostic text lacks old location and hint
 orna-evaluator/src/fixtures/repl-inline-let-n-int-text-6fd49f71.orna DIAG type mismatch reported as ORNA-INFER-011 not ORNA-S021
 orna-evaluator/src/fixtures/repl-inline-note-insert-1-17cd3595.orna DIAG unresolved name diagnostic text lacks old location and hint
@@ -27,12 +27,12 @@ orna-project-repl/src/fixtures/repl-inline-let-text-int-wrong-12395f03.orna DIAG
 orna-project-repl/src/fixtures/repl-inline-n-1-60910b50.orna DIAG unresolved name diagnostic text lacks old location and hint
 orna-project-repl/src/fixtures/repl-inline-n-1b16b1df.orna DIAG unresolved name diagnostic text lacks old location and hint
 orna-project-repl/src/fixtures/repl-inline-pending-62a2fed3.orna DIAG unresolved name diagnostic text lacks old location and hint
-orna-project-repl/src/fixtures/repl-inline-pub-fn-status-988936de.orna NOVALUE pub fn status prints empty output where old prints nothing; HIR reports ORNA-EVAL-UNSUPPORTED
+orna-project-repl/src/fixtures/repl-inline-pub-fn-status-988936de.orna SPEC `$?` in module source must not become an implicit global (ORNA-REPL-002); HIR rejects, old accepts silently
 orna-project-repl/src/fixtures/repl-inline-pub-fn-value-int-42-fn-hidden-int-99-3655e003.orna DIAG trailing-input parse error reported as ORNA-EVAL-PARSE not ORNA-PARSE-001
 orna-project-repl/src/fixtures/repl-inline-pub-fn-value-str-changed-pub-fn-hidden-4a870d7d.orna DIAG trailing-input parse error reported as ORNA-EVAL-PARSE not ORNA-PARSE-001
 orna-project-repl/src/fixtures/repl-inline-recurse-0-d5e629d3.orna DIAG unresolved name diagnostic text lacks old location and hint
 orna-project-repl/src/fixtures/repl-inline-recurse-100000-6ed6c372.orna DIAG unresolved name diagnostic text lacks old location and hint
-orna-project-repl/src/fixtures/repl-inline-source-3a7494a2.orna NOVALUE null literal reports ORNA-EVAL-UNSUPPORTED where old prints null
+orna-project-repl/src/fixtures/repl-inline-source-3a7494a2.orna NOVALUE bare `$?` is unsupported in HIR (spec: "if supported"); old prints null : Null
 orna-project-repl/src/fixtures/repl-inline-source-ba1da4b7.orna DIAG unresolved $_ reports ORNA-EVAL-NAME not ORNA-S012
 orna-project-repl/src/fixtures/repl-inline-text-982d9e3e.orna DIAG unresolved name diagnostic text lacks old location and hint
 orna-project-repl/src/fixtures/repl-inline-twice-n-21d0ebc9.orna DIAG unresolved name diagnostic text lacks old location and hint
