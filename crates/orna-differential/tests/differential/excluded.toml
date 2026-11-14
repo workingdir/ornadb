@@ -124,6 +124,11 @@ files = 285
 reason = "runtime fixtures are table-store and publication cases with rows and committed identities; they need the case row path (H6)"
 
 [[excluded]]
+scope = "crates/orna-vfs/tests/fixtures"
+files = 4
+reason = "VFS fixtures are save and publication cases with rows and committed identities; they need the case row path (H6)"
+
+[[excluded]]
 scope = "crates/orna-storage/tests/fixtures"
 files = 9
 reason = "publication fixtures are journal and store states, not programs"
