@@ -38,7 +38,7 @@ impl<'p> Machine<'p> {
         Ok(Some(resolved.into()))
     }
 
-    fn resolve_ty(&self, ty: Ty, env: &[Ty]) -> Result<Ty, Stop> {
+    pub(crate) fn resolve_ty(&self, ty: Ty, env: &[Ty]) -> Result<Ty, Stop> {
         if let Some(TyKind::Param(index)) = self.program.tys.kind(ty) {
             return env
                 .get(index.as_u32() as usize)
@@ -181,7 +181,7 @@ impl<'p> Machine<'p> {
     }
 
     /// The `core.Ordering` value for `ordering`.
-    fn ordering_value(&self, ordering: Ordering) -> Result<Value, Stop> {
+    pub(crate) fn ordering_value(&self, ordering: Ordering) -> Result<Value, Stop> {
         let ids = match self.ordering.get() {
             Some(ids) => *ids,
             None => {

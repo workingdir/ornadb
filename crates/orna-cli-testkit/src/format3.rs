@@ -188,8 +188,8 @@ pub fn capture_failure(
     .to_owned()
 }
 
-pub fn empty_format3_repository() -> (TempDir, Repository, [u8; 16]) {
-    format3_repository(include_str!("../fixtures/media/empty-media-main.orna"))
+pub fn empty_format3_repository(media_source: &str) -> (TempDir, Repository, [u8; 16]) {
+    format3_repository(media_source)
 }
 
 /// Creates an Object project, its canonical identity manifest, and matching
@@ -197,22 +197,15 @@ pub fn empty_format3_repository() -> (TempDir, Repository, [u8; 16]) {
 /// not committed: format 3 keeps rows only in `.orna/store`
 /// (ORNA-REPO-004), so a caller admits [`object_source_row`] documents into
 /// the store.
-pub fn object_format3_repository() -> (TempDir, Repository, [u8; 16], Format3Context) {
-    format3_repository_with_context(
-        include_str!("../fixtures/media/offline-query-main.orna"),
-        "Object",
-    )
+pub fn object_format3_repository(
+    media_source: &str,
+) -> (TempDir, Repository, [u8; 16], Format3Context) {
+    format3_repository_with_context(media_source, "Object")
 }
 
-/// The source document of one fixture Object row (`song`, `image` or
-/// `overflow`), naming its media under `media_root`.
-pub fn object_source_row(media_root: &Path, key: &str) -> String {
-    let fixture = match key {
-        "song" => include_str!("../fixtures/media/source-song.orna"),
-        "image" => include_str!("../fixtures/media/source-image.orna"),
-        "overflow" => include_str!("../fixtures/media/overflow.orna"),
-        other => panic!("no fixture Object row {other:?}"),
-    };
+/// The source document of one Object row, naming its media under `media_root`.
+/// `fixture` is the row template (`__MEDIA_ROOT__` is substituted).
+pub fn object_source_row(media_root: &Path, fixture: &str) -> String {
     fixture.replace(
         "__MEDIA_ROOT__",
         &format!("{:?}", media_root.to_string_lossy().as_ref()),

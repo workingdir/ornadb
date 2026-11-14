@@ -4,12 +4,14 @@
 //! byte-for-byte: canonical result bytes or the same error code. A case the
 //! executor does not run is counted by the reason it names, not skipped. The
 //! agreed count is recorded in `tests/differential/exec-share.toml` and may only
-//! grow.
+//! grow. The allowances that explain a disagreement live in
+//! `orna_differential::exec_allowance`, shared with the shadow report.
 
 use std::collections::BTreeMap;
 
-use orna_differential::case::{Case, Corpus, Family};
+use orna_differential::case::Corpus;
 use orna_differential::compare;
+use orna_differential::exec_allowance::ExecAllowances;
 use orna_differential::observe_exec::{self, ExecOutcome};
 use orna_differential::observe_old;
 
@@ -24,15 +26,7 @@ fn executor_agreement_with_the_old_pipeline_only_grows() {
     let mut mismatches = Vec::new();
     let mut step_differences: Vec<(String, u64, u64)> = Vec::new();
     let mut reasons: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    let harness_allowances =
-        compare::load_harness_allowances().expect("the harness allowances parse");
-    let mut harness_used = vec![false; harness_allowances.len()];
-    let representation_allowances =
-        compare::load_representation_allowances().expect("the representation allowances parse");
-    let mut representation_used = vec![false; representation_allowances.len()];
-    let executor_gap_allowances =
-        compare::load_executor_gap_allowances().expect("the executor-gap allowances parse");
-    let mut executor_gap_used = vec![false; executor_gap_allowances.len()];
+    let mut allowances = ExecAllowances::load().expect("the executor allowances parse");
     for case in &corpus.cases {
         match observe_exec::run_case(case) {
             ExecOutcome::NotYet(reason) => {
@@ -52,37 +46,15 @@ fn executor_agreement_with_the_old_pipeline_only_grows() {
                     }
                 };
                 if observation.outcome.as_ref() != Some(&outcome) {
-                    if harness_environment_allowed(
-                        case,
-                        &outcome,
-                        observation.outcome.as_ref(),
-                        &harness_allowances,
-                        &mut harness_used,
-                    ) {
-                        continue;
+                    if allowances
+                        .outcome_allowed(case, &outcome, observation.outcome.as_ref())
+                        .is_none()
+                    {
+                        mismatches.push(format!(
+                            "{}: executor {outcome:?}, old {:?}",
+                            case.id, observation.outcome
+                        ));
                     }
-                    if representation_allowed(
-                        case,
-                        observation.outcome.as_ref(),
-                        &outcome,
-                        &representation_allowances,
-                        &mut representation_used,
-                    ) {
-                        continue;
-                    }
-                    if executor_gap_allowed(
-                        case,
-                        &outcome,
-                        observation.outcome.as_ref(),
-                        &executor_gap_allowances,
-                        &mut executor_gap_used,
-                    ) {
-                        continue;
-                    }
-                    mismatches.push(format!(
-                        "{}: executor {outcome:?}, old {:?}",
-                        case.id, observation.outcome
-                    ));
                     continue;
                 }
                 agreed += 1;
@@ -94,40 +66,18 @@ fn executor_agreement_with_the_old_pipeline_only_grows() {
             }
         }
     }
-    mismatches.extend(harness_stale(&harness_allowances, &harness_used));
-    mismatches.extend(representation_stale(
-        &representation_allowances,
-        &representation_used,
-    ));
-    mismatches.extend(executor_gap_stale(
-        &executor_gap_allowances,
-        &executor_gap_used,
-    ));
-    let old_harness_environment = harness_used.iter().filter(|used| **used).count();
-    println!(
-        "old-harness environment: {old_harness_environment} run cases differ only by the H0 observer's missing table store"
-    );
-    let allowances = compare::load_step_allowances().expect("the step allowances parse");
-    let mut used = vec![false; allowances.len()];
     for (id, old, executor) in step_differences {
-        match allowances
-            .iter()
-            .position(|allowance| allowance.matches(&id, old, executor))
-        {
-            Some(index) => used[index] = true,
-            None => mismatches.push(format!(
-                "{id}: executor charges {executor} steps, old pipeline {old}"
-            )),
-        }
-    }
-    for (allowance, used) in allowances.iter().zip(&used) {
-        if !used {
+        if !allowances.step_allowed(&id, old, executor) {
             mismatches.push(format!(
-                "{}: step allowance for old {} and executor {} is stale; remove or update it",
-                allowance.case, allowance.old, allowance.executor
+                "{id}: executor charges {executor} steps, old pipeline {old}"
             ));
         }
     }
+    mismatches.extend(allowances.stale());
+    let old_harness_environment = allowances.harness_environment_count();
+    println!(
+        "old-harness environment: {old_harness_environment} run cases differ only by the H0 observer's missing table store"
+    );
     println!(
         "executor agreement: {agreed}/{ran} run cases agree with the old pipeline ({} cases in the corpus)",
         corpus.cases.len()
@@ -160,141 +110,4 @@ fn executor_agreement_with_the_old_pipeline_only_grows() {
         "the exec-share ratchet failed:\n{}",
         failures.join("\n")
     );
-}
-
-/// Whether `case`'s disagreement is the H0 observer's missing table store. Either the old outcome
-/// is `ORNA-EVAL-NAME` for a case that reaches a table (declared in its source, or an attached
-/// fixture table: the reference family imports `fixture.attached.*` at load time), or the executor
-/// reports `ORNA-EVAL-TABLE-ROW` for a case the old pipeline rejects. Both need a harness allowance.
-fn harness_environment_allowed(
-    case: &Case,
-    executor: &Result<Vec<u8>, String>,
-    old: Option<&Result<Vec<u8>, String>>,
-    allowances: &[compare::HarnessAllowance],
-    used: &mut [bool],
-) -> bool {
-    let reaches_table = declares_table(case) || case.family == Family::Reference;
-    let missing_name = matches!(old, Some(Err(code)) if code == "ORNA-EVAL-NAME") && reaches_table;
-    let missing_store = matches!(executor, Err(code) if code == "ORNA-EVAL-TABLE-ROW")
-        && matches!(old, Some(Err(_)));
-    if !missing_name && !missing_store {
-        return false;
-    }
-    match allowances
-        .iter()
-        .position(|allowance| allowance.case == case.id)
-    {
-        Some(index) => {
-            used[index] = true;
-            true
-        }
-        None => false,
-    }
-}
-
-/// Whether `case`'s disagreement is the old pipeline's raw-blob representation gap: the old
-/// pipeline answers `ORNA-EVAL-VALUE` for a result the executor returns as a raw `Blob`, and the
-/// case is listed in `[[representation-allowance]]`. Any other disagreement is still a mismatch.
-fn representation_allowed(
-    case: &Case,
-    old: Option<&Result<Vec<u8>, String>>,
-    executor: &Result<Vec<u8>, String>,
-    allowances: &[compare::HarnessAllowance],
-    used: &mut [bool],
-) -> bool {
-    let value_gap = matches!(old, Some(Err(code)) if code == "ORNA-EVAL-VALUE");
-    if !value_gap || !executor.is_ok() {
-        return false;
-    }
-    match allowances
-        .iter()
-        .position(|allowance| allowance.case == case.id)
-    {
-        Some(index) => {
-            used[index] = true;
-            true
-        }
-        None => false,
-    }
-}
-
-/// The representation allowances that no longer cover a run: each must be removed.
-fn representation_stale(allowances: &[compare::HarnessAllowance], used: &[bool]) -> Vec<String> {
-    allowances
-        .iter()
-        .zip(used)
-        .filter(|(_, used)| !**used)
-        .map(|(allowance, _)| {
-            format!(
-                "{}: representation allowance is stale; the case no longer differs, remove it",
-                allowance.case
-            )
-        })
-        .collect()
-}
-
-/// Whether a source of `case` declares a table, the shape the H0 observer has no store for.
-fn declares_table(case: &Case) -> bool {
-    case.sources.iter().any(|source| {
-        source
-            .text
-            .lines()
-            .map(str::trim_start)
-            .any(|line| line.starts_with("table ") || line.starts_with("pub table "))
-    })
-}
-
-/// The harness allowances that no longer cover a run: each must be removed.
-fn harness_stale(allowances: &[compare::HarnessAllowance], used: &[bool]) -> Vec<String> {
-    allowances
-        .iter()
-        .zip(used)
-        .filter(|(_, used)| !**used)
-        .map(|(allowance, _)| {
-            format!(
-                "{}: harness allowance is stale; the case no longer differs, remove it",
-                allowance.case
-            )
-        })
-        .collect()
-}
-
-/// Executor-gap allowances whose exact pair no longer disagrees are stale and must be removed.
-fn executor_gap_stale(allowances: &[compare::ExecutorGapAllowance], used: &[bool]) -> Vec<String> {
-    allowances
-        .iter()
-        .zip(used)
-        .filter(|(_, used)| !**used)
-        .map(|(allowance, _)| {
-            format!(
-                "{}: executor-gap allowance for executor {} and old {} is stale; remove it",
-                allowance.case, allowance.executor, allowance.old
-            )
-        })
-        .collect()
-}
-
-/// Whether `case`'s disagreement is a listed executor gap: the executor answers the listed error
-/// code and the old pipeline answers the listed error code. Any other disagreement stays a mismatch.
-fn executor_gap_allowed(
-    case: &Case,
-    executor: &Result<Vec<u8>, String>,
-    old: Option<&Result<Vec<u8>, String>>,
-    allowances: &[compare::ExecutorGapAllowance],
-    used: &mut [bool],
-) -> bool {
-    let (Err(executor_code), Some(Err(old_code))) = (executor, old) else {
-        return false;
-    };
-    match allowances.iter().position(|allowance| {
-        allowance.case == case.id
-            && allowance.executor == *executor_code
-            && allowance.old == *old_code
-    }) {
-        Some(index) => {
-            used[index] = true;
-            true
-        }
-        None => false,
-    }
 }

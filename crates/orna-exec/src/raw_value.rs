@@ -8,7 +8,8 @@ use std::rc::Rc;
 use num_bigint::BigInt;
 use orna_hir::Name;
 use orna_value::{
-    DATE_TAG, DECIMAL_TAG, DIGEST_TAG, MONEY_TAG, OPTION_TAG, Raw, TUPLE_TAG, UNIT_TAG, UUID_TAG,
+    DATE_TAG, DECIMAL_TAG, DIGEST_TAG, ENUM_TAG, INSTANT_TAG, MONEY_TAG, OPTION_TAG,
+    PINNED_ROW_REFERENCE_TAG, Raw, TUPLE_TAG, UNIT_TAG, UUID_TAG,
 };
 
 use crate::calendar;
@@ -44,7 +45,13 @@ pub(crate) fn from_raw(raw: &Raw) -> Result<Value, Stop> {
         Raw::Tag(DIGEST_TAG, body) => digest_from(body),
         Raw::Tag(DECIMAL_TAG, body) => decimal_from(body),
         Raw::Tag(MONEY_TAG, body) => money_from(body),
-        Raw::Null | Raw::Float(_) | Raw::Tag(..) => Err(Stop::NotYet("stored value shape (H6)")),
+        Raw::Tag(ENUM_TAG, body) => enum_from(body),
+        Raw::Tag(PINNED_ROW_REFERENCE_TAG, body) if matches!(&**body, Raw::Array(_)) => {
+            Ok(Value::RowRef(raw.clone()))
+        }
+        Raw::Null => Ok(Value::Null),
+        Raw::Tag(INSTANT_TAG, body) => instant_from(body),
+        Raw::Float(_) | Raw::Tag(..) => Err(Stop::NotYet("stored value shape (H6)")),
     }
 }
 
@@ -91,6 +98,27 @@ fn date_from(body: &Raw) -> Result<Value, Stop> {
     calendar::parse_date_text(text)
         .map(Value::Date)
         .ok_or_else(value_error)
+}
+
+/// An Instant body: its whole seconds and its nanoseconds, the latter below one second.
+fn instant_from(body: &Raw) -> Result<Value, Stop> {
+    let Raw::Array(parts) = body else {
+        return Err(value_error());
+    };
+    match parts.as_slice() {
+        [Raw::Int(seconds), Raw::Int(nanosecond)] => {
+            let nanosecond: u32 = nanosecond.try_into().map_err(|_| value_error())?;
+            if nanosecond >= 1_000_000_000 {
+                return Err(value_error());
+            }
+            let unix_seconds: i64 = seconds.try_into().map_err(|_| value_error())?;
+            Ok(Value::Instant {
+                unix_seconds,
+                nanosecond,
+            })
+        }
+        _ => Err(value_error()),
+    }
 }
 
 /// A Uuid body: its 16 bytes.
@@ -147,6 +175,36 @@ fn money_from(body: &Raw) -> Result<Value, Stop> {
     Ok(Value::Money { amount, currency })
 }
 
+/// An enum variant: its type id, its variant id, then its payload record or none.
+fn enum_from(body: &Raw) -> Result<Value, Stop> {
+    let Raw::Array(parts) = body else {
+        return Err(value_error());
+    };
+    let [
+        Raw::Tag(UUID_TAG, type_body),
+        Raw::Tag(UUID_TAG, variant_body),
+        payload,
+    ] = parts.as_slice()
+    else {
+        return Err(value_error());
+    };
+    let type_id = object_id(type_body).ok_or_else(value_error)?;
+    let variant_id = object_id(variant_body).ok_or_else(value_error)?;
+    let payload = match payload {
+        Raw::Null => None,
+        Raw::Map(entries) => match record_from(entries)? {
+            Value::Record(fields) => Some(fields),
+            _ => return Err(value_error()),
+        },
+        _ => return Err(value_error()),
+    };
+    Ok(Value::Enum {
+        type_id,
+        variant_id,
+        payload,
+    })
+}
+
 /// The 16 bytes of an object id body.
 fn object_id(body: &Raw) -> Option<[u8; 16]> {
     let Raw::Bytes(bytes) = body else {
@@ -157,4 +215,59 @@ fn object_id(body: &Raw) -> Option<[u8; 16]> {
 
 fn value_error() -> Stop {
     Stop::Error("ORNA-EVAL-VALUE")
+}
+
+#[cfg(test)]
+mod tests {
+    use orna_value::{INSTANT_TAG, PINNED_ROW_REFERENCE_TAG, Raw};
+
+    use super::from_raw;
+    use crate::value::Value;
+
+    #[test]
+    fn null_decodes_to_null() {
+        assert!(matches!(from_raw(&Raw::Null), Ok(Value::Null)));
+    }
+
+    #[test]
+    fn instant_round_trips_byte_exact() {
+        let raw = Raw::Tag(
+            INSTANT_TAG,
+            Box::new(Raw::Array(vec![Raw::Int(42.into()), Raw::Int(7.into())])),
+        );
+        let value = from_raw(&raw).expect("instant decodes");
+        assert_eq!(value.to_raw().expect("instant encodes"), raw);
+    }
+
+    #[test]
+    fn instant_rejects_out_of_range_nanoseconds() {
+        let raw = Raw::Tag(
+            INSTANT_TAG,
+            Box::new(Raw::Array(vec![
+                Raw::Int(0.into()),
+                Raw::Int(1_000_000_000.into()),
+            ])),
+        );
+        assert!(from_raw(&raw).is_err());
+    }
+
+    #[test]
+    fn row_reference_round_trips_byte_exact() {
+        let raw = Raw::Tag(
+            PINNED_ROW_REFERENCE_TAG,
+            Box::new(Raw::Array(vec![
+                Raw::Text("run".to_owned()),
+                Raw::Int(3.into()),
+            ])),
+        );
+        let value = from_raw(&raw).expect("reference decodes");
+        assert!(matches!(value, Value::RowRef(_)));
+        assert_eq!(value.to_raw().expect("reference encodes"), raw);
+    }
+
+    #[test]
+    fn row_reference_encodes_as_its_raw_form() {
+        let value = Value::RowRef(Raw::Null);
+        assert!(value.to_raw().is_ok());
+    }
 }

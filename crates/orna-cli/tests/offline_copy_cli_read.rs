@@ -27,13 +27,11 @@ use orna_sys::{EnvironmentProvider, FilesystemProvider};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
-#[path = "support/format3.rs"]
-mod format3;
 use format3::*;
+use orna_cli_testkit::format3;
 
-#[path = "support/media_commit.rs"]
-mod media_commit;
 use media_commit::commit_capture;
+use orna_cli_testkit::media_commit;
 
 const MEDIA_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/media");
 const SONG_IMPORT_FIXTURE: &str = concat!(
@@ -211,7 +209,8 @@ fn assert_self_contained(copy: &Path) {
 #[allow(clippy::too_many_lines)]
 #[tokio::test]
 async fn a_restored_copy_answers_query_history_and_a_payload_read_offline() {
-    let (directory, repository, relation_id) = empty_format3_repository();
+    let (directory, repository, relation_id) =
+        empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let source = TempDir::new().unwrap();
     for name in ["tone.wav", "pixel.png"] {
         std::fs::copy(
@@ -473,7 +472,8 @@ async fn a_restored_copy_answers_query_history_and_a_payload_read_offline() {
 
 #[test]
 fn restore_rejects_export_only_dependency_options() {
-    let (source_directory, _repository, _relation_id) = empty_format3_repository();
+    let (source_directory, _repository, _relation_id) =
+        empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let outside = TempDir::new().unwrap();
     let archive = outside.path().join("archive");
     let archive_path = archive.to_str().unwrap();

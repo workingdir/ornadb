@@ -20,9 +20,9 @@ use orna_storage::{PublicationChurn, RuntimePublicationCoordinator};
 use orna_sys::{EnvironmentProvider, FilesystemProvider};
 use tempfile::TempDir;
 
-#[path = "../../orna-cli/tests/support/format3.rs"]
+#[path = "../../orna-cli-testkit/src/format3.rs"]
 mod format3;
-#[path = "../../orna-cli/tests/support/media_commit.rs"]
+#[path = "../../orna-cli-testkit/src/media_commit.rs"]
 mod media_commit;
 
 const MEDIA_FIXTURES: &str = concat!(
@@ -172,7 +172,8 @@ struct SeededRelation {
 /// publication must create index nodes and commit every row. The revised
 /// payload for the one-row update is written alongside the seeded payloads.
 async fn seed_relation() -> SeededRelation {
-    let (directory, repository, relation_id) = format3::empty_format3_repository();
+    let (directory, repository, relation_id) =
+        format3::empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let media = TempDir::new().expect("temporary media directory");
     let tone = fs::read(Path::new(MEDIA_FIXTURES).join("tone.wav")).expect("read tone fixture");
     // Each seeded row carries distinct bytes, so each row owns a payload object

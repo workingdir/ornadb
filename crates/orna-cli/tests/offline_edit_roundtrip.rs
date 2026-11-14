@@ -6,9 +6,8 @@ use orna_repository::offline_copy::{OfflineCopy, write_offline_copy};
 use orna_sys::{EnvironmentProvider, FilesystemProvider};
 use tempfile::TempDir;
 
-#[path = "support/format3.rs"]
-mod format3;
 use format3::*;
+use orna_cli_testkit::format3;
 
 #[path = "support/offline_roundtrip.rs"]
 mod offline_roundtrip;
@@ -23,7 +22,8 @@ const MEDIA_ROOT_PLACEHOLDER: &str = "__MEDIA_ROOT__";
 
 #[test]
 fn edited_catalogue_exports_offline_and_reimports_identically() {
-    let (directory, repository, relation_id) = empty_format3_repository();
+    let (directory, repository, relation_id) =
+        empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let source = TempDir::new().unwrap();
     std::fs::copy(
         Path::new(MEDIA_FIXTURES).join("pixel.png"),

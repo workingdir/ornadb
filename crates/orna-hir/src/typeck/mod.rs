@@ -48,6 +48,9 @@ mod call;
 mod case;
 #[cfg(test)]
 mod case_tests;
+mod currency;
+#[cfg(test)]
+mod currency_tests;
 #[cfg(test)]
 mod diagnostics_tests;
 mod display;
@@ -56,6 +59,9 @@ mod expr;
 mod family;
 #[cfg(test)]
 mod generics_tests;
+mod money;
+#[cfg(test)]
+mod money_tests;
 mod nominal;
 #[cfg(test)]
 mod null_compare_tests;
@@ -324,6 +330,9 @@ impl TypeChecker<'_> {
     /// Attempts one top-level body.
     fn attempt(&mut self, body_id: BodyId) -> Attempt {
         let owner = self.program.bodies[body_id].owner;
+        if let Some(failed) = self.currency_signature_failure(owner) {
+            return failed;
+        }
         let owner_kind = self.program.defs[owner].kind.clone();
         let body_params = self.program.bodies[body_id].params.clone();
         let (expected, root_slot, omitted) = match self.expectation(body_id, &owner_kind) {
@@ -887,6 +896,9 @@ impl<'a> BodyCheck<'a> {
     ) -> Result<Ty, NotYetReason> {
         let left = self.infer_expr(body, lhs, None)?;
         let right = self.infer_expr(body, rhs, None)?;
+        if let Some(error) = self.money_operator_rejection(op, left, right, span.clone()) {
+            return Ok(error);
+        }
         if let Some(result) = self.quantity_binary(body, op, left, right, rhs, span.clone()) {
             return Ok(result);
         }

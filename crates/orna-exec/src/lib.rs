@@ -15,6 +15,7 @@ mod decimal;
 mod decimal_round;
 mod dispatch;
 mod engine_display;
+mod engine_money;
 mod engine_order;
 mod error;
 mod eval;
@@ -43,7 +44,8 @@ pub use globals::{Globals, evaluate_global};
 #[cfg(feature = "test-support")]
 pub use host::FixtureHost;
 pub use host::{
-    ActivationContext, Host, HostFailure, HostInstant, HostManifest, RowSource, StoreHost, SysSlot,
+    ActivationContext, Host, HostFailure, HostInfo, HostInstant, HostManifest, HostRuntimeMode,
+    ProgramCatalog, RowSource, StoreHost, SysSlot,
 };
 pub use machine::{
     ExecLimits, Measured, Run, measure_entry, measure_entry_in, measure_entry_with_host,

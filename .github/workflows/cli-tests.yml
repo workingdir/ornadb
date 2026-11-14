@@ -183,8 +183,10 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@1.95.0
 
+      # The shadow report is #[ignore] and runs in the nightly shadow-report job with --ignored;
+      # gate_evidence.py counts a target that runs zero tests as a failure, so it is excluded here.
       - name: Run the differential harness over the corpus
-        run: python3 scripts/gate_evidence.py test -p orna-differential --timeout-minutes 30
+        run: python3 scripts/gate_evidence.py test -p orna-differential --timeout-minutes 30 --exclude-target test:shadow_report
 
   # Gate E aggregate draft quota: the mount reads its budget from ORNA_DRAFT_QUOTA_BYTES,
   # which exists only with the test-seams feature. Its target is skipped by the crate-wide step above.

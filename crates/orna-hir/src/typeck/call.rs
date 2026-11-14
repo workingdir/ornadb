@@ -513,6 +513,9 @@ impl<'a> BodyCheck<'a> {
                 "the relation stage input is not a list, relation or stream in H2a".into(),
             ));
         };
+        if let Some(error) = self.affine_sum_rejection(op, element, span.clone()) {
+            return Ok(error);
+        }
         match op {
             RelOp::Count => Ok(self.intern(TyKind::Int)),
             RelOp::First | RelOp::Last => Ok(self.intern(TyKind::Option(element))),
@@ -682,7 +685,11 @@ impl<'a> BodyCheck<'a> {
         for (index, field) in fields.iter().enumerate() {
             let field_ty = self.field_in(result, *field)?;
             if call.args.get(index).is_some() {
-                self.check_slot(body, call, index, Some(field_ty), span.clone())?;
+                if index == 0 && crate::engine_money::is_money_def(self.program, def) {
+                    self.check_money_amount(body, def, call, field_ty, span.clone())?;
+                } else {
+                    self.check_slot(body, call, index, Some(field_ty), span.clone())?;
+                }
             }
         }
         if call.args.len() > fields.len() {

@@ -12,6 +12,10 @@ use orna_value::{Raw, Snapshot};
 
 use crate::store::{MemoryStore, TableStore};
 
+#[path = "host/catalog.rs"]
+mod catalog;
+pub use catalog::{HostInfo, HostRuntimeMode, ProgramCatalog};
+
 /// The code a host answers for a member, or a capability, it does not provide.
 pub(crate) const UNSUPPORTED: &str = "ORNA-EVAL-UNSUPPORTED";
 
@@ -192,6 +196,15 @@ pub trait Host {
         slot: SysSlot,
         at: Option<&Snapshot>,
     ) -> Result<Box<dyn RowSource>, HostFailure>;
+
+    /// The 16-byte object id of the nominal type named `qualified_name` (module-qualified declaration name). It is the
+    /// currency id a `Money` value carries (hir-host.md B4, B6). The default derives it with
+    /// `orna_value::enum_type_id`, which needs no application state. The application may override it: the production
+    /// scheme is the database-scoped identity of `orna-project`'s `derived_identity`, which the default does not
+    /// reproduce.
+    fn nominal_type_id(&self, qualified_name: &str) -> [u8; 16] {
+        orna_value::enum_type_id(qualified_name)
+    }
 }
 
 /// The host of a run that needs only tables: a table store, a clock fixed at the epoch, no entropy, no snapshots and

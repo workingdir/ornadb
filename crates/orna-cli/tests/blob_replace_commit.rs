@@ -11,13 +11,11 @@ use orna_value::decode_rov3_blob_metadata;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
-#[path = "support/format3.rs"]
-mod format3;
 use format3::*;
+use orna_cli_testkit::format3;
 
-#[path = "support/media_commit.rs"]
-mod media_commit;
 use media_commit::commit_capture;
+use orna_cli_testkit::media_commit;
 
 const MEDIA_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/media");
 const REIMPORT_FIXTURE: &str = concat!(
@@ -100,7 +98,8 @@ fn git_log_subjects(root: &Path) -> Vec<String> {
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn replacing_a_blob_payload_writes_a_new_descriptor_and_leaves_other_rows_untouched() {
-    let (directory, repository, relation_id) = empty_format3_repository();
+    let (directory, repository, relation_id) =
+        empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let source = TempDir::new().unwrap();
     std::fs::copy(
         Path::new(MEDIA_FIXTURES).join("pixel.png"),
@@ -234,7 +233,8 @@ async fn replacing_a_blob_payload_writes_a_new_descriptor_and_leaves_other_rows_
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn replacing_one_rows_payload_leaves_another_rows_payload_untouched() {
-    let (_directory, repository, relation_id) = empty_format3_repository();
+    let (_directory, repository, relation_id) =
+        empty_format3_repository(include_str!("fixtures/media/empty-media-main.orna"));
     let source = TempDir::new().unwrap();
     std::fs::copy(
         Path::new(MEDIA_FIXTURES).join("pixel.png"),

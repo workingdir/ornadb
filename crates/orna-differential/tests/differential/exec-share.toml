@@ -82,6 +82,15 @@ case = "valid/blob-range.orna"
 reason = "the old pipeline answers ORNA-EVAL-VALUE for a raw Blob result (its blob values are ROV3 references, which sys.blob.from_bytes does not produce); the executor returns the canonical bytes the spec defines"
 bead = "ornadb-csenl.20"
 
+# `valid/currency.orna` evaluates `Money` values per the spec, so the HIR executor returns their
+# canonical bytes. The old pipeline has no currency values and answers `ORNA-EVAL-TYPE`. Matches only
+# that exact pair (old `ORNA-EVAL-TYPE`, executor `Ok`); any other disagreement stays a mismatch.
+# HB8 (ornadb-csenl.40) folds this allowance into its harness work.
+[[currency-allowance]]
+case = "valid/currency.orna"
+reason = "old pipeline cannot evaluate currency values; HIR evaluates Money per spec"
+bead = "ornadb-csenl.40"
+
 # Cases the executor runs whose update or rekey targets a key the table does not hold. The executor
 # answers the spec result for an absent row. Four disagree with the old pipeline, each for a named
 # reason, and each entry matches only its exact (executor, old) error-code pair; any other

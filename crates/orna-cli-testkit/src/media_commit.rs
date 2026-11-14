@@ -27,9 +27,7 @@ use orna_runtime::{
 use orna_value::Format3Context;
 
 /// The production table schema identity (ORNA-VFS-019), shared with the mount.
-#[path = "../../../orna-cli-support/src/table_schema.rs"]
-mod table_schema;
-pub use table_schema::committed_table_schema_identity;
+pub use orna_cli_support::table_schema::committed_table_schema_identity;
 
 /// Projects one fixture row key with the VFS-1 key spelling the mount writes
 /// (profiles/vfs-1.md:44-56) and returns its canonical pair for admission.
@@ -657,7 +655,8 @@ pub async fn commit_source_replacement_through_save_admission(
     .unwrap_or_else(|_| panic!("the committed project yields a candidate validator"));
     let live_repository = repository.clone();
     let live_table = coordinates.table().object_id();
-    let mut live_identity = table_schema::LiveTableSchemaIdentity::new(live_table);
+    let mut live_identity =
+        orna_cli_support::table_schema::LiveTableSchemaIdentity::new(live_table);
     let candidate = VfsSaveCandidate::new(replacement, validator)
         .with_protected_content_transfers(replacement_bytes, content_transfers)
         .with_live_schema_identity(move || live_identity.read(&live_repository));

@@ -40,11 +40,9 @@ use tempfile::TempDir;
 
 #[path = "support/editor_mount.rs"]
 mod editor_mount;
-#[path = "support/format3.rs"]
-mod format3;
-#[path = "support/media_commit.rs"]
-mod media_commit;
 use editor_mount::{mountinfo_contains, require_fuse_or_skip};
+use orna_cli_testkit::format3;
+use orna_cli_testkit::media_commit;
 
 const ROOT_INODE: u64 = 1;
 const XATTR_NAME: &str = "user.orna.edit-commit";
