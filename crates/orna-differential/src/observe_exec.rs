@@ -223,7 +223,7 @@ fn checker_coded(lowered: &LoweredProgram) -> bool {
             continue;
         }
         for diagnostic in &found.diagnostics {
-            if CHECKER_CODES.iter().any(|known| *known == diagnostic.code) {
+            if CHECKER_CODES.contains(&diagnostic.code) {
                 return true;
             }
         }
