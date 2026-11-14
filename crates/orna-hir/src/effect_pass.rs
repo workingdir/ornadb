@@ -14,14 +14,18 @@
 //!   plus `MayFail` whenever the clause names any kind;
 //! - a table operation contributes its table kind plus `MayFail`;
 //! - a callee the classification cannot resolve (a member call or a first-class
-//!   value) contributes `Opaque`, which fails closed.
+//!   value) contributes `Opaque`, which fails closed;
+//! - a function named as a value (a `fn` handed to a relation stage or a native)
+//!   contributes what calling it performs; a function-valued argument the pass
+//!   cannot name contributes `Opaque`.
 //!
 //! Lambda bodies belong to the definition whose body contains them, so their
 //! effects are joined into that definition: a lambda's effect is reachable
 //! through the expression that creates it.
 
 use crate::{
-    Callee, DefId, DefKind, EffectKind, EffectSet, ExprKind, FnBody, Idx, Program, RelOp, TableOp,
+    ArgValue, Body, Call, Callee, DefId, DefKind, EffectKind, EffectSet, ExprKind, FnBody, Idx,
+    Program, RelOp, TableOp, TyKind,
 };
 
 /// Computes `FnDef.effects` for every source function and `Body.effects` for
@@ -33,28 +37,41 @@ pub(crate) fn run(program: &mut Program) {
     for body in program.bodies.iter() {
         let owner = body.owner.index();
         for expr in body.exprs.iter() {
-            if let ExprKind::Def(def) = &expr.kind
-                && (matches!(program.defs[*def].kind, DefKind::Table(_))
-                    || (matches!(program.defs[*def].kind, DefKind::Type(_))
-                        && program.is_sys_relation(*def)))
-            {
-                direct[owner] = direct[owner].join(table_scan());
-                continue;
-            }
-            let ExprKind::Call(call) = &expr.kind else {
-                continue;
-            };
-            match &call.callee {
-                Callee::Source { def, .. } => calls[owner].push(*def),
-                Callee::Value { callee } => {
-                    match value_target(program, &body.exprs[*callee].kind) {
+            match &expr.kind {
+                ExprKind::Def(def) => match &program.defs[*def].kind {
+                    DefKind::Table(_) => direct[owner] = direct[owner].join(table_scan()),
+                    DefKind::Type(_) if program.is_sys_relation(*def) => {
+                        direct[owner] = direct[owner].join(table_scan())
+                    }
+                    // A function named as a value, such as a callback handed to a relation stage, performs what
+                    // calling it could perform.
+                    DefKind::Fn(_) => match value_target(program, &expr.kind) {
                         ValueTarget::Source(def) => calls[owner].push(def),
                         ValueTarget::Effects(effects) => {
                             direct[owner] = direct[owner].join(effects)
                         }
+                    },
+                    _ => {}
+                },
+                ExprKind::Call(call) => match &call.callee {
+                    Callee::Source { def, .. } => calls[owner].push(*def),
+                    Callee::Value { callee } => {
+                        match value_target(program, &body.exprs[*callee].kind) {
+                            ValueTarget::Source(def) => calls[owner].push(def),
+                            ValueTarget::Effects(effects) => {
+                                direct[owner] = direct[owner].join(effects)
+                            }
+                        }
                     }
-                }
-                callee => direct[owner] = direct[owner].join(direct_effects(program, callee)),
+                    callee => {
+                        direct[owner] = direct[owner].join(direct_effects(program, callee));
+                        if !matches!(callee, Callee::Ctor { .. }) {
+                            direct[owner] =
+                                direct[owner].join(unnamed_callbacks(program, body, call));
+                        }
+                    }
+                },
+                _ => {}
             }
         }
     }
@@ -137,6 +154,25 @@ fn value_target(program: &Program, kind: &ExprKind) -> ValueTarget {
         ExprKind::Lambda { .. } => ValueTarget::Effects(EffectSet::empty()),
         _ => ValueTarget::Effects(EffectSet::opaque()),
     }
+}
+
+/// What a non-source call performs with the function values it is given. A callee may invoke any function it is
+/// handed, so a function-valued argument the pass cannot name (a local, a parameter, a member) is unknown and fails
+/// closed. A named function (`Def`) or lambda is joined through its own expression instead.
+fn unnamed_callbacks(program: &Program, body: &Body, call: &Call) -> EffectSet {
+    let mut effects = EffectSet::empty();
+    for argument in call.args.iter() {
+        let ArgValue::Expr(value) = argument.value else {
+            continue;
+        };
+        let expr = &body.exprs[value];
+        if matches!(program.tys.kind(expr.ty), Some(TyKind::Fn(_)))
+            && !matches!(expr.kind, ExprKind::Def(_) | ExprKind::Lambda { .. })
+        {
+            effects = effects.join(EffectSet::opaque());
+        }
+    }
+    effects
 }
 
 /// The table kind a table operation touches.
