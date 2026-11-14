@@ -7,6 +7,8 @@ use crate::diag::{
     AFFINE_POINT_OPERATOR, AFFINE_POINT_SUM, MONEY_BINARY_FLOAT, MONEY_CURRENCY_MISMATCH,
     MONEY_FROM_FLOAT, QUANTITY_DIMENSIONS,
 };
+use crate::units::print::unit_name;
+use crate::units::{Rational, UnitKey};
 use crate::{BinOp, DefId, DefKind, Program, Ty, TyKind, engine_money};
 
 /// The affine point type of `core.temperature`, whose `+` and `-` between two points has no instance.
@@ -85,20 +87,34 @@ fn affine_rejection(program: &Program, op: BinOp, left: Ty, right: Ty) -> Option
         .then_some(AFFINE_POINT_OPERATOR)
 }
 
-/// `E5001`: `+` or `-` with two quantities whose units have different dimensions. A quantity and a plain number stay
-/// the `ORNA-UNIT-DIM` class.
+/// `E5001`: `+` or `-` with two quantities whose units have different dimensions, or with a `Duration` and a quantity
+/// that is not a time. A `Duration` is the time dimension (units.md section 8.1), so only a quantity of that dimension
+/// may meet it. A quantity and a plain number stay the `ORNA-UNIT-DIM` class.
 fn dimension_rejection(program: &Program, op: BinOp, left: Ty, right: Ty) -> Option<&'static str> {
-    let (Some(TyKind::Quantity(_, left_key)), Some(TyKind::Quantity(_, right_key))) =
-        (program.tys.kind(left), program.tys.kind(right))
-    else {
+    if !matches!(op, BinOp::Add | BinOp::Sub) {
         return None;
-    };
-    (matches!(op, BinOp::Add | BinOp::Sub)
-        && !program
+    }
+    let mismatch = match (program.tys.kind(left), program.tys.kind(right)) {
+        (Some(TyKind::Quantity(_, left_key)), Some(TyKind::Quantity(_, right_key))) => !program
             .units
             .key(*left_key)
-            .same_dimension(program.units.key(*right_key)))
-    .then_some(QUANTITY_DIMENSIONS)
+            .same_dimension(program.units.key(*right_key)),
+        (Some(TyKind::Duration), Some(TyKind::Quantity(_, key)))
+        | (Some(TyKind::Quantity(_, key)), Some(TyKind::Duration)) => {
+            !is_time_key(program, program.units.key(*key))
+        }
+        _ => false,
+    };
+    mismatch.then_some(QUANTITY_DIMENSIONS)
+}
+
+/// Whether `key` is the time dimension: the base unit `Time.second` to the first power, at scale 1 (units.md section 8.1).
+fn is_time_key(program: &Program, key: &UnitKey) -> bool {
+    let mut axes = key.exponents().iter();
+    let (Some((axis, 1)), None) = (axes.next(), axes.next()) else {
+        return false;
+    };
+    *key.scale() == Rational::one() && unit_name(program, axis) == "Time.second"
 }
 
 /// The published code for a fold (`sum`) over an element type, when the element is an affine point (`E5003`).
