@@ -138,6 +138,12 @@ pub const ASSERTION_ONE_TABLE: &str = "ORNA-A091-003";
 pub const ASSERTION_EFFECT: &str = "ORNA-A091-007";
 /// A table assertion that pipes its own table into the predicate (A091-002).
 pub const ASSERTION_OWNER_PIPE: &str = "ORNA-A091-002";
+/// A `Currency` protocol that declares a `symbol` static (ORNA091-E-CURRENCY-SYMBOL).
+pub const CURRENCY_SYMBOL: &str = "ORNA091-E-CURRENCY-SYMBOL";
+/// An `impl TryFrom<Source>`; `From` may not fail in Orna (ORNA091-E-TRYFROM).
+pub const LEGACY_TRYFROM: &str = "ORNA091-E-TRYFROM";
+/// A `Result` type, whose control plumbing was removed (ORNA091-E-RESULT).
+pub const LEGACY_RESULT: &str = "ORNA091-E-RESULT";
 
 /// One diagnostic raised while lowering a module.
 #[derive(Clone, Debug, Eq, PartialEq)]

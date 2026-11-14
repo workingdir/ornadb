@@ -168,8 +168,16 @@ fn lower_named(
             NameTarget::Unresolved => {
                 builder.diagnose(
                     module,
-                    crate::diag::UNRESOLVED,
-                    format!("`{name}` is not a declared type"),
+                    if spelling == "Result" {
+                        crate::diag::LEGACY_RESULT
+                    } else {
+                        crate::diag::UNRESOLVED
+                    },
+                    if spelling == "Result" {
+                        "Result/Ok/Err control plumbing was removed; return the success type directly".to_owned()
+                    } else {
+                        format!("`{name}` is not a declared type")
+                    },
                     span.clone(),
                 );
                 builder.program.tys.error()

@@ -34,8 +34,7 @@ pub(super) fn check(program: &Program) -> Vec<Found> {
             continue;
         }
         let root_span = body.exprs[body.root].span.clone();
-        if is_table && owns_pipe(program, assertion.body, owner) {
-            let message = "remove the repeated table owner before the assertion predicate";
+        if is_table && let Some(message) = owner_pipe_message(program, assertion.body, owner) {
             found.push((
                 module,
                 HirDiagnostic::new(diag::ASSERTION_OWNER_PIPE, message, root_span.clone()),
@@ -73,22 +72,30 @@ pub(super) fn check(program: &Program) -> Vec<Found> {
     found
 }
 
-/// Whether a table assertion pipes its own table into the predicate.
-fn owns_pipe(program: &Program, body: BodyId, owner: DefId) -> bool {
+/// The message when a table assertion pipes its own table into the predicate, by its name or as `self`.
+fn owner_pipe_message(program: &Program, body: BodyId, owner: DefId) -> Option<&'static str> {
     let body = &program.bodies[body];
     let ExprKind::Call(call) = &body.exprs[body.root].kind else {
-        return false;
+        return None;
     };
     if !call.piped {
-        return false;
+        return None;
     }
-    let Some(first) = call.args.first() else {
-        return false;
-    };
+    let first = call.args.first()?;
     let ArgValue::Expr(lhs) = first.value else {
-        return false;
+        return None;
     };
-    matches!(body.exprs[lhs].kind, ExprKind::Def(def) if def == owner)
+    // The subject `self` is the body's first parameter; the checker refuses `self |` too.
+    let subject = body.params.first().copied();
+    match body.exprs[lhs].kind {
+        ExprKind::Def(def) if def == owner => {
+            Some("remove the repeated table owner before the assertion predicate")
+        }
+        ExprKind::Local(local) if Some(local) == subject => {
+            Some("remove `self |`; the table already supplies its candidate relation")
+        }
+        _ => None,
+    }
 }
 
 /// The effects an assertion body performs, including lambdas it defines.

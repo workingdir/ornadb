@@ -97,6 +97,25 @@ fn hir_rejects_a_type_mismatch_without_asserting_the_unproven_code_pairing() {
 }
 
 #[test]
+fn hir_refuses_an_uncaptured_standard_module_as_the_old_checker_does() {
+    let project = project("use std.math; pub fn run(): Int = std.math.increment(41);\n");
+    for backend in [None, Some("hir")] {
+        let output = check(&project, backend);
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "backend {backend:?} stderr: {}",
+            stderr(&output)
+        );
+        assert!(
+            stderr(&output).contains("ORNA-S010-IMPORT"),
+            "backend {backend:?} stderr: {}",
+            stderr(&output)
+        );
+    }
+}
+
+#[test]
 fn shadow_on_invalid_project_keeps_the_old_verdict_and_agrees_on_code_and_line() {
     let project = project("pub fn uses(): Int = missing_name + 1;\n");
     let output = check(&project, Some("shadow"));

@@ -32,11 +32,15 @@ pub(crate) fn check_project(
     project: &LoadedProject,
     color_enabled: bool,
 ) -> Result<(), Diagnostic> {
+    // Every backend refuses what the production catalogue cannot represent
+    // (a captured standard dependency that does not bundle every import), so
+    // HIR never reports a verdict for a project the old checker refuses.
+    let catalogue = crate::semantic_catalogue(project)?;
     let (diagnostics, _) = match backend_from_env() {
-        Backend::Old => old_located(project)?,
+        Backend::Old => old_located(project, &catalogue),
         Backend::Hir => hir_located(project),
         Backend::Shadow => {
-            let old = old_located(project)?;
+            let old = old_located(project, &catalogue);
             report_shadow(project, &old, &hir_located(project));
             old
         }
@@ -66,14 +70,13 @@ fn env_is_one(name: &str) -> bool {
     std::env::var_os(name).is_some_and(|value| value == "1")
 }
 
-fn old_located(project: &LoadedProject) -> Result<Located, Diagnostic> {
-    let catalogue = crate::semantic_catalogue(project)?;
+fn old_located(project: &LoadedProject, catalogue: &orna_check::Catalogue) -> Located {
     let located = orna_check::analyze_with_providers_located(
         project.modules(),
-        &catalogue,
+        catalogue,
         SystemProviders::Production,
     );
-    Ok((located.analysis.diagnostics, located.origins))
+    (located.analysis.diagnostics, located.origins)
 }
 
 fn hir_located(project: &LoadedProject) -> Located {
