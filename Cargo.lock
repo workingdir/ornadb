@@ -1529,6 +1529,7 @@ dependencies = [
  "orna-repository",
  "orna-runtime",
  "orna-value",
+ "orna-vfs",
  "sha2 0.10.9",
  "tempfile",
 ]
@@ -1706,6 +1707,7 @@ dependencies = [
  "orna-sys",
  "orna-sys-id",
  "orna-value",
+ "orna-vfs",
  "rustix 0.38.44",
  "sha2 0.10.9",
  "tempfile",

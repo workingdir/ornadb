@@ -30,3 +30,4 @@ orna-project = { path = "../orna-project" }
 orna-repository = { path = "../orna-repository", features = ["legacy-fixture-writer"] }
 orna-runtime = { path = "../orna-runtime" }
 orna-value = { path = "../orna-value" }
+orna-vfs = { path = "../orna-vfs" }
