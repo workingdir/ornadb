@@ -63,3 +63,46 @@ fn a_table_write_does_not_read_the_table() {
     assert!(effects.contains(EffectKind::TableWrite));
     assert!(!effects.contains(EffectKind::TableRead));
 }
+
+#[test]
+fn a_named_source_callback_contributes_its_effects() {
+    // The callback reads a table; a stage over a list receives it as a value, so its reads must reach the caller.
+    let program = lower_one(
+        "table Note(id: Int) { }\nfn hot(x: Int): Bool = Note.count() > x;\npub fn run(xs: [Int]) = xs | filter(hot);\n",
+    );
+    let effects = effects_of(&program, "run");
+    assert!(
+        effects.contains(EffectKind::TableRead),
+        "the callback reads Note"
+    );
+    assert!(effects.may_fail());
+}
+
+#[test]
+fn a_named_callback_under_a_map_contributes_its_effects() {
+    let program = lower_one(
+        "table Note(id: Int) { }\nfn hot(x: Int): Bool = Note.count() > x;\npub fn run(xs: [Int]) = xs | map(hot);\n",
+    );
+    let effects = effects_of(&program, "run");
+    assert!(
+        effects.contains(EffectKind::TableRead),
+        "the callback reads Note"
+    );
+}
+
+#[test]
+fn a_pure_named_callback_adds_nothing() {
+    let program = lower_one(
+        "fn small(x: Int): Bool = x < 10;\npub fn run(xs: [Int]) = xs | filter(small);\n",
+    );
+    let effects = effects_of(&program, "run");
+    assert!(effects.is_empty(), "a pure callback performs no effect");
+}
+
+#[test]
+fn a_function_parameter_given_to_a_stage_is_unknown() {
+    // The stage invokes the parameter, whose effects the pass cannot name here: they fail closed.
+    let program = lower_one("pub fn run(xs: [Int], keep: fn(Int): Bool) = xs | filter(keep);\n");
+    let effects = effects_of(&program, "run");
+    assert!(effects.is_opaque(), "an unnamed callback is opaque");
+}

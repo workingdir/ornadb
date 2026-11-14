@@ -6,6 +6,8 @@ been published.
 
 ## Unreleased
 
+- Changed (ornadb-7o4z4, HIR effect pass): a named function handed to a relation stage or a native (`xs | filter(keep)`, `map(f)`) contributes the effects of that function, joined through the call graph, so a pure callback adds nothing and an effectful one is no longer dropped. A function-valued argument the pass cannot name (a local, a parameter or a member) is `Opaque`, which fails closed. A table scan used as a receiver of a relation stage or pipe reads the table. Covered by `crates/orna-hir/tests/table_scan_effects.rs`.
+
 - Added (ornadb-csenl.41, HIR rules): `orna-hir` reports E9101 (ORNA-CONSUMER-001) when one `parallel([...])` list names the same source twice, so `invalid/ambiguous-consumer.orna` is rejected with E9101 instead of ORNA-S012-UNRESOLVED. The rule keys each element by its written path, so it fires whether or not the name resolves; the exec-share ratchet rises from 78 to 79 agreed.
 
 - Changed (ornadb-cwvqs, ornadb-rn0yo, opt-in `ORNA_LSP_HIR=1` only): the language server's HIR diagnostics now match the default checker's for an unresolved bare name: the code `ORNA-S012-UNRESOLVED`, the message `name cannot be resolved`, the note `unresolved name: X`, and the range of the enclosing top-level item. Every HIR diagnostic is anchored on that item range (`orna-check` `hir_check::checker_located_diagnostics`). The default checker is unchanged. Covered by `crates/orna-lsp/tests/check_backend_gate.rs`, `project_diagnostics.rs` and `handler_backend_parity.rs`, which pins the other handler families to the same answer under both switches. Known difference: a type mismatch keeps HIR's `ORNA-INFER-011` code, not the checker's `ORNA-S021-TYPE`.
