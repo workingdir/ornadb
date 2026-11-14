@@ -123,8 +123,7 @@ pub(in crate::natives) fn one(
     matching.ok_or(Stop::Error("ORNA-EVAL-RELATION-ONE-ZERO"))
 }
 
-/// `sort_by<T, K>(rows: [T], key: fn(T): K): [T]`, and `__stable_sort`. Every key is computed in source order before
-/// any reordering, and each key must be a lawful sort key. The sort is stable.
+/// `sort_by<T, K>(rows: [T], key: fn(T): K): [T]`, and `__stable_sort`.
 pub(in crate::natives) fn sort_by(
     machine: &mut Machine<'_>,
     _targs: &[Ty],
@@ -132,16 +131,25 @@ pub(in crate::natives) fn sort_by(
 ) -> Result<Value, Stop> {
     let [rows, key] = exactly(arguments)?;
     let rows = list(rows)?;
+    Ok(list_of(sort_rows(machine, &rows, &key)?))
+}
+
+/// The stable ascending sort of `rows` by the key `key` computes for each row. Every key is computed in source order
+/// before any reordering, and each key must be a lawful sort key. Shared by the `sort_by` native and the relation
+/// pipeline's sort stage, so both sort the same way.
+pub(crate) fn sort_rows(
+    machine: &mut Machine<'_>,
+    rows: &[Value],
+    key: &Value,
+) -> Result<Vec<Value>, Stop> {
     let mut keys = Vec::with_capacity(rows.len());
-    for row in rows.iter() {
-        let sort_key = machine.call_closure(&key, vec![row.clone()])?;
+    for row in rows {
+        let sort_key = machine.call_closure(key, vec![row.clone()])?;
         check_sort_key(&sort_key)?;
         keys.push(sort_key);
     }
     let order = stable_order(machine, &keys)?;
-    Ok(list_of(
-        order.into_iter().map(|index| rows[index].clone()).collect(),
-    ))
+    Ok(order.into_iter().map(|index| rows[index].clone()).collect())
 }
 
 /// `rank<T, K>(values: [T], key: fn(T): K): [(T, Int)]`. Competition ranking: equal keys share the rank of the first of

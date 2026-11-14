@@ -26,7 +26,10 @@ pub(super) type Sink<'a, 'p> = dyn FnMut(&mut Machine<'p>, Value) -> Result<bool
 
 /// Whether `op` is a stage a pipeline carries, rather than a terminal or a constructor.
 pub(crate) fn is_stage(op: RelOp) -> bool {
-    matches!(op, RelOp::Filter | RelOp::Map | RelOp::Take | RelOp::Drop)
+    matches!(
+        op,
+        RelOp::Filter | RelOp::Map | RelOp::Take | RelOp::Drop | RelOp::SortBy
+    )
 }
 
 /// Where a pipeline's rows come from.
@@ -49,6 +52,8 @@ enum Stage {
     Take(usize),
     /// Skips the first `n` rows.
     Drop(usize),
+    /// Sorts the rows stably by the key each row maps to. It is blocking: see `run`.
+    SortBy(Value),
 }
 
 /// What a `map` applies to each row: a callable value, or a table field read as a function of the row.
@@ -104,32 +109,71 @@ impl Pipeline {
         machine: &mut Machine<'p>,
         sink: &mut Sink<'_, 'p>,
     ) -> Result<(), Stop> {
-        // A `take(0)` anywhere means no row can reach the end, so no row is read.
-        if self
-            .stages
-            .iter()
-            .any(|stage| matches!(stage, Stage::Take(0)))
-        {
-            return Ok(());
-        }
-        let mut counts = vec![0usize; self.stages.len()];
-        match &self.source {
-            Source::Rows(items) => {
-                for row in items.iter() {
-                    if push(machine, &self.stages, &mut counts, 0, row.clone(), sink)? == Flow::Stop
-                    {
-                        break;
-                    }
+        run(machine, &self.source, &self.stages, sink)
+    }
+}
+
+/// Pushes every row of `source` through `stages` into `sink`. A sort stage is blocking: the rows before it are
+/// collected and sorted by the native `sort_by` rule, and the stages after it run over the sorted rows.
+fn run<'p>(
+    machine: &mut Machine<'p>,
+    source: &Source,
+    stages: &[Stage],
+    sink: &mut Sink<'_, 'p>,
+) -> Result<(), Stop> {
+    // A `take(0)` anywhere means no row can reach the end, so no row is read.
+    if stages.iter().any(|stage| matches!(stage, Stage::Take(0))) {
+        return Ok(());
+    }
+    let Some(sort) = stages
+        .iter()
+        .position(|stage| matches!(stage, Stage::SortBy(_)))
+    else {
+        return stream(machine, source, stages, sink);
+    };
+    let Stage::SortBy(key) = &stages[sort] else {
+        unreachable!("sort stage index")
+    };
+    let mut rows = Vec::new();
+    stream(
+        machine,
+        source,
+        &stages[..sort],
+        &mut |_: &mut Machine<'p>, row: Value| {
+            rows.push(row);
+            Ok(true)
+        },
+    )?;
+    let sorted = crate::natives::sort_rows(machine, &rows, key)?;
+    run(
+        machine,
+        &Source::Rows(sorted.into()),
+        &stages[sort + 1..],
+        sink,
+    )
+}
+
+/// Streams every row of `source` through `stages`, none of which sorts, into `sink`.
+fn stream<'p>(
+    machine: &mut Machine<'p>,
+    source: &Source,
+    stages: &[Stage],
+    sink: &mut Sink<'_, 'p>,
+) -> Result<(), Stop> {
+    let mut counts = vec![0usize; stages.len()];
+    match source {
+        Source::Rows(items) => {
+            for row in items.iter() {
+                if push(machine, stages, &mut counts, 0, row.clone(), sink)? == Flow::Stop {
+                    break;
                 }
-                Ok(())
             }
-            Source::Table(table) => scan_table(machine, *table, &self.stages, &mut counts, sink),
-            Source::Handle(handle) => match &**handle {
-                RelHandle::Sys { slot } => {
-                    scan_sys(machine, *slot, &self.stages, &mut counts, sink)
-                }
-            },
+            Ok(())
         }
+        Source::Table(table) => scan_table(machine, *table, stages, &mut counts, sink),
+        Source::Handle(handle) => match &**handle {
+            RelHandle::Sys { slot } => scan_sys(machine, *slot, stages, &mut counts, sink),
+        },
     }
 }
 
@@ -149,6 +193,7 @@ fn append<'p>(
         RelOp::Map => Stage::Map(transform_argument(machine, body, frame, call)?),
         RelOp::Take => Stage::Take(count_argument(machine, body, frame, call)?),
         RelOp::Drop => Stage::Drop(count_argument(machine, body, frame, call)?),
+        RelOp::SortBy => Stage::SortBy(argument_value(machine, body, frame, call, 1)?),
         _ => return Err(Stop::NotYet("relation stage (H7)")),
     };
     stages.push(stage);
@@ -358,6 +403,7 @@ fn push<'p>(
         });
     };
     match stage {
+        Stage::SortBy(_) => unreachable!("a sort stage is split out before rows are pushed"),
         Stage::Filter(predicate) => {
             machine.tick(1)?;
             if truth(machine.call_closure(predicate, vec![row.clone()])?)? {
