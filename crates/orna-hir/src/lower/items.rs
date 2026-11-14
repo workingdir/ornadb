@@ -569,6 +569,14 @@ impl Builder {
                     lowered.push(member_def);
                 }
                 ProtocolMember::Static { name, ty, span } => {
+                    if name == "symbol" && self.def_name(def).as_str() == "Currency" {
+                        self.diagnose(
+                            module,
+                            crate::diag::CURRENCY_SYMBOL,
+                            "currency symbols belong to locale-aware formatting, not Currency identity",
+                            span.clone(),
+                        );
+                    }
                     let ty = super::types::lower_type(self, module, &names, ty);
                     lowered.push(self.declare_nested(
                         module,
@@ -766,6 +774,19 @@ impl Builder {
             .into_boxed_slice();
         let receiver = self.program.tys.intern(crate::TyKind::Adt(owner, args));
         self.self_ty = Some(receiver);
+        if let TypeExpr::Name {
+            path, arguments, ..
+        } = &implementation.protocol
+            && path.as_slice() == ["TryFrom"]
+            && arguments.len() == 1
+        {
+            self.diagnose(
+                module,
+                crate::diag::LEGACY_TRYFROM,
+                "use From<Source>; From may fail in Orna",
+                span.clone(),
+            );
+        }
         let protocol = self.resolve_protocol(module, &implementation.protocol);
         let protocol_args = match &implementation.protocol {
             TypeExpr::Name { arguments, .. } => arguments

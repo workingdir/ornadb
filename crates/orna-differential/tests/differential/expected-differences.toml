@@ -695,13 +695,6 @@ reason = "the pinned std module does not export `http.get`, so the call does not
 bead = "ornadb-csenl.18"
 
 [[difference]]
-case = "invalid/legacy-assert-self-pipe.orna"
-field = "rules"
-first = "ORNA-A091-002: remove `self |`; the table already supplies its candidate relation"
-second = ""
-reason = "`all_unique` is not in scope in the case, so the piped call does not lower (`ORNA-S012-UNRESOLVED`) and the `self |` rule has no call to judge; closed when the resolver carries the fixture-catalogue environment"
-bead = "ornadb-csenl.15"
-[[difference]]
 case = "valid/formatting-does-not-serialize.orna"
 field = "public-signature"
 first = "examples.valid.formatting-does-not-serialize::both=both(Duration) -> {display: Str, encoded: ByteStream}"
@@ -749,7 +742,7 @@ bead = "ornadb-csenl.15"
 
 [[environment]]
 category = "legacy-rejection-names"
-count = 10
+count = 9
 reason = "legacy 1.0.0 programs (invalid/legacy-*) use names the HIR does not declare (DecodeError, Ok, Result, decode, ensure, match, name, var). The HIR does not reject them with the published code; the environment test asserts each published code against the old checker, which is the evidence for the legacy class"
 bead = "ornadb-csenl.16"
 
