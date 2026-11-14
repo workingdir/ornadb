@@ -1643,8 +1643,7 @@ Before H9 every stage can be reverted by reverting its PRs, because the old
 pipeline never stopped being authoritative; the only shipped-code edits are the
 `route-trace` feature (H0) and consumer switches that H3 (`orna check`) gates
 behind the `ORNA_CHECK_HIR` and `ORNA_CHECK_SHADOW` environment variables for a
-fixed period. H1 (LSP) has no environment gate: the gate is not yet implemented
-(tracked under `ornadb-csenl.16`). H9's per-entry
+fixed period. H1 (LSP) is gated by `ORNA_LSP_HIR` and shadowed by `ORNA_LSP_SHADOW`, for semantic diagnostics only; neither changes the default. Parity gap G8 (`ornadb-csenl.16`) stays open. H9's per-entry
 switches are single-line defaults with the old path intact until the final
 deletion PR.
 

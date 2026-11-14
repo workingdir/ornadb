@@ -16,6 +16,7 @@
 #![allow(clippy::mutable_key_type)]
 
 mod analysis;
+mod check_backend;
 mod diagnostics;
 mod documents;
 mod editor_ranges;
