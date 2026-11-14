@@ -174,22 +174,35 @@ fn entry_name(case: &Case) -> Option<&str> {
     }
 }
 
-/// The code of an owned-module lowering rejection the old pipeline also
-/// reports before evaluation: an unlinked `sys` member
-/// (`sys.version.incompatible`, ORNA-SYS-008). The old observer reports the
-/// first sorted code, which equals this code only when it is the sole code, so
-/// a mixed set has no shared outcome and is left to `owned_diagnostics`.
+/// The lowering rejections the old pipeline reports as its outcome before evaluation, each under the
+/// spec's own code: an unlinked `sys` member (`sys.version.incompatible`, ORNA-SYS-008), the renamed
+/// `sys.runtime` (ORNA-SYS-005), a `sys.storage` call (ORNA-SYS-120) and a `sys` row mutator (E7001).
+const STATIC_REJECTIONS: [&str; 4] = [
+    orna_hir::diag::SYS_VERSION_INCOMPATIBLE,
+    orna_hir::diag::LEGACY_SYS_RUNTIME,
+    orna_hir::diag::SYS_STORAGE_CALL,
+    orna_hir::diag::SYS_COMMIT_READ_ONLY,
+];
+
+/// The code of an owned-module lowering rejection the old pipeline also reports before evaluation.
+/// The old observer reports the first sorted code, which equals this code only when it is the sole
+/// distinct code, so a set of two different codes, or any other diagnostic, has no shared outcome and
+/// is left to `owned_diagnostics`.
 fn admission_rejection(lowered: &LoweredProgram) -> Option<&'static str> {
-    let mut rejection = None;
+    let mut rejection: Option<&'static str> = None;
     for (module, found) in lowered.program.modules.iter_enumerated() {
         if !lowered.owned[module.index()] {
             continue;
         }
         for diagnostic in &found.diagnostics {
-            if diagnostic.code != orna_hir::diag::SYS_VERSION_INCOMPATIBLE {
-                return None;
+            let code = STATIC_REJECTIONS
+                .into_iter()
+                .find(|code| *code == diagnostic.code)?;
+            match rejection {
+                None => rejection = Some(code),
+                Some(first) if first != code => return None,
+                Some(_) => {}
             }
-            rejection = Some(orna_hir::diag::SYS_VERSION_INCOMPATIBLE);
         }
     }
     rejection

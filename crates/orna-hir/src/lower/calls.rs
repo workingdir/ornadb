@@ -228,8 +228,11 @@ fn classify_path(
         }) {
             builder.diagnose(
                 module,
-                crate::diag::UNSUPPORTED,
-                "`sys` rows are read-only; a row mutator on a `sys` path is not represented",
+                crate::diag::SYS_COMMIT_READ_ONLY,
+                format!(
+                    "{} is read-only; a row mutator on it is rejected",
+                    path[..path.len().saturating_sub(1)].join(".")
+                ),
                 last_span,
             );
             return None;
@@ -269,12 +272,9 @@ fn classify_path(
                 NameTarget::Unresolved,
             );
             if builder.program.modules[target].origin == crate::ModuleOrigin::Sys {
-                builder.diagnose(
-                    module,
-                    crate::diag::UNSUPPORTED,
-                    "the `sys` declarations are not represented yet",
-                    last_span,
-                );
+                let texts = segments.iter().map(|(text, _)| *text).collect::<Vec<_>>();
+                let (code, message) = super::admission::unrepresented_sys(&texts);
+                builder.diagnose(module, code, message, last_span);
             } else {
                 builder.diagnose(
                     module,
@@ -291,12 +291,9 @@ fn classify_path(
             report_unresolved_root(builder, state, segments, &names)
         }
         crate::resolve::PathKind::Module(_) => {
-            builder.diagnose(
-                module,
-                crate::diag::UNSUPPORTED,
-                "a module is not a function",
-                last_span,
-            );
+            let texts = segments.iter().map(|(text, _)| *text).collect::<Vec<_>>();
+            let (code, message) = super::admission::module_as_function(&texts);
+            builder.diagnose(module, code, message, last_span);
             None
         }
     }
