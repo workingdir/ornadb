@@ -4,12 +4,27 @@ use super::{
     AdmittedReplSession, ApplicationError, Arc, BufReader, CanonicalValue, ColorMode, Diagnostic,
     Endpoint, Limits, PinnedCommittedRows, QueryObservationRegistration, Rc, RefCell,
     ReplEvaluationFailure, ReplSnapshotSessionLoader, ReplTransactionScope, ReplTransactions,
-    ReplWriterInputs, RequestIdentity, Reserved, StageOutcome, StagedTableActivation,
-    TableActivationError, ValidatedTableRequestActivationCommit, committed_rows_at,
-    diagnostic_documentation, ensure_writer, io, project_declares_assertions, repl,
-    repl_effect_failure, repl_request_fingerprint, repl_session, request_nonce, runtime_identity,
-    transactional_loaded_project_candidate_validator,
+    ReplWriterInputs, RequestIdentity, Reserved, STORE_COMMIT_REMEDY, StageOutcome,
+    StagedTableActivation, TableActivationError, ValidatedTableRequestActivationCommit,
+    committed_rows_at, diagnostic_documentation, ensure_writer, io, project_declares_assertions,
+    repl, repl_effect_failure, repl_request_fingerprint, repl_session, request_nonce,
+    runtime_identity, transactional_loaded_project_candidate_validator, transactions_unavailable,
 };
+
+/// Submits one input for a bound repository whose transaction capability is
+/// unavailable. Pure input still evaluates. Input that would perform an effect
+/// is refused with the reason the capability is unavailable, so the REPL never
+/// misreports a writable project as a read-only preview.
+pub(crate) fn run_repl_input_unavailable(
+    session: &mut AdmittedReplSession,
+    source: &str,
+    unavailable: &repl::ReplFailure,
+) -> Result<Option<CanonicalValue>, repl::ReplFailure> {
+    if session.stage_activation(source).is_err() {
+        return session.submit(source).map_err(repl::ReplFailure::from);
+    }
+    Err(unavailable.clone())
+}
 
 #[allow(clippy::too_many_lines)]
 pub(crate) fn run_repl_input(
@@ -28,7 +43,12 @@ pub(crate) fn run_repl_input(
     };
     let (current_commit, _) = repository
         .open_pinned_format_context_with_commit("HEAD")
-        .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
+        .map_err(|_| {
+            transactions_unavailable(
+                "the repository has no committed HEAD with a readable store",
+                STORE_COMMIT_REMEDY,
+            )
+        })?;
     if current_commit != transactions.commit {
         return Err(repl_effect_failure(
             "the project changed since this REPL session started",
@@ -434,13 +454,17 @@ pub(crate) fn run_repl(
     let mut runtime = repl_session(endpoint)?;
     let color_enabled = color_mode.stdout_enabled();
     let repository = runtime.repository.as_ref();
-    let host_bindings = runtime.transactions.as_ref().map_or_else(
+    let host_bindings = runtime.transactions.as_ref().ok().map_or_else(
         || Rc::new(RefCell::new(None)),
         |transactions| transactions.host_bindings.clone(),
     );
     let mut transactions = runtime.transactions.as_mut();
-    let mut submitter = |session: &mut AdmittedReplSession, source: &str| {
-        run_repl_input(repository, transactions.as_deref_mut(), session, source)
+    let mut submitter = |session: &mut AdmittedReplSession, source: &str| match (
+        repository,
+        transactions.as_deref_mut(),
+    ) {
+        (Some(_), Err(unavailable)) => run_repl_input_unavailable(session, source, unavailable),
+        (_, capability) => run_repl_input(repository, capability.ok(), session, source),
     };
     if let Some(source) = expression {
         return run_repl_submission_with(

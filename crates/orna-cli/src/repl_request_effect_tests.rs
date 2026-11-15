@@ -288,3 +288,40 @@ fn repl_enum_keyed_assertion_write_is_refused_as_repl_effect() {
         "a refused candidate cancels its reserved row"
     );
 }
+
+#[test]
+fn bound_repository_without_transactions_reports_its_unavailable_capability() {
+    // A Git repository with no commits has no HEAD, so the REPL cannot bind
+    // transactions. An effect must be refused with the located reason for that,
+    // never with the misleading `ORNA-REPL-EFFECT` preview rejection.
+    let directory = tempfile::TempDir::new().unwrap();
+    let root = directory.path();
+    crate::format3::git(root, &["init", "--quiet"]);
+    std::fs::write(root.join("main.orna"), MUSIC_SOURCE).unwrap();
+    let repository = orna_repository::Repository::discover(root).unwrap();
+    let ReplRuntime {
+        repository,
+        mut session,
+        transactions,
+    } = repl_runtime(Some(repository)).expect("repl runtime");
+    let Err(unavailable) = transactions else {
+        panic!("a repository without HEAD has no transaction capability");
+    };
+    assert_eq!(unavailable.code, "E2200");
+    assert!(repository.is_some(), "the bound repository is retained");
+
+    let effect = crate::repl_run::run_repl_input_unavailable(
+        &mut session,
+        "main.Music | count()",
+        &unavailable,
+    )
+    .expect_err("an effect without transactions is refused");
+    assert_eq!(effect.code, "E2200");
+    assert_ne!(effect.code, "ORNA-REPL-EFFECT");
+
+    let pure = crate::repl_run::run_repl_input_unavailable(&mut session, "1 + 1", &unavailable);
+    assert!(
+        pure.is_ok(),
+        "pure input still evaluates without transactions"
+    );
+}
