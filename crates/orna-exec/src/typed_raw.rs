@@ -8,16 +8,18 @@ use std::rc::Rc;
 
 use num_bigint::BigInt;
 use orna_hir::{BodyId, DefId, DefKind, FieldInitializer, Name, Program, Ty, TyKind};
-use orna_value::{OPTION_TAG, Raw, TUPLE_TAG, UNIT_TAG};
+use orna_value::{OPTION_TAG, REFINED_NOMINAL_TAG, Raw, TUPLE_TAG, UNIT_TAG, UUID_TAG};
 
+use crate::engine_money::{currency_name, def_qualified_name, is_money_type};
 use crate::error::Stop;
-use crate::frame::type_args;
+use crate::frame::{TypeEnv, type_args};
 use crate::machine::Machine;
-use crate::raw_value;
+use crate::raw_value::{self, object_id};
 use crate::value::Value;
 
 const SHAPE: &str = "ORNA-EVAL-VALUE";
 const UNSUPPORTED: &str = "decoded type shape (H6)";
+const REFINEMENT_FAILED: &str = "ORNA-A091-008";
 
 /// A field a record must carry: its name, its declared type, and the closed body that supplies it when absent.
 struct Declared {
@@ -61,6 +63,13 @@ pub(crate) fn from_raw_at(
             _ => Err(Stop::Error(SHAPE)),
         },
         Some(TyKind::Unit) => unit_at(raw),
+        Some(TyKind::Float) => leaf_at(raw, |value| matches!(value, Value::Float(_))),
+        Some(TyKind::Decimal) => leaf_at(raw, |value| matches!(value, Value::Decimal(_))),
+        Some(TyKind::Uuid) => leaf_at(raw, |value| matches!(value, Value::Uuid(_))),
+        Some(TyKind::Digest) => leaf_at(raw, |value| matches!(value, Value::Digest(_))),
+        Some(TyKind::Date) => leaf_at(raw, |value| matches!(value, Value::Date(_))),
+        Some(TyKind::Instant) => leaf_at(raw, |value| matches!(value, Value::Instant { .. })),
+        Some(TyKind::Duration) => leaf_at(raw, |value| matches!(value, Value::Duration { .. })),
         Some(TyKind::Option(item)) => option_at(machine, raw, *item, env),
         Some(TyKind::List(item)) => list_at(machine, raw, *item, env),
         Some(TyKind::Tuple(items)) => tuple_at(machine, raw, items, env),
@@ -78,8 +87,11 @@ pub(crate) fn from_raw_at(
             };
             record_at(machine, entries, &declared, env)
         }
+        Some(TyKind::Adt(def, args)) if is_money_type(program, *def) => {
+            money_at(machine, raw, args, env)
+        }
         Some(TyKind::Adt(def, args)) if matches!(program.defs[*def].kind, DefKind::Type(_)) => {
-            nominal_at(machine, raw, *def, args, env)
+            type_at(machine, raw, *def, args, env)
         }
         _ => Err(Stop::NotYet(UNSUPPORTED)),
     }
@@ -147,8 +159,9 @@ fn tuple_at(machine: &mut Machine<'_>, raw: &Raw, types: &[Ty], env: &[Ty]) -> R
     Ok(Value::Tuple(values.into()))
 }
 
-/// A nominal record of declared type `def`, instantiated at the type arguments `args`.
-fn nominal_at(
+/// A user-defined type. A type with fields is a nominal record. A type whose members are only refinements is a refined
+/// type, whose value is its base value. Either way every refinement holds of the value before it is returned.
+fn type_at(
     machine: &mut Machine<'_>,
     raw: &Raw,
     def: DefId,
@@ -156,9 +169,6 @@ fn nominal_at(
     env: &[Ty],
 ) -> Result<Value, Stop> {
     let program = machine.program;
-    let Raw::Map(entries) = raw else {
-        return Err(Stop::Error(SHAPE));
-    };
     let DefKind::Type(type_def) = &program.defs[def].kind else {
         return Err(Stop::NotYet(UNSUPPORTED));
     };
@@ -167,8 +177,123 @@ fn nominal_at(
         .iter()
         .filter_map(|member| declared_field(program, *member))
         .collect();
+    let assertions: Vec<DefId> = type_def
+        .members
+        .iter()
+        .copied()
+        .filter(|member| assertion_body(program, *member).is_some())
+        .collect();
     let inner = machine.resolve_targs(args, env)?;
-    record_at(machine, entries, &declared, type_args(&inner))
+    let refined_base = match assertions.first() {
+        Some(first) if declared.is_empty() => self_ty(program, *first).filter(
+            |base| !matches!(program.tys.kind(*base), Some(TyKind::Adt(owner, _)) if *owner == def),
+        ),
+        _ => None,
+    };
+    let value = match refined_base {
+        Some(base) => {
+            let base_raw = refined_base_raw(machine, raw, def)?;
+            from_raw_at(machine, base_raw, base, type_args(&inner))?
+        }
+        None => {
+            let Raw::Map(entries) = raw else {
+                return Err(Stop::Error(SHAPE));
+            };
+            record_at(machine, entries, &declared, type_args(&inner))?
+        }
+    };
+    check_assertions(machine, &assertions, &value, inner)?;
+    Ok(value)
+}
+
+/// The base value a refined type's raw value carries. A `60020` wrapper must name this type; the executor's own
+/// encoding writes the bare base, which is accepted as it is.
+fn refined_base_raw<'r>(machine: &Machine<'_>, raw: &'r Raw, def: DefId) -> Result<&'r Raw, Stop> {
+    let Raw::Tag(REFINED_NOMINAL_TAG, payload) = raw else {
+        return Ok(raw);
+    };
+    let Raw::Array(parts) = &**payload else {
+        return Err(Stop::Error(SHAPE));
+    };
+    let [Raw::Tag(UUID_TAG, id), base] = parts.as_slice() else {
+        return Err(Stop::Error(SHAPE));
+    };
+    let expected = machine
+        .host
+        .nominal_type_id(&def_qualified_name(machine.program, def));
+    if object_id(id) == Some(expected) {
+        Ok(base)
+    } else {
+        Err(Stop::Error(SHAPE))
+    }
+}
+
+/// A Money value, whose currency must be the currency type `Money` names.
+fn money_at(machine: &mut Machine<'_>, raw: &Raw, args: &[Ty], env: &[Ty]) -> Result<Value, Stop> {
+    let program = machine.program;
+    let inner = machine.resolve_targs(args, env)?;
+    let [currency] = type_args(&inner) else {
+        return Err(Stop::NotYet(UNSUPPORTED));
+    };
+    let name = currency_name(program, *currency).ok_or(Stop::NotYet(UNSUPPORTED))?;
+    let expected = machine.host.nominal_type_id(&name);
+    let value = leaf_at(raw, |value| matches!(value, Value::Money { .. }))?;
+    let Value::Money {
+        currency: actual, ..
+    } = &value
+    else {
+        return Err(Stop::Error(SHAPE));
+    };
+    if *actual != expected {
+        return Err(Stop::Error(SHAPE));
+    }
+    Ok(value)
+}
+
+/// A leaf value: the canonical raw value read back by [`raw_value::from_raw`] when it has the leaf type's shape. A raw
+/// value that reads back as another shape, or not at all, is not a value of the leaf type.
+fn leaf_at(raw: &Raw, accepts: fn(&Value) -> bool) -> Result<Value, Stop> {
+    match raw_value::from_raw(raw) {
+        Ok(value) if accepts(&value) => Ok(value),
+        Ok(_) | Err(Stop::NotYet(_)) => Err(Stop::Error(SHAPE)),
+        Err(error) => Err(error),
+    }
+}
+
+/// Each refinement of `value`, in source order. The first one that is false fails the decode.
+fn check_assertions(
+    machine: &mut Machine<'_>,
+    assertions: &[DefId],
+    value: &Value,
+    env: TypeEnv,
+) -> Result<(), Stop> {
+    let program = machine.program;
+    for member in assertions {
+        let Some(body) = assertion_body(program, *member) else {
+            continue;
+        };
+        match machine.invoke(body, vec![(0, value.clone())], &[], env.clone())? {
+            Value::Bool(true) => {}
+            Value::Bool(false) => return Err(Stop::Error(REFINEMENT_FAILED)),
+            _ => return Err(Stop::Error("ORNA-EVAL-TYPE")),
+        }
+    }
+    Ok(())
+}
+
+/// The body of an assertion definition, or `None` for any other definition.
+fn assertion_body(program: &Program, member: DefId) -> Option<BodyId> {
+    match &program.defs[member].kind {
+        DefKind::Assertion(assertion) => Some(assertion.body),
+        _ => None,
+    }
+}
+
+/// The type an assertion's `self` names: the base value of a refined type, or the nominal row type.
+fn self_ty(program: &Program, member: DefId) -> Option<Ty> {
+    let body = &program.bodies[assertion_body(program, member)?];
+    let slot = body.params.first()?;
+    Some(body.locals[*slot].ty)
 }
 
 /// The field a nominal type's member names, if the member is a field.
