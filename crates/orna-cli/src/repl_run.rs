@@ -1,14 +1,15 @@
+use super::repl_committed_read::{bound_head_unchanged, submit_committed_read, submit_effect_free};
 #[cfg(test)]
 use super::repl_request::FIRST_SYS_DISPATCH_RUNNING;
 use super::{
     AdmittedReplSession, ApplicationError, Arc, BufReader, ColorMode, Diagnostic, Endpoint, Limits,
     PinnedCommittedRows, QueryObservationRegistration, Rc, RefCell, ReplEvaluationFailure,
     ReplSnapshotSessionLoader, ReplTransactionScope, ReplTransactions, ReplWriterInputs,
-    RequestIdentity, Reserved, STORE_COMMIT_REMEDY, StageOutcome, StagedTableActivation,
-    TableActivationError, ValidatedTableRequestActivationCommit, committed_rows_at,
-    diagnostic_documentation, ensure_writer, io, project_declares_assertions, repl,
-    repl_effect_failure, repl_request_fingerprint, repl_session, request_nonce, runtime_identity,
-    transactional_loaded_project_candidate_validator, transactions_unavailable,
+    RequestIdentity, Reserved, StageOutcome, StagedTableActivation, TableActivationError,
+    ValidatedTableRequestActivationCommit, committed_rows_at, diagnostic_documentation,
+    ensure_writer, io, project_declares_assertions, repl, repl_effect_failure,
+    repl_request_fingerprint, repl_session, request_nonce, runtime_identity,
+    transactional_loaded_project_candidate_validator,
 };
 
 /// Submits one input for a bound repository whose transaction capability is
@@ -36,29 +37,17 @@ pub(crate) fn run_repl_input(
     source: &str,
 ) -> Result<orna_project_repl::ReplOutcome, repl::ReplFailure> {
     let Ok(staged) = session.stage_activation(source) else {
-        return session
-            .submit_outcome(source, orna_evaluator::RelationDisplay::Window)
-            .map_err(repl::ReplFailure::from);
+        return submit_effect_free(session, source);
     };
     let (Some(repository), Some(transactions)) = (repository, transactions) else {
         return Err(repl::ReplFailure::from(
             orna_project_repl::effect_rejection(staged.effects()),
         ));
     };
-    let (current_commit, _) = repository
-        .open_pinned_format_context_with_commit("HEAD")
-        .map_err(|_| {
-            transactions_unavailable(
-                "the repository has no committed HEAD with a readable store",
-                STORE_COMMIT_REMEDY,
-            )
-        })?;
-    if current_commit != transactions.commit {
-        return Err(repl_effect_failure(
-            "the project changed since this REPL session started",
-            "restart the REPL to bind to the current HEAD",
-        ));
+    if staged.is_table_read_only() {
+        return submit_committed_read(repository, transactions, session, source);
     }
+    bound_head_unchanged(repository, transactions)?;
     if !transactions.format_context.supports_writes() {
         return Err(repl_effect_failure(
             "this repository's format does not accept REPL writes",

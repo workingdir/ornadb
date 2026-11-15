@@ -655,7 +655,7 @@ fn write_result_line<W: Write>(
     writer.write_all(b"\n")
 }
 
-/// Writes a relation window as its header, `SOURCE : Relation<T> · N rows`,
+/// Writes a relation window as its header, `SOURCE : Relation<T> · N rows · CWD`,
 /// then a table of its rows with one column per record field.
 fn write_relation_window<W: Write>(
     writer: &mut W,
@@ -677,7 +677,7 @@ fn write_relation_window<W: Write>(
         color_enabled,
     )?;
     writer.write_all(b" : ")?;
-    let label = format!("{} · {extent}", ty.unwrap_or("Relation"));
+    let label = format!("{} · {extent} · CWD", ty.unwrap_or("Relation"));
     write_styled(writer, AnsiColor::Dim, label.as_bytes(), color_enabled)?;
     writer.write_all(b"\n")?;
 

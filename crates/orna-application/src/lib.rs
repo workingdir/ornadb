@@ -67,6 +67,7 @@ mod remote_analysis;
 pub use remote_analysis::{
     RemoteAnalysisGate, RemoteAnalysisProvenance, RemoteAnalysisProvenanceError,
 };
+mod repl_read;
 mod repl_transaction;
 mod table_reference;
 pub use browser_profile::execute_browser_profile;
