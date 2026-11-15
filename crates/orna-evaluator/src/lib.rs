@@ -58,6 +58,7 @@ mod source_enums;
 mod sys_bindings;
 #[cfg(feature = "system-host-bindings")]
 mod sys_dispatch;
+mod table_relation;
 mod timezone;
 mod ui;
 
@@ -6298,6 +6299,9 @@ impl Context<'_, '_> {
                         nominal_definitions: scope.3.clone(),
                     });
                 }
+                if let Some(source) = self.admitted_table_relation(expression, scope) {
+                    return Ok(Value::Relation(RelationPlan::new(source)));
+                }
                 let base = self.evaluate(base, scope, depth + 1)?;
                 self.field_value(base, name, scope)
             }
@@ -6895,33 +6899,6 @@ impl Context<'_, '_> {
             ("-", Value::Float(value)) => Ok(float_value(-f64::from_bits(value))),
             _ => Err(error("ORNA-EVAL-TYPE")),
         }
-    }
-
-    /// A table name piped into a relation operation reads that table: a bare
-    /// `music` or a root-qualified `main.music`. Locals, functions, aliases and
-    /// namespace-qualified functions keep their precedence over a table name,
-    /// mirroring [`Expr::Name`] resolution in [`Context::evaluate_node`].
-    fn admitted_table_relation(&self, lhs: &Expr, scope: &Scope) -> Option<String> {
-        let path = dotted_name_path(lhs)?;
-        let root = path.split('.').next()?;
-        if scope.0.contains_key(root) {
-            return None;
-        }
-        if !self.mode.is_repl() && self.functions.contains_key(&path) {
-            return None;
-        }
-        if self
-            .alias_target(&path)
-            .is_some_and(|name| self.functions.contains_key(name))
-        {
-            return None;
-        }
-        if let Some(namespace) = self.namespace.as_deref()
-            && self.functions.contains_key(&format!("{namespace}.{path}"))
-        {
-            return None;
-        }
-        self.effects.as_deref()?.admitted_relation_source(&path)
     }
 
     fn binary(

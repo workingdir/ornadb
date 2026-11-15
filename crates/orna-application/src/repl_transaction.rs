@@ -386,7 +386,7 @@ fn normalize_repl_mutations(
 /// (committed `HEAD` overlaid by uncommitted local rows), so the REPL reads
 /// the same relation the CWD does (ORNA-STATE-002). The snapshot is the only
 /// row read: the committed storage orders come from the caller's single read.
-fn committed_table_rows(
+pub(super) fn committed_table_rows(
     scope: &ReplTransactionScope<'_>,
     tables: &BTreeMap<String, orna_check::TableSchema>,
 ) -> Result<(RuntimeTableRows, BTreeMap<String, CommittedTable>), ApplicationError> {
@@ -417,14 +417,14 @@ fn committed_table_rows(
 
 /// Project tables admitted for one REPL transaction: the schema map, the object
 /// identity map, the insert defaults and the callable functions.
-type AdmittedProjectTables = (
+pub(super) type AdmittedProjectTables = (
     BTreeMap<String, TableSchema>,
     BTreeMap<String, TableObjectId>,
     TableInsertDefaults,
     Functions,
 );
 
-fn admitted_project_tables(
+pub(super) fn admitted_project_tables(
     authority: &ApplicationAuthority,
     scope: &ReplTransactionScope<'_>,
 ) -> Result<AdmittedProjectTables, ApplicationError> {
@@ -490,13 +490,13 @@ fn admitted_project_tables(
     Ok((tables, table_ids, defaults, functions))
 }
 
-struct ReplTransactionEffectHandler<'a, 'scope> {
-    bindings: &'a mut SysHostBindingRegistry,
-    mutations: SourceMutationEffectHandler,
-    scope: &'a ReplTransactionScope<'scope>,
-    next_row_ordinal: u64,
-    explain_catalogue: orna_evaluator::ActivationExplainCatalogue,
-    external_dispatched: bool,
+pub(super) struct ReplTransactionEffectHandler<'a, 'scope> {
+    pub(super) bindings: &'a mut SysHostBindingRegistry,
+    pub(super) mutations: SourceMutationEffectHandler,
+    pub(super) scope: &'a ReplTransactionScope<'scope>,
+    pub(super) next_row_ordinal: u64,
+    pub(super) explain_catalogue: orna_evaluator::ActivationExplainCatalogue,
+    pub(super) external_dispatched: bool,
 }
 
 impl ReplTransactionEffectHandler<'_, '_> {

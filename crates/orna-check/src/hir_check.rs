@@ -20,6 +20,7 @@ use orna_value::{Diagnostic, SafeText};
 
 use crate::StandardDependencyProfile;
 use crate::located::DiagnosticOrigin;
+use crate::span_index::ItemSpans;
 use crate::system_api::{PathResolution, SystemMember, embedded_system_api};
 use crate::{DIAG_PARSE, DIAG_UNRESOLVED, ModuleInput, UNRESOLVED_NAME_NOTE, diag};
 
@@ -256,7 +257,7 @@ pub fn checker_located_diagnostics(
     findings: &[HirFinding],
     modules: &[ModuleInput],
 ) -> (Vec<Diagnostic>, Vec<DiagnosticOrigin>) {
-    let mut items_by_module = BTreeMap::<&str, Vec<SyntaxSpan>>::new();
+    let mut items_by_module = BTreeMap::<&str, ItemSpans>::new();
     findings
         .iter()
         .map(|finding| {
@@ -266,16 +267,18 @@ pub fn checker_located_diagnostics(
                     modules
                         .iter()
                         .find(|module| module.logical_path == finding.logical_path)
-                        .map(|module| top_level_spans(&module.source, &module.logical_path))
-                        .unwrap_or_default()
+                        .map_or_else(
+                            || ItemSpans::new(Vec::new()),
+                            |module| top_level_spans(&module.source, &module.logical_path),
+                        )
                 });
+            let inner = finding.span.start..finding.span.end;
             let anchor = items
-                .iter()
-                .find(|item| item.start <= finding.span.start && finding.span.end <= item.end)
-                .unwrap_or(&finding.span);
+                .containing(&inner)
+                .map_or(inner, |index| items.span(index).clone());
             let origin = DiagnosticOrigin {
                 logical_path: Some(finding.logical_path.clone()),
-                primary: Some(anchor.start..anchor.end),
+                primary: Some(anchor),
             };
             (checker_diagnostic(finding), origin)
         })
@@ -283,13 +286,15 @@ pub fn checker_located_diagnostics(
 }
 
 /// The spans of the top-level items of one module, as the parser recovers them.
-fn top_level_spans(source: &str, logical: &str) -> Vec<SyntaxSpan> {
-    parse_module_with_file(source, logical.to_owned())
-        .value
-        .items
-        .iter()
-        .map(|item| item.span.clone())
-        .collect()
+fn top_level_spans(source: &str, logical: &str) -> ItemSpans {
+    ItemSpans::new(
+        parse_module_with_file(source, logical.to_owned())
+            .value
+            .items
+            .iter()
+            .map(|item| item.span.start..item.span.end)
+            .collect(),
+    )
 }
 
 /// The checker's diagnostic for one HIR finding.
@@ -313,4 +318,62 @@ fn unresolved_bare_name(finding: &HirFinding) -> Option<&str> {
         .strip_prefix('`')?
         .strip_suffix("` is not in scope")?;
     (!name.is_empty() && !name.contains('`')).then_some(name)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ops::Range;
+
+    use super::*;
+
+    /// A finding of `DIAG_UNRESOLVED` in `logical_path` over `start..end`.
+    fn finding(logical_path: &str, start: usize, end: usize) -> HirFinding {
+        HirFinding {
+            code: DIAG_UNRESOLVED,
+            message: "unused".to_owned(),
+            logical_path: logical_path.to_owned(),
+            span: SyntaxSpan::new(start, end),
+        }
+    }
+
+    #[test]
+    fn origins_anchor_each_finding_to_its_first_containing_item() {
+        let main = "pub fn one(): Int = 1;\npub fn two(): Int = 2;\n";
+        let modules = [ModuleInput::new("main.orna", main)];
+        let items: Vec<Range<usize>> = parse_module_with_file(main, "main.orna".to_owned())
+            .value
+            .items
+            .iter()
+            .map(|item| item.span.start..item.span.end)
+            .collect();
+        assert_eq!(items.len(), 2, "{items:?}");
+        let two = main.find("pub fn two").expect("second item");
+        let findings = [
+            finding("main.orna", two + 4, two + 6),
+            finding("main.orna", 3, 5),
+            finding("main.orna", 0, main.len()),
+            finding("main.orna", main.len(), main.len()),
+        ];
+        let (_, origins) = checker_located_diagnostics(&findings, &modules);
+        let anchored: Vec<_> = origins.into_iter().map(|origin| origin.primary).collect();
+        let expected: Vec<_> = findings
+            .iter()
+            .map(|finding| {
+                let span = finding.span.start..finding.span.end;
+                Some(
+                    items
+                        .iter()
+                        .find(|item| item.start <= span.start && span.end <= item.end)
+                        .cloned()
+                        .unwrap_or_else(|| span.clone()),
+                )
+            })
+            .collect();
+        assert_eq!(anchored, expected);
+        assert_eq!(anchored[0], Some(items[1].clone()));
+        assert_eq!(anchored[1], Some(items[0].clone()));
+
+        let (_, missing) = checker_located_diagnostics(&[finding("missing.orna", 3, 5)], &modules);
+        assert_eq!(missing[0].primary, Some(3..5));
+    }
 }

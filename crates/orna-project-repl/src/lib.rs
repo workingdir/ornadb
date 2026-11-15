@@ -33,6 +33,8 @@ use orna_evaluator::{
 };
 use orna_evaluator::{reference_standard_profile, reference_standard_sources};
 
+mod submission;
+
 /// Redacted failure from the admitted REPL boundary.
 ///
 /// [`Self::diagnostic`] never contains submitted source. [`Self::detail`]
@@ -423,36 +425,7 @@ impl AdmittedReplSession {
         source: &str,
         display: RelationDisplay,
     ) -> Result<ReplOutcome, ReplError> {
-        let input = match self.parse(source) {
-            Ok(input) => input,
-            Err(error) => return Err(self.publish_failure(error)),
-        };
-        let admission = match self.stage_input(&input, source) {
-            Ok(admission) => admission,
-            Err(error) => return Err(self.publish_failure(error)),
-        };
-        if admission.effects.is_effectful() {
-            return Err(self.publish_failure(effect_rejection(&admission.effects)));
-        }
-        let ty = admission.ty.clone();
-        let mut runtime = self.runtime.clone();
-        let value = match runtime
-            .submit_admitted_with(&input, None, None, display)
-            .map_err(ReplError::runtime)
-        {
-            Ok(value) => value,
-            Err(error) => return Err(self.publish_failure(error)),
-        };
-        let mut semantic = self.semantic.clone();
-        if semantic.commit(admission).is_err() {
-            return Err(self.publish_failure(ReplError::fixed("ORNA-REPL-COMMIT")));
-        }
-        runtime.set_last_status(
-            CanonicalValue::new(orna_value::OvbRaw::Null).expect("null is canonical"),
-        );
-        self.runtime = runtime;
-        self.semantic = semantic;
-        Ok(ReplOutcome { value, ty })
+        self.submit_outcome_with(source, display, None)
     }
 
     /// Executes a checked input with explicitly installed native sys providers.

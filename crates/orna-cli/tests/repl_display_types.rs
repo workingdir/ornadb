@@ -1,8 +1,5 @@
 //! REPL display of a submission's static type (spec `17-repl.md`, "Eager
 //! previews"): a value prints as `BODY : TYPE`.
-//!
-//! Relation row windows (spec "Default presentation") are not yet reachable
-//! for pure REPL inputs; see the follow-up bead linked from ornadb-5il1.233.
 
 #[path = "support/product.rs"]
 mod product;
