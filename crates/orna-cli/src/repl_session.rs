@@ -9,53 +9,126 @@ use super::{
 pub(crate) fn repl_transactions(
     repository: &orna_repository::Repository,
     workspace_project: &orna_project::LoadedProject,
-) -> Option<ReplTransactions> {
+) -> Result<ReplTransactions, repl::ReplFailure> {
     let session_id = request_nonce().to_be_bytes();
     let (commit, format_context) = repository
         .open_pinned_format_context_with_commit("HEAD")
-        .ok()?;
+        .map_err(|_| {
+            transactions_unavailable(
+                "the repository has no committed HEAD with a readable store",
+                STORE_COMMIT_REMEDY,
+            )
+        })?;
     let format_context = format_context.with_runtime_owner_id(session_id);
-    if !format_context.supports_writes() || format_context.final_format_capability().is_err() {
-        return None;
+    if !format_context.supports_writes() {
+        return Err(transactions_unavailable(
+            "this repository's format does not accept REPL writes",
+            "open a repository whose format supports writes, then restart the REPL",
+        ));
+    }
+    if format_context.final_format_capability().is_err() {
+        return Err(transactions_unavailable(
+            "this repository's format capability is not supported for REPL writes",
+            "open a repository whose format supports writes, then restart the REPL",
+        ));
     }
     let project = orna_project::ProjectLoader::default()
         .load_committed_snapshot(repository, &commit)
-        .ok()?;
+        .map_err(|_| {
+            transactions_unavailable(
+                "the committed project could not be loaded",
+                STORE_COMMIT_REMEDY,
+            )
+        })?;
     if !same_repl_project_inputs(workspace_project, &project) {
-        return None;
+        return Err(transactions_unavailable(
+            "the project has changes that are not committed at HEAD",
+            "commit the project with `orna commit -m MESSAGE` or restore it to HEAD, then restart the REPL",
+        ));
     }
-    let catalogue = semantic_catalogue(&project).ok()?;
+    let catalogue = semantic_catalogue(&project).map_err(|_| {
+        transactions_unavailable(
+            "the committed project does not load its semantic catalogue",
+            "fix the first reported source error, commit it, then restart the REPL",
+        )
+    })?;
     let analysis = orna_check::analyze_with_providers(
         project.modules(),
         &catalogue,
         orna_check::SystemProviders::Production,
     );
     if !analysis.is_ok() {
-        return None;
+        return Err(transactions_unavailable(
+            "the committed project does not pass semantic analysis",
+            "fix the first reported source error, commit it, then restart the REPL",
+        ));
     }
-    let (table_names, table_schemas) = admitted_project_tables(&analysis)?;
+    let (table_names, table_schemas) = admitted_project_tables(&analysis).ok_or_else(|| {
+        transactions_unavailable(
+            "two admitted tables share a qualified name",
+            "rename one of the tables, commit it, then restart the REPL",
+        )
+    })?;
     if table_names.is_empty() {
-        return None;
+        return Err(transactions_unavailable(
+            "the project declares no admitted table for REPL writes",
+            "declare an admitted table, commit it, then restart the REPL",
+        ));
     }
-    let tables = committed_table_identities(repository, &commit, table_names).ok()?;
-    let identities =
-        orna_project::ObjectIdentityManifest::read_committed(repository, &commit).ok()?;
+    let tables = committed_table_identities(repository, &commit, table_names).map_err(|_| {
+        transactions_unavailable(
+            "committed table identities are unavailable",
+            STORE_COMMIT_REMEDY,
+        )
+    })?;
+    let identities = orna_project::ObjectIdentityManifest::read_committed(repository, &commit)
+        .map_err(|_| {
+            transactions_unavailable(
+                "committed object identities are unavailable",
+                STORE_COMMIT_REMEDY,
+            )
+        })?;
     let table_object_ids: Arc<BTreeMap<String, TableObjectId>> = Arc::new(
         tables
             .iter()
             .map(|table| (table.table().to_owned(), table.object_id()))
             .collect(),
     );
-    let capture_relation_id = tables.first()?.object_id().bytes();
-    let (identity, initial_digest) = runtime_identity(repository).ok()?;
-    if format_context.require_database_id().ok()?.as_bytes() != &identity.database_id {
-        return None;
+    let capture_relation_id = tables
+        .first()
+        .ok_or_else(|| {
+            transactions_unavailable(
+                "the committed project has no table identity to capture",
+                STORE_COMMIT_REMEDY,
+            )
+        })?
+        .object_id()
+        .bytes();
+    let (identity, initial_digest) = runtime_identity(repository).map_err(|_| {
+        transactions_unavailable(
+            "the runtime identity of the committed store could not be read",
+            STORE_COMMIT_REMEDY,
+        )
+    })?;
+    let database_id = format_context.require_database_id().map_err(|_| {
+        transactions_unavailable("the store has no database identity", STORE_COMMIT_REMEDY)
+    })?;
+    if database_id.as_bytes() != &identity.database_id {
+        return Err(transactions_unavailable(
+            "the store's database identity does not match its committed runtime identity",
+            "restore the committed store or commit it with `orna commit -m MESSAGE`, then restart the REPL",
+        ));
     }
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .ok()?;
-    Some(ReplTransactions {
+        .map_err(|_| {
+            transactions_unavailable(
+                "the REPL runtime could not be started",
+                "retry the REPL; if it persists, check the host's resource limits",
+            )
+        })?;
+    Ok(ReplTransactions {
         project,
         commit,
         format_context,
@@ -80,6 +153,17 @@ pub(crate) fn repl_transactions(
         faults: Arc::new(NoFault),
         writer: None,
     })
+}
+
+/// The remedy when the committed store or its identities are missing or
+/// unreadable: the store must be committed at HEAD before writes can run.
+pub(crate) const STORE_COMMIT_REMEDY: &str =
+    "commit the project and its store with `orna commit -m MESSAGE`, then restart the REPL";
+
+/// A located `E2200` failure: the project REPL has no writable transaction
+/// capability, and the message and remedy say why and how to recover.
+pub(crate) fn transactions_unavailable(message: &str, remedy: &str) -> repl::ReplFailure {
+    repl::ReplFailure::located("E2200", message, vec![remedy.to_owned()])
 }
 
 /// Collects the admitted tables of an analyzed project: every table whose
@@ -163,7 +247,13 @@ pub(crate) fn repl_runtime(
     } else {
         // Preserve the core-only REPL when the current directory has no Git
         // repository or the endpoint is not local.
-        (AdmittedReplSession::new(Limits::default()), None)
+        (
+            AdmittedReplSession::new(Limits::default()),
+            Err(transactions_unavailable(
+                "no project repository is bound to this REPL",
+                "run the REPL inside a Git worktree to write project tables",
+            )),
+        )
     };
     Ok(ReplRuntime {
         repository,
