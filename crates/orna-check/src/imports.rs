@@ -3,6 +3,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use orna_syntax_ast::{
     Declaration, Item, ProtocolMember, SyntaxTree, TypeExpr, TypeMember, TypeRepresentation,
@@ -21,13 +22,15 @@ pub(crate) fn resolve_imports(
     attached_symbols: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Scope {
+    let modules = Arc::new(modules.clone());
+    let historical_modules = Arc::new(historical_modules.clone());
     resolve_imports_with_dependencies(
         namespace,
         tree,
         header,
         ImportInputs {
-            modules,
-            historical_modules,
+            modules: &modules,
+            historical_modules: &historical_modules,
             attached_symbols,
             attached_databases: &BTreeSet::new(),
             dependency_summaries: &BTreeMap::new(),
@@ -86,8 +89,8 @@ pub(crate) fn module_scope(
         ambiguous: CowTable::default(),
         nominal_identities: CowTable::default(),
         modules: CowTable::default(),
-        available_modules: inputs.modules.clone().into(),
-        historical_modules: inputs.historical_modules.clone().into(),
+        available_modules: Arc::clone(inputs.modules),
+        historical_modules: Arc::clone(inputs.historical_modules),
         attached_databases: inputs.attached_databases.clone().into(),
         // Row shapes and automatic-key tables are keyed by the same qualified
         // identity that table symbols carry, never by the bare declared name.

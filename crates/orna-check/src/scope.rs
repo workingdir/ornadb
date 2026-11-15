@@ -90,10 +90,10 @@ pub(crate) struct Scope {
     pub(crate) modules: CowTable<BTreeMap<String, Namespace>>,
     /// The closed source/catalogue module set used by qualified lookup. This
     /// is data assembled by the caller, never a filesystem loader.
-    pub(crate) available_modules: CowTable<BTreeMap<Namespace, ModuleHeader>>,
+    pub(crate) available_modules: Arc<BTreeMap<Namespace, ModuleHeader>>,
     /// Authority-backed declarations available only through a historical
     /// database snapshot. Current modules are never implicitly projected.
-    pub(crate) historical_modules: CowTable<BTreeMap<Namespace, ModuleHeader>>,
+    pub(crate) historical_modules: Arc<BTreeMap<Namespace, ModuleHeader>>,
     /// Aliases of databases attached alongside the current one. Their
     /// independent transaction logs rule out atomic writes through them
     /// (ORNA-ATTACH-002, source/08-relations.md:131).
@@ -185,8 +185,8 @@ pub(crate) struct UnitEnvironment {
 /// against. They are views of one analysis input, so they travel together
 /// instead of as a positional list beside the per-module arguments.
 pub(crate) struct ImportInputs<'a> {
-    pub(crate) modules: &'a BTreeMap<Namespace, ModuleHeader>,
-    pub(crate) historical_modules: &'a BTreeMap<Namespace, ModuleHeader>,
+    pub(crate) modules: &'a Arc<BTreeMap<Namespace, ModuleHeader>>,
+    pub(crate) historical_modules: &'a Arc<BTreeMap<Namespace, ModuleHeader>>,
     pub(crate) attached_symbols: &'a BTreeMap<String, Symbol>,
     pub(crate) attached_databases: &'a BTreeSet<String>,
     pub(crate) dependency_summaries: &'a BTreeMap<Namespace, BTreeMap<String, BTreeSet<String>>>,
