@@ -700,13 +700,20 @@ impl ReplSession {
                     .map(|suffix| (suffix.to_owned(), value.clone()))
             })
             .collect::<Vec<_>>();
+        // The root module executes as `main` but stores its tables under bare
+        // names, so `use main.*;` must also reach those unqualified tables
+        // (ORNA-IMPORT-003: all public names of `main`).
+        let root_tables = path == "main";
         let tables = self
             .table_names
             .iter()
             .filter_map(|name| {
-                name.strip_prefix(&prefix)
-                    .filter(|suffix| !suffix.contains('.'))
-                    .map(str::to_owned)
+                let suffix = match name.strip_prefix(&prefix) {
+                    Some(suffix) => suffix,
+                    None if root_tables => name.as_str(),
+                    None => return None,
+                };
+                (!suffix.contains('.')).then(|| suffix.to_owned())
             })
             .collect::<Vec<_>>();
         if functions.is_empty() && values.is_empty() && tables.is_empty() {
