@@ -8,7 +8,9 @@ use std::rc::Rc;
 use orna_exec::{ExecError, ExecLimits, Value, run_entry};
 use orna_hir::{DefId, DefKind, ModulePath, Name, Program, SourceId, SourceUnit, lower};
 use orna_syntax::parse_module_with_file;
-use orna_value::{CanonicalValue, Raw, base64_encode};
+use orna_value::{
+    CanonicalValue, DURATION_TAG, REFINED_NOMINAL_TAG, Raw, UUID_TAG, base64_encode, enum_type_id,
+};
 
 const LIMITS: ExecLimits = ExecLimits {
     max_steps: 100_000,
@@ -203,5 +205,117 @@ fn encode_refuses_output_past_the_collection_limit() {
     assert_eq!(
         run_with(&source("Blob", "ovb.encode<Str>(\"abcdefghij\")"), limits),
         Err(ExecError::Code("ORNA-EVAL-LIMIT"))
+    );
+}
+
+/// The Orna expression that decodes the canonical bytes of `raw` at the type `ty`.
+fn decode_raw(ty: &str, raw: Raw) -> String {
+    let encoded = base64_encode(&canonical(raw));
+    format!("ovb.decode<{ty}>(base64.decode(\"{encoded}\"))")
+}
+
+/// A refined type whose base is `Int` and whose two predicates bound it to `0..=100`.
+const SCORE: &str = "pub type Score = Int {\n    assert >= 0;\n    assert <= 100;\n}\n";
+
+const GBP: &str = "pub type GBP {\n    impl Currency {\n        static code = \"GBP\";\n        static minor_digits = 2;\n    }\n}\npub fn gbp(amount: Decimal): Money<GBP> = Money<GBP>(amount);\n";
+
+const USD: &str = "pub type USD {\n    impl Currency {\n        static code = \"USD\";\n        static minor_digits = 2;\n    }\n}\npub fn usd(amount: Decimal): Money<USD> = Money<USD>(amount);\n";
+
+#[test]
+fn decode_reads_a_float_from_its_canonical_bits() {
+    let bits = 1.5_f64.to_bits();
+    assert_eq!(
+        run("Float", &decode_raw("Float", Raw::Float(bits))),
+        Ok(Value::Float(bits))
+    );
+    assert_eq!(
+        run("Float", &decode_raw("Float", Raw::Int(1.into()))),
+        Err(ExecError::Code("ORNA-EVAL-VALUE"))
+    );
+}
+
+#[test]
+fn decode_reads_a_duration_from_its_seconds_and_nanoseconds() {
+    let body = Raw::Array(vec![Raw::Int(5.into()), Raw::Int(250.into())]);
+    assert_eq!(
+        run(
+            "Duration",
+            &decode_raw("Duration", Raw::Tag(DURATION_TAG, Box::new(body)))
+        ),
+        Ok(Value::Duration {
+            seconds: 5.into(),
+            nanosecond: 250,
+        })
+    );
+}
+
+fn score_program(expression: &str) -> String {
+    format!("{HEAD}{SCORE}pub fn run(): Score = {expression};\n")
+}
+
+#[test]
+fn decode_checks_each_refinement_of_the_base_value() {
+    assert_eq!(
+        run_with(
+            &score_program(&decode_raw("Score", Raw::Int(50.into()))),
+            LIMITS
+        ),
+        Ok(Value::Int(50.into()))
+    );
+    for refused in [-1, 101] {
+        assert_eq!(
+            run_with(
+                &score_program(&decode_raw("Score", Raw::Int(refused.into()))),
+                LIMITS
+            ),
+            Err(ExecError::Code("ORNA-A091-008"))
+        );
+    }
+}
+
+#[test]
+fn decode_reads_the_refined_wrapper_that_names_its_type() {
+    let wrapped = |id: [u8; 16]| {
+        Raw::Tag(
+            REFINED_NOMINAL_TAG,
+            Box::new(Raw::Array(vec![
+                Raw::Tag(UUID_TAG, Box::new(Raw::Bytes(id.to_vec()))),
+                Raw::Int(50.into()),
+            ])),
+        )
+    };
+    assert_eq!(
+        run_with(
+            &score_program(&decode_raw("Score", wrapped(enum_type_id("main.Score")))),
+            LIMITS
+        ),
+        Ok(Value::Int(50.into()))
+    );
+    assert_eq!(
+        run_with(
+            &score_program(&decode_raw("Score", wrapped(enum_type_id("main.Other")))),
+            LIMITS
+        ),
+        Err(ExecError::Code("ORNA-EVAL-VALUE"))
+    );
+}
+
+#[test]
+fn decode_reads_money_at_its_currency_and_refuses_another() {
+    let round_trip = format!(
+        "{HEAD}{GBP}pub fn run(): Money<GBP> = ovb.decode<Money<GBP>>(ovb.encode<Money<GBP>>(gbp(1.00)));\n"
+    );
+    let direct = format!("{HEAD}{GBP}pub fn run(): Money<GBP> = gbp(1.00);\n");
+    assert_eq!(
+        run_with(&round_trip, LIMITS),
+        run_with(&direct, LIMITS),
+        "a Money value reads back as the same Money value"
+    );
+    let other_currency = format!(
+        "{HEAD}{GBP}{USD}pub fn run(): Money<GBP> = ovb.decode<Money<GBP>>(ovb.encode<Money<USD>>(usd(1.00)));\n"
+    );
+    assert_eq!(
+        run_with(&other_currency, LIMITS),
+        Err(ExecError::Code("ORNA-EVAL-VALUE"))
     );
 }
