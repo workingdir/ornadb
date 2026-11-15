@@ -1456,6 +1456,10 @@ pub(crate) fn infer_named_pipeline_stage(
         ));
         return Inferred::error_with(input.effects);
     }
+    let sole_name = match qualified_path(callee).as_deref() {
+        Some([name]) => Some(*name),
+        _ => None,
+    };
     let callee = infer(callee, scope, local, diagnostics);
     let mut effects = input.effects;
     effects.join(&callee.effects);
@@ -1476,10 +1480,19 @@ pub(crate) fn infer_named_pipeline_stage(
             effects.join(&value.effects);
         }
         if !callee_is_error {
-            diagnostics.push(diag(
-                DIAG_UNSUPPORTED,
-                "pipeline stage is not a supported named callable",
-            ));
+            let shadowing = sole_name.and_then(|name| {
+                scope
+                    .modules
+                    .get(name)
+                    .map(|namespace| (name, namespace.display()))
+            });
+            let message = match shadowing {
+                Some((name, module)) => format!(
+                    "pipeline stage {name} names the module imported by `use {module}`, which shadows the root callable {name}"
+                ),
+                None => "pipeline stage is not a supported named callable".to_owned(),
+            };
+            diagnostics.push(diag(DIAG_UNSUPPORTED, message));
         }
         return Inferred::error_with(effects);
     };

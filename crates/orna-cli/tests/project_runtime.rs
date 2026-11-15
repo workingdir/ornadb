@@ -2977,3 +2977,77 @@ fn binary_commit_and_check_type_check_the_shipped_query_test_module() {
     assert!(check.status.success(), "check stderr: {:?}", check.stderr);
     assert_eq!(check.stdout, b"project valid\n");
 }
+
+/// The pinned `std.list` closure plus `std.map` and its `encoding.ovb` dependency.
+fn pinned_map_closure() -> Vec<(&'static str, &'static str)> {
+    let mut closure = pinned_list_closure().to_vec();
+    closure.push(("map.orna", include_str!("fixtures/captured-standard-map.orna")));
+    closure.push((
+        "encoding/ovb.orna",
+        include_str!("fixtures/captured-standard-encoding-ovb.orna"),
+    ));
+    closure
+}
+
+fn check_project(directory: &std::path::Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_orna"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args(["--db", directory.to_str().expect("UTF-8 path"), "check"])
+        .output()
+        .expect("CLI process")
+}
+
+#[test]
+fn check_names_the_import_that_shadows_a_root_pipeline_callable() {
+    let (directory, _module_commit) = captured_standard_project_with(
+        &pinned_map_closure(),
+        &[(
+            "main.orna",
+            "use std.map;\nfn seed() = [1, 2] | map(v => 1) | sum();\n",
+        )],
+    );
+
+    let output = check_project(directory.path());
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("ORNA-S022-UNSUPPORTED"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("imported by `use std.map`, which shadows the root callable map"),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn check_accepts_the_root_pipeline_callable_beside_a_non_shadowing_std_import() {
+    let (directory, _module_commit) = captured_standard_project_with(
+        &pinned_map_closure(),
+        &[(
+            "main.orna",
+            "use std.collection;\nfn seed() = [1, 2] | map(v => 1) | sum();\n",
+        )],
+    );
+
+    let output = check_project(directory.path());
+
+    assert!(output.status.success(), "check stderr: {:?}", output.stderr);
+    assert_eq!(output.stdout, b"project valid\n");
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn check_accepts_direct_call_spellings_of_root_collection_operations() {
+    let directory = tempfile::tempdir().expect("project");
+    initialize_project(directory.path());
+    std::fs::write(
+        directory.path().join("main.orna"),
+        "fn filtered() = filter([1, 2, 3], v => v > 1);\nfn taken() = take([1, 2], 1);\nfn unique() = distinct([1, 1]);\nfn counted() = count([1, 1]);\nfn seed() = [1, 2, 3] | map(v => v);\n",
+    )
+    .expect("project source");
+
+    let output = check_project(directory.path());
+
+    assert!(output.status.success(), "check stderr: {:?}", output.stderr);
+    assert_eq!(output.stdout, b"project valid\n");
+    assert!(output.stderr.is_empty());
+}

@@ -1,0 +1,181 @@
+// A map value is an immutable [ (K, V) ] list with at most one entry per key.
+// Constructors and updates keep first-insertion order; an update replaces the
+// old value in place, and a new key is appended. Lookup is linear and uses
+// Orna equality, so keys must have a lawful equality relation. There is no
+// host hash table or ambient key ordering. from_entries keeps the first key
+// position and the last value for duplicates; merge lets right-hand values
+// replace left-hand values while preserving left-hand key positions.
+use collection;
+use encoding.ovb;
+
+pub fn size<K, V>(entries: [(K, V)]): Int =
+    count(from_entries(entries));
+
+pub fn is_empty<K, V>(entries: [(K, V)]): Bool = size(entries) == 0;
+
+pub fn to_entries<K, V>(entries: [(K, V)]): [(K, V)] = from_entries(entries);
+
+// Return a canonical-key view for callers that need deterministic encoded
+// map order. Ordinary map iteration remains in first-insertion order; OVB-1
+// ordering compares the complete encoded key bytes and does not rewrite the
+// map's retained entry positions.
+pub fn entries_by_ovb_key<K, V>(entries: [(K, V)]): [(K, V)] =
+    sort_by(
+        from_entries(entries),
+        entry => case entry {
+            (key, _): std.encoding.ovb.encode(key),
+        }
+    );
+
+// Return ordered encoded key/value pairs for an OVB map encoder. Each key is
+// encoded once, and its value bytes stay attached while pairs are sorted by
+// unsigned lexicographic order of the complete encoded key. The result is a
+// list of pairs, not a map encoding. Duplicate logical keys retain
+// from_entries' first-position/last-value rule.
+pub fn encoded_entries_by_ovb_key<K, V>(entries: [(K, V)]): [(Blob, Blob)] {
+    let normalized = from_entries(entries);
+    let projected = [];
+    let index = 0;
+    while index < count(normalized) {
+        let (key, value) = normalized[index];
+        projected = union(projected, [(
+            std.encoding.ovb.encode(key),
+            std.encoding.ovb.encode(value),
+        )]);
+        index += 1;
+    };
+    sort_by(projected, pair => case pair {
+        (key_bytes, _): key_bytes,
+    })
+}
+
+pub fn keys<K, V>(entries: [(K, V)]): [K] =
+    if count(entries) == 0 {
+        []
+    } else {
+        let normalized = from_entries(entries);
+        let output = [];
+        let index = 0;
+        while index < count(normalized) {
+            let (key, _) = normalized[index];
+            output = union(output, [key]);
+            index += 1;
+        }
+        output
+    };
+
+pub fn values<K, V>(entries: [(K, V)]): [V] =
+    if count(entries) == 0 {
+        []
+    } else {
+        let normalized = from_entries(entries);
+        let output = [];
+        let index = 0;
+        while index < count(normalized) {
+            let (_, value) = normalized[index];
+            output = union(output, [value]);
+            index += 1;
+        }
+        output
+    };
+
+fn contains_in<K, V>(entries: [(K, V)], key: K): Bool =
+    if count(entries) == 0 {
+        false
+    } else {
+        let found = false;
+        let index = 0;
+        while index < count(entries) {
+            let (entry_key, _) = entries[index];
+            found = if entry_key == key { true } else { found };
+            index += 1;
+        }
+        found
+    };
+
+fn replace_entries<K, V>(entries: [(K, V)], key: K, value: V): [(K, V)] =
+    if count(entries) == 0 {
+        []
+    } else {
+        let output = [];
+        let index = 0;
+        while index < count(entries) {
+            let entry = entries[index];
+            output = union(output, [replace_entry(entry, key, value)]);
+            index += 1;
+        }
+        output
+    };
+
+pub fn contains_key<K, V>(entries: [(K, V)], key: K): Bool =
+    contains_in(from_entries(entries), key);
+
+fn find_value<K, V>(entries: [(K, V)], key: K): V? =
+    if count(entries) == 0 {
+        null
+    } else {
+        let result = null;
+        let index = 0;
+        while index < count(entries) {
+            let (entry_key, value) = entries[index];
+            result = if entry_key == key { Some(value) } else { result };
+            index += 1;
+        }
+        result
+    };
+
+pub fn get<K, V>(entries: [(K, V)], key: K): V? =
+    find_value(from_entries(entries), key);
+
+fn replace_entry<K, V>(entry: (K, V), key: K, value: V): (K, V) = case entry {
+    (existing_key, _): if existing_key == key { (existing_key, value) } else { entry },
+};
+
+fn insert_unique<K, V>(entries: [(K, V)], key: K, value: V): [(K, V)] =
+    if contains_in(entries, key) {
+        replace_entries(entries, key, value)
+    } else {
+        union(entries, [(key, value)])
+    };
+
+pub fn insert<K, V>(entries: [(K, V)], key: K, value: V): [(K, V)] =
+    insert_unique(from_entries(entries), key, value);
+
+pub fn remove<K, V>(entries: [(K, V)], key: K): [(K, V)] =
+    if count(entries) == 0 {
+        []
+    } else {
+        let normalized = from_entries(entries);
+        let output = [];
+        let index = 0;
+        while index < count(normalized) {
+            let entry = normalized[index];
+            let (entry_key, _) = entry;
+            if entry_key != key {
+                output = union(output, [entry]);
+            };
+            index += 1;
+        }
+        output
+    };
+
+pub fn from_entries<K, V>(entries: [(K, V)]): [(K, V)] =
+    if count(entries) == 0 {
+        []
+    } else {
+        let normalized = [];
+        let index = 0;
+        while index < count(entries) {
+            let (key, value) = entries[index];
+            normalized = if contains_in(normalized, key) {
+                replace_entries(normalized, key, value)
+            } else {
+                union(normalized, [(key, value)])
+            };
+            index += 1;
+        }
+        normalized
+    };
+
+pub fn merge<K, V>(left: [(K, V)], right: [(K, V)]): [(K, V)] =
+    from_entries(union(left, right));
