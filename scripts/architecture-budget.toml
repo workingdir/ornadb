@@ -68,7 +68,7 @@ name = "orna-cli"
 "src/repl.rs" = 1674
 [crate.functions]
 "src/cli_serve_app.rs::stage_at_head" = 128
-"src/repl_run.rs::run_repl_input" = 264
+"src/repl_run.rs::run_repl_input" = 260
 
 [[crate]]
 name = "orna-conformance"
@@ -153,7 +153,7 @@ name = "orna-compat-v1"
 [[crate]]
 name = "orna-evaluator"
 [crate.files]
-"src/lib.rs" = 15793
+"src/lib.rs" = 15780
 "src/relation.rs" = 1375
 "src/repl.rs" = 1766
 "src/sys_bindings.rs" = 2392
@@ -226,7 +226,7 @@ name = "orna-project"
 [[crate]]
 name = "orna-project-repl"
 [crate.files]
-"src/lib.rs" = 2578
+"src/lib.rs" = 2551
 [crate.functions]
 "src/lib.rs::admitted_runtime_sources" = 190
 
