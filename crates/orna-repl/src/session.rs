@@ -6,14 +6,15 @@
 //! parameter of their entry function.
 
 use orna_exec::Value;
-use orna_syntax::parse_repl;
+use orna_hir::diag::UNRESOLVED;
+use orna_syntax::{locate_identifier, parse_repl, repl_parse_failure};
 use orna_syntax_ast::SourceSpan;
 use orna_syntax_ast::{Declaration, Expr, Item, Pattern, ReplInput};
 
 use crate::base::{Base, Definition};
 use crate::check::{self, Evaluated};
 use crate::compose::{self, LAST, RESERVED_PREFIX};
-use crate::error::ReplError;
+use crate::error::{ReplError, unresolved};
 use crate::standard;
 
 /// A value with the printed type the HIR gave it.
@@ -81,14 +82,20 @@ impl Session {
     /// # Errors
     /// Returns the rejection code and message for a parse, name, type, effect or runtime failure.
     pub fn stage(&self, input: &str) -> Result<Staged, ReplError> {
+        self.stage_checked(input)
+            .map_err(|error| locate(input, error))
+    }
+
+    fn stage_checked(&self, input: &str) -> Result<Staged, ReplError> {
         let parsed = parse_repl(input);
         if !parsed.is_ok() {
             // Every prompt parse failure is reported under the REPL's established code, whatever
             // the parser's own diagnostic code is.
-            return Err(ReplError::new(
-                "ORNA-EVAL-PARSE",
-                "the input does not parse",
-            ));
+            let error = ReplError::new("ORNA-EVAL-PARSE", "the input does not parse");
+            return Err(match repl_parse_failure(&parsed.diagnostics, input) {
+                Some(failure) => error.with_detail(failure.into()),
+                None => error,
+            });
         }
         match &parsed.value {
             ReplInput::Expression(expression) => self.stage_expression(input, expression, true),
@@ -228,10 +235,7 @@ impl Session {
             Declaration::Function { signature, .. } => {
                 check_name(&signature.name)?;
                 if !compose::declaration_references(&item.declaration)?.is_empty() {
-                    return Err(ReplError::new(
-                        "ORNA-EVAL-UNSUPPORTED",
-                        "a function cannot read the previous result",
-                    ));
+                    return Err(unresolved("$_", &[]));
                 }
                 let definition = Definition {
                     name: signature.name.clone(),
@@ -353,6 +357,26 @@ impl Session {
         }
         Ok(scope)
     }
+}
+
+/// Attaches the span of an unresolved user name to its rejection. `$_` is not spelled as a name in the input,
+/// so its rejection stays unlocated.
+fn locate(input: &str, error: ReplError) -> ReplError {
+    if error.code() != UNRESOLVED {
+        return error;
+    }
+    let Some(name) = error.message().split('`').nth(1).map(str::to_owned) else {
+        return error;
+    };
+    if name.starts_with('$') {
+        return error;
+    }
+    let span = locate_identifier(input, &name, false);
+    let Some(mut detail) = error.detail().cloned() else {
+        return error;
+    };
+    detail.span = span;
+    ReplError::new(error.code(), error.message()).with_detail(detail)
 }
 
 fn check_name(name: &str) -> Result<(), ReplError> {

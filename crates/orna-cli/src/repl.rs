@@ -597,7 +597,7 @@ pub(crate) fn write_rendered_error<W: Write>(
     writer.write_all(b"\n")
 }
 
-fn write_repl_failure<W: Write>(
+pub(crate) fn write_repl_failure<W: Write>(
     writer: &mut W,
     failure: &ReplFailure,
     source: &str,

@@ -8,31 +8,17 @@
 # limitation and the row stays listed until the old path is retired. WRONG rows must be empty.
 
 ## expected
-orna-evaluator/src/fixtures/repl-inline-fn-echo-value-value-da0be3af.orna SPEC unannotated fn parameter generalised to a generic (ORNA-INFER-003, FN-008, FN-011); old ORNA-S020 limitation
-orna-evaluator/src/fixtures/repl-inline-fn-f-int-text-c1b5b853.orna DIAG type mismatch reported as ORNA-INFER-011 not ORNA-S021
+orna-evaluator/src/fixtures/repl-inline-fn-echo-value-value-da0be3af.orna SPEC unannotated fn parameter generalised to a generic (ORNA-INFER-003, FN-008); old ORNA-S020 limitation
+orna-evaluator/src/fixtures/repl-inline-fn-f-int-text-c1b5b853.orna DIAG typed fn body mismatch: HIR emits ORNA-INFER-011 without the conflicting constraint or source spans INFER-011 requires (old ORNA-S021 shows both); HIR detail gap
 orna-evaluator/src/fixtures/repl-inline-fn-generic-t-value-value-25ca40f0.orna SPEC declared generic with an unannotated parameter generalised (ORNA-INFER-003, GENERIC-001); old ORNA-S020 limitation
-orna-evaluator/src/fixtures/repl-inline-fn-last-45d0d77e.orna DIAG both paths reject `$_` in a fn body (ORNA-REPL-002); HIR reports ORNA-EVAL-UNSUPPORTED where old reports ORNA-S012
-orna-evaluator/src/fixtures/repl-inline-fn-previous-95c9ccff.orna DIAG both paths reject `$_` in a fn body (ORNA-REPL-002); HIR reports ORNA-EVAL-UNSUPPORTED where old reports ORNA-S012
 orna-evaluator/src/fixtures/repl-inline-fn-twice-value-value-value-303b1146.orna NOVALUE HIR rejects `fn twice(value) = value + value` as underconstrained (ORNA-INFER-007); old prints nothing and accepts it; spec does not establish the body is underconstrained (INFER-004 is public-only SHOULD), so this needs a decision
-orna-evaluator/src/fixtures/repl-inline-let-broken-missing-94d25d6f.orna DIAG unresolved name diagnostic text lacks old location and hint
-orna-evaluator/src/fixtures/repl-inline-let-n-int-text-6fd49f71.orna DIAG type mismatch reported as ORNA-INFER-011 not ORNA-S021
-orna-evaluator/src/fixtures/repl-inline-note-insert-1-17cd3595.orna DIAG unresolved name diagnostic text lacks old location and hint
-orna-project-repl/src/fixtures/repl-inline-empty-module.orna DIAG empty input reported as ORNA-EVAL-PARSE not ORNA-PARSE-001
-orna-project-repl/src/fixtures/repl-inline-fn-identity-t-value-t-t-value-ab04ee2f.orna SPEC explicit generic identity fn accepted (ORNA-GENERIC-001, ORNA-FN-011); old ORNA-EVAL-UNSUPPORTED limitation
-orna-project-repl/src/fixtures/repl-inline-if-true-for-value-in-1-100000-value-0-cb81a3a8.orna DIAG if-without-else with a non-unit block reports ORNA-INFER-011 not ORNA-S022 (ORNA-CFLOW-001, CFLOW-003)
-orna-project-repl/src/fixtures/repl-inline-increment-41-fa3331ac.orna DIAG unresolved name diagnostic text lacks old location and hint
-orna-project-repl/src/fixtures/repl-inline-let-answer-int-wrong-13d92e60.orna DIAG type mismatch reported as ORNA-INFER-011 not ORNA-S021
-orna-project-repl/src/fixtures/repl-inline-let-secret-name-int-private-178755d6.orna DIAG type mismatch reported as ORNA-INFER-011 not ORNA-S021
-orna-project-repl/src/fixtures/repl-inline-let-text-int-wrong-12395f03.orna DIAG type mismatch reported as ORNA-INFER-011 not ORNA-S021
-orna-project-repl/src/fixtures/repl-inline-n-1-60910b50.orna DIAG unresolved name diagnostic text lacks old location and hint
-orna-project-repl/src/fixtures/repl-inline-n-1b16b1df.orna DIAG unresolved name diagnostic text lacks old location and hint
-orna-project-repl/src/fixtures/repl-inline-pending-62a2fed3.orna DIAG unresolved name diagnostic text lacks old location and hint
-orna-project-repl/src/fixtures/repl-inline-pub-fn-status-988936de.orna NOVALUE `$?` unsupported in HIR (spec: "if supported"); old prints nothing where HIR reports ORNA-EVAL-UNSUPPORTED
-orna-project-repl/src/fixtures/repl-inline-pub-fn-value-int-42-fn-hidden-int-99-3655e003.orna DIAG trailing-input parse error reported as ORNA-EVAL-PARSE not ORNA-PARSE-001
-orna-project-repl/src/fixtures/repl-inline-pub-fn-value-str-changed-pub-fn-hidden-4a870d7d.orna DIAG trailing-input parse error reported as ORNA-EVAL-PARSE not ORNA-PARSE-001
-orna-project-repl/src/fixtures/repl-inline-recurse-0-d5e629d3.orna DIAG unresolved name diagnostic text lacks old location and hint
-orna-project-repl/src/fixtures/repl-inline-recurse-100000-6ed6c372.orna DIAG unresolved name diagnostic text lacks old location and hint
-orna-project-repl/src/fixtures/repl-inline-source-3a7494a2.orna NOVALUE bare `$?` is unsupported in HIR (spec: "if supported"); old prints null : Null
-orna-project-repl/src/fixtures/repl-inline-source-ba1da4b7.orna DIAG unresolved $_ reports ORNA-EVAL-NAME not ORNA-S012
-orna-project-repl/src/fixtures/repl-inline-text-982d9e3e.orna DIAG unresolved name diagnostic text lacks old location and hint
-orna-project-repl/src/fixtures/repl-inline-twice-n-21d0ebc9.orna DIAG unresolved name diagnostic text lacks old location and hint
+orna-evaluator/src/fixtures/repl-inline-let-n-int-text-6fd49f71.orna DIAG annotated let mismatch: HIR emits ORNA-INFER-011 without the conflicting constraint or source spans INFER-011 requires (old ORNA-S021 shows both); HIR detail gap
+orna-project-repl/src/fixtures/repl-inline-fn-identity-t-value-t-t-value-ab04ee2f.orna SPEC explicit generic identity fn accepted (ORNA-GENERIC-001); old ORNA-EVAL-UNSUPPORTED limitation
+orna-project-repl/src/fixtures/repl-inline-if-true-for-value-in-1-100000-value-0-cb81a3a8.orna DIAG both paths reject else-less non-unit if; old ORNA-S022 slice limitation, HIR ORNA-INFER-011 without constraint/spans; spec (CFLOW-003) does not state an else-less if's value, so no spec requirement is established
+orna-project-repl/src/fixtures/repl-inline-let-answer-int-wrong-13d92e60.orna DIAG annotated let mismatch: HIR emits ORNA-INFER-011 without the conflicting constraint or source spans INFER-011 requires (old ORNA-S021 shows both); HIR detail gap
+orna-project-repl/src/fixtures/repl-inline-let-secret-name-int-private-178755d6.orna DIAG annotated let mismatch: HIR emits ORNA-INFER-011 without the conflicting constraint or source spans INFER-011 requires (old ORNA-S021 shows both); HIR detail gap
+orna-project-repl/src/fixtures/repl-inline-let-text-int-wrong-12395f03.orna DIAG annotated let mismatch: HIR emits ORNA-INFER-011 without the conflicting constraint or source spans INFER-011 requires (old ORNA-S021 shows both); HIR detail gap
+orna-project-repl/src/fixtures/repl-inline-pub-fn-status-988936de.orna NOVALUE `$?` unsupported in HIR; old prints nothing, HIR reports ORNA-EVAL-UNSUPPORTED; spec 17-repl says `$?` is available "if supported" (optional), so this is a support gap
+orna-project-repl/src/fixtures/repl-inline-source-3a7494a2.orna NOVALUE bare `$?` unsupported in HIR; old prints `null : Null`, HIR reports ORNA-EVAL-UNSUPPORTED; spec 17-repl "if supported" makes support optional, so this is a support gap
+orna-project-repl/src/fixtures/repl-inline-source-ba1da4b7.orna DIAG unresolved `$_` with no prior result: HIR reports ORNA-S012-UNRESOLVED, old REPL reports ORNA-EVAL-NAME (same class as the unresolved-name rows)
+orna-project-repl/src/fixtures/repl-inline-text-982d9e3e.orna DIAG unresolved `text`: old path hints `use std.ui.text` from its module index; the HIR standard set exports `Text` (not `text`) from std.ui, so no use hint is produced

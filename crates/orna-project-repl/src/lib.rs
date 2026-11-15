@@ -15,7 +15,9 @@ use orna_check::{
     SymbolKind, SystemProviders, Type, analyze_with_providers, unresolved_member, unresolved_name,
 };
 use orna_project::{AttachedDatabaseSession, LoadedProject};
-use orna_syntax::{SyntaxDiagnostic, TokenKind, lex, parse_module, parse_repl};
+use orna_syntax::{
+    SyntaxDiagnostic, locate_identifier, parse_module, parse_repl, repl_parse_failure,
+};
 use orna_syntax_ast::{
     Declaration, ImportSegment, ReplInput, TypeMember, TypeRepresentation, UseTail, Visibility,
 };
@@ -1074,72 +1076,16 @@ fn whole_input_span(source: &str) -> Option<std::ops::Range<usize>> {
 
 fn parse_error(diagnostics: &[SyntaxDiagnostic], source: &str) -> ReplError {
     let mut error = ReplError::redacted("ORNA-EVAL-PARSE");
-    if let Some(diagnostic) = diagnostics.first() {
-        // End-of-input tokens sit after the trailing newline the terminal
-        // adds; point just past the last written character instead.
-        let content_end = source.trim_end().len();
-        let start = diagnostic.span.start.min(content_end);
-        let end = diagnostic.span.end.min(content_end).max(start);
-        let mut help = diagnostic.help.clone();
-        if help.is_empty()
-            && let Some(remedy) = parse_remedy(&diagnostic.message)
-        {
-            help.push(remedy.to_owned());
-        }
-        let mut notes = diagnostic.notes.clone();
-        if diagnostic.message.starts_with("expected `)`")
-            && let Some(opener) = unclosed_opener(source)
-        {
-            let (line, column) = line_column(source, opener.start);
-            notes.push(format!(
-                "the `(` at line {line}, column {column} is not closed"
-            ));
-        }
+    if let Some(failure) = repl_parse_failure(diagnostics, source) {
         error.detail = Some(Box::new(ReplDetail {
-            code: diagnostic.code.to_owned(),
-            message: diagnostic.message.clone(),
-            span: Some(start..end),
-            notes,
-            help,
+            code: failure.code.to_owned(),
+            message: failure.message,
+            span: Some(failure.span),
+            notes: failure.notes,
+            help: failure.help,
         }));
     }
     error
-}
-
-/// The remedy for a parser message the syntax crate leaves without `help`.
-fn parse_remedy(message: &str) -> Option<&'static str> {
-    if message == "expected namespace path" {
-        Some("name the module to import after `use`, for example `use library;`")
-    } else if message == "expected pattern" {
-        Some("name the binding after `let`, for example `let x = 3;`")
-    } else if message.starts_with("expected `)`") {
-        Some("close the parenthesis with `)`")
-    } else {
-        None
-    }
-}
-
-/// The innermost `(` that is still open at the end of `source`.
-fn unclosed_opener(source: &str) -> Option<std::ops::Range<usize>> {
-    let mut open = Vec::new();
-    for token in lex(source).ok()? {
-        match token.kind {
-            TokenKind::Punct("(") => open.push(token.span.start..token.span.end),
-            TokenKind::Punct(")") => {
-                open.pop();
-            }
-            _ => {}
-        }
-    }
-    open.pop()
-}
-
-/// One-based line and column of byte `offset` in `source`.
-fn line_column(source: &str, offset: usize) -> (usize, usize) {
-    let before = &source[..offset];
-    let line = before.matches('\n').count() + 1;
-    let line_start = before.rfind('\n').map_or(0, |index| index + 1);
-    (line, before[line_start..].chars().count() + 1)
 }
 
 fn stage_error(
@@ -1217,22 +1163,6 @@ fn unresolved_member_detail(code: &str, module: &str, member: &str, source: &str
             format!("if `{member}` is private in `{module}`, mark it `pub` to use it here"),
         ],
     }
-}
-
-/// Locates the first identifier `name` in `source` as a byte span. With
-/// `qualified`, only an occurrence directly after `.` (a member access) counts.
-fn locate_identifier(source: &str, name: &str, qualified: bool) -> Option<std::ops::Range<usize>> {
-    lex(source)
-        .ok()?
-        .into_iter()
-        .find_map(|token| match &token.kind {
-            TokenKind::Identifier { normalized } if normalized == name || token.text == name => {
-                let start = token.span.start;
-                (!qualified || source[..start].trim_end().ends_with('.'))
-                    .then_some(start..token.span.end)
-            }
-            _ => None,
-        })
 }
 
 #[cfg(test)]

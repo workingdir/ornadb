@@ -9,9 +9,12 @@
 
 use std::io::{self, BufRead, BufReader, Write};
 
+use orna_project_repl::ReplDetail;
+
 use crate::repl::{
-    AnsiColor, ReadSubmission, parse_help_command, parse_snapshot_target, parse_watch_source,
-    read_submission, write_rendered_error, write_rendered_value, write_repl_error, write_styled,
+    AnsiColor, ReadSubmission, ReplFailure, parse_help_command, parse_snapshot_target,
+    parse_watch_source, read_submission, render_repl_failure, write_rendered_error,
+    write_rendered_value, write_repl_error, write_repl_failure, write_styled,
 };
 use crate::repl_run::repl_failure_diagnostic;
 use crate::repl_session::repl_repository;
@@ -80,7 +83,28 @@ fn run_expression<W: Write>(
                 .map_err(|_| console_failed())
         }
         Ok(None) => Ok(()),
-        Err(error) => Err(repl_failure_diagnostic(error.code(), None)),
+        Err(error) => {
+            let failure = hir_failure(&error);
+            let body = failure
+                .detail
+                .as_ref()
+                .map(|_| render_repl_failure(&failure, source));
+            Err(repl_failure_diagnostic(error.code(), body))
+        }
+    }
+}
+
+/// The located explanation of an HIR REPL rejection, in the project REPL's failure shape.
+fn hir_failure(error: &orna_repl::ReplError) -> ReplFailure {
+    ReplFailure {
+        code: error.code().to_owned(),
+        detail: error.detail().map(|detail| ReplDetail {
+            code: detail.code.clone(),
+            message: detail.message.clone(),
+            span: detail.span.clone(),
+            notes: detail.notes.clone(),
+            help: detail.help.clone(),
+        }),
     }
 }
 
@@ -130,7 +154,9 @@ fn run_console<R: BufRead, W: Write>(
                     write_rendered_value(writer, &orna_repl::render_result(&value), color_enabled)?;
                 }
                 Ok(None) => {}
-                Err(error) => write_repl_error(writer, error.code(), color_enabled)?,
+                Err(error) => {
+                    write_repl_failure(writer, &hir_failure(&error), &source, color_enabled)?;
+                }
             }
         }
     }
