@@ -485,7 +485,7 @@ impl BoundedEvaluator {
             // Standard functions keep their module identity (`std.<module>.<name>`)
             // so their bodies resolve sibling helpers and never shadow user names.
             let namespace = module_namespace(&unit);
-            match staged.evaluate_module_with_namespace(&unit, namespace.as_deref()) {
+            match staged.evaluate_module_with_namespace(&unit, namespace.as_deref(), true) {
                 StageOutcome::Passed => {}
                 outcome => return outcome,
             }
@@ -526,13 +526,14 @@ impl BoundedEvaluator {
     }
 
     pub(super) fn evaluate_module(&mut self, unit: &SourceUnit) -> StageOutcome<Diagnostic> {
-        self.evaluate_module_with_namespace(unit, None)
+        self.evaluate_module_with_namespace(unit, None, false)
     }
 
     pub(super) fn evaluate_module_with_namespace(
         &mut self,
         unit: &SourceUnit,
         namespace: Option<&str>,
+        standard: bool,
     ) -> StageOutcome<Diagnostic> {
         if let Err(error) = self.limits.check_source(&unit.source) {
             return StageOutcome::Failed(error.diagnostic().clone());
@@ -542,7 +543,7 @@ impl BoundedEvaluator {
             let mut syntax = SyntaxAdapter;
             return syntax.parse(unit);
         }
-        if !Self::supports_pure_declarations(&parsed.value.items) {
+        if !Self::supports_pure_declarations(&parsed.value.items, standard) {
             return Self::unsupported_module();
         }
         let names = self
@@ -628,6 +629,7 @@ impl BoundedEvaluator {
                     );
                 }
                 Declaration::Use { .. } => {}
+                declaration if standard && Self::is_catalogue_only_declaration(&declaration) => {}
                 _ => return Self::unsupported_module(),
             }
         }
@@ -638,10 +640,13 @@ impl BoundedEvaluator {
 
     pub(super) fn supports_pure_module(unit: &SourceUnit) -> bool {
         let parsed = parse_module(&unit.source);
-        parsed.is_ok() && Self::supports_pure_declarations(&parsed.value.items)
+        parsed.is_ok() && Self::supports_pure_declarations(&parsed.value.items, false)
     }
 
-    pub(super) fn supports_pure_declarations(items: &[orna_syntax_ast::Item]) -> bool {
+    pub(super) fn supports_pure_declarations(
+        items: &[orna_syntax_ast::Item],
+        standard: bool,
+    ) -> bool {
         items.iter().all(|item| match &item.declaration {
             Declaration::Function { .. } | Declaration::Use { .. } => true,
             Declaration::Type {
@@ -650,8 +655,22 @@ impl BoundedEvaluator {
             } => members
                 .iter()
                 .all(|member| matches!(member, TypeMember::Field { .. })),
-            _ => false,
+            declaration => standard && Self::is_catalogue_only_declaration(declaration),
         })
+    }
+
+    /// Declarations the bounded evaluator never executes: types, protocols, enums,
+    /// dimensions and units. Standard units admit them because the standard
+    /// catalogue verifies them before any module is evaluated.
+    fn is_catalogue_only_declaration(declaration: &Declaration) -> bool {
+        matches!(
+            declaration,
+            Declaration::Protocol { .. }
+                | Declaration::Enum { .. }
+                | Declaration::Dimension { .. }
+                | Declaration::Unit { .. }
+                | Declaration::Type { .. }
+        )
     }
 
     pub(super) fn supports_pure_project(project: &ProjectUnit) -> bool {
@@ -710,7 +729,7 @@ impl RuntimeEvaluator for BoundedEvaluator {
         let mut staged = self.clone();
         for module in &project.modules {
             let namespace = module_namespace(module);
-            match staged.evaluate_module_with_namespace(module, namespace.as_deref()) {
+            match staged.evaluate_module_with_namespace(module, namespace.as_deref(), false) {
                 StageOutcome::Passed => {}
                 outcome => return outcome,
             }

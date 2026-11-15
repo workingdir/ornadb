@@ -188,11 +188,11 @@ fn project_modules_retain_qualified_pure_functions() {
     };
 
     assert!(matches!(
-        evaluator.evaluate_module_with_namespace(&library, Some("library")),
+        evaluator.evaluate_module_with_namespace(&library, Some("library"), false),
         StageOutcome::Passed
     ));
     assert!(matches!(
-        evaluator.evaluate_module_with_namespace(&main, None),
+        evaluator.evaluate_module_with_namespace(&main, None, false),
         StageOutcome::Passed
     ));
     let result = evaluate_expression_with_functions(
@@ -224,7 +224,7 @@ fn repl_sessions_import_admitted_functions_without_mutating_the_project() {
         source: "pub fn add(left: Int, right: Int): Int = left + right; pub fn twice(value: Int): Int = add(value, value);".into(),
     };
     assert!(matches!(
-        evaluator.evaluate_module_with_namespace(&library, Some("library")),
+        evaluator.evaluate_module_with_namespace(&library, Some("library"), false),
         StageOutcome::Passed
     ));
     let mut session = evaluator.repl_session().expect("admitted session");

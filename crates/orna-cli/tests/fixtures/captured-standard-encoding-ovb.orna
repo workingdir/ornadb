@@ -1,0 +1,30 @@
+// OVB-1 is the pinned binary value profile. Encoders use shortest permitted
+// heads, definite lengths, deterministic map-key order, canonical integer and
+// tag payloads, and binary64 Float values (including the single canonical NaN
+// bit pattern). UTF-8 text is not normalised. Unsupported values and unbounded
+// resources fail; operational handles are data descriptions only and cannot
+// be revived by decoding.
+// Bool, Int, Str and Blob use their primitive CBOR items; lists use arrays.
+// Decimal uses tag 60000, Option tag 60013, Unit tag 60014 and Tuple tag 60015.
+// Nominal records, enums, references and system values use the closed OVB-1
+// tag registry and retain their exact type/snapshot identity.
+//
+// Decoding is strict: reject duplicate keys, indefinite items, unsupported
+// simple values or tags, and every noncanonical alias before bytes can be used
+// as identity or a fingerprint. The explicit type witness and captured
+// snapshot provide the schema and context needed to validate nominal values.
+// Decode calls use the required static type witness form `decode(input, as: T)`.
+
+pub fn encode<T>(value: T): Blob = __encode(value);
+fn __encode<T>(value: T): Blob =
+    fail(error(
+        code: "ORNA-EVAL-UNSUPPORTED",
+        message: "std.encoding.ovb.encode is a native intrinsic"
+    ));
+
+pub fn decode<T>(input: Blob): T = __decode(input);
+fn __decode<T>(input: Blob): T =
+    fail(error(
+        code: "ORNA-EVAL-UNSUPPORTED",
+        message: "std.encoding.ovb.decode is a native intrinsic"
+    ));

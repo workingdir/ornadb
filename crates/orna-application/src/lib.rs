@@ -4921,6 +4921,37 @@ mod tests {
     }
 
     #[test]
+    fn module_root_call_evaluates_on_the_production_run_path() {
+        // ORNA-IMPORT-001/002: after `use std.list;`, `list.append` must run
+        // through the production admission and evaluation path, not only the
+        // conformance graph rewrite.
+        let authority = std_import_authority(&[(
+            "std/list.orna",
+            "pub fn append(values: [Int], value: Int): [Int] = union(values, [value]);\n",
+        )]);
+        let source = "use std.list;\npub fn seed(): [Int] = list.append([1, 2], 3);\n";
+        let admitted = authority
+            .admit_module("main.orna", source, "seed")
+            .expect("admission succeeds for a module-root call");
+        let value = authority
+            .evaluate(&admitted, &Environment::new())
+            .expect("module-root call evaluates on the run path");
+        // Oracle: the full-path call on the same authority, which resolves
+        // directly. The module-root form must agree with it.
+        let full_source = "use std.list;\npub fn seed(): [Int] = std.list.append([1, 2], 3);\n";
+        let full = authority
+            .admit_module("main.orna", full_source, "seed")
+            .expect("full-path admission succeeds");
+        let expected = authority
+            .evaluate(&full, &Environment::new())
+            .expect("full-path call evaluates");
+        assert_eq!(
+            value, expected,
+            "module-root call must equal the full-path call"
+        );
+    }
+
+    #[test]
     fn std_body_unqualified_call_never_resolves_to_a_user_function() {
         // `g` is not defined by the pinned std module; the user's `g` must not
         // capture the std body's unqualified call (ORNA-IMPORT-006 isolation).
