@@ -79,8 +79,8 @@ use repl_run::{repl_evaluation_failure, run_repl_input, run_repl_submission_with
 #[cfg(test)]
 use repl_session::repl_runtime;
 use repl_session::{
-    ReplSnapshotSessionLoader, admitted_project_tables, repl_effect_failure, repl_lease_failure,
-    repl_request_fingerprint, repl_session,
+    ReplSnapshotSessionLoader, STORE_COMMIT_REMEDY, admitted_project_tables, repl_effect_failure,
+    repl_lease_failure, repl_request_fingerprint, repl_session, transactions_unavailable,
 };
 #[cfg(test)]
 use repo_sync::{fetch_continuity_diagnostic, repository_init_diagnostic};

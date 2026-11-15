@@ -4,7 +4,7 @@ use super::{
     Rc, RefCell, ReplWriter, RuntimeError, RuntimeIdentity, RuntimeMode,
     RuntimePublicationMetadataRows, RuntimeState, RuntimeTableActivationSnapshot,
     RuntimeTableIdentity, RuntimeTableRows, StagedActivation, StdSnapshotPin,
-    SysHostBindingRegistry, TableObjectId, local_project_path, runtime_identity, sys_host,
+    SysHostBindingRegistry, TableObjectId, local_project_path, repl, runtime_identity, sys_host,
 };
 
 /// Runtime authority retained by one CLI REPL session.
@@ -15,7 +15,8 @@ use super::{
 pub(crate) struct ReplRuntime {
     pub(crate) repository: Option<orna_repository::Repository>,
     pub(crate) session: AdmittedReplSession,
-    pub(crate) transactions: Option<ReplTransactions>,
+    /// The writable transaction capability, or the reason it is unavailable.
+    pub(crate) transactions: Result<ReplTransactions, repl::ReplFailure>,
 }
 
 pub(crate) struct ReplTransactions {

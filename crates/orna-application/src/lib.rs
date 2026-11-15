@@ -3255,13 +3255,16 @@ fn standard_import_bindings(
                     }
                 }
             }
-            // A bare `use std.x;` or `use std.x as y` names a module, which this
-            // route cannot resolve; refuse it at admission rather than letting a
-            // qualified call fail later at evaluation.
-            UseTail::None | UseTail::Alias { .. } => {
-                return Err(ApplicationError::UnsupportedImport(
-                    "qualified std module alias not supported on this route".to_owned(),
-                ));
+            // ORNA-IMPORT-001/002: `use std.x;` makes the module available under
+            // its final component, and `use std.x as y;` under `y`. Each public
+            // member `f` is bound as `<root>.f`, so dotted calls such as
+            // `root.f(…)` resolve through the same alias table as bare names.
+            UseTail::None => {
+                let root = path.last().map_or("", |segment| segment.name.as_str());
+                bind_module_root(&namespace, root, exports, &mut explicit)?;
+            }
+            UseTail::Alias { name, .. } => {
+                bind_module_root(&namespace, name.as_str(), exports, &mut explicit)?;
             }
         }
     }
@@ -3292,6 +3295,28 @@ fn bind_explicit(
         return Err(ApplicationError::Semantic(vec![DIAG_AMBIGUOUS.to_owned()]));
     }
     Ok(())
+}
+
+/// Binds `root.f` to `namespace.f` for every public member `f` declared
+/// directly in `namespace`. A module with no exported members is unknown.
+fn bind_module_root(
+    namespace: &str,
+    root: &str,
+    exports: &StandardExports<'_>,
+    explicit: &mut BTreeMap<String, String>,
+) -> Result<(), ApplicationError> {
+    let prefix = format!("{namespace}.");
+    let known = exports
+        .public
+        .iter()
+        .chain(exports.non_function.iter())
+        .any(|target| target.starts_with(&prefix));
+    if !known {
+        return Err(ApplicationError::Semantic(vec![DIAG_IMPORT.to_owned()]));
+    }
+    bind_public_exports(namespace, exports, &mut |member: &str, target: String| {
+        bind_explicit(explicit, &format!("{root}.{member}"), target)
+    })
 }
 
 /// Binds every public function declared directly in `namespace`.
@@ -4879,21 +4904,51 @@ mod tests {
     }
 
     #[test]
-    fn module_alias_imports_are_refused_at_admission() {
-        for source in [
-            "use std.math;\npub fn answer(): Int = 1;\n",
-            "use std.math as m;\npub fn answer(): Int = 1;\n",
-        ] {
-            let error = direct_std_bindings(&["std.math.increment"], &[], source)
-                .expect_err("a module alias binds nothing on this route");
-            match error {
-                ApplicationError::UnsupportedImport(message) => assert_eq!(
-                    message,
-                    "qualified std module alias not supported on this route"
-                ),
-                other => panic!("expected an unsupported-import refusal, got {other:?}"),
-            }
-        }
+    fn module_root_import_binds_namespace_under_final_component() {
+        // ORNA-IMPORT-001/002: `use a.b;` makes the namespace available under
+        // its final component, so `b.f` resolves to `a.b.f`.
+        let bindings = direct_std_bindings(
+            &["std.math.increment"],
+            &[],
+            "use std.math;\npub fn answer(): Int = math.increment(1);\n",
+        )
+        .expect("a module-root import binds its namespace");
+        assert_eq!(
+            bindings.values().map(String::as_str).collect::<Vec<_>>(),
+            ["std.math.increment"],
+            "math.increment must resolve to std.math.increment, got {bindings:?}"
+        );
+    }
+
+    #[test]
+    fn module_root_call_evaluates_on_the_production_run_path() {
+        // ORNA-IMPORT-001/002: after `use std.list;`, `list.append` must run
+        // through the production admission and evaluation path, not only the
+        // conformance graph rewrite.
+        let authority = std_import_authority(&[(
+            "std/list.orna",
+            "pub fn append(values: [Int], value: Int): [Int] = union(values, [value]);\n",
+        )]);
+        let source = "use std.list;\npub fn seed(): [Int] = list.append([1, 2], 3);\n";
+        let admitted = authority
+            .admit_module("main.orna", source, "seed")
+            .expect("admission succeeds for a module-root call");
+        let value = authority
+            .evaluate(&admitted, &Environment::new())
+            .expect("module-root call evaluates on the run path");
+        // Oracle: the full-path call on the same authority, which resolves
+        // directly. The module-root form must agree with it.
+        let full_source = "use std.list;\npub fn seed(): [Int] = std.list.append([1, 2], 3);\n";
+        let full = authority
+            .admit_module("main.orna", full_source, "seed")
+            .expect("full-path admission succeeds");
+        let expected = authority
+            .evaluate(&full, &Environment::new())
+            .expect("full-path call evaluates");
+        assert_eq!(
+            value, expected,
+            "module-root call must equal the full-path call"
+        );
     }
 
     #[test]

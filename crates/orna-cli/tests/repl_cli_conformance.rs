@@ -272,7 +272,11 @@ fn repl_effect_preview_rejects_the_effect_and_preserves_last_value() {
     let output = run_repl(directory.path(), REPL_EFFECT);
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
-    assert!(stdout.contains("error[ORNA-REPL-EFFECT]"), "{stdout}");
+    assert!(
+        stdout.contains("error[E2200]: the repository has no committed HEAD with a readable store"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("ORNA-REPL-EFFECT"), "{stdout}");
     assert!(stdout.ends_with("2 : Int\n> "), "{stdout}");
     assert!(output.stderr.is_empty());
 }
