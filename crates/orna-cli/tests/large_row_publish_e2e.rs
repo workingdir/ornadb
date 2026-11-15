@@ -57,13 +57,21 @@ fn orna_repl(root: &Path, input: &str) -> Output {
         .stderr(Stdio::piped())
         .spawn()
         .expect("the orna REPL starts");
-    child
-        .stdin
-        .take()
-        .expect("REPL stdin")
-        .write_all(format!("{input}\n:quit\n").as_bytes())
+    let stdin = child.stdin.take().expect("REPL stdin");
+    // Feed stdin from a writer thread: a large seeding script echoes more
+    // output than a pipe buffer holds, so writing it all before draining stdout
+    // deadlocks the parent and the child.
+    let payload = format!("{input}\n:quit\n");
+    let writer = std::thread::spawn(move || {
+        let mut stdin = stdin;
+        stdin.write_all(payload.as_bytes())
+    });
+    let output = child.wait_with_output().expect("the orna REPL exits");
+    writer
+        .join()
+        .expect("REPL writer thread joins")
         .expect("write REPL input");
-    child.wait_with_output().expect("the orna REPL exits")
+    output
 }
 
 fn git_bytes(root: &Path, arguments: &[&str]) -> Vec<u8> {

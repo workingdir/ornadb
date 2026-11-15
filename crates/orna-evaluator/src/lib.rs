@@ -96,7 +96,7 @@ use relation::{
     RelationLastState, RelationPlan, RelationStage, RelationWindowState,
 };
 pub use relation::{RelationPlanMetadata, RelationPlanNode};
-pub use repl::{ReplSession, parse_admitted_repl};
+pub use repl::{RelationDisplay, RelationWindow, ReplSession, ReplValue, parse_admitted_repl};
 #[cfg(feature = "system-host-bindings")]
 pub use runtime_info::SysHostAttachment;
 pub use source_enums::source_enum_definitions;

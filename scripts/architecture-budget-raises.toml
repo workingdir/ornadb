@@ -39,9 +39,16 @@ bead = "ornadb-ouxeq.4"
 
 [[raise]]
 path = "crates/orna-cli/src/repl.rs"
-new_limit = 1882
-reason = "PR #9770 adds the REPL request typestate and the production :watch host"
-bead = "ornadb-32tpo"
+new_limit = 2139
+reason = "PR #9770 adds the REPL request typestate and the production :watch host; bead ornadb-5il1.233 adds the static checked type to each REPL result line (the split of request, display and typing modules remains follow-up work under that bead)"
+bead = "ornadb-5il1.233"
+
+[[raise]]
+path = "crates/orna-evaluator/src/repl.rs"
+new_limit = 1871
+reason = "bead ornadb-5il1.233 routes REPL item and let evaluation through the typed admission path so each result carries its static type (the split of the admission helpers remains follow-up work under that bead)"
+bead = "ornadb-5il1.233"
+
 
 [[raise]]
 path = "crates/orna-repository/src/native_graph/ordered.rs::collect_ordered_range_with"
