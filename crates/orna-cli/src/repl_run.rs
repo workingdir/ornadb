@@ -1,14 +1,14 @@
 #[cfg(test)]
 use super::repl_request::FIRST_SYS_DISPATCH_RUNNING;
 use super::{
-    AdmittedReplSession, ApplicationError, Arc, BufReader, ColorMode, Diagnostic,
-    Endpoint, Limits, PinnedCommittedRows, QueryObservationRegistration, Rc, RefCell,
-    ReplEvaluationFailure, ReplSnapshotSessionLoader, ReplTransactionScope, ReplTransactions,
-    ReplWriterInputs, RequestIdentity, Reserved, STORE_COMMIT_REMEDY, StageOutcome,
-    StagedTableActivation, TableActivationError, ValidatedTableRequestActivationCommit,
-    committed_rows_at, diagnostic_documentation, ensure_writer, io, project_declares_assertions,
-    repl, repl_effect_failure, repl_request_fingerprint, repl_session, request_nonce,
-    runtime_identity, transactional_loaded_project_candidate_validator, transactions_unavailable,
+    AdmittedReplSession, ApplicationError, Arc, BufReader, ColorMode, Diagnostic, Endpoint, Limits,
+    PinnedCommittedRows, QueryObservationRegistration, Rc, RefCell, ReplEvaluationFailure,
+    ReplSnapshotSessionLoader, ReplTransactionScope, ReplTransactions, ReplWriterInputs,
+    RequestIdentity, Reserved, STORE_COMMIT_REMEDY, StageOutcome, StagedTableActivation,
+    TableActivationError, ValidatedTableRequestActivationCommit, committed_rows_at,
+    diagnostic_documentation, ensure_writer, io, project_declares_assertions, repl,
+    repl_effect_failure, repl_request_fingerprint, repl_session, request_nonce, runtime_identity,
+    transactional_loaded_project_candidate_validator, transactions_unavailable,
 };
 
 /// Submits one input for a bound repository whose transaction capability is
