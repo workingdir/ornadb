@@ -2438,6 +2438,40 @@ fn binary_run_admits_a_standard_import_alongside_a_table_assertion() {
 }
 
 #[test]
+fn binary_run_evaluates_a_module_root_std_call_on_the_production_path() {
+    let (directory, _module_commit) = committed_standard_project_with(
+        &pinned_list_closure(),
+        &[(
+            "main.orna",
+            "use std.list;\npub fn seed(): [Int] = list.append([1, 2], 3);\n",
+        )],
+    );
+
+    let output = invoke(directory.path(), "run", "main.seed");
+
+    assert!(output.status.success(), "run stderr: {:?}", output.stderr);
+    assert_eq!(output.stdout, b"invocation completed\n");
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn binary_run_evaluates_an_aliased_module_root_std_call_on_the_production_path() {
+    let (directory, _module_commit) = committed_standard_project_with(
+        &pinned_list_closure(),
+        &[(
+            "main.orna",
+            "use std.list as l;\npub fn seed(): [Int] = l.append([1, 2], 3);\n",
+        )],
+    );
+
+    let output = invoke(directory.path(), "run", "main.seed");
+
+    assert!(output.status.success(), "run stderr: {:?}", output.stderr);
+    assert_eq!(output.stdout, b"invocation completed\n");
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
 /// A table assertion naming a table the project does not declare (`Contact` exists only in a conformance fixture) is refused with a compile diagnostic; no run is admitted.
 fn binary_run_refuses_an_assertion_naming_an_undeclared_table() {
     let (directory, _module_commit) = captured_standard_project_with(
