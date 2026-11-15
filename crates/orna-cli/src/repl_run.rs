@@ -1,7 +1,7 @@
 #[cfg(test)]
 use super::repl_request::FIRST_SYS_DISPATCH_RUNNING;
 use super::{
-    AdmittedReplSession, ApplicationError, Arc, BufReader, CanonicalValue, ColorMode, Diagnostic,
+    AdmittedReplSession, ApplicationError, Arc, BufReader, ColorMode, Diagnostic,
     Endpoint, Limits, PinnedCommittedRows, QueryObservationRegistration, Rc, RefCell,
     ReplEvaluationFailure, ReplSnapshotSessionLoader, ReplTransactionScope, ReplTransactions,
     ReplWriterInputs, RequestIdentity, Reserved, STORE_COMMIT_REMEDY, StageOutcome,
@@ -19,9 +19,11 @@ pub(crate) fn run_repl_input_unavailable(
     session: &mut AdmittedReplSession,
     source: &str,
     unavailable: &repl::ReplFailure,
-) -> Result<Option<CanonicalValue>, repl::ReplFailure> {
+) -> Result<orna_project_repl::ReplOutcome, repl::ReplFailure> {
     if session.stage_activation(source).is_err() {
-        return session.submit(source).map_err(repl::ReplFailure::from);
+        return session
+            .submit_outcome(source, orna_evaluator::RelationDisplay::Window)
+            .map_err(repl::ReplFailure::from);
     }
     Err(unavailable.clone())
 }

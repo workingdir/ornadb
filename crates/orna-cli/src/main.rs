@@ -123,7 +123,9 @@ use orna_runtime::{
     TableObjectId, TerminalOutcome, ValidatedTableRequestActivationCommit, WriterLease,
 };
 use orna_sys::{EnvironmentProvider, RuntimeMode, StdSnapshotPin, SysHostContext};
-use orna_value::{CanonicalValue, OvbRaw, Value};
+#[cfg(test)]
+use orna_value::CanonicalValue;
+use orna_value::{OvbRaw, Value};
 use sha2::{Digest, Sha256};
 
 use orna_cli_support::request_nonce;
