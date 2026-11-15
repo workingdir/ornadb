@@ -17,18 +17,21 @@ pub(crate) fn is_money_type(program: &Program, def: DefId) -> bool {
         && program.modules[definition.module].path.to_string() == "core.money"
 }
 
+/// The module-qualified declaration name of the nominal type `def`. A declaration in the unnamed root module keeps its
+/// bare name.
+pub(crate) fn def_qualified_name(program: &Program, def: DefId) -> String {
+    let definition = &program.defs[def];
+    let module = program.modules[definition.module].path.to_string();
+    orna_value::qualified_name(Some(&module), definition.name.as_str())
+}
+
 /// The module-qualified declaration name of the currency `ty` names (`Money<C>`'s `C`), or `None` when `ty` is not a
 /// nominal type. A declaration in the unnamed root module keeps its bare name.
 pub(crate) fn currency_name(program: &Program, ty: Ty) -> Option<String> {
     let Some(TyKind::Adt(def, _)) = program.tys.kind(ty) else {
         return None;
     };
-    let definition = &program.defs[*def];
-    let module = program.modules[definition.module].path.to_string();
-    Some(orna_value::qualified_name(
-        Some(&module),
-        definition.name.as_str(),
-    ))
+    Some(def_qualified_name(program, *def))
 }
 
 #[cfg(test)]

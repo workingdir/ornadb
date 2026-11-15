@@ -8,8 +8,8 @@ use std::rc::Rc;
 use num_bigint::BigInt;
 use orna_hir::Name;
 use orna_value::{
-    DATE_TAG, DECIMAL_TAG, DIGEST_TAG, ENUM_TAG, INSTANT_TAG, MONEY_TAG, OPAQUE_SYSTEM_ID_TAG,
-    OPTION_TAG, PINNED_ROW_REFERENCE_TAG, Raw, TUPLE_TAG, UNIT_TAG, UUID_TAG,
+    DATE_TAG, DECIMAL_TAG, DIGEST_TAG, DURATION_TAG, ENUM_TAG, INSTANT_TAG, MONEY_TAG,
+    OPAQUE_SYSTEM_ID_TAG, OPTION_TAG, PINNED_ROW_REFERENCE_TAG, Raw, TUPLE_TAG, UNIT_TAG, UUID_TAG,
 };
 
 use crate::calendar;
@@ -53,7 +53,9 @@ pub(crate) fn from_raw(raw: &Raw) -> Result<Value, Stop> {
         }
         Raw::Null => Ok(Value::Null),
         Raw::Tag(INSTANT_TAG, body) => instant_from(body),
-        Raw::Float(_) | Raw::Tag(..) => Err(Stop::NotYet("stored value shape (H6)")),
+        Raw::Tag(DURATION_TAG, body) => duration_from(body),
+        Raw::Float(bits) => Ok(crate::float::canonical(f64::from_bits(*bits))),
+        Raw::Tag(..) => Err(Stop::NotYet("stored value shape (H6)")),
     }
 }
 
@@ -116,6 +118,26 @@ fn instant_from(body: &Raw) -> Result<Value, Stop> {
             let unix_seconds: i64 = seconds.try_into().map_err(|_| value_error())?;
             Ok(Value::Instant {
                 unix_seconds,
+                nanosecond,
+            })
+        }
+        _ => Err(value_error()),
+    }
+}
+
+/// A Duration body: its whole seconds and its nanoseconds, the latter below one second.
+fn duration_from(body: &Raw) -> Result<Value, Stop> {
+    let Raw::Array(parts) = body else {
+        return Err(value_error());
+    };
+    match parts.as_slice() {
+        [Raw::Int(seconds), Raw::Int(nanosecond)] => {
+            let nanosecond: u32 = nanosecond.try_into().map_err(|_| value_error())?;
+            if nanosecond >= 1_000_000_000 {
+                return Err(value_error());
+            }
+            Ok(Value::Duration {
+                seconds: seconds.clone(),
                 nanosecond,
             })
         }
@@ -208,7 +230,7 @@ fn enum_from(body: &Raw) -> Result<Value, Stop> {
 }
 
 /// The 16 bytes of an object id body.
-fn object_id(body: &Raw) -> Option<[u8; 16]> {
+pub(crate) fn object_id(body: &Raw) -> Option<[u8; 16]> {
     let Raw::Bytes(bytes) = body else {
         return None;
     };
