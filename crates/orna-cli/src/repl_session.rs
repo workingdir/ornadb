@@ -1,9 +1,9 @@
 use super::{
     AdmittedReplSession, ApplicationAuthority, Arc, BTreeMap, BTreeSet, Diagnostic, Digest,
     Endpoint, Limits, NoFault, Rc, RefCell, ReplError, ReplRuntime, ReplTransactions, RuntimeError,
-    RuntimeMode, RuntimeState, Sha256, SysHostBindingRegistry, SysHostContext, TableObjectId,
-    committed_table_identities, project_load_diagnostic, repl, request_nonce, runtime_identity,
-    semantic_catalogue, sys_host,
+    RuntimeIdentity, RuntimeMode, RuntimeState, Sha256, SysHostBindingRegistry, SysHostContext,
+    TableObjectId, committed_table_identities, project_load_diagnostic, repl, request_nonce,
+    runtime_identity, semantic_catalogue, sys_host,
 };
 
 pub(crate) fn repl_transactions(
@@ -20,18 +20,7 @@ pub(crate) fn repl_transactions(
             )
         })?;
     let format_context = format_context.with_runtime_owner_id(session_id);
-    if !format_context.supports_writes() {
-        return Err(transactions_unavailable(
-            "this repository's format does not accept REPL writes",
-            "open a repository whose format supports writes, then restart the REPL",
-        ));
-    }
-    if format_context.final_format_capability().is_err() {
-        return Err(transactions_unavailable(
-            "this repository's format capability is not supported for REPL writes",
-            "open a repository whose format supports writes, then restart the REPL",
-        ));
-    }
+    check_writable_format(&format_context)?;
     let project = orna_project::ProjectLoader::default()
         .load_committed_snapshot(repository, &commit)
         .map_err(|_| {
@@ -104,30 +93,8 @@ pub(crate) fn repl_transactions(
         })?
         .object_id()
         .bytes();
-    let (identity, initial_digest) = runtime_identity(repository).map_err(|_| {
-        transactions_unavailable(
-            "the runtime identity of the committed store could not be read",
-            STORE_COMMIT_REMEDY,
-        )
-    })?;
-    let database_id = format_context.require_database_id().map_err(|_| {
-        transactions_unavailable("the store has no database identity", STORE_COMMIT_REMEDY)
-    })?;
-    if database_id.as_bytes() != &identity.database_id {
-        return Err(transactions_unavailable(
-            "the store's database identity does not match its committed runtime identity",
-            "restore the committed store or commit it with `orna commit -m MESSAGE`, then restart the REPL",
-        ));
-    }
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|_| {
-            transactions_unavailable(
-                "the REPL runtime could not be started",
-                "retry the REPL; if it persists, check the host's resource limits",
-            )
-        })?;
+    let (identity, initial_digest) = committed_store_identity(repository, &format_context)?;
+    let runtime = repl_tokio_runtime()?;
     Ok(ReplTransactions {
         project,
         commit,
@@ -153,6 +120,63 @@ pub(crate) fn repl_transactions(
         faults: Arc::new(NoFault),
         writer: None,
     })
+}
+
+/// Refuses the REPL unless the pinned format accepts writes and its final
+/// format capability is supported.
+fn check_writable_format(
+    format_context: &orna_repository::RepositoryFormatContext,
+) -> Result<(), repl::ReplFailure> {
+    if !format_context.supports_writes() {
+        return Err(transactions_unavailable(
+            "this repository's format does not accept REPL writes",
+            "open a repository whose format supports writes, then restart the REPL",
+        ));
+    }
+    if format_context.final_format_capability().is_err() {
+        return Err(transactions_unavailable(
+            "this repository's format capability is not supported for REPL writes",
+            "open a repository whose format supports writes, then restart the REPL",
+        ));
+    }
+    Ok(())
+}
+
+/// Reads the committed store's runtime identity and checks that its database
+/// identity matches the format context's database identity.
+fn committed_store_identity(
+    repository: &orna_repository::Repository,
+    format_context: &orna_repository::RepositoryFormatContext,
+) -> Result<(RuntimeIdentity, [u8; 32]), repl::ReplFailure> {
+    let (identity, initial_digest) = runtime_identity(repository).map_err(|_| {
+        transactions_unavailable(
+            "the runtime identity of the committed store could not be read",
+            STORE_COMMIT_REMEDY,
+        )
+    })?;
+    let database_id = format_context.require_database_id().map_err(|_| {
+        transactions_unavailable("the store has no database identity", STORE_COMMIT_REMEDY)
+    })?;
+    if database_id.as_bytes() != &identity.database_id {
+        return Err(transactions_unavailable(
+            "the store's database identity does not match its committed runtime identity",
+            "restore the committed store or commit it with `orna commit -m MESSAGE`, then restart the REPL",
+        ));
+    }
+    Ok((identity, initial_digest))
+}
+
+/// Starts the single-threaded tokio runtime that drives REPL requests.
+fn repl_tokio_runtime() -> Result<tokio::runtime::Runtime, repl::ReplFailure> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| {
+            transactions_unavailable(
+                "the REPL runtime could not be started",
+                "retry the REPL; if it persists, check the host's resource limits",
+            )
+        })
 }
 
 /// The remedy when the committed store or its identities are missing or

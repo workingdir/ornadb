@@ -304,9 +304,8 @@ fn bound_repository_without_transactions_reports_its_unavailable_capability() {
         mut session,
         transactions,
     } = repl_runtime(Some(repository)).expect("repl runtime");
-    let unavailable = match transactions {
-        Err(unavailable) => unavailable,
-        Ok(_) => panic!("a repository without HEAD has no transaction capability"),
+    let Err(unavailable) = transactions else {
+        panic!("a repository without HEAD has no transaction capability");
     };
     assert_eq!(unavailable.code, "E2200");
     assert!(repository.is_some(), "the bound repository is retained");
