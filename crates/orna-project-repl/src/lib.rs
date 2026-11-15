@@ -559,6 +559,42 @@ impl AdmittedReplSession {
             .ok_or_else(|| ReplError::fixed("ORNA-EVAL-UNSUPPORTED"))
     }
 
+    /// Evaluates one expression as [`Self::submit_outcome`] would report it,
+    /// without publishing any session state: its value as `display` asks and
+    /// its static type.
+    pub fn preview_outcome(
+        &self,
+        source: &str,
+        display: RelationDisplay,
+    ) -> Result<ReplOutcome, ReplError> {
+        let input = self.parse(source)?;
+        if !matches!(input, ReplInput::Expression(_)) {
+            return Err(ReplError::fixed("ORNA-EVAL-UNSUPPORTED"));
+        }
+        let admission = self.stage_input(&input, source)?;
+        if admission.effects.is_effectful() {
+            return Err(effect_rejection(&admission.effects));
+        }
+        let ty = admission.ty;
+        let mut runtime = self.runtime.clone();
+        let value = runtime
+            .submit_admitted_with(&input, None, None, display)
+            .map_err(ReplError::runtime)?;
+        Ok(ReplOutcome { value, ty })
+    }
+
+    /// The static type of one expression. Nothing is evaluated, so an
+    /// expression that would fail at run time still has its type.
+    pub fn expression_type(&self, source: &str) -> Result<Type, ReplError> {
+        let input = self.parse(source)?;
+        if !matches!(input, ReplInput::Expression(_)) {
+            return Err(ReplError::fixed("ORNA-EVAL-UNSUPPORTED"));
+        }
+        self.stage_input(&input, source)?
+            .ty
+            .ok_or_else(|| ReplError::fixed("ORNA-EVAL-UNSUPPORTED"))
+    }
+
     fn parse(&self, source: &str) -> Result<ReplInput, ReplError> {
         self.limits
             .check_source(source)

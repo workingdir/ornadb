@@ -65,7 +65,7 @@ name = "orna-cli"
 "src/cli_query.rs" = 1252
 "src/cli_serve.rs" = 2354
 "src/cli_serve_app.rs" = 1270
-"src/repl.rs" = 1674
+"src/repl.rs" = 1653
 [crate.functions]
 "src/cli_serve_app.rs::stage_at_head" = 128
 "src/repl_run.rs::run_repl_input" = 260

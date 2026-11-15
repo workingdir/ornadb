@@ -9,6 +9,17 @@
 #[allow(dead_code)]
 mod repl;
 
+// `repl` reaches the console modules through `crate::`, so the test crate
+// includes them by path beside it.
+#[path = "../src/repl_commands.rs"]
+#[allow(clippy::duplicate_mod)]
+#[allow(dead_code)]
+mod repl_commands;
+#[path = "../src/repl_inspect.rs"]
+#[allow(clippy::duplicate_mod)]
+#[allow(dead_code)]
+mod repl_inspect;
+
 use std::collections::VecDeque;
 
 use orna_evaluator::Limits;
@@ -341,4 +352,30 @@ fn failed_host_close_is_reported_during_graceful_session_close() {
     assert!(output.contains("error[ORNA-REPL-WATCH-SOURCE]"), "{output}");
     assert_eq!(source.closed_watches, [WATCH]);
     assert_eq!(state.watch(), None);
+}
+
+#[test]
+fn console_commands_are_routed_and_unknown_names_are_reported() {
+    let mut input =
+        b":tpye 1 + 1\n:type 1 + 1\n:members 1\n:history\n:timing on\n:zzz\n:quit\n".as_slice();
+    let mut output = Vec::new();
+    let mut session = AdmittedReplSession::new(Limits::default());
+    repl::run(&mut input, &mut output, &mut session).expect("REPL runs");
+    let text = String::from_utf8(output).expect("UTF-8");
+    assert!(text.contains("unknown command `:tpye`"), "{text}");
+    assert!(text.contains("did you mean `:type`?"), "{text}");
+    assert!(text.contains("Int\n"), "{text}");
+    assert!(text.contains("`:members` needs a record"), "{text}");
+    assert!(text.contains("unknown command `:zzz`"), "{text}");
+}
+
+#[test]
+fn unwatch_without_active_watch_is_refused_and_history_records_expressions() {
+    let mut input = b"1 + 1\n:unwatch\n:history\n:quit\n".as_slice();
+    let mut output = Vec::new();
+    let mut session = AdmittedReplSession::new(Limits::default());
+    repl::run(&mut input, &mut output, &mut session).expect("REPL runs");
+    let text = String::from_utf8(output).expect("UTF-8");
+    assert!(text.contains("error[ORNA-REPL-COMMAND]"), "{text}");
+    assert!(text.contains("   1  1 + 1\n"), "{text}");
 }

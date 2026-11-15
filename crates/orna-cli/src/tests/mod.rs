@@ -655,7 +655,7 @@ fn repl_repository_authority_is_reused_for_cwd_head_and_named_refs_without_git_m
             .submit("library.answer()")
             .expect("snapshot function evaluates")
             .expect("visible result");
-        assert_eq!(repl::inspect(&value), expected);
+        assert_eq!(repl_inspect::inspect(&value), expected);
     }
 
     let after = std::process::Command::new("git")
@@ -824,7 +824,7 @@ fn repl_snapshot_loader_keeps_a_selected_ref_stable_after_it_moves() {
         .submit("library.answer()")
         .expect("selected function evaluates")
         .expect("visible result");
-    assert_eq!(repl::inspect(&value), "42 : Int");
+    assert_eq!(repl_inspect::inspect(&value), "42 : Int");
 
     let after_head = git_output(&["rev-parse", "HEAD"]);
     let after_symbolic_head = git_output(&["symbolic-ref", "--quiet", "HEAD"]);
