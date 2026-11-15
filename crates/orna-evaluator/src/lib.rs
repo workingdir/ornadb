@@ -5172,10 +5172,10 @@ impl Context<'_, '_> {
 
 /// Closures and lazy stream/relation plans carry live evaluation state, so
 /// they are never stored or matched as reusable values.
-fn reusable_value(value: &Value) -> bool {
+pub(crate) fn reusable_value(value: &Value) -> bool {
     match value {
         Value::Closure(_) | Value::Stream { .. } | Value::Relation(_) => false,
-        Value::List(values) => values.iter().all(reusable_value),
+        Value::List(values) => values.reusable(),
         Value::Tuple(values) => values.iter().all(reusable_value),
         Value::Record(fields) => fields.values().all(reusable_value),
         Value::NominalRecord { fields, .. } => {
