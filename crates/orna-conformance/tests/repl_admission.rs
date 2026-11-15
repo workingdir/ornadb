@@ -180,3 +180,82 @@ fn loaded_project_snapshot_pairs_visibility_and_executable_bodies() {
         "ORNA-S012-UNRESOLVED"
     );
 }
+
+fn load_project(files: &[(&str, &str)]) -> (tempfile::TempDir, orna_project::LoadedProject) {
+    let project = tempfile::tempdir().unwrap();
+    assert!(
+        std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(project.path())
+            .status()
+            .unwrap()
+            .success()
+    );
+    for (path, source) in files {
+        std::fs::write(project.path().join(path), source).unwrap();
+    }
+    let repository = orna_repository::Repository::discover(project.path()).unwrap();
+    let loaded = orna_project::ProjectLoader::default()
+        .load(&repository)
+        .unwrap();
+    (project, loaded)
+}
+
+const ROOT_SIBLINGS: &str =
+    "pub fn helper(x: Int): Int = x + 1;\npub fn twice(x: Int): Int = helper(helper(x));\n";
+const ROOT_MUSIC: &str = "pub table Music(id: Str) { title: Str, artist: Str, }\n";
+
+#[test]
+fn project_repl_qualified_root_function_value_resolves_root_sibling() {
+    // ORNA-EVAL-NAME before the fix: a qualified root function used as a value
+    // (`map(main.helper)`) was evaluated as a field access on the module.
+    let (_project, loaded) = load_project(&[("main.orna", ROOT_SIBLINGS)]);
+    let mut session = AdmittedReplSession::from_loaded_project(
+        &loaded,
+        std::iter::empty::<(String, String)>(),
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        session.submit("main.twice(1)").unwrap(),
+        Some(Value::int(3.into()))
+    );
+    let as_value = session.submit("[1, 2] | map(main.helper)").unwrap();
+    let as_lambda = session.submit("[1, 2] | map(x => main.helper(x))").unwrap();
+    assert!(as_value.is_some());
+    assert_eq!(as_value, as_lambda);
+}
+
+#[test]
+fn project_repl_use_glob_imports_root_table_and_root_sibling_names() {
+    // ORNA-IMPORT-003: `use main.*;` imports every public name of the root
+    // module, tables included. Before the fix the glob matched nothing under the
+    // `main.` prefix and failed with ORNA-EVAL-NAME before the table was reached.
+    let (_project, loaded) = load_project(&[("main.orna", ROOT_SIBLINGS)]);
+    let mut session = AdmittedReplSession::from_loaded_project(
+        &loaded,
+        std::iter::empty::<(String, String)>(),
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(session.submit("use main.*;").unwrap(), None);
+    assert_eq!(
+        session.submit("twice(1)").unwrap(),
+        Some(Value::int(3.into()))
+    );
+
+    let (_project, loaded) = load_project(&[("main.orna", ROOT_MUSIC)]);
+    let mut session = AdmittedReplSession::from_loaded_project(
+        &loaded,
+        std::iter::empty::<(String, String)>(),
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(session.submit("use main.*;").unwrap(), None);
+    // The name now resolves; the table read itself is an effect the core
+    // session refuses, which proves the binding was found.
+    assert_eq!(
+        session.preview("Music").unwrap_err().code(),
+        "ORNA-REPL-EFFECT"
+    );
+}
