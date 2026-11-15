@@ -15,7 +15,7 @@
 # (169 cases), the evaluator's expression fixtures (42), the REPL admission
 # fixtures (14) and the pinned standard modules (77). 5,399 programs were excluded
 # at H0; the embedded interface tree (18, including the hand-written core.money (Money and the Currency protocol, loaded at the root environment), core.range, core.display, core.temperature and core.units), the native parser
-# fixtures (27) and the unit-family parser fixtures (12) were added later, and the orna-vfs save fixtures (4) moved in with the VFS split, so 5,467 programs are excluded here. The
+# fixtures (27) and the unit-family parser fixtures (12) were added later, and the orna-vfs save fixtures (4) moved in with the VFS split, so 5,472 programs are excluded here. The
 # follow-up PRs move them across family by family.
 
 [[excluded]]
@@ -40,7 +40,7 @@ reason = "checker fixtures feed the semantic adapter, whose per-fixture expected
 
 [[excluded]]
 scope = "crates/orna-cli/tests/fixtures"
-files = 159
+files = 161
 reason = "CLI fixtures are project directories, VFS and media mounts and captured-standard projects driven by process-level tests; they need the project and mount harnesses, not the module observer"
 
 [[excluded]]

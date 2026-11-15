@@ -2981,7 +2981,10 @@ fn binary_commit_and_check_type_check_the_shipped_query_test_module() {
 /// The pinned `std.list` closure plus `std.map` and its `encoding.ovb` dependency.
 fn pinned_map_closure() -> Vec<(&'static str, &'static str)> {
     let mut closure = pinned_list_closure().to_vec();
-    closure.push(("map.orna", include_str!("fixtures/captured-standard-map.orna")));
+    closure.push((
+        "map.orna",
+        include_str!("fixtures/captured-standard-map.orna"),
+    ));
     closure.push((
         "encoding/ovb.orna",
         include_str!("fixtures/captured-standard-encoding-ovb.orna"),

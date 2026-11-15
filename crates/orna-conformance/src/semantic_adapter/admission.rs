@@ -338,53 +338,7 @@ pub(super) fn admit_transaction_project_with(
             }
         }
     }
-    // A module import (`use std.list;`, `use std.list as l;`) binds `root.f` for
-    // every public function `f` of that module, keyed by the importing module's
-    // namespace, which is how the evaluator resolves `namespace::root.f`.
-    let standard_members = standard_public_functions(project)?;
-    for unit in project
-        .modules
-        .iter()
-        .filter(|unit| !is_standard_source(unit))
-    {
-        let importer = project_transaction_namespace(project, unit)
-            .map_err(|reason| Box::new(StageOutcome::Skipped { reason }))?;
-        for item in parse_module(&unit.source).value.items {
-            let Declaration::Use { path, tail } = item.declaration else {
-                continue;
-            };
-            if path.first().map(|segment| segment.name.as_str()) != Some("std") {
-                continue;
-            }
-            let root = match &tail {
-                orna_syntax_ast::UseTail::None => path.last().map(|segment| segment.name.clone()),
-                orna_syntax_ast::UseTail::Alias { name, .. } if name != "_" => Some(name.clone()),
-                _ => continue,
-            };
-            let Some(root) = root else {
-                continue;
-            };
-            let module = path
-                .iter()
-                .map(|segment| segment.name.as_str())
-                .collect::<Vec<_>>()
-                .join(".");
-            // A path that names no standard module is not a module import here;
-            // the semantic analysis above has already diagnosed any real miss.
-            let Some(members) = standard_members.get(&module) else {
-                continue;
-            };
-            for member in members {
-                functions.insert_alias(
-                    orna_evaluator::module_function_alias_key(
-                        &importer,
-                        &format!("{root}.{member}"),
-                    ),
-                    format!("{module}.{member}"),
-                );
-            }
-        }
-    }
+    bind_standard_module_imports(project, &mut functions)?;
     for (alias, target) in standard_aliases {
         if let Some(function) = functions.get(&target).cloned()
             && !functions.contains_key(&alias)
@@ -524,6 +478,62 @@ pub(super) fn project_transaction_namespace(
     // `main.orna` keeps the `main` prefix that root functions are run by.
     let stem = stem.strip_suffix("/main").unwrap_or(stem);
     Ok(stem.replace('/', "."))
+}
+
+/// Binds `root.f` for every public function `f` of each standard module that a
+/// project module imports, keyed by the importing module's namespace.
+fn bind_standard_module_imports(
+    project: &ProjectUnit,
+    functions: &mut Functions,
+) -> Result<(), AdmissionFailure> {
+    // A module import (`use std.list;`, `use std.list as l;`) binds `root.f` for
+    // every public function `f` of that module, keyed by the importing module's
+    // namespace, which is how the evaluator resolves `namespace::root.f`.
+    let standard_members = standard_public_functions(project)?;
+    for unit in project
+        .modules
+        .iter()
+        .filter(|unit| !is_standard_source(unit))
+    {
+        let importer = project_transaction_namespace(project, unit)
+            .map_err(|reason| Box::new(StageOutcome::Skipped { reason }))?;
+        for item in parse_module(&unit.source).value.items {
+            let Declaration::Use { path, tail } = item.declaration else {
+                continue;
+            };
+            if path.first().map(|segment| segment.name.as_str()) != Some("std") {
+                continue;
+            }
+            let root = match &tail {
+                orna_syntax_ast::UseTail::None => path.last().map(|segment| segment.name.clone()),
+                orna_syntax_ast::UseTail::Alias { name, .. } if name != "_" => Some(name.clone()),
+                _ => continue,
+            };
+            let Some(root) = root else {
+                continue;
+            };
+            let module = path
+                .iter()
+                .map(|segment| segment.name.as_str())
+                .collect::<Vec<_>>()
+                .join(".");
+            // A path that names no standard module is not a module import here;
+            // the semantic analysis above has already diagnosed any real miss.
+            let Some(members) = standard_members.get(&module) else {
+                continue;
+            };
+            for member in members {
+                functions.insert_alias(
+                    orna_evaluator::module_function_alias_key(
+                        &importer,
+                        &format!("{root}.{member}"),
+                    ),
+                    format!("{module}.{member}"),
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The public functions each admitted standard module declares, keyed by its
