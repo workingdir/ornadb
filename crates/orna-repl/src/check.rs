@@ -1,13 +1,14 @@
 //! Lowers and typechecks a composed module, then evaluates its entry on the executor.
 
 use orna_exec::{ExecError, ExecLimits, Globals, MemoryStore, Value, measure_entry_in};
+use orna_hir::diag::UNRESOLVED;
 use orna_hir::{
     DefId, DefKind, Lowering, ModulePath, Name, Program, SourceId, SourceUnit, print_type, typeck,
 };
 use orna_syntax::parse_session_module_with_file;
 
 use crate::compose::ENTRY;
-use crate::error::ReplError;
+use crate::error::{ReplError, unresolved};
 
 /// The module path the session's source lowers under.
 const MODULE: &str = "repl";
@@ -61,6 +62,17 @@ pub(crate) fn lower_checked(
         .find(|(module, _)| program.modules[*module].path.to_string() == MODULE)
         .map(|(_, diagnostic)| (diagnostic.code, diagnostic.message.to_string()));
     match first {
+        Some((UNRESOLVED, message)) if message.ends_with("is not in scope") => {
+            let name = message.split('`').nth(1).unwrap_or_default();
+            let modules: Vec<String> = program
+                .modules
+                .iter()
+                .filter(|module| module.path.to_string() != MODULE)
+                .filter(|module| module.exports.contains_key(&Name::new(name)))
+                .map(|module| module.path.to_string())
+                .collect();
+            Err(unresolved(name, &modules))
+        }
         Some((code, message)) => Err(ReplError::new(code, message)),
         None => Ok(program),
     }
