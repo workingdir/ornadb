@@ -692,7 +692,7 @@ fn binary_managed_local_repl_executes_integer_list_aggregates() {
     assert!(output.status.success());
     assert_eq!(
         output.stdout,
-        b"> 6 : Int\n> 1 : Int\n> 3 : Int\n> 0 : Int\n> null : Null\n> null : Null\n> ",
+        b"> 6 : Int\n> 1 : Int\n> 3 : Int\n> 0 : Int\n> null : Int?\n> null : Int?\n> ",
         "managed-local REPL must preserve typed aggregate results and null extrema"
     );
     assert!(output.stderr.is_empty());

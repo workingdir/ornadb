@@ -194,8 +194,9 @@ fn bare_capture_result_is_presented_as_a_payload_free_summary() {
 
     let stdout = String::from_utf8_lossy(&captured.stdout);
     let transcript = transcript(&captured);
-    // The summary is a metadata map, not a Blob.
-    assert!(stdout.contains(": Map"), "{transcript}");
+    // The summary is the Blob's metadata record, shown under the Blob type that
+    // sys.blob.capture_file declares.
+    assert!(stdout.contains(": Blob"), "{transcript}");
     for key in ["Blob", "length", "sha256"] {
         assert!(stdout.contains(key), "missing {key}\n{transcript}");
     }

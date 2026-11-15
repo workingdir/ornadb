@@ -2,8 +2,9 @@ use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Write as _;
 use std::io::{self, BufRead, Write};
 
+use orna_evaluator::{RelationDisplay, RelationWindow, ReplValue};
 use orna_live::live_presentation::{LivePresentationUpdate, ResyncRequest, WatchPresentation};
-use orna_project_repl::{AdmittedReplSession, ReplDetail, ReplError};
+use orna_project_repl::{AdmittedReplSession, ReplDetail, ReplError, ReplOutcome};
 use orna_protocol::{Envelope, Limits, Message, PresentNode};
 use orna_sys_id::SysType;
 use orna_value::{CanonicalSnapshot, CanonicalValue, canonical_uuid_text};
@@ -16,7 +17,7 @@ const MAX_INSPECT_TEXT: usize = 256;
 const REPL_HELP: &str = "commands: :help [name], :at CWD|HEAD|ref, :watch expression, :quit";
 
 type ReplSubmissionHandler<'a> =
-    dyn FnMut(&mut AdmittedReplSession, &str) -> Result<Option<CanonicalValue>, ReplFailure> + 'a;
+    dyn FnMut(&mut AdmittedReplSession, &str) -> Result<ReplOutcome, ReplFailure> + 'a;
 
 #[derive(Clone, Copy)]
 pub(super) enum AnsiColor {
@@ -614,12 +615,168 @@ pub(crate) fn write_repl_error<W: Write>(
     write_repl_failure(writer, &ReplFailure::code(code), "", color_enabled)
 }
 
-fn write_repl_value<W: Write>(
+/// Writes one submission's outcome: a value as `BODY : TYPE` with its static
+/// type, a relation as its bounded row window. An input without a value
+/// prints nothing.
+pub(crate) fn write_repl_outcome<W: Write>(
     writer: &mut W,
-    value: &CanonicalValue,
+    outcome: &ReplOutcome,
+    source: &str,
     color_enabled: bool,
 ) -> io::Result<()> {
-    write_rendered_value(writer, &inspect(value), color_enabled)
+    let ty = outcome.ty.as_ref().map(ToString::to_string);
+    match &outcome.value {
+        None => Ok(()),
+        Some(ReplValue::Value(value)) => {
+            let (body, runtime) = inspect_raw(value.raw(), 0);
+            write_result_line(
+                writer,
+                &body,
+                ty.as_deref().unwrap_or(runtime),
+                color_enabled,
+            )
+        }
+        Some(ReplValue::Relation(window)) => {
+            write_relation_window(writer, window, source, ty.as_deref(), color_enabled)
+        }
+    }
+}
+
+/// Writes `BODY : LABEL`: the result green, the type dim.
+fn write_result_line<W: Write>(
+    writer: &mut W,
+    body: &str,
+    label: &str,
+    color_enabled: bool,
+) -> io::Result<()> {
+    write_styled(writer, AnsiColor::Green, body.as_bytes(), color_enabled)?;
+    writer.write_all(b" : ")?;
+    write_styled(writer, AnsiColor::Dim, label.as_bytes(), color_enabled)?;
+    writer.write_all(b"\n")
+}
+
+/// Writes a relation window as its header, `SOURCE : Relation<T> · N rows`,
+/// then a table of its rows with one column per record field.
+fn write_relation_window<W: Write>(
+    writer: &mut W,
+    window: &RelationWindow,
+    source: &str,
+    ty: Option<&str>,
+    color_enabled: bool,
+) -> io::Result<()> {
+    let count = window.rows.len();
+    let extent = if window.has_more {
+        format!("first {count} rows")
+    } else {
+        format!("{count} rows")
+    };
+    write_styled(
+        writer,
+        AnsiColor::Green,
+        source_label(source).as_bytes(),
+        color_enabled,
+    )?;
+    writer.write_all(b" : ")?;
+    let label = format!("{} · {extent}", ty.unwrap_or("Relation"));
+    write_styled(writer, AnsiColor::Dim, label.as_bytes(), color_enabled)?;
+    writer.write_all(b"\n")?;
+
+    let rows: Vec<Vec<(String, String)>> =
+        window.rows.iter().map(|row| row_cells(row.raw())).collect();
+    let mut columns: Vec<String> = Vec::new();
+    for (name, _) in rows.iter().flatten() {
+        if !columns.contains(name) {
+            columns.push(name.clone());
+        }
+    }
+    if columns.is_empty() {
+        return Ok(());
+    }
+    let grid: Vec<Vec<String>> = rows
+        .iter()
+        .map(|row| {
+            columns
+                .iter()
+                .map(|column| {
+                    row.iter()
+                        .find(|(name, _)| name == column)
+                        .map_or_else(String::new, |(_, cell)| cell.clone())
+                })
+                .collect()
+        })
+        .collect();
+    let widths: Vec<usize> = columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            grid.iter()
+                .map(|row| row[index].chars().count())
+                .chain(std::iter::once(column.chars().count()))
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
+    write_table_row(writer, &columns, &widths, true, color_enabled)?;
+    for row in &grid {
+        write_table_row(writer, row, &widths, false, color_enabled)?;
+    }
+    Ok(())
+}
+
+/// Writes one table row with each cell padded to its column width; the
+/// header row is dim.
+fn write_table_row<W: Write>(
+    writer: &mut W,
+    cells: &[String],
+    widths: &[usize],
+    header: bool,
+    color_enabled: bool,
+) -> io::Result<()> {
+    let mut line = String::new();
+    for (index, (cell, width)) in cells.iter().zip(widths).enumerate() {
+        if index > 0 {
+            line.push_str("  ");
+        }
+        line.push_str(cell);
+        if index + 1 < cells.len() {
+            line.push_str(&" ".repeat(width.saturating_sub(cell.chars().count())));
+        }
+    }
+    if header {
+        write_styled(writer, AnsiColor::Dim, line.as_bytes(), color_enabled)?;
+    } else {
+        writer.write_all(line.as_bytes())?;
+    }
+    writer.write_all(b"\n")
+}
+
+/// The `(column, cell)` pairs of one relation row: a record's fields in
+/// order, or one `value` cell for a row that is not a record.
+fn row_cells(raw: &Raw) -> Vec<(String, String)> {
+    match raw {
+        Raw::Map(entries) => entries
+            .iter()
+            .map(|(key, value)| (column_name(key), inspect_raw(value, 1).0))
+            .collect(),
+        other => vec![("value".to_owned(), inspect_raw(other, 1).0)],
+    }
+}
+
+fn column_name(key: &Raw) -> String {
+    match key {
+        Raw::Text(text) => text.clone(),
+        other => inspect_raw(other, 1).0,
+    }
+}
+
+/// The relation's source text as a single header line.
+fn source_label(source: &str) -> String {
+    source
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Writes one `RESULT : TYPE` rendering: the result green, the type dim.
@@ -689,7 +846,7 @@ pub fn run_with_loader_and_submitter<
     R: BufRead,
     W: Write,
     L: SnapshotSessionLoader + ?Sized,
-    S: FnMut(&mut AdmittedReplSession, &str) -> Result<Option<CanonicalValue>, ReplFailure>,
+    S: FnMut(&mut AdmittedReplSession, &str) -> Result<ReplOutcome, ReplFailure>,
     F: WatchFrameSource + ?Sized,
 >(
     reader: &mut R,
@@ -806,11 +963,14 @@ fn run_loop<
                 } else {
                     let result = match submitter.as_deref_mut() {
                         Some(submit) => submit(session, &source),
-                        None => session.submit(&source).map_err(ReplFailure::from),
+                        None => session
+                            .submit_outcome(&source, RelationDisplay::Window)
+                            .map_err(ReplFailure::from),
                     };
                     match result {
-                        Ok(Some(value)) => write_repl_value(writer, &value, color_enabled)?,
-                        Ok(None) => {}
+                        Ok(outcome) => {
+                            write_repl_outcome(writer, &outcome, &source, color_enabled)?;
+                        }
                         Err(failure) => {
                             write_repl_failure(writer, &failure, &source, color_enabled)?;
                         }
@@ -1137,6 +1297,9 @@ fn inspect_raw(raw: &Raw, depth: usize) -> (String, &'static str) {
         // into an alternate persistence encoding.
         Raw::Tag(37, value) => inspect_uuid(value),
         Raw::Tag(tag, value) => {
+            if let Some(shown) = fixed_point_display(*tag, value) {
+                return shown;
+            }
             let (text, _) = inspect_raw(value, depth + 1);
             match registered_tag_name(*tag) {
                 Some(name) => (format!("{name}({text})"), name),
@@ -1154,6 +1317,69 @@ fn inspect_uuid(value: &Raw) -> (String, &'static str) {
         return ("Uuid(<invalid>)".into(), "Uuid");
     };
     (canonical_uuid_text(bytes), "Uuid")
+}
+
+/// The plain body of a Decimal (`60000`) or Money (`60007`) payload: the
+/// amount only. Money's currency is a UUID witness that the value never reduces
+/// to a code, so its `Money<CODE>` label comes from the static type. Any other
+/// payload shape keeps the structural fallback.
+fn fixed_point_display(tag: u64, value: &Raw) -> Option<(String, &'static str)> {
+    match tag {
+        60000 => Some((decimal_payload_text(value)?, "Decimal")),
+        60007 => {
+            let Raw::Array(parts) = value else {
+                return None;
+            };
+            let [Raw::Tag(60000, amount), _] = parts.as_slice() else {
+                return None;
+            };
+            Some((decimal_payload_text(amount)?, "Money"))
+        }
+        _ => None,
+    }
+}
+
+/// Plain decimal text of a `[coefficient, exponent]` payload, such as `3.1415`
+/// for `[31415, -4]`.
+fn decimal_payload_text(value: &Raw) -> Option<String> {
+    let Raw::Array(parts) = value else {
+        return None;
+    };
+    let [Raw::Int(coefficient), Raw::Int(exponent)] = parts.as_slice() else {
+        return None;
+    };
+    plain_decimal(&coefficient.to_string(), &exponent.to_string())
+}
+
+/// Renders `coefficient * 10^exponent` in positional form, trimming trailing
+/// fraction zeroes. It works on the decimal digit strings, so it stays exact at
+/// any magnitude the canonical payload admits.
+fn plain_decimal(coefficient: &str, exponent: &str) -> Option<String> {
+    let exponent: i64 = exponent.parse().ok()?;
+    let (sign, digits) = match coefficient.strip_prefix('-') {
+        Some(digits) => ("-", digits),
+        None => ("", coefficient),
+    };
+    if digits == "0" {
+        return Some("0".to_owned());
+    }
+    if exponent >= 0 {
+        let zeros = "0".repeat(usize::try_from(exponent).ok()?);
+        return Some(format!("{sign}{digits}{zeros}"));
+    }
+    let places = usize::try_from(exponent.checked_neg()?).ok()?;
+    let padded = if digits.len() <= places {
+        format!("{}{digits}", "0".repeat(places - digits.len() + 1))
+    } else {
+        digits.to_owned()
+    };
+    let (whole, fraction) = padded.split_at(padded.len() - places);
+    let fraction = fraction.trim_end_matches('0');
+    if fraction.is_empty() {
+        Some(format!("{sign}{whole}"))
+    } else {
+        Some(format!("{sign}{whole}.{fraction}"))
+    }
 }
 
 /// Type name of each OVB 1.1 registered tag (60000..=60027). Such a value is
@@ -1457,11 +1683,31 @@ mod tests {
         );
         let date = Raw::Tag(60001, Box::new(Raw::Text("2026-11-07".into())));
         for (raw, expected) in [
-            (decimal, "Decimal([125, -2]) : Decimal"),
+            (decimal, "1.25 : Decimal"),
             (date, "Date(\"2026-11-07\") : Date"),
         ] {
             let value = CanonicalValue::new(raw).expect("registered tag is canonical");
             assert_eq!(inspect(&value), expected);
+        }
+    }
+
+    #[test]
+    fn decimal_body_is_its_plain_amount() {
+        for (coefficient, exponent, expected) in [
+            (31415, -4, "3.1415"),
+            (-125, -2, "-1.25"),
+            (5, -3, "0.005"),
+            (12, 3, "12000"),
+        ] {
+            let raw = Raw::Tag(
+                60000,
+                Box::new(Raw::Array(vec![
+                    Raw::Int(coefficient.into()),
+                    Raw::Int(exponent.into()),
+                ])),
+            );
+            let value = CanonicalValue::new(raw).expect("registered tag is canonical");
+            assert_eq!(inspect(&value), format!("{expected} : Decimal"));
         }
     }
 
@@ -1715,7 +1961,7 @@ mod tests {
         assert!(!status_payload.contains("private"), "{output}");
         assert!(status_payload.contains("\"redacted\": true"), "{output}");
         assert!(
-            output.ends_with("> 42 : Int\n> null : Null\n> "),
+            output.ends_with("> 42 : Int\n> null : { code: Str, message: Str, redacted: Bool, severity: Str }?\n> "),
             "{output}"
         );
     }
