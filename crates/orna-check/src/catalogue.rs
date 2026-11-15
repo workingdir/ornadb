@@ -18,7 +18,7 @@ pub struct Catalogue {
     /// evaluation.  These are deliberately separate from `modules`: current
     /// declarations must never become historical definitions merely because
     /// they happen to have the same name.
-    pub(crate) historical_modules: BTreeMap<Namespace, ModuleHeader>,
+    pub(crate) historical_modules: Arc<BTreeMap<Namespace, ModuleHeader>>,
     /// The verified source provenance used to admit the source-backed
     /// standard modules, when this catalogue contains any.
     pub(crate) standard_dependency_profile: Option<StandardDependencyProfile>,
@@ -66,8 +66,7 @@ impl Catalogue {
         modules: impl IntoIterator<Item = ModuleHeader>,
     ) -> Self {
         for module in modules {
-            self.historical_modules
-                .insert(module.namespace.clone(), module);
+            Arc::make_mut(&mut self.historical_modules).insert(module.namespace.clone(), module);
         }
         self
     }
@@ -228,7 +227,7 @@ impl Catalogue {
             modules,
             attached_symbols: BTreeMap::new(),
             attached_databases: BTreeSet::new(),
-            historical_modules: BTreeMap::new(),
+            historical_modules: Arc::new(BTreeMap::new()),
             standard_dependency_profile: None,
             source_units: BTreeMap::new(),
             source_dimensions: BTreeMap::new(),

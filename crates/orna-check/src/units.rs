@@ -348,8 +348,8 @@ pub(crate) fn source_scale_expression(
 /// independent of manifest order.
 pub(crate) fn stabilize_function_summaries(
     parsed: &[(Namespace, SyntaxTree)],
-    modules: &mut BTreeMap<Namespace, ModuleHeader>,
-    historical_modules: &BTreeMap<Namespace, ModuleHeader>,
+    modules: &mut Arc<BTreeMap<Namespace, ModuleHeader>>,
+    historical_modules: &Arc<BTreeMap<Namespace, ModuleHeader>>,
     attached_symbols: &BTreeMap<String, Symbol>,
     attached_databases: &BTreeSet<String>,
     dependency_summaries: &mut BTreeMap<Namespace, BTreeMap<String, BTreeSet<String>>>,
@@ -361,62 +361,82 @@ pub(crate) fn stabilize_function_summaries(
         .sum::<usize>()
         .saturating_add(1);
     for _ in 0..pass_limit {
-        let before = modules.clone();
-        let dependencies_before = dependency_summaries.clone();
+        // Set when a module's symbols or exports, or a dependency summary, change
+        // in this pass. A pass with no change is the fixed point. Comparing against
+        // a snapshot taken before the pass would copy every module header per pass.
+        let mut changed = false;
         for (namespace, tree) in parsed {
             let Some(header) = modules.get(namespace).cloned() else {
                 continue;
             };
-            let mut discarded = Vec::new();
-            let scope = resolve_imports_with_dependencies(
-                namespace,
-                tree,
-                &header,
-                ImportInputs {
-                    modules,
-                    historical_modules,
-                    attached_symbols,
-                    attached_databases,
-                    dependency_summaries,
-                    units,
-                },
-                &mut discarded,
-            );
-            let mut symbols = header.symbols;
-            for symbol in symbols.values_mut() {
-                canonicalize_symbol(symbol, &scope.nominal_identities);
-                normalize_symbol_quantities(symbol, &scope);
-            }
-            for item in &tree.items {
-                if matches!(item.declaration, Declaration::Function { .. }) {
-                    check_function(item, &mut symbols, &scope, &mut discarded);
+            let (symbols, exports) = {
+                let mut discarded = Vec::new();
+                let scope = resolve_imports_with_dependencies(
+                    namespace,
+                    tree,
+                    &header,
+                    ImportInputs {
+                        modules: &*modules,
+                        historical_modules,
+                        attached_symbols,
+                        attached_databases,
+                        dependency_summaries,
+                        units,
+                    },
+                    &mut discarded,
+                );
+                let mut symbols = header.symbols;
+                for symbol in symbols.values_mut() {
+                    canonicalize_symbol(symbol, &scope.nominal_identities);
+                    normalize_symbol_quantities(symbol, &scope);
                 }
-            }
-            let summaries = scope.function_dependencies.borrow();
-            let local_summaries = dependency_summaries.entry(namespace.clone()).or_default();
-            for item in &tree.items {
-                let Declaration::Function { signature, .. } = &item.declaration else {
-                    continue;
-                };
-                if let Some(dependencies) = summaries.get(&signature.name) {
-                    local_summaries.insert(signature.name.clone(), dependencies.clone());
+                for item in &tree.items {
+                    if matches!(item.declaration, Declaration::Function { .. }) {
+                        check_function(item, &mut symbols, &scope, &mut discarded);
+                    }
                 }
-            }
-            let conversion_metadata = conversion_metadata(&scope);
-            attach_conversion_metadata(&mut symbols, &conversion_metadata);
-            attach_currency_metadata(&mut symbols, &scope.currency_types);
-            attach_table_references(&mut symbols);
-            if let Some(module) = modules.get_mut(namespace) {
-                module.symbols = symbols;
-                module.exports = module
-                    .symbols
+                let summaries = scope.function_dependencies.borrow();
+                if !dependency_summaries.contains_key(namespace) {
+                    changed = true;
+                }
+                let local_summaries = dependency_summaries.entry(namespace.clone()).or_default();
+                for item in &tree.items {
+                    let Declaration::Function { signature, .. } = &item.declaration else {
+                        continue;
+                    };
+                    if let Some(dependencies) = summaries.get(&signature.name) {
+                        let previous =
+                            local_summaries.insert(signature.name.clone(), dependencies.clone());
+                        if previous.as_ref() != Some(dependencies) {
+                            changed = true;
+                        }
+                    }
+                }
+                let conversion_metadata = conversion_metadata(&scope);
+                attach_conversion_metadata(&mut symbols, &conversion_metadata);
+                attach_currency_metadata(&mut symbols, &scope.currency_types);
+                attach_table_references(&mut symbols);
+                let exports = symbols
                     .iter()
                     .filter(|(_, symbol)| symbol.public && !type_contains_error(&symbol.ty))
                     .map(|(name, symbol)| (name.clone(), symbol.clone()))
-                    .collect();
+                    .collect::<BTreeMap<_, _>>();
+                (symbols, exports)
+            };
+            // The scope above is gone, so the module map is unshared and the write
+            // does not copy it.
+            let unchanged = modules
+                .get(namespace)
+                .is_some_and(|module| module.symbols == symbols && module.exports == exports);
+            if !unchanged {
+                changed = true;
+                if let Some(module) = crate::module_map_mut(modules).get_mut(namespace) {
+                    module.symbols = symbols;
+                    module.exports = exports;
+                }
             }
         }
-        if *modules == before && *dependency_summaries == dependencies_before {
+        if !changed {
             break;
         }
     }
@@ -1329,6 +1349,24 @@ pub(crate) fn canonicalize_symbol(symbol: &mut Symbol, identities: &BTreeMap<Str
     }
 }
 
+/// Whether canonicalizing `module` would change one of its symbols. A module is
+/// written only when this holds, so an unchanged module is never copied out of
+/// the map that scopes share.
+fn module_needs_canonicalization(
+    module: &ModuleHeader,
+    identities: &BTreeMap<String, String>,
+) -> bool {
+    module
+        .symbols
+        .values()
+        .chain(module.exports.values())
+        .any(|symbol| {
+            let mut canonical = symbol.clone();
+            canonicalize_symbol(&mut canonical, identities);
+            canonical != *symbol
+        })
+}
+
 pub(crate) fn canonicalize_scope_metadata(
     scope: &mut Scope,
     namespace: &Namespace,
@@ -1336,12 +1374,25 @@ pub(crate) fn canonicalize_scope_metadata(
 ) {
     populate_nominal_identities(scope, namespace, tree);
     let identities = scope.nominal_identities.clone();
-    for module in scope.available_modules.values_mut() {
-        for symbol in module.symbols.values_mut() {
-            canonicalize_symbol(symbol, &identities);
-        }
-        for symbol in module.exports.values_mut() {
-            canonicalize_symbol(symbol, &identities);
+    let rewritten = scope
+        .available_modules
+        .iter()
+        .filter(|(_, module)| module_needs_canonicalization(module, &identities))
+        .map(|(namespace, _)| namespace.clone())
+        .collect::<Vec<_>>();
+    if !rewritten.is_empty() {
+        let modules = crate::module_map_mut(&mut scope.available_modules);
+        for namespace in &rewritten {
+            let Some(module) = modules.get_mut(namespace) else {
+                continue;
+            };
+            for symbol in module
+                .symbols
+                .values_mut()
+                .chain(module.exports.values_mut())
+            {
+                canonicalize_symbol(symbol, &identities);
+            }
         }
     }
     for symbol in scope.names.values_mut() {

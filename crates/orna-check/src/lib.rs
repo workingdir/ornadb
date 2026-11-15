@@ -10,6 +10,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use num_bigint::BigInt;
 use num_traits::{One, Signed, Zero};
@@ -928,7 +929,7 @@ fn fixture_modules(catalogue: &mut Catalogue, rows: &FixtureRows) {
         .and_then(|module| module.exports.get("Contact"))
         .cloned()
         .expect("fixture Contact projection");
-    catalogue.historical_modules.insert(
+    Arc::make_mut(&mut catalogue.historical_modules).insert(
         Namespace(vec!["directory".into()]),
         fixture_module(
             Namespace(vec!["directory".into()]),
@@ -936,7 +937,7 @@ fn fixture_modules(catalogue: &mut Catalogue, rows: &FixtureRows) {
             true,
         ),
     );
-    catalogue.historical_modules.insert(
+    Arc::make_mut(&mut catalogue.historical_modules).insert(
         Namespace(vec!["energy".into()]),
         fixture_module(
             Namespace(vec!["energy".into()]),
@@ -2081,9 +2082,10 @@ fn analyze_recording_origins(
         .iter()
         .map(|(namespace, tree)| (namespace.clone(), source_enum_variant_rows(namespace, tree)))
         .collect::<BTreeMap<_, _>>();
+    let mut modules = Arc::new(std::mem::take(&mut result.modules));
     stabilize_function_summaries(
         &parsed,
-        &mut result.modules,
+        &mut modules,
         &catalogue.historical_modules,
         &catalogue.attached_symbols,
         &catalogue.attached_databases,
@@ -2100,7 +2102,7 @@ fn analyze_recording_origins(
     let mut secret_aliases: BTreeMap<String, Type> = BTreeMap::new();
     let mut secret_spellings: BTreeMap<Namespace, BTreeMap<String, String>> = BTreeMap::new();
     for (namespace, tree) in &parsed {
-        let Some(header) = result.modules.get(namespace) else {
+        let Some(header) = modules.get(namespace) else {
             continue;
         };
         let mut scratch = result.diagnostics.clone();
@@ -2109,7 +2111,7 @@ fn analyze_recording_origins(
             tree,
             header,
             ImportInputs {
-                modules: &result.modules,
+                modules: &modules,
                 historical_modules: &catalogue.historical_modules,
                 attached_symbols: &catalogue.attached_symbols,
                 attached_databases: &catalogue.attached_databases,
@@ -2118,7 +2120,7 @@ fn analyze_recording_origins(
             },
             &mut scratch,
         );
-        let spellings = secret_identity_spellings(namespace, tree, &scope, &result.modules);
+        let spellings = secret_identity_spellings(namespace, tree, &scope, &modules);
         secret_definitions(
             namespace,
             tree,
@@ -2130,7 +2132,7 @@ fn analyze_recording_origins(
     }
     for (namespace, tree) in &parsed {
         origins.enter_namespace(&result.diagnostics, namespace);
-        let Some(header) = result.modules.get(namespace).cloned() else {
+        let Some(header) = modules.get(namespace).cloned() else {
             continue;
         };
         let mut scope = resolve_imports_with_dependencies(
@@ -2138,7 +2140,7 @@ fn analyze_recording_origins(
             tree,
             &header,
             ImportInputs {
-                modules: &result.modules,
+                modules: &modules,
                 historical_modules: &catalogue.historical_modules,
                 attached_symbols: &catalogue.attached_symbols,
                 attached_databases: &catalogue.attached_databases,
@@ -2156,7 +2158,7 @@ fn analyze_recording_origins(
         // can reach is in the merged environment, including wildcard-imported
         // catalogue units whose module never becomes a `scope.modules` alias.
         scope.source_units = Rc::clone(&units.units);
-        let imported_enums = imported_enum_bindings(tree, &source_enums, &result.modules);
+        let imported_enums = imported_enum_bindings(tree, &source_enums, &modules);
         scope.payload_enum_types.extend(
             imported_enums
                 .iter()
@@ -2198,20 +2200,29 @@ fn analyze_recording_origins(
         attach_conversion_metadata(&mut symbols, &conversion_metadata);
         attach_currency_metadata(&mut symbols, &scope.currency_types);
         attach_table_references(&mut symbols);
-        if let Some(module) = result.modules.get_mut(namespace) {
-            module.symbols = symbols;
-            module.exports = module
-                .symbols
-                .iter()
-                .filter(|(_, s)| s.public && !type_contains_error(&s.ty))
-                .map(|(n, s)| (n.clone(), s.clone()))
-                .collect();
-        }
+        let exports = symbols
+            .iter()
+            .filter(|(_, s)| s.public && !type_contains_error(&s.ty))
+            .map(|(n, s)| (n.clone(), s.clone()))
+            .collect::<BTreeMap<_, _>>();
         result.assertions.insert(namespace.clone(), plans);
+        // The scope shares the module map. It must end before the write below,
+        // or the write copies every module header; a retained scope keeps its
+        // pre-write snapshot, which is what the semantic payload path reads.
         if retain_context {
             contexts.push((namespace.clone(), tree.clone(), scope));
+        } else {
+            drop(scope);
+        }
+        if let Some(module) = module_map_mut(&mut modules).get_mut(namespace) {
+            module.symbols = symbols;
+            module.exports = exports;
         }
     }
+    result.modules = Arc::try_unwrap(modules).unwrap_or_else(|shared| {
+        note_module_map_copy(shared.len());
+        (*shared).clone()
+    });
     result.source_enums = source_enums;
     origins.finish(&result.diagnostics);
     // Admission-wide diagnostics belong to no item, so they are reported after
@@ -5764,5 +5775,46 @@ const FAIL_CLOSED_SECRET_IDENTITY: &str = "Secret";
 /// Such an assertion is evaluated on every write instead of being skipped.
 pub const UNRESOLVED_TABLE_DEPENDENCY: &str = "*";
 
+/// Mutable access to a module map that may still be shared with a live scope.
+/// `Arc::make_mut` copies a shared map; that copy is what the counter records.
+pub(crate) fn module_map_mut(
+    map: &mut Arc<BTreeMap<Namespace, ModuleHeader>>,
+) -> &mut BTreeMap<Namespace, ModuleHeader> {
+    if Arc::strong_count(map) > 1 {
+        note_module_map_copy(map.len());
+    }
+    Arc::make_mut(map)
+}
+
 #[cfg(test)]
 mod tests;
+
+// Module headers deep-copied while analysing a project. The module map is
+// shared between module scopes, so a non-zero count means a per-module copy
+// of every other module's header has crept back in.
+#[cfg(test)]
+thread_local! {
+    static MODULE_HEADER_COPIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn note_module_map_copy(headers: usize) {
+    MODULE_HEADER_COPIES.with(|copies| copies.set(copies.get() + headers));
+}
+
+#[cfg(not(test))]
+#[inline]
+pub(crate) fn note_module_map_copy(_headers: usize) {}
+
+#[cfg(test)]
+pub(crate) fn module_header_copies() -> usize {
+    MODULE_HEADER_COPIES.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_module_header_copies() {
+    MODULE_HEADER_COPIES.with(|copies| copies.set(0));
+}
+
+#[cfg(test)]
+mod module_map_sharing_tests;
