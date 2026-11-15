@@ -71,6 +71,8 @@ mod item_checks;
 pub(crate) use item_checks::*;
 mod flow;
 pub(crate) use flow::*;
+mod span_index;
+use span_index::ItemSpans;
 mod inference;
 pub(crate) use inference::*;
 mod collections;
@@ -1825,7 +1827,7 @@ pub fn check_standard_sources(
                 .iter()
                 .map(|item| item.span.start..item.span.end)
                 .collect::<Vec<_>>();
-            (logical_path.clone(), spans)
+            (logical_path.clone(), ItemSpans::new(spans))
         })
         .collect::<BTreeMap<_, _>>();
     let mut by_item: BTreeMap<(String, usize), Vec<ItemDiagnosticSpan<'_>>> = BTreeMap::new();
@@ -1836,10 +1838,7 @@ pub fn check_standard_sources(
         let Some(spans) = item_spans.get(&logical_path) else {
             continue;
         };
-        let Some(index) = spans
-            .iter()
-            .position(|span| span.start <= primary.start && primary.end <= span.end)
-        else {
+        let Some(index) = spans.containing(&primary) else {
             continue;
         };
         by_item
