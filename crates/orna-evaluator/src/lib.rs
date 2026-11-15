@@ -6288,6 +6288,16 @@ impl Context<'_, '_> {
                         stages: Vec::new(),
                     }));
                 }
+                // A qualified function path used as a value (`main.helper`,
+                // `map(main.helper)`) names a function, not a record field on
+                // the module root. Resolve it exactly as a call site does, so
+                // the root binding is never evaluated as a bare name.
+                if let Some(name) = self.resolve_function_name(expression, scope) {
+                    return Ok(Value::Function {
+                        name,
+                        nominal_definitions: scope.3.clone(),
+                    });
+                }
                 let base = self.evaluate(base, scope, depth + 1)?;
                 self.field_value(base, name, scope)
             }

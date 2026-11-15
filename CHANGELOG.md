@@ -6,6 +6,7 @@ been published.
 
 ## Unreleased
 - Added (ornadb-id4gh, HIR exec `ovb.decode<T>`): the engine decodes `Float`, `Duration`, `Money<C>` and refined aliases (`pub type Score = Int { assert >= 0; }`) at their declared type. A `Money` value must carry the currency the type names (`ORNA-EVAL-VALUE` otherwise), and a refined value whose predicate fails is refused with `ORNA-A091-008`. Enum and period decode, encoding of the refined tag, and the std `as:` side remain not yet implemented.
+- Fixed (ornadb-5il1.195, ornadb-5il1.227): the project REPL resolves a qualified root-module function used as a value (`[1, 2] | map(main.helper)`) instead of failing `ORNA-EVAL-NAME`, and `use main.*;` in a project whose root module declares a table now imports that table (ORNA-IMPORT-003), so a following bare `Music.update(...)` resolves rather than failing `ORNA-EVAL-NAME`.
 
 - Changed (ornadb-lyyyv, ornadb-fctec, `ORNA_REPL_HIR=1` only): `orna repl` on HIR reports a rejected input with a located diagnostic. An unresolved name gets its span, one `use` hint per module that exports it, then the `declare` hint, as the old path does; a parse failure carries the parser code and span; a bare `$_` with no prior result reports `ORNA-S012-UNRESOLVED` on HIR while the old path keeps `ORNA-EVAL-NAME`. The old path is otherwise unchanged. The repl-HIR differential ratchet drops from 28 rows to 14: 15 now agree and were removed, and five annotated-mismatch and fn-body rows are listed as DIAG because HIR's `ORNA-INFER-011` omits the constraint and spans that INFER-011 requires.
 
