@@ -13,6 +13,7 @@ use unicode_casefold::UnicodeCaseFold;
 use unicode_normalization::{UnicodeNormalization, is_nfc};
 
 use super::*;
+use crate::canonical_needs::{symbol_needs_canonicalization, type_needs_canonicalization};
 
 /// Resolves dimension and unit declarations to their reduced dimension bases
 /// and unit metadata. Declarations that cannot be reduced are omitted, so
@@ -1360,11 +1361,7 @@ fn module_needs_canonicalization(
         .symbols
         .values()
         .chain(module.exports.values())
-        .any(|symbol| {
-            let mut canonical = symbol.clone();
-            canonicalize_symbol(&mut canonical, identities);
-            canonical != *symbol
-        })
+        .any(|symbol| symbol_needs_canonicalization(symbol, identities))
 }
 
 pub(crate) fn canonicalize_scope_metadata(
@@ -1398,8 +1395,14 @@ pub(crate) fn canonicalize_scope_metadata(
     for symbol in scope.names.values_mut() {
         canonicalize_symbol(symbol, &identities);
     }
-    for row in scope.table_rows.values_mut() {
-        *row = canonicalize_type_with_identities(row, &identities);
+    if scope
+        .table_rows
+        .values()
+        .any(|row| type_needs_canonicalization(row, &identities))
+    {
+        for row in scope.table_rows.values_mut() {
+            *row = canonicalize_type_with_identities(row, &identities);
+        }
     }
     let mut nominal_rows = BTreeMap::new();
     for item in &tree.items {

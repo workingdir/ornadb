@@ -63,6 +63,7 @@ mod scope;
 pub(crate) use scope::*;
 mod std_support;
 pub(crate) use std_support::*;
+mod canonical_needs;
 mod units;
 pub use units::*;
 mod imports;
