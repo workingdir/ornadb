@@ -1424,7 +1424,7 @@ pub(crate) fn canonicalize_scope_metadata(
             }
         }
     }
-    scope.nominal_rows = nominal_rows;
+    scope.nominal_rows = nominal_rows.into();
     let mut private_fields = BTreeMap::new();
     for item in &tree.items {
         let Declaration::Type {
@@ -1450,7 +1450,7 @@ pub(crate) fn canonicalize_scope_metadata(
             private_fields.insert(nominal_identity(namespace, name), hidden);
         }
     }
-    scope.nominal_private_fields = private_fields;
+    scope.nominal_private_fields = private_fields.into();
     for value in scope.refined_types.values_mut() {
         *value = canonicalize_type_with_identities(value, &identities);
     }
@@ -1507,7 +1507,7 @@ pub(crate) fn normalize_scope_quantities(scope: &mut Scope) {
     let table_rows = normalize_rows(&scope.table_rows);
     let nominal_rows = normalize_rows(&scope.nominal_rows);
     let refined_types = normalize_rows(&scope.refined_types);
-    let enum_variants = scope
+    let enum_variants: CowTable<EnumPayloads> = scope
         .enum_variants
         .iter()
         .map(|(name, variants)| {
@@ -1518,9 +1518,9 @@ pub(crate) fn normalize_scope_quantities(scope: &mut Scope) {
             (name.clone(), variants)
         })
         .collect();
-    scope.table_rows = table_rows;
-    scope.nominal_rows = nominal_rows;
-    scope.refined_types = refined_types;
+    scope.table_rows = table_rows.into();
+    scope.nominal_rows = nominal_rows.into();
+    scope.refined_types = refined_types.into();
     scope.enum_variants = enum_variants;
 }
 

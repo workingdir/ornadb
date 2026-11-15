@@ -63,7 +63,7 @@ pub(crate) fn resolve_imports_with_dependencies(
     import_protocol_members(&mut scope, tree, modules);
     import_dependency_provenance(&mut scope, tree, modules, dependency_summaries);
     canonicalize_scope_metadata(&mut scope, namespace, tree);
-    scope.currency_types = currency_types(namespace, tree, &scope);
+    scope.currency_types = currency_types(namespace, tree, &scope).into();
     install_attached_type_rows(&mut scope, attached_symbols);
     collect_protocol_implementations(&mut scope, tree);
 
@@ -80,18 +80,18 @@ pub(crate) fn module_scope(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Scope {
     Scope {
-        names: header.symbols.clone(),
+        names: header.symbols.clone().into(),
         current_namespace: None,
         source_units: Rc::clone(&inputs.units.units),
         source_dimensions: Rc::clone(&inputs.units.dimensions),
-        function_dependencies: RefCell::new(BTreeMap::new()),
+        function_dependencies: Rc::new(RefCell::new(BTreeMap::new())),
         unlinked_system_members: None,
-        ambiguous: BTreeSet::new(),
-        nominal_identities: BTreeMap::new(),
-        modules: BTreeMap::new(),
+        ambiguous: CowTable::default(),
+        nominal_identities: CowTable::default(),
+        modules: CowTable::default(),
         available_modules: Arc::clone(inputs.modules),
         historical_modules: Arc::clone(inputs.historical_modules),
-        attached_databases: inputs.attached_databases.clone(),
+        attached_databases: inputs.attached_databases.clone().into(),
         // Row shapes and automatic-key tables are keyed by the same qualified
         // identity that table symbols carry, never by the bare declared name.
         table_rows: tree
@@ -115,8 +115,8 @@ pub(crate) fn module_scope(
             })
             .collect(),
         nominal_rows: tree.items.iter().filter_map(nominal_row_type).collect(),
-        nominal_private_fields: BTreeMap::new(),
-        secret_types: BTreeSet::new(),
+        nominal_private_fields: CowTable::default(),
+        secret_types: CowTable::default(),
         private_field_owner: None,
         allow_local_private_nominal_construction: false,
         local_nominal_names: tree
@@ -148,10 +148,10 @@ pub(crate) fn module_scope(
                 _ => None,
             })
             .collect(),
-        currency_types: BTreeSet::new(),
-        enum_variants: enum_variant_types(tree, diagnostics),
-        payload_enum_types: payload_enum_names(tree),
-        imported_enum_variants: BTreeMap::new(),
+        currency_types: CowTable::default(),
+        enum_variants: enum_variant_types(tree, diagnostics).into(),
+        payload_enum_types: payload_enum_names(tree).into(),
+        imported_enum_variants: CowTable::default(),
         type_aliases: tree
             .items
             .iter()
@@ -200,9 +200,9 @@ pub(crate) fn module_scope(
             })
             .collect(),
         generic_type_bounds: BTreeMap::new(),
-        protocol_implementations: BTreeMap::new(),
-        nominal_conversions: BTreeMap::new(),
-        nominal_conversion_effects: BTreeMap::new(),
+        protocol_implementations: CowTable::default(),
+        nominal_conversions: CowTable::default(),
+        nominal_conversion_effects: CowTable::default(),
         return_frames: RefCell::new(Vec::new()),
     }
 }
@@ -548,8 +548,8 @@ pub(crate) fn import_dependency_provenance(
     // the public ModuleHeader/Symbol representations. Qualified calls use the
     // module binding (including aliases); named and wildcard imports use their
     // lexical binding.
-    for (alias, target) in scope.modules.clone() {
-        let Some(summaries) = dependency_summaries.get(&target) else {
+    for (alias, target) in &scope.modules {
+        let Some(summaries) = dependency_summaries.get(target) else {
             continue;
         };
         for (name, dependencies) in summaries {

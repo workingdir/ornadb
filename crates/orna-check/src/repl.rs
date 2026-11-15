@@ -356,7 +356,7 @@ impl ReplContext {
                 .filter(|(_, variants)| variants.values().any(|fields| !fields.is_empty()))
                 .map(|(spelling, _)| spelling.clone()),
         );
-        scope.imported_enum_variants = imported_enums;
+        scope.imported_enum_variants = imported_enums.into();
         scope.unlinked_system_members = self.system_providers.admission_record();
         scope
     }

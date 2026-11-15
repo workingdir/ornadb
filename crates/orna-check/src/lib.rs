@@ -2152,7 +2152,8 @@ fn analyze_recording_origins(
         scope.current_namespace = Some(namespace.clone());
         scope.unlinked_system_members = unlinked_system_members.clone();
         let spellings = secret_spellings.get(namespace).cloned().unwrap_or_default();
-        scope.secret_types = imported_secret_types(tree, &spellings, &secret_rows, &secret_aliases);
+        scope.secret_types =
+            imported_secret_types(tree, &spellings, &secret_rows, &secret_aliases).into();
         // Import visibility is enforced by `scope.names`; every unit a name
         // can reach is in the merged environment, including wildcard-imported
         // catalogue units whose module never becomes a `scope.modules` alias.
@@ -2164,7 +2165,7 @@ fn analyze_recording_origins(
                 .filter(|(_, variants)| variants.values().any(|fields| !fields.is_empty()))
                 .map(|(spelling, _)| spelling.clone()),
         );
-        scope.imported_enum_variants = imported_enums;
+        scope.imported_enum_variants = imported_enums.into();
         let mut symbols = header.symbols.clone();
         for symbol in symbols.values_mut() {
             canonicalize_symbol(symbol, &scope.nominal_identities);
