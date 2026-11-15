@@ -20,6 +20,82 @@ use crate::{
 #[cfg(feature = "system-host-bindings")]
 use crate::{SysHostAttachment, SysHostContext};
 
+/// Rows a REPL relation result retains for display. A relation is fetched
+/// no further than this many rows; `has_more` reports any remainder.
+const REPL_RELATION_WINDOW_ROWS: usize = 20;
+
+/// How a submitted REPL result is presented. `Reject` keeps the canonical
+/// value contract, under which a relation has no value and is an error.
+/// `Window` returns a relation as a bounded window of its rows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RelationDisplay {
+    Reject,
+    Window,
+}
+
+/// The result of one admitted REPL input.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReplValue {
+    Value(CanonicalValue),
+    Relation(RelationWindow),
+}
+
+/// A bounded window of a relation result, in relation order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RelationWindow {
+    pub rows: Vec<CanonicalValue>,
+    /// Whether the relation holds rows beyond `rows`.
+    pub has_more: bool,
+}
+
+impl ReplValue {
+    /// The canonical value, or `None` for a relation window.
+    #[must_use]
+    pub fn canonical(&self) -> Option<&CanonicalValue> {
+        match self {
+            Self::Value(value) => Some(value),
+            Self::Relation(_) => None,
+        }
+    }
+
+    /// Converts to a canonical value. A relation has none and is rejected.
+    pub fn into_canonical(self) -> Result<CanonicalValue, EvaluationError> {
+        match self {
+            Self::Value(value) => Ok(value),
+            Self::Relation(_) => Err(error("ORNA-EVAL-UNSUPPORTED")),
+        }
+    }
+}
+
+/// The unconverted result of one evaluation.
+enum Evaluated {
+    Value(Box<crate::Value>),
+    Window(Box<RelationWindow>),
+}
+
+impl Evaluated {
+    fn into_canonical(self) -> Result<CanonicalValue, EvaluationError> {
+        match self {
+            Self::Value(value) => (*value).canonical_repl_result(),
+            Self::Window(_) => Err(error("ORNA-EVAL-UNSUPPORTED")),
+        }
+    }
+
+    fn into_repl(self) -> Result<ReplValue, EvaluationError> {
+        match self {
+            Self::Value(value) => (*value).canonical_repl_result().map(ReplValue::Value),
+            Self::Window(window) => Ok(ReplValue::Relation(*window)),
+        }
+    }
+
+    fn discard(self) -> Result<(), EvaluationError> {
+        match self {
+            Self::Value(value) => (*value).discard_result(),
+            Self::Window(_) => Ok(()),
+        }
+    }
+}
+
 /// A bounded ephemeral module for one interactive Orna session.
 ///
 /// The supplied environment and functions are already admitted by the caller.
@@ -219,10 +295,9 @@ impl ReplSession {
         &mut self,
         input: &ReplInput,
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
-        let mut candidate = self.clone();
-        let result = candidate.submit_checked(input, None)?;
-        *self = candidate;
-        Ok(result)
+        self.submit_admitted_with(input, None, None, RelationDisplay::Reject)?
+            .map(ReplValue::into_canonical)
+            .transpose()
     }
 
     /// Executes one already admitted effectful input against a candidate
@@ -233,31 +308,9 @@ impl ReplSession {
         input: &ReplInput,
         effects: &mut dyn crate::EffectHandler,
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
-        let mut candidate = self.clone();
-        let result = match input {
-            ReplInput::Expression(expression) => {
-                let value = candidate.evaluate_with_effects(expression, effects)?;
-                candidate.last_success = Some(value.clone());
-                Some(value)
-            }
-            ReplInput::ExpressionStatement(expression) => {
-                candidate.evaluate_discarded(expression, None, Some(effects))?;
-                None
-            }
-            ReplInput::Item(item) => {
-                match &item.declaration {
-                    Declaration::Let { pattern, value, .. } => {
-                        candidate.let_binding(pattern, value, None, Some(effects))?;
-                    }
-                    // A function or import declaration evaluates nothing, so
-                    // it is declared exactly as the pure path declares it.
-                    declaration => candidate.declare_admitted(declaration, None)?,
-                }
-                None
-            }
-        };
-        *self = candidate;
-        Ok(result)
+        self.submit_admitted_with(input, None, Some(effects), RelationDisplay::Reject)?
+            .map(ReplValue::into_canonical)
+            .transpose()
     }
 
     /// Executes one already-admitted input with an explicit operation token.
@@ -268,10 +321,32 @@ impl ReplSession {
         input: &ReplInput,
         cancellation: &CancellationToken,
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
-        cancellation.check()?;
+        self.submit_admitted_with(input, Some(cancellation), None, RelationDisplay::Reject)?
+            .map(ReplValue::into_canonical)
+            .transpose()
+    }
+
+    /// Executes one already-admitted input, optionally under a cancellation
+    /// token and an effect handler, and returns its result as `display` asks.
+    /// A relation result is returned as a bounded row window only for
+    /// [`RelationDisplay::Window`]. The candidate is published only after
+    /// evaluation, every effect call, and the final cancellation fence all
+    /// succeed.
+    pub fn submit_admitted_with(
+        &mut self,
+        input: &ReplInput,
+        cancellation: Option<&CancellationToken>,
+        effects: Option<&mut dyn crate::EffectHandler>,
+        display: RelationDisplay,
+    ) -> Result<Option<ReplValue>, EvaluationError> {
+        if let Some(cancellation) = cancellation {
+            cancellation.check()?;
+        }
         let mut candidate = self.clone();
-        let result = candidate.submit_checked(input, Some(cancellation))?;
-        cancellation.check()?;
+        let result = candidate.submit_admitted_value(input, cancellation, effects, display)?;
+        if let Some(cancellation) = cancellation {
+            cancellation.check()?;
+        }
         *self = candidate;
         Ok(result)
     }
@@ -307,26 +382,32 @@ impl ReplSession {
         }
     }
 
-    fn submit_checked(
+    fn submit_admitted_value(
         &mut self,
         input: &ReplInput,
         cancellation: Option<&CancellationToken>,
-    ) -> Result<Option<CanonicalValue>, EvaluationError> {
-        if let Some(cancellation) = cancellation {
-            cancellation.check()?;
-        }
+        effects: Option<&mut dyn crate::EffectHandler>,
+        display: RelationDisplay,
+    ) -> Result<Option<ReplValue>, EvaluationError> {
         match input {
             ReplInput::Expression(expression) => {
-                let value = self.evaluate(expression, cancellation)?;
-                self.last_success = Some(value.clone());
+                let value = self
+                    .evaluate_inner(expression, cancellation, effects, display)?
+                    .into_repl()?;
+                self.last_success = value.canonical().cloned();
                 Ok(Some(value))
             }
             ReplInput::ExpressionStatement(expression) => {
-                self.evaluate_discarded(expression, cancellation, None)?;
+                self.evaluate_discarded(expression, cancellation, effects)?;
                 Ok(None)
             }
             ReplInput::Item(item) => {
-                self.declare_admitted(&item.declaration, cancellation)?;
+                match &item.declaration {
+                    Declaration::Let { pattern, value, .. } => {
+                        self.let_binding(pattern, value, cancellation, effects)?;
+                    }
+                    declaration => self.declare_admitted(declaration, cancellation)?,
+                }
                 Ok(None)
             }
         }
@@ -346,17 +427,8 @@ impl ReplSession {
         expression: &Expr,
         cancellation: Option<&CancellationToken>,
     ) -> Result<CanonicalValue, EvaluationError> {
-        self.evaluate_inner(expression, cancellation, None)
-            .and_then(crate::Value::canonical_repl_result)
-    }
-
-    fn evaluate_with_effects(
-        &self,
-        expression: &Expr,
-        effects: &mut dyn crate::EffectHandler,
-    ) -> Result<CanonicalValue, EvaluationError> {
-        self.evaluate_inner(expression, None, Some(effects))
-            .and_then(crate::Value::canonical_repl_result)
+        self.evaluate_inner(expression, cancellation, None, RelationDisplay::Reject)?
+            .into_canonical()
     }
 
     fn evaluate_discarded(
@@ -365,8 +437,8 @@ impl ReplSession {
         cancellation: Option<&CancellationToken>,
         effects: Option<&mut dyn crate::EffectHandler>,
     ) -> Result<(), EvaluationError> {
-        self.evaluate_inner(expression, cancellation, effects)?
-            .discard_result()
+        self.evaluate_inner(expression, cancellation, effects, RelationDisplay::Reject)?
+            .discard()
     }
 
     /// The evaluator activation every REPL input runs in: session-owned code
@@ -393,7 +465,8 @@ impl ReplSession {
         expression: &Expr,
         cancellation: Option<&CancellationToken>,
         effects: Option<&mut dyn crate::EffectHandler>,
-    ) -> Result<crate::Value, EvaluationError> {
+        display: RelationDisplay,
+    ) -> Result<Evaluated, EvaluationError> {
         self.reject_ambiguous_expression(expression)?;
         let mut environment = self.environment.clone();
         if let Some(value) = &self.last_success {
@@ -419,7 +492,24 @@ impl ReplSession {
         if context.transfer.is_some() {
             return Err(error("ORNA-EVAL-UNSUPPORTED"));
         }
-        Ok(value)
+        if let (RelationDisplay::Window, crate::Value::Relation(plan)) = (display, &value) {
+            let mut rows = Vec::new();
+            let mut has_more = false;
+            context.for_each_relation_value(plan, 0, |context, row| {
+                if rows.len() == REPL_RELATION_WINDOW_ROWS {
+                    has_more = true;
+                    return Ok(false);
+                }
+                rows.push(row.canonical_repl_result()?);
+                context.items(rows.len())?;
+                Ok(true)
+            })?;
+            return Ok(Evaluated::Window(Box::new(RelationWindow {
+                rows,
+                has_more,
+            })));
+        }
+        Ok(Evaluated::Value(Box::new(value)))
     }
 
     fn declare(&mut self, declaration: Declaration) -> Result<(), EvaluationError> {

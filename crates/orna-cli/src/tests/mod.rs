@@ -983,7 +983,9 @@ fn run_repl_submission<W: io::Write>(
     color_enabled: bool,
 ) -> Result<(), Diagnostic> {
     let mut submitter = |session: &mut AdmittedReplSession, source: &str| {
-        session.submit(source).map_err(repl::ReplFailure::from)
+        session
+            .submit_outcome(source, orna_evaluator::RelationDisplay::Window)
+            .map_err(repl::ReplFailure::from)
     };
     run_repl_submission_with(session, source, writer, color_enabled, &mut submitter)
 }

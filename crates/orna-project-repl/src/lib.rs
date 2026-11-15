@@ -28,8 +28,8 @@ use sha2::{Digest as _, Sha256};
 
 use orna_evaluator::{
     CancellationToken, Environment, EvaluationError, Functions, Limits, NominalDefinition,
-    NominalDefinitions, NominalField, PureFunction, ReplSession, module_function_alias_key,
-    source_enum_definitions,
+    NominalDefinitions, NominalField, PureFunction, RelationDisplay, ReplSession, ReplValue,
+    module_function_alias_key, source_enum_definitions,
 };
 use orna_evaluator::{reference_standard_profile, reference_standard_sources};
 
@@ -126,6 +126,14 @@ impl ReplError {
         ]))
         .expect("redacted status record is canonical")
     }
+}
+
+/// One executed REPL input: its result as the requested display asks for it,
+/// and its static type. A declaration has neither a value nor a type.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReplOutcome {
+    pub value: Option<ReplValue>,
+    pub ty: Option<Type>,
 }
 
 /// Canonically admitted source ready for a transaction-aware evaluator.
@@ -400,6 +408,21 @@ impl AdmittedReplSession {
     /// completed submission updates `$?`: successful submissions publish
     /// `null`; rejected submissions publish their redacted diagnostic.
     pub fn submit(&mut self, source: &str) -> Result<Option<CanonicalValue>, ReplError> {
+        self.submit_outcome(source, RelationDisplay::Reject)?
+            .value
+            .map(|value| value.into_canonical().map_err(ReplError::runtime))
+            .transpose()
+    }
+
+    /// As [`Self::submit`], but returns the result as `display` asks and the
+    /// input's static type. A relation result is returned as a bounded row
+    /// window only for [`RelationDisplay::Window`]; under `Reject` it is an
+    /// error before any session state is published.
+    pub fn submit_outcome(
+        &mut self,
+        source: &str,
+        display: RelationDisplay,
+    ) -> Result<ReplOutcome, ReplError> {
         let input = match self.parse(source) {
             Ok(input) => input,
             Err(error) => return Err(self.publish_failure(error)),
@@ -411,8 +434,12 @@ impl AdmittedReplSession {
         if admission.effects.is_effectful() {
             return Err(self.publish_failure(effect_rejection(&admission.effects)));
         }
+        let ty = admission.ty.clone();
         let mut runtime = self.runtime.clone();
-        let value = match runtime.submit_admitted(&input).map_err(ReplError::runtime) {
+        let value = match runtime
+            .submit_admitted_with(&input, None, None, display)
+            .map_err(ReplError::runtime)
+        {
             Ok(value) => value,
             Err(error) => return Err(self.publish_failure(error)),
         };
@@ -425,7 +452,7 @@ impl AdmittedReplSession {
         );
         self.runtime = runtime;
         self.semantic = semantic;
-        Ok(value)
+        Ok(ReplOutcome { value, ty })
     }
 
     /// Executes a checked input with explicitly installed native sys providers.
@@ -1199,6 +1226,16 @@ mod tests {
             .load_with_standard_profile(&repository, profile)
             .unwrap();
         (directory, project)
+    }
+
+    #[test]
+    fn submit_outcome_reports_the_static_type_of_a_scalar_result() {
+        let mut session = AdmittedReplSession::new(Limits::default());
+        let outcome = session
+            .submit_outcome("1 + 1", RelationDisplay::Window)
+            .expect("scalar submission succeeds");
+        assert_eq!(outcome.value, Some(ReplValue::Value(Value::int(2.into()))));
+        assert_eq!(outcome.ty.map(|ty| ty.to_string()), Some("Int".to_owned()));
     }
 
     #[test]

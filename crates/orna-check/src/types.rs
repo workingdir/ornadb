@@ -1,6 +1,7 @@
 //! The semantic value types: types, symbols, tables and modules.
 
 use super::*;
+use std::fmt;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Type {
@@ -67,6 +68,105 @@ pub enum Type {
     Bottom,
     /// A diagnostic has already been emitted; this is never a dynamic Any.
     Error,
+}
+
+/// The REPL-facing spelling of a static type, as shown after a result
+/// (`3 : Int`, `"a" : Str`, `main.Contact : Relation<Contact>`).
+impl fmt::Display for Type {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Int => f.write_str("Int"),
+            Self::Decimal => f.write_str("Decimal"),
+            Self::Float => f.write_str("Float"),
+            Self::Date => f.write_str("Date"),
+            Self::Instant => f.write_str("Instant"),
+            Self::Text => f.write_str("Str"),
+            Self::Bool => f.write_str("Bool"),
+            Self::Null => f.write_str("Null"),
+            Self::Unit => f.write_str("Unit"),
+            Self::List(element) => write!(f, "[{element}]"),
+            Self::Range(element) => write!(f, "Range<{element}>"),
+            Self::Relation(element) => write!(f, "Relation<{element}>"),
+            Self::Stream(element) => write!(f, "Stream<{element}>"),
+            Self::Record(fields) => {
+                f.write_str("{")?;
+                for (index, (name, ty)) in fields.iter().enumerate() {
+                    if index > 0 {
+                        f.write_str(",")?;
+                    }
+                    write!(f, " {name}: {ty}")?;
+                }
+                if !fields.is_empty() {
+                    f.write_str(" ")?;
+                }
+                f.write_str("}")
+            }
+            Self::Tuple(elements) => {
+                f.write_str("(")?;
+                write_separated(f, elements)?;
+                f.write_str(")")
+            }
+            Self::Optional(element) => write!(f, "{element}?"),
+            Self::Applied { base, arguments } => {
+                write!(f, "{base}<")?;
+                write_separated(f, arguments)?;
+                f.write_str(">")
+            }
+            Self::Quantity {
+                numeric,
+                dimension_basis,
+                ..
+            } => {
+                write!(f, "{numeric}")?;
+                if dimension_basis.is_empty() {
+                    return Ok(());
+                }
+                f.write_str("<")?;
+                for (index, (dimension, exponent)) in dimension_basis.iter().enumerate() {
+                    if index > 0 {
+                        f.write_str("·")?;
+                    }
+                    f.write_str(&dimension.display())?;
+                    if *exponent != 1 {
+                        write!(f, "^{exponent}")?;
+                    }
+                }
+                f.write_str(">")
+            }
+            Self::MoneyPerUnit { currency, unit } => write!(f, "Money<{currency}>/{unit}"),
+            Self::Function {
+                parameters,
+                parameter_names,
+                result,
+                ..
+            } => {
+                f.write_str("fn(")?;
+                for (index, parameter) in parameters.iter().enumerate() {
+                    if index > 0 {
+                        f.write_str(", ")?;
+                    }
+                    match parameter_names.as_ref().and_then(|names| names.get(index)) {
+                        Some(name) => write!(f, "{name}: {parameter}")?,
+                        None => write!(f, "{parameter}")?,
+                    }
+                }
+                write!(f, "): {result}")
+            }
+            Self::Named(name) => f.write_str(name),
+            Self::Bottom => f.write_str("Never"),
+            Self::Error => f.write_str("<error>"),
+        }
+    }
+}
+
+fn write_separated(f: &mut fmt::Formatter<'_>, types: &[Type]) -> fmt::Result {
+    for (index, ty) in types.iter().enumerate() {
+        if index > 0 {
+            f.write_str(", ")?;
+        }
+        write!(f, "{ty}")?;
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

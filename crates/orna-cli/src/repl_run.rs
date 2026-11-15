@@ -1,14 +1,14 @@
 #[cfg(test)]
 use super::repl_request::FIRST_SYS_DISPATCH_RUNNING;
 use super::{
-    AdmittedReplSession, ApplicationError, Arc, BufReader, CanonicalValue, ColorMode, Diagnostic,
-    Endpoint, Limits, PinnedCommittedRows, QueryObservationRegistration, Rc, RefCell,
-    ReplEvaluationFailure, ReplSnapshotSessionLoader, ReplTransactionScope, ReplTransactions,
-    ReplWriterInputs, RequestIdentity, Reserved, STORE_COMMIT_REMEDY, StageOutcome,
-    StagedTableActivation, TableActivationError, ValidatedTableRequestActivationCommit,
-    committed_rows_at, diagnostic_documentation, ensure_writer, io, project_declares_assertions,
-    repl, repl_effect_failure, repl_request_fingerprint, repl_session, request_nonce,
-    runtime_identity, transactional_loaded_project_candidate_validator, transactions_unavailable,
+    AdmittedReplSession, ApplicationError, Arc, BufReader, ColorMode, Diagnostic, Endpoint, Limits,
+    PinnedCommittedRows, QueryObservationRegistration, Rc, RefCell, ReplEvaluationFailure,
+    ReplSnapshotSessionLoader, ReplTransactionScope, ReplTransactions, ReplWriterInputs,
+    RequestIdentity, Reserved, STORE_COMMIT_REMEDY, StageOutcome, StagedTableActivation,
+    TableActivationError, ValidatedTableRequestActivationCommit, committed_rows_at,
+    diagnostic_documentation, ensure_writer, io, project_declares_assertions, repl,
+    repl_effect_failure, repl_request_fingerprint, repl_session, request_nonce, runtime_identity,
+    transactional_loaded_project_candidate_validator, transactions_unavailable,
 };
 
 /// Submits one input for a bound repository whose transaction capability is
@@ -19,9 +19,11 @@ pub(crate) fn run_repl_input_unavailable(
     session: &mut AdmittedReplSession,
     source: &str,
     unavailable: &repl::ReplFailure,
-) -> Result<Option<CanonicalValue>, repl::ReplFailure> {
+) -> Result<orna_project_repl::ReplOutcome, repl::ReplFailure> {
     if session.stage_activation(source).is_err() {
-        return session.submit(source).map_err(repl::ReplFailure::from);
+        return session
+            .submit_outcome(source, orna_evaluator::RelationDisplay::Window)
+            .map_err(repl::ReplFailure::from);
     }
     Err(unavailable.clone())
 }
@@ -32,9 +34,11 @@ pub(crate) fn run_repl_input(
     transactions: Option<&mut ReplTransactions>,
     session: &mut AdmittedReplSession,
     source: &str,
-) -> Result<Option<CanonicalValue>, repl::ReplFailure> {
+) -> Result<orna_project_repl::ReplOutcome, repl::ReplFailure> {
     let Ok(staged) = session.stage_activation(source) else {
-        return session.submit(source).map_err(repl::ReplFailure::from);
+        return session
+            .submit_outcome(source, orna_evaluator::RelationDisplay::Window)
+            .map_err(repl::ReplFailure::from);
     };
     let (Some(repository), Some(transactions)) = (repository, transactions) else {
         return Err(repl::ReplFailure::from(
@@ -164,6 +168,7 @@ pub(crate) fn run_repl_input(
         query_id,
     )?;
     let mut running = reserved.start(admission)?;
+    let ty = staged.result_type().cloned();
     let evaluation = transactions
         .authority
         .evaluate_staged_repl_transaction(session, staged, &scope, bindings);
@@ -184,7 +189,7 @@ pub(crate) fn run_repl_input(
         // terminal outcome instead of being left running.
         running.settle_read()?;
         *session = successor;
-        return Ok(value);
+        return Ok(staged_outcome(value, ty));
     }
     let Ok(activation) =
         activation.stage_for_request(&transactions.authority, snapshot.context(), request)
@@ -294,7 +299,19 @@ pub(crate) fn run_repl_input(
     }
     running.record_committed();
     *session = successor;
-    Ok(value)
+    Ok(staged_outcome(value, ty))
+}
+
+/// The outcome of an effectful input: its canonical value, presented as a
+/// value, together with the static type the checker admitted for it.
+fn staged_outcome(
+    value: Option<orna_value::CanonicalValue>,
+    ty: Option<orna_check::Type>,
+) -> orna_project_repl::ReplOutcome {
+    orna_project_repl::ReplOutcome {
+        value: value.map(orna_evaluator::ReplValue::Value),
+        ty,
+    }
 }
 
 /// Reported when external effects may already have happened after evaluation
@@ -391,24 +408,24 @@ pub(crate) fn run_repl_submission_with<W, S>(
 ) -> Result<(), Diagnostic>
 where
     W: io::Write,
-    S: FnMut(&mut AdmittedReplSession, &str) -> Result<Option<CanonicalValue>, repl::ReplFailure>,
+    S: FnMut(
+        &mut AdmittedReplSession,
+        &str,
+    ) -> Result<orna_project_repl::ReplOutcome, repl::ReplFailure>,
 {
     if source.trim() == ":quit" {
         return Ok(());
     }
     match submitter(session, source) {
-        Ok(Some(value)) => {
-            repl::write_rendered_value(writer, &repl::inspect(&value), color_enabled).map_err(
-                |_| {
-                    Diagnostic::target(
-                        "E2200",
-                        "REPL console I/O failed",
-                        "check the terminal input and output streams, then start a new session",
-                    )
-                },
-            )
+        Ok(outcome) => {
+            repl::write_repl_outcome(writer, &outcome, source, color_enabled).map_err(|_| {
+                Diagnostic::target(
+                    "E2200",
+                    "REPL console I/O failed",
+                    "check the terminal input and output streams, then start a new session",
+                )
+            })
         }
-        Ok(None) => Ok(()),
         Err(failure) => {
             let body = failure
                 .detail
