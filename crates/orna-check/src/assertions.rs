@@ -897,7 +897,7 @@ pub(crate) fn secret_identity_spellings(
     scope: &Scope,
     modules: &BTreeMap<Namespace, ModuleHeader>,
 ) -> BTreeMap<String, String> {
-    let mut spellings = scope.nominal_identities.clone();
+    let mut spellings = BTreeMap::clone(&scope.nominal_identities);
     let mut declared = BTreeSet::new();
     for item in &tree.items {
         let Declaration::Type {
