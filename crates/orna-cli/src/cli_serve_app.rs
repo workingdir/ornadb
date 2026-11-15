@@ -150,12 +150,12 @@ impl ServeApp {
                         staged.value().raw(),
                         Some(commit.as_str()),
                     ),
-                    || crate::repl::inspect(staged.value()),
+                    || crate::repl_inspect::inspect(staged.value()),
                 )
             }
             ServedValue::Contextual(value) => page(
                 crate::ui_render::render_ui_page(&value, Some(commit.as_str())),
-                || crate::repl::inspect_context(&value),
+                || crate::repl_inspect::inspect_context(&value),
             ),
         }
     }
@@ -1077,7 +1077,10 @@ fn console_submit(console: &mut Result<AdmittedReplSession, String>, source: &st
                 let html =
                     crate::ui_render::render_value_html(value.raw(), None).unwrap_or_else(|| {
                         let mut text = String::from("<pre><code>");
-                        crate::ui_render::push_escaped(&crate::repl::inspect(&value), &mut text);
+                        crate::ui_render::push_escaped(
+                            &crate::repl_inspect::inspect(&value),
+                            &mut text,
+                        );
                         text.push_str("</code></pre>");
                         text
                     });
