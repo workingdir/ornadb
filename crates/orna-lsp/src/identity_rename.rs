@@ -50,6 +50,23 @@ impl Step {
     }
 }
 
+/// Why an object identity cannot be carried by a rename.
+pub(crate) enum CarryFailure {
+    /// The repository format has no object identities, so there is nothing to carry.
+    LegacyFormat(String),
+    /// The identity cannot be read or matched. The rename is refused, so an identity
+    /// is never lost silently (ORNA-OBJECT-003).
+    Blocked(String),
+}
+
+impl CarryFailure {
+    fn reason(&self) -> &str {
+        match self {
+            Self::LegacyFormat(reason) | Self::Blocked(reason) => reason,
+        }
+    }
+}
+
 /// Identity renames returned to the client and not yet saved, per document.
 #[derive(Default)]
 pub(crate) struct PendingRenames {
@@ -59,14 +76,15 @@ pub(crate) struct PendingRenames {
 impl PendingRenames {
     /// The table or field identity rename a rename request at `position` of
     /// `document` implies. `Ok(None)` when the file is outside a repository or the
-    /// rename changes no identity.
+    /// rename changes no identity. `Err(Blocked)` when the identity cannot be read or
+    /// matched, so the rename must be refused.
     pub(crate) fn rename_for_request(
         &self,
         document: Option<&Document>,
         uri: &Uri,
         position: Position,
         new_name: &str,
-    ) -> Result<Option<ObjectIdentityRename>, String> {
+    ) -> Result<Option<ObjectIdentityRename>, CarryFailure> {
         let Some(document) = document else {
             return Ok(None);
         };
@@ -122,9 +140,9 @@ impl PendingRenames {
             })
             .collect::<Vec<_>>();
         if pending_fields.len() > 1 {
-            return Err(format!(
+            return Err(CarryFailure::Blocked(format!(
                 "the field name {old_name} matches several pending renames"
-            ));
+            )));
         }
         if let Some(rename) = pending_fields.first() {
             let current = rename.new_qualified_name();
@@ -155,7 +173,9 @@ impl PendingRenames {
             return Ok(None);
         };
         if matches.next().is_some() {
-            return Err(format!("the field name {old_name} matches several fields"));
+            return Err(CarryFailure::Blocked(format!(
+                "the field name {old_name} matches several fields"
+            )));
         }
         let parent = &record.qualified_name()[..record.qualified_name().len() - old_name.len()];
         Ok(Some(ObjectIdentityRename::new(
@@ -266,7 +286,8 @@ impl PendingRenames {
             .load(&repository)
             .map_err(|error| format!("{error:?}"))?;
         let modules = project.into_modules();
-        let (staged, previous) = staged_identities(&repository)?;
+        let (staged, previous) =
+            staged_identities(&repository).map_err(|failure| failure.reason().to_owned())?;
         // Intermediate destinations are not in the saved source, so the furthest
         // applied step that reconciles against it is the one saved.
         // `Ok(None)`: no step of the chain reached the saved text, so the rename was
@@ -368,44 +389,50 @@ impl PendingRenames {
 /// unverified store.
 fn staged_identities(
     repository: &Repository,
-) -> Result<(StagedCandidate, ObjectIdentityManifest), String> {
+) -> Result<(StagedCandidate, ObjectIdentityManifest), CarryFailure> {
     repository
         .refuse_unretained_committed_store()
-        .map_err(|error| format!("{error:?}"))?;
+        .map_err(|error| CarryFailure::Blocked(format!("{error:?}")))?;
     require_identity_format(repository)?;
     let staged = repository
         .capture_staged_candidate()
-        .map_err(|error| format!("{error:?}"))?;
+        .map_err(|error| CarryFailure::Blocked(format!("{error:?}")))?;
     let identities = ObjectIdentityManifest::read_staged(repository, &staged)
-        .map_err(|error| format!("{error:?}"))?
-        .ok_or_else(|| "the staged object identities are missing".to_owned())?;
+        .map_err(|error| CarryFailure::Blocked(format!("{error:?}")))?
+        .ok_or_else(|| {
+            CarryFailure::Blocked("the staged object identities are missing".to_owned())
+        })?;
     Ok((staged, identities))
 }
 
 /// Object identities exist only in format 3. Older repositories refuse the
 /// carry rather than renaming without an identity.
-fn require_identity_format(repository: &Repository) -> Result<(), String> {
+fn require_identity_format(repository: &Repository) -> Result<(), CarryFailure> {
     let format = repository
         .open_format_context()
-        .map_err(|error| format!("{error:?}"))?;
+        .map_err(|error| CarryFailure::Blocked(format!("{error:?}")))?;
     if format.repository_format() == RepositoryFormat::Format3 {
         Ok(())
     } else {
-        Err("this repository uses a legacy format without object identities".to_owned())
+        Err(CarryFailure::LegacyFormat(
+            "this repository uses a legacy format without object identities".to_owned(),
+        ))
     }
 }
 
-/// Whether a rename of `target` concerns an object identity. Only declared
-/// tables and fields have one; local names, functions and modules do not.
+/// Whether a rename of `target` concerns an object identity. Only declared tables
+/// and the fields of a table have one; local names, functions, modules, and the
+/// fields of types and variants do not.
 pub(crate) fn carries_identity(workspace: &Workspace, target: &Target) -> bool {
-    match target {
-        Target::Declared { module, index } => matches!(
-            workspace.declaration(*module, *index).kind,
-            DeclaredKind::Table
-                | DeclaredKind::Field
-                | DeclaredKind::KeyField
-                | DeclaredKind::PayloadField
-        ),
+    let Target::Declared { module, index } = target else {
+        return false;
+    };
+    let declared = workspace.declaration(*module, *index);
+    match declared.kind {
+        DeclaredKind::Table => true,
+        DeclaredKind::Field | DeclaredKind::KeyField | DeclaredKind::PayloadField => declared
+            .owner
+            .is_some_and(|owner| workspace.declaration(*module, owner).kind == DeclaredKind::Table),
         _ => false,
     }
 }

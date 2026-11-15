@@ -15,7 +15,9 @@ use std::thread::{self, JoinHandle};
 use crate::analysis;
 use crate::diagnostics::{self, DiagnosticsWorker, Publisher, Snapshot};
 use crate::documents::{Document, PositionMapper};
-use crate::identity_rename::{PendingRenames, carries_identity, identity_not_carried};
+use crate::identity_rename::{
+    CarryFailure, PendingRenames, carries_identity, identity_not_carried,
+};
 use crate::project::{ProjectHome, ProjectLocator};
 use crate::rename::{self, ModuleEdits, Refusal};
 use crate::requests::RequestPool;
@@ -1007,18 +1009,25 @@ fn request_rename(
         verify_project_check(state, &home, &workspace, &edits)?;
     }
     let changes = workspace_changes(&workspace, &edits);
-    // Only declared tables and fields have identities. Local names, functions
-    // and modules never consult the identity store, so they never warn. An
-    // identity that cannot be carried never fails an ordinary rename: the plain
-    // workspace edit is returned with a warning.
+    // Only declared tables and table fields have identities. Local names,
+    // functions, modules and type fields never consult the identity store, so they
+    // never warn. A table or field identity that cannot be read or matched refuses
+    // the rename, so the identity is never lost silently (ORNA-OBJECT-003). A format
+    // without object identities has none to carry, so its rename warns instead.
     let identity = if carries_identity(&workspace, &renamable.target) {
-        state
-            .pending_identity_renames
-            .rename_for_request(state.document(&uri), &uri, position, &params.new_name)
-            .unwrap_or_else(|error| {
-                state.show_warning(&identity_not_carried(&error));
+        match state.pending_identity_renames.rename_for_request(
+            state.document(&uri),
+            &uri,
+            position,
+            &params.new_name,
+        ) {
+            Ok(identity) => identity,
+            Err(CarryFailure::LegacyFormat(reason)) => {
+                state.show_warning(&identity_not_carried(&reason));
                 None
-            })
+            }
+            Err(CarryFailure::Blocked(reason)) => return Err(refused_identity(&reason)),
+        }
     } else {
         None
     };
@@ -1035,9 +1044,11 @@ fn request_rename(
                     .pending_identity_renames
                     .stage(&uri, rename, document, expected_text);
             }
-            None => state.show_warning(&identity_not_carried(
-                "the renamed text could not be matched to the document",
-            )),
+            None => {
+                return Err(refused_identity(
+                    "the renamed text could not be matched to the document",
+                ));
+            }
         }
     }
     let workspace_edit = WorkspaceEdit {
@@ -1050,6 +1061,13 @@ fn request_rename(
 
 fn refused(refusal: Refusal) -> Box<dyn std::error::Error + Send + Sync> {
     Box::new(RequestFailed(format!("cannot rename: {}", refusal.0)))
+}
+
+fn refused_identity(reason: &str) -> Box<dyn std::error::Error + Send + Sync> {
+    Box::new(RequestFailed(format!(
+        "cannot rename: ORNA-OBJECT-003 the object identity cannot be carried ({reason}); \
+         use orna mv to rename a table with its identity"
+    )))
 }
 
 /// Text edits per document URI.
@@ -2415,7 +2433,7 @@ mod persisted_object_rename_tests {
     }
 
     #[test]
-    fn rename_request_returns_the_plain_edit_when_staged_identities_are_unreadable() {
+    fn rename_of_a_table_is_refused_when_its_staged_identities_are_unreadable() {
         let source = "pub table Media(id: Str) { payload: Blob, }";
         let (directory, _repository, source_path, _initial) = format3_fixture(source);
         git(
@@ -2424,50 +2442,30 @@ mod persisted_object_rename_tests {
         );
         let uri = file_uri(&source_path);
         let mut state = ServerState::new();
-        let messages = capture_client(&mut state);
         open_document(&mut state, &uri, source);
 
-        let response = request_rename(&state.context, rename_request(uri, "Archive"))
-            .expect("an unreadable identity never fails an ordinary rename");
-        let edit: WorkspaceEdit = serde_json::from_value(response).unwrap();
-        assert_eq!(
-            edit.changes.unwrap().values().map(Vec::len).sum::<usize>(),
-            1
-        );
-        assert_one_rename_warning(&messages, "object identity was not carried");
+        // The table's identity cannot be read, so renaming it would lose it. The
+        // refusal reports the read failure rather than a missing inventory.
+        let error = request_rename(&state.context, rename_request(uri, "Archive"))
+            .expect_err("an unreadable identity refuses the table rename");
+        assert_refused_for_identity(error, "cannot be carried (");
     }
 
     #[test]
-    fn rename_during_a_merge_returns_the_plain_edit_and_keeps_identity() {
+    fn rename_during_a_merge_is_refused_and_keeps_identity() {
         let source = "pub table Media(id: Str) { payload: Blob, }";
         let (directory, repository, source_path, initial) = format3_fixture(source);
         let merge_head = directory.path().join(".git/MERGE_HEAD");
         fs::write(&merge_head, "0000000000000000000000000000000000000000\n").unwrap();
         let uri = file_uri(&source_path);
         let mut state = ServerState::new();
-        let messages = capture_client(&mut state);
         open_document(&mut state, &uri, source);
 
-        let response = request_rename(&state.context, rename_request(uri.clone(), "Archive"))
-            .expect("a merge in progress never fails the plain rename edit");
-        // The index cannot be read mid-merge, which is a typed error: the plain
-        // edit still returns, and the client is told the identity was not carried.
-        assert_one_rename_warning(&messages, "RepositoryBusy");
-        let edit: WorkspaceEdit = serde_json::from_value(response).unwrap();
-        assert_eq!(
-            edit.changes.unwrap().values().map(Vec::len).sum::<usize>(),
-            1
-        );
-        let saved_source = apply_rename(&mut state, &uri, "Archive", 2);
-        fs::write(&source_path, &saved_source).unwrap();
-        did_save(&mut state, &uri);
-        // `apply_rename` issues a second rename request, which warns the same way.
-        // The save adds no warning: no identity was recorded to carry.
-        assert_eq!(
-            shown_warnings(&messages).len(),
-            2,
-            "one warning per rename request, none on save"
-        );
+        // The index cannot be read mid-merge, a typed error: the rename is refused
+        // rather than returned without its identity.
+        let error = request_rename(&state.context, rename_request(uri, "Archive"))
+            .expect_err("a merge in progress refuses the identity rename");
+        assert_refused_for_identity(error, "RepositoryBusy");
         fs::remove_file(merge_head).unwrap();
         assert_eq!(staged_manifest(&repository), initial);
     }
@@ -2517,20 +2515,18 @@ mod persisted_object_rename_tests {
     }
 
     #[test]
-    fn ambiguous_field_rename_warns_when_a_committed_identity_exists() {
+    fn ambiguous_field_rename_is_refused_when_a_committed_identity_exists() {
         let source =
             "pub table Media(id: Str) { title: Str, }\npub table Music(id: Str) { title: Str, }\n";
         let (_directory, _repository, source_path, _initial) = format3_fixture(source);
         let uri = file_uri(&source_path);
         let mut state = ServerState::new();
-        let messages = capture_client(&mut state);
         open_document(&mut state, &uri, source);
 
         // Both tables hold a committed `title`, so the field cannot be matched to one identity.
-        let response =
-            request_rename(&state.context, rename_request_at(&uri, 0, 28, "heading")).unwrap();
-        assert!(edit_count(response) > 0, "the plain edit still returns");
-        assert_one_rename_warning(&messages, "matches several fields");
+        let error = request_rename(&state.context, rename_request_at(&uri, 0, 28, "heading"))
+            .expect_err("a field matching two identities refuses the rename");
+        assert_refused_for_identity(error, "matches several fields");
     }
 
     #[test]
@@ -2552,18 +2548,47 @@ mod persisted_object_rename_tests {
     }
 
     #[test]
-    fn rename_without_a_staged_identity_inventory_warns_and_keeps_the_text() {
+    fn rename_without_a_staged_identity_inventory_is_refused() {
         let source = "pub table Media(id: Str) { payload: Blob, }\n";
         let (_directory, _repository, source_path) = format3_committed(source);
+        let uri = file_uri(&source_path);
+        let mut state = ServerState::new();
+        open_document(&mut state, &uri, source);
+
+        let error = request_rename(&state.context, rename_request(uri, "Archive"))
+            .expect_err("a table with no staged inventory refuses the rename");
+        assert_refused_for_identity(error, "the staged object identities are missing");
+    }
+
+    /// Asserts a rename was refused for an object identity, citing `reason`.
+    fn assert_refused_for_identity(error: impl std::fmt::Display, reason: &str) {
+        let message = error.to_string();
+        assert!(
+            message.starts_with("cannot rename: ORNA-OBJECT-003"),
+            "{message}"
+        );
+        assert!(message.contains(reason), "{message}");
+    }
+
+    #[test]
+    fn rename_of_a_type_field_is_never_refused_for_identity() {
+        let source =
+            "pub type Badge { pub text: Str, }\npub table Media(id: Str) { payload: Blob, }\n";
+        let (directory, _repository, source_path, _initial) = format3_fixture(source);
+        git(
+            directory.path(),
+            &["rm", "--cached", "-q", "-r", ".orna/store"],
+        );
         let uri = file_uri(&source_path);
         let mut state = ServerState::new();
         let messages = capture_client(&mut state);
         open_document(&mut state, &uri, source);
 
-        let response =
-            request_rename(&state.context, rename_request(uri.clone(), "Archive")).unwrap();
-        assert_eq!(edit_count(response), 1);
-        assert_one_rename_warning(&messages, "the staged object identities are missing");
+        // A type field has no identity, so the unreadable store cannot refuse it.
+        let response = request_rename(&state.context, rename_request_at(&uri, 0, 21, "label"))
+            .expect("a type field rename has no identity to refuse for");
+        assert!(edit_count(response) > 0);
+        assert!(shown_warnings(&messages).is_empty());
     }
 
     #[test]

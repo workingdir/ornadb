@@ -83,6 +83,9 @@ impl Drop for Buffer {
 pub(crate) struct List {
     buffer: Arc<Buffer>,
     len: usize,
+    /// Whether every element of this view is reusable (see `reusable_value`).
+    /// Computed once per view so that call-memo checks stay O(1).
+    reusable: bool,
 }
 
 impl List {
@@ -95,6 +98,11 @@ impl List {
         unsafe { self.buffer.prefix(self.len) }
     }
 
+    /// Whether every element of this list is reusable, in constant time.
+    pub(crate) fn reusable(&self) -> bool {
+        self.reusable
+    }
+
     /// Returns this list followed by `tail`, and how many existing elements
     /// were copied to build it. Nothing is copied when this view ends at the
     /// buffer's last claimed slot and the buffer has room for `tail`.
@@ -103,6 +111,7 @@ impl List {
             return (self.clone(), 0);
         }
         let len = self.len + tail.len();
+        let reusable = self.reusable && tail.iter().all(crate::reusable_value);
         if len <= self.buffer.slots.len() && self.buffer.claimed.load(Ordering::Acquire) == self.len
         {
             // Clone before claiming so that no panic can leave a claimed slot
@@ -123,16 +132,17 @@ impl List {
                 let list = Self {
                     buffer: Arc::clone(&self.buffer),
                     len,
+                    reusable,
                 };
                 return (list, 0);
             }
-            return (self.copied_with(&tail, len), self.len);
+            return (self.copied_with(&tail, len, reusable), self.len);
         }
-        (self.copied_with(tail, len), self.len)
+        (self.copied_with(tail, len, reusable), self.len)
     }
 
     /// A fresh buffer holding this list and `tail`, with room to grow.
-    fn copied_with(&self, tail: &[Value], len: usize) -> Self {
+    fn copied_with(&self, tail: &[Value], len: usize, reusable: bool) -> Self {
         let mut buffer = Buffer::with_capacity(len.max(4).saturating_mul(2));
         for value in self.iter().chain(tail) {
             buffer.push_exclusive(value.clone());
@@ -140,6 +150,7 @@ impl List {
         Self {
             buffer: Arc::new(buffer),
             len,
+            reusable,
         }
     }
 
@@ -179,6 +190,7 @@ impl Default for List {
 impl From<Vec<Value>> for List {
     fn from(values: Vec<Value>) -> Self {
         let len = values.len();
+        let reusable = values.iter().all(crate::reusable_value);
         let mut values = ManuallyDrop::new(values);
         let (pointer, capacity) = (values.as_mut_ptr(), values.capacity());
         // SAFETY: the allocation holds `capacity` slots with the layout of
@@ -193,6 +205,7 @@ impl From<Vec<Value>> for List {
                 claimed: AtomicUsize::new(len),
             }),
             len,
+            reusable,
         }
     }
 }
@@ -234,6 +247,7 @@ impl Clone for List {
         Self {
             buffer: Arc::clone(&self.buffer),
             len: self.len,
+            reusable: self.reusable,
         }
     }
 }
@@ -307,6 +321,30 @@ mod tests {
         assert_eq!(same, base);
         assert_eq!(List::from(ints(&[1, 2])), base);
         assert_ne!(List::from(ints(&[2, 1])), base);
+    }
+
+    #[test]
+    fn reusability_is_cached_per_view_and_follows_concat() {
+        let nested = List::from(ints(&[1, 2]));
+        let grown = nested.concat(&ints(&[3])).0;
+        let outer = List::from(vec![Value::List(nested.clone())]);
+        assert!(nested.reusable());
+        assert!(grown.reusable());
+        assert!(outer.reusable());
+        let wider = outer.concat(&[Value::List(grown)]).0;
+        assert!(wider.reusable());
+        assert!(outer.reusable());
+    }
+
+    #[test]
+    fn reusability_of_a_long_appended_list_matches_its_elements() {
+        let mut list = List::from((0..10_000).map(int).collect::<Vec<_>>());
+        for value in 0..200 {
+            list = list.concat(&[int(value)]).0;
+        }
+        assert_eq!(list.len(), 10_200);
+        assert!(list.reusable());
+        assert!(list.iter().all(crate::reusable_value));
     }
 
     #[test]
