@@ -1289,7 +1289,7 @@ been published.
   `ORNA-EVAL-LIMIT` six times sooner. Std bodies that are inherently quadratic,
   such as the Orna `std.collection.distinct`, reach the limit at a few hundred
   elements.
-- `std.collection.map` evaluates its pinned Orna while-loop body instead of the Rust binding when the pinned `map_from` is a loop. Historical pins whose `map_from` is recursive keep the native binding. Other list-input collection operations already take their Orna bodies; relation inputs stay on the Rust relation path.
+- `std.collection.map` binds its native arm by resolved catalogue identity (`Dispatch::Native`, `CoreMap`) at admission, the same as every other standard collection helper. An earlier change (ornadb-5il1.81, PR 9175) had chosen between the Rust binding and a pinned Orna `while` loop by inspecting the AST of `map_from`; the S2 refactor (ornadb-yuzot.2) removed that AST sniff, and no pinned std module defines a `map_from` loop. `tests/collection_helpers_are_source_bound.rs` pins the `Native` entries for `map` and `count`.
 - `orna publish` says what happened when every pending runtime mutation
   already matched the committed snapshot: it reports how many mutations made
   no visible change and were cleared, per table, instead of calling them
