@@ -128,9 +128,9 @@ pub(crate) use git_command::{
     ConfigValue, GitListRecord, GitTreeRecord, PromisorReachability, git_command,
     git_command_at_root, git_command_in, git_stderr_indicates_malformed_object,
     parse_committed_tree_entry, parse_git_bool, parse_remote_orna_refs, remote_ref_records,
-    require_native_object_id, run_bounded_listing, run_command, scrub_git_routing_environment,
-    trim_output, valid_branch_name, valid_native_object_id, valid_orna_internal_ref,
-    valid_remote_name,
+    require_native_object_id, run_bounded_listing, run_command, run_command_with_input,
+    scrub_git_routing_environment, trim_output, valid_branch_name, valid_native_object_id,
+    valid_orna_internal_ref, valid_remote_name,
 };
 #[cfg(test)]
 pub(crate) use git_command::{bind_git_ceiling_above, bind_git_discovery_to_worktree};
@@ -248,16 +248,14 @@ pub(crate) fn bind_tree_entry_in_index(
         .env("GIT_INDEX_FILE", index)
         .args(["ls-files", "-z", "--", path]);
     let output = run_command(listed)?;
-    for stale in output.stdout.split(|byte| *byte == 0) {
-        if stale.is_empty() {
-            continue;
-        }
-        let stale = std::str::from_utf8(stale).map_err(|_| RepositoryError::GitOperationFailed)?;
+    if !output.stdout.is_empty() {
+        // One NUL-separated batch removes every stale leaf in a single process, so
+        // the process count does not grow with the number of store leaves.
+        std::str::from_utf8(&output.stdout).map_err(|_| RepositoryError::GitOperationFailed)?;
         let mut remove = git();
-        remove
-            .env("GIT_INDEX_FILE", index)
-            .args(["update-index", "--force-remove", "--", stale]);
-        run_command(remove)?;
+        remove.env("GIT_INDEX_FILE", index);
+        remove.args(["update-index", "--force-remove", "-z", "--stdin"]);
+        run_command_with_input(remove, &output.stdout)?;
     }
     let prefix = format!("{path}/");
     let mut bind = git();

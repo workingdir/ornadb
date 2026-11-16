@@ -1,4 +1,5 @@
 use crate::*;
+use std::process::{Child, ChildStdin, ChildStdout};
 
 impl Repository {
     /// Installs the ordinary index image for a published candidate. Only the
@@ -346,6 +347,7 @@ impl Repository {
         &self,
         path: &ManagedPath,
         object: &str,
+        blobs: &mut StoreBlobBatch<'_>,
         target: &Path,
         quarantine: &Path,
         install: bool,
@@ -356,7 +358,7 @@ impl Repository {
             return Err(RepositoryError::ManagedContentConflict);
         }
         let expected = if current.is_some() || displaced.is_some() {
-            Some(self.git_bytes_no_lazy_fetch(["cat-file", "blob", object])?)
+            Some(blobs.read(object)?)
         } else {
             None
         };
@@ -405,6 +407,7 @@ impl Repository {
             .transpose()?
             .unwrap_or_default();
         let new = self.native_store_tree_blobs(candidate.commit().as_str())?;
+        let mut blobs = StoreBlobBatch::new(self);
         let paths = old.keys().chain(new.keys()).collect::<BTreeSet<_>>();
         for relative in paths {
             let relative = relative.as_str();
@@ -420,7 +423,7 @@ impl Repository {
                 let (target, _) = self.store_reconciliation_paths(&path, candidate)?;
                 if let Some(current) = self.read_managed_file(&target)? {
                     let object = new_object.ok_or(RepositoryError::GitOperationFailed)?;
-                    let next = self.git_bytes_no_lazy_fetch(["cat-file", "blob", object])?;
+                    let next = blobs.read(object)?;
                     if current != next {
                         return Err(RepositoryError::ManagedContentConflict);
                     }
@@ -434,6 +437,7 @@ impl Repository {
                 self.reconcile_store_payload_worktree_file(
                     &path,
                     object,
+                    &mut blobs,
                     &target,
                     &quarantine,
                     install,
@@ -446,7 +450,7 @@ impl Repository {
             if unchanged {
                 let displaced = self.read_managed_file(&quarantine)?;
                 let next = new_object
-                    .map(|object| self.git_bytes_no_lazy_fetch(["cat-file", "blob", object]))
+                    .map(|object| blobs.read(object))
                     .transpose()?
                     .ok_or(RepositoryError::GitOperationFailed)?;
                 if current
@@ -475,12 +479,8 @@ impl Repository {
                 continue;
             }
 
-            let old_bytes = old_object
-                .map(|object| self.git_bytes_no_lazy_fetch(["cat-file", "blob", object]))
-                .transpose()?;
-            let new_bytes = new_object
-                .map(|object| self.git_bytes_no_lazy_fetch(["cat-file", "blob", object]))
-                .transpose()?;
+            let old_bytes = old_object.map(|object| blobs.read(object)).transpose()?;
+            let new_bytes = new_object.map(|object| blobs.read(object)).transpose()?;
             let displaced = self.read_managed_file(&quarantine)?;
             if displaced.as_deref().is_some_and(|bytes| {
                 Some(bytes) != old_bytes.as_deref()
@@ -603,5 +603,112 @@ impl Repository {
             None,
             None,
         )
+    }
+}
+
+/// Reads store blobs through one `git cat-file --batch` process, started on the
+/// first read, so reconciling a store starts the same Git processes whatever its
+/// size. Each read honours replace refs and refuses lazy fetches, as
+/// [`Repository::git_bytes_no_lazy_fetch`] does.
+pub(crate) struct StoreBlobBatch<'a> {
+    repository: &'a Repository,
+    child: Option<BatchChild>,
+}
+
+impl<'a> StoreBlobBatch<'a> {
+    pub(crate) fn new(repository: &'a Repository) -> Self {
+        Self {
+            repository,
+            child: None,
+        }
+    }
+
+    /// Returns the content of blob `object`. A failed read drops the process, so
+    /// a broken response stream is never read again.
+    pub(crate) fn read(&mut self, object: &str) -> Result<Vec<u8>, RepositoryError> {
+        let mut child = match self.child.take() {
+            Some(child) => child,
+            None => BatchChild::start(self.repository)?,
+        };
+        let bytes = child.read_blob(object)?;
+        self.child = Some(child);
+        Ok(bytes)
+    }
+}
+
+/// The live `cat-file --batch` process behind a [`StoreBlobBatch`].
+struct BatchChild {
+    child: Child,
+    requests: ChildStdin,
+    responses: BufReader<ChildStdout>,
+}
+
+impl BatchChild {
+    fn start(repository: &Repository) -> Result<Self, RepositoryError> {
+        let mut command = repository.command();
+        command
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .args(["cat-file", "--batch"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = command
+            .spawn()
+            .map_err(|_| RepositoryError::GitUnavailable)?;
+        let (Some(requests), Some(responses)) = (child.stdin.take(), child.stdout.take()) else {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(RepositoryError::GitOperationFailed);
+        };
+        Ok(Self {
+            child,
+            requests,
+            responses: BufReader::new(responses),
+        })
+    }
+
+    fn read_blob(&mut self, object: &str) -> Result<Vec<u8>, RepositoryError> {
+        let failed = |_: std::io::Error| RepositoryError::GitOperationFailed;
+        writeln!(self.requests, "{object}").map_err(failed)?;
+        let mut header = Vec::new();
+        self.responses
+            .read_until(b'\n', &mut header)
+            .map_err(failed)?;
+        // A present blob answers `<oid> blob <size>`, then its content and a
+        // newline. A missing, ambiguous or non-blob object answers differently.
+        let header = header
+            .strip_suffix(b"\n")
+            .ok_or(RepositoryError::GitOperationFailed)?;
+        let header =
+            std::str::from_utf8(header).map_err(|_| RepositoryError::GitOperationFailed)?;
+        let mut fields = header.split(' ');
+        let (Some(oid), Some("blob"), Some(size), None) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
+        else {
+            return Err(RepositoryError::GitOperationFailed);
+        };
+        if oid != object {
+            return Err(RepositoryError::GitOperationFailed);
+        }
+        let size = size
+            .parse::<usize>()
+            .map_err(|_| RepositoryError::GitOperationFailed)?;
+        let mut bytes = vec![0_u8; size];
+        self.responses.read_exact(&mut bytes).map_err(failed)?;
+        let mut terminator = [0_u8; 1];
+        self.responses.read_exact(&mut terminator).map_err(failed)?;
+        if terminator != *b"\n" {
+            return Err(RepositoryError::GitOperationFailed);
+        }
+        Ok(bytes)
+    }
+}
+
+impl Drop for BatchChild {
+    fn drop(&mut self) {
+        // Git may be blocked writing a response nobody will read, so kill it
+        // rather than wait for a clean exit. A failed kill means it has exited.
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }

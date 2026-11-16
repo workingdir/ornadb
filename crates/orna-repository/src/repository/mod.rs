@@ -10,3 +10,5 @@ mod observe;
 mod publish;
 mod read;
 mod review;
+#[cfg(test)]
+mod store_index_batching_tests;
