@@ -292,7 +292,7 @@ impl DurableTransactionalEvaluator {
             }
         }
         let mutations = match evaluator.execute_admitted_with_arguments(&admitted, arguments) {
-            Ok(mutations) => mutations,
+            Ok((mutations, _)) => mutations,
             Err(diagnostic) => return Ok(StageOutcome::Failed(*diagnostic)),
         };
         if mutations.is_empty() {
@@ -339,7 +339,8 @@ impl DurableTransactionalEvaluator {
         Ok(StageOutcome::Passed)
     }
     /// The inputs are one adapter call: the repository, the request record and
-    /// the effect handler the admitted project runs through.
+    /// the effect handler the admitted project runs through. The value the
+    /// entry evaluated to is written to `result_value` when it passes.
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn execute_admitted_project_request(
         &self,
@@ -351,6 +352,7 @@ impl DurableTransactionalEvaluator {
         entry: &str,
         admitted: AdmittedTransaction,
         arguments: &Environment,
+        result_value: &mut Option<Value>,
         loaded_project: &LoadedProject,
         table_object_ids: &BTreeMap<String, TableObjectId>,
         storage_orders: &BTreeMap<String, Vec<String>>,
@@ -436,7 +438,10 @@ impl DurableTransactionalEvaluator {
             }
         }
         let mutations = match evaluator.execute_admitted_with_arguments(&admitted, arguments) {
-            Ok(mutations) => mutations,
+            Ok((mutations, value)) => {
+                *result_value = Some(value);
+                mutations
+            }
             Err(diagnostic) => {
                 return terminalize_observed_outcome(
                     state,

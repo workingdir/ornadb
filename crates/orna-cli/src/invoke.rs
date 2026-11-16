@@ -1,13 +1,17 @@
+use super::repl::write_result_line;
+use super::repl_inspect::{DISPLAY, render};
 use super::{
     ApplicationAuthority, ApplicationError, BoundedEvaluator, Cow, Diagnostic,
     DurableTransactionalEvaluator, Endpoint, Environment, Exit, Limits, ProjectUnit,
     RuntimeEvaluator, RuntimeMode, StageOutcome, StdSnapshotPin, cancellation_diagnostic,
-    committed_storage_orders, committed_table_object_ids, diagnostic_documentation,
-    execution_project, load_project, local_project_path, project_load_diagnostic,
-    pure_execution_project, pure_sys_host_context, refuse_legacy_bare_module_rows, request_nonce,
-    run_committed_table_invocation, runtime_identity, runtime_publication_metadata_rows,
-    semantic_catalogue, sys_host, write_success_line,
+    cli_output_failed, committed_storage_orders, committed_table_object_ids,
+    diagnostic_documentation, execution_project, load_project, local_project_path,
+    project_load_diagnostic, pure_execution_project, pure_sys_host_context,
+    refuse_legacy_bare_module_rows, request_nonce, run_committed_table_invocation,
+    runtime_identity, runtime_publication_metadata_rows, semantic_catalogue, sys_host,
+    write_success_line,
 };
+use orna_value::CanonicalValue;
 
 pub(crate) fn run_project_invocation(
     endpoint: &Endpoint,
@@ -148,7 +152,7 @@ pub(crate) fn run_project_invocation_with_arguments(
             )
         })?;
     let project = load_project(endpoint)?;
-    let catalogue = admit_project_analysis(&project)?;
+    let (catalogue, analysis) = admit_project_analysis(&project)?;
     let (identity, initial_digest) = runtime_identity(&repository)?;
     refuse_legacy_bare_module_rows(&repository, identity, initial_digest, &project)?;
     let (request, fingerprint) = DurableTransactionalEvaluator::project_request_identity(
@@ -178,6 +182,7 @@ pub(crate) fn run_project_invocation_with_arguments(
         _ => project.clone(),
     };
     let project = execution_project(&loaded_project);
+    let mut result_value = None;
     let owner_id = orna_runtime::process_owner_id();
     let outcome = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -210,19 +215,28 @@ pub(crate) fn run_project_invocation_with_arguments(
                     &project,
                     root_entry,
                     arguments,
+                    &mut result_value,
                     &loaded_project,
                     &table_object_ids,
                     &storage_orders,
                 ),
         )
         .map_err(|error| durable_invocation_failed(&error))?;
-    report_project_outcome(endpoint, root_entry, arguments, color_enabled, outcome)
+    report_project_outcome(
+        endpoint,
+        root_entry,
+        arguments,
+        color_enabled,
+        outcome,
+        result_value.as_ref(),
+        static_result_type(&analysis, root_entry).as_deref(),
+    )
 }
 
-/// The production catalogue of a project that passes semantic analysis.
+/// The production catalogue and analysis of a project that passes semantic analysis.
 pub(crate) fn admit_project_analysis(
     project: &orna_project::LoadedProject,
-) -> Result<std::sync::Arc<orna_check::Catalogue>, Diagnostic> {
+) -> Result<(std::sync::Arc<orna_check::Catalogue>, orna_check::Analysis), Diagnostic> {
     let catalogue = std::sync::Arc::new(semantic_catalogue(project)?);
     let analysis = orna_check::analyze_with_providers(
         project.modules(),
@@ -236,7 +250,7 @@ pub(crate) fn admit_project_analysis(
             "fix the first reported source contract error, then run the project again",
         ));
     }
-    Ok(catalogue)
+    Ok((catalogue, analysis))
 }
 
 /// Routes a stream-root skip to the stream seam and reports the transaction's
@@ -247,6 +261,8 @@ pub(crate) fn report_project_outcome(
     arguments: &Environment,
     color_enabled: bool,
     outcome: StageOutcome<orna_value::Diagnostic>,
+    result_value: Option<&CanonicalValue>,
+    static_type: Option<&str>,
 ) -> Result<(), Diagnostic> {
     // Project transaction admission does not run stream roots; those route to
     // the explicit finite-list stream seam. The adapter reports that skip as a
@@ -255,7 +271,7 @@ pub(crate) fn report_project_outcome(
         return run_project_stream_invocation(endpoint, root_entry, color_enabled);
     }
     match outcome {
-        StageOutcome::Passed => write_success_line("invocation completed", color_enabled),
+        StageOutcome::Passed => write_invocation_result(result_value, static_type, color_enabled),
         StageOutcome::Failed(diagnostic) => Err(evaluation_failure(
             &diagnostic,
             "durable project invocation was rejected",
@@ -471,29 +487,34 @@ pub(crate) fn run_pure_invocation(
     color_enabled: bool,
 ) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
-    if run_authority_invocation(endpoint, &project, target, color_enabled)? {
-        return Ok(());
+    if let Some(value) = run_authority_invocation(endpoint, &project, target)? {
+        let static_type = project_result_type(&project, target)?;
+        return write_invocation_result(Some(&value), static_type.as_deref(), color_enabled);
     }
-    admit_function_only_project(&project)?;
-    run_bounded_invocation(&project, target, color_enabled)
+    let analysis = admit_function_only_project(&project)?;
+    let value = run_bounded_invocation(&project, target)?;
+    write_invocation_result(
+        Some(&value),
+        static_result_type(&analysis, target).as_deref(),
+        color_enabled,
+    )
 }
 
 /// Admits and evaluates `target` through the authority route when the only
-/// module is the one `target` names. Returns whether it answered, so every
+/// module is the one `target` names. Returns the value it evaluated to when it answered, so every
 /// other project takes the bounded function-only path.
 pub(crate) fn run_authority_invocation(
     endpoint: &Endpoint,
     project: &orna_project::LoadedProject,
     target: &str,
-    color_enabled: bool,
-) -> Result<bool, Diagnostic> {
+) -> Result<Option<orna_value::CanonicalValue>, Diagnostic> {
     // Single-module projects that import pinned standard modules take the
     // authority route only when they need publication metadata. Every other
     // standard-importing project takes the bounded path below, which loads the
     // reachable standard bodies through the verified profile.
     let std_imports = !project.standard_runtime_modules().is_empty();
     if project.modules().len() != 1 {
-        return Ok(false);
+        return Ok(None);
     }
     let identity = &project.identities()[0];
     let module = &project.modules()[0];
@@ -507,7 +528,7 @@ pub(crate) fn run_authority_invocation(
             .collect::<Vec<_>>()
     };
     if identity.namespace() != namespace {
-        return Ok(false);
+        return Ok(None);
     }
     let authority = ApplicationAuthority::new(
         orna_check::Catalogue::authoritative_core(),
@@ -540,9 +561,9 @@ pub(crate) fn run_authority_invocation(
     let Some(admitted) =
         admitted.filter(|candidate| !std_imports || candidate.requires_publication_metadata())
     else {
-        return Ok(false);
+        return Ok(None);
     };
-    if !admitted.table_schemas().is_empty() && admitted.entry_references_tables() {
+    let value = if !admitted.table_schemas().is_empty() && admitted.entry_references_tables() {
         run_committed_table_invocation(
             endpoint,
             authority,
@@ -550,7 +571,7 @@ pub(crate) fn run_authority_invocation(
             identity.logical_path(),
             &module.source,
             sys_host::std_snapshot_pin(project),
-        )?;
+        )?
     } else if admitted.requires_publication_metadata() {
         let (publication_rows, sys_host_context) =
             runtime_publication_metadata_rows(endpoint, sys_host::std_snapshot_pin(project))?;
@@ -570,6 +591,7 @@ pub(crate) fn run_authority_invocation(
                 "use a supported table transaction; stream roots require the explicit stream runtime",
             ));
         }
+        activation.value().clone()
     } else {
         let std_snapshot = sys_host::std_snapshot_pin(project);
         let authority = match pure_sys_host_context(endpoint, std_snapshot) {
@@ -584,17 +606,16 @@ pub(crate) fn run_authority_invocation(
                     "pure project invocation failed",
                     "fix the admitted function or retry the invocation",
                 )
-            })?;
-    }
-    write_success_line("invocation completed", color_enabled)?;
-    Ok(true)
+            })?
+    };
+    Ok(Some(value))
 }
 
 /// Proves the project is function-only and can be read by the bounded
 /// evaluator.
 pub(crate) fn admit_function_only_project(
     project: &orna_project::LoadedProject,
-) -> Result<(), Diagnostic> {
+) -> Result<orna_check::Analysis, Diagnostic> {
     let catalogue = semantic_catalogue(project)?;
     let analysis = orna_check::analyze_with_providers(
         project.modules(),
@@ -615,7 +636,7 @@ pub(crate) fn admit_function_only_project(
             "one-shot invocation admits table declarations only in single-module projects",
         ));
     }
-    Ok(())
+    Ok(analysis)
 }
 
 /// Runs `target` through the bounded function-only evaluator, loading the
@@ -623,8 +644,7 @@ pub(crate) fn admit_function_only_project(
 pub(crate) fn run_bounded_invocation(
     project: &orna_project::LoadedProject,
     target: &str,
-    color_enabled: bool,
-) -> Result<(), Diagnostic> {
+) -> Result<orna_value::CanonicalValue, Diagnostic> {
     let mut evaluator = BoundedEvaluator::default();
     if let Some(profile) = project.standard_profile() {
         // Admission supplies the runtime-reachable closure (requested roots plus
@@ -676,18 +696,71 @@ pub(crate) fn run_bounded_invocation(
             ));
         }
     }
-    match evaluator.invoke(target) {
-        StageOutcome::Passed => write_success_line("invocation completed", color_enabled),
-        StageOutcome::Cancelled(diagnostic) => Err(cancellation_diagnostic(&diagnostic)),
-        StageOutcome::Failed(diagnostic) => Err(evaluation_failure(
+    match evaluator.invoke_value(target, &Environment::new()) {
+        Ok(value) => Ok(value),
+        Err(StageOutcome::Cancelled(diagnostic)) => Err(cancellation_diagnostic(&diagnostic)),
+        Err(StageOutcome::Failed(diagnostic)) => Err(evaluation_failure(
             &diagnostic,
             "pure project invocation failed",
             "define a reachable zero-argument pure function with the requested name",
             failure_detail(&diagnostic),
         )),
-        StageOutcome::Skipped { .. } => Err(Diagnostic::unavailable(
+        // `invoke_value` reports an unretained function as `Skipped`; it never returns `Passed`.
+        Err(StageOutcome::Passed | StageOutcome::Skipped { .. }) => Err(Diagnostic::unavailable(
             "requested invocation is not available",
             "define a reachable zero-argument pure function with the requested name",
         )),
     }
+}
+
+/// Analyzes `project` and returns the declared result type of `target`. Called only
+/// after a successful invocation, so a failing run never pays for the extra analysis.
+pub(crate) fn project_result_type(
+    project: &orna_project::LoadedProject,
+    target: &str,
+) -> Result<Option<String>, Diagnostic> {
+    let (_, analysis) = admit_project_analysis(project)?;
+    Ok(static_result_type(&analysis, target))
+}
+
+/// The declared result type of the exported function `target`, spelled as the REPL
+/// spells a value's type. A bare name is a root-module export. `None` when `target`
+/// names no exported function.
+pub(crate) fn static_result_type(analysis: &orna_check::Analysis, target: &str) -> Option<String> {
+    let (module, function) = target.rsplit_once('.').unwrap_or(("main", target));
+    let namespace = if module == "main" {
+        Vec::new()
+    } else {
+        module.split('.').map(str::to_owned).collect()
+    };
+    let symbol = analysis
+        .modules
+        .get(&orna_check::Namespace(namespace))?
+        .exports
+        .get(function)?;
+    match &symbol.ty {
+        orna_check::Type::Function { result, .. } => Some(result.to_string()),
+        _ => None,
+    }
+}
+
+/// Writes a successful invocation's result as the REPL writes a value, `VALUE : TYPE`.
+/// The type is the function's declared result, or the runtime label when that is
+/// unknown. A pass with no captured value keeps the `invocation completed` line.
+pub(crate) fn write_invocation_result(
+    value: Option<&CanonicalValue>,
+    static_type: Option<&str>,
+    color_enabled: bool,
+) -> Result<(), Diagnostic> {
+    let Some(value) = value else {
+        return write_success_line("invocation completed", color_enabled);
+    };
+    let (body, runtime) = render(value.raw(), 0, DISPLAY);
+    write_result_line(
+        &mut std::io::stdout().lock(),
+        &body,
+        static_type.unwrap_or(runtime),
+        color_enabled,
+    )
+    .map_err(|_| cli_output_failed())
 }

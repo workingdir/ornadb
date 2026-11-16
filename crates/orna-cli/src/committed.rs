@@ -505,7 +505,8 @@ pub(crate) fn committed_rows_at(
 /// same committed rows as the REPL. The sys host context and publication
 /// snapshot follow the pure path: a module that needs publication metadata runs
 /// as an embedded host, and any other module runs with the run host. `run` never
-/// commits the activation's table mutations.
+/// commits the activation's table mutations. The entry's result value is
+/// returned to the caller for printing.
 pub(crate) fn run_committed_table_invocation(
     endpoint: &Endpoint,
     authority: ApplicationAuthority,
@@ -513,7 +514,7 @@ pub(crate) fn run_committed_table_invocation(
     logical_path: &str,
     source: &str,
     std_snapshot: StdSnapshotPin,
-) -> Result<(), Diagnostic> {
+) -> Result<orna_value::CanonicalValue, Diagnostic> {
     let repository = discover_committed_repository(endpoint)?;
     let commit = committed_head(&repository)?;
     let tables = committed_tables(&repository, &commit, admitted)?;
@@ -539,7 +540,7 @@ pub(crate) fn run_committed_table_invocation(
             "use a supported table transaction; stream roots require the explicit stream runtime",
         ));
     }
-    Ok(())
+    Ok(activation.value().clone())
 }
 
 /// The repository a committed-table invocation reads.

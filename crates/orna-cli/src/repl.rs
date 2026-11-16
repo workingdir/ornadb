@@ -641,7 +641,7 @@ pub(crate) fn write_repl_outcome<W: Write>(
 }
 
 /// Writes `BODY : LABEL`: the result green, the type dim.
-fn write_result_line<W: Write>(
+pub(crate) fn write_result_line<W: Write>(
     writer: &mut W,
     body: &str,
     label: &str,

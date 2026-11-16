@@ -145,10 +145,7 @@ async fn orna_run_commits_the_runtime_info_coordinates() {
     let project = initialized(RUNTIME_INFO_SOURCE);
     let directory = project.path();
 
-    assert_output(
-        &orna(directory, &["run", "main.main"]),
-        "invocation completed\n",
-    );
+    assert_output(&orna(directory, &["run", "main.main"]), "null : Unit\n");
 
     let repository = Repository::discover(directory).expect("repository");
     let (identity, initial_digest) = format3::cli_runtime_identity(&repository);
@@ -196,7 +193,7 @@ fn invoke_evaluates_runtime_info_in_a_fresh_project() {
     let project = initialized(LANGUAGE_SOURCE);
     assert_output(
         &orna(project.path(), &["invoke", "language"]),
-        "invocation completed\n",
+        "\"1.1.0\" : Str\n",
     );
 }
 

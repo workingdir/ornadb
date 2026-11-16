@@ -69,7 +69,7 @@ fn repl_qualified_root_enum_matches_the_run_entry_arm() {
     // the same string the REPL's `main.Availability.ready` produced above.
     assert_stdout(
         &orna(directory, &["run", "main.ready_matches"]),
-        "invocation completed\n",
+        "true : Bool\n",
     );
 }
 
@@ -79,7 +79,7 @@ fn run_self_check_fails_when_the_bare_run_value_differs() {
     let output = orna(project.path(), &["run", "main.expects_waiting"]);
     assert!(!output.status.success(), "{output:?}");
     assert!(
-        !String::from_utf8_lossy(&output.stdout).contains("invocation completed"),
+        !String::from_utf8_lossy(&output.stdout).contains(": Bool"),
         "{output:?}"
     );
 }
