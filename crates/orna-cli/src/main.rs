@@ -58,12 +58,13 @@ use committed::{
 };
 use diagnostic_docs::{diagnostic_documentation, explain_diagnostic};
 use endpoint::{Endpoint, local_project_path, pure_sys_host_context};
+use invoke::{
+    application_failure, run_default_project_main, run_project_invocation,
+    run_project_invocation_with_arguments, run_project_stream_invocation,
+    run_public_project_function, run_pure_invocation,
+};
 #[cfg(test)]
 use invoke::{durable_invocation_failed, stream_delivery_failed};
-use invoke::{
-    run_default_project_main, run_project_invocation, run_project_invocation_with_arguments,
-    run_project_stream_invocation, run_public_project_function, run_pure_invocation,
-};
 use orna_base::hex_digit;
 use project_run::{
     check_project, execution_project, load_project, load_project_without_standard_rejection,

@@ -108,7 +108,7 @@ pub enum ApplicationError {
     /// The requested entry function was not present in the admitted module.
     MissingEntry(String),
     /// The bounded evaluator rejected the already-admitted program.
-    Evaluation(String),
+    Evaluation(Box<orna_value::Diagnostic>),
     /// Runtime staging rejected a malformed mutation or activation.
     Runtime(String),
     /// Canonical snapshot encoding failed while computing an activation digest.
@@ -140,7 +140,13 @@ impl fmt::Display for ApplicationError {
             Self::MissingEntry(name) => {
                 write!(formatter, "application entry `{name}` was not admitted")
             }
-            Self::Evaluation(code) => write!(formatter, "application evaluation failed: {code}"),
+            Self::Evaluation(diagnostic) => {
+                write!(
+                    formatter,
+                    "application evaluation failed: {}",
+                    diagnostic.code()
+                )
+            }
             Self::Runtime(message) => {
                 write!(formatter, "runtime activation staging failed: {message}")
             }
@@ -242,7 +248,7 @@ impl AdmittedPageModule {
         // REPL contributes nothing.
         ReplSession::with_module_scope(limits, Environment::new(), functions)
             .map(|environment| Self { environment })
-            .map_err(|error| ApplicationError::Evaluation(error.code().to_owned()))
+            .map_err(|error| ApplicationError::Evaluation(Box::new(error.diagnostic().clone())))
     }
 
     /// Evaluates one read-only page expression in this pinned environment.
@@ -252,7 +258,7 @@ impl AdmittedPageModule {
     pub fn evaluate(&self, source: &str) -> Result<CanonicalValue, ApplicationError> {
         self.environment
             .preview(source)
-            .map_err(|error| ApplicationError::Evaluation(error.code().to_owned()))
+            .map_err(|error| ApplicationError::Evaluation(Box::new(error.diagnostic().clone())))
     }
 }
 
@@ -526,7 +532,7 @@ impl ApplicationAuthority {
     ) -> Result<(SyntaxTree, Analysis, Functions), ApplicationError> {
         self.limits
             .check_source(source)
-            .map_err(|error| ApplicationError::Evaluation(error.code().to_owned()))?;
+            .map_err(|error| ApplicationError::Evaluation(Box::new(error.diagnostic().clone())))?;
 
         let parsed = parse_module_with_file(source, logical_path.to_owned());
         if !parsed.is_ok() {
@@ -665,8 +671,9 @@ impl ApplicationAuthority {
                 application.limits,
             ),
         };
-        result
-            .map_err(|error: EvaluationError| ApplicationError::Evaluation(error.code().to_owned()))
+        result.map_err(|error: EvaluationError| {
+            ApplicationError::Evaluation(Box::new(error.diagnostic().clone()))
+        })
     }
 
     /// Executes the admitted entry while staging every admitted table effect
@@ -3703,11 +3710,11 @@ impl ApplicationLiveAdapter {
         session: [u8; 16],
         repl: AdmittedReplSession,
         source: &str,
-        code: &str,
+        diagnostic: orna_value::Diagnostic,
     ) -> LiveError {
         self.publish_repl_candidate(session, repl);
-        self.record_run_failure(session, source, code);
-        LiveError::from(ApplicationError::Evaluation(code.to_owned()))
+        self.record_run_failure(session, source, diagnostic.code());
+        LiveError::from(ApplicationError::Evaluation(Box::new(diagnostic)))
     }
 
     /// Rejects a REPL input the evaluator refused before running it: submitting
@@ -3718,10 +3725,10 @@ impl ApplicationLiveAdapter {
         session: [u8; 16],
         mut repl: AdmittedReplSession,
         source: &str,
-        code: &str,
+        diagnostic: orna_value::Diagnostic,
     ) -> LiveError {
         let _ = repl.submit(source);
-        self.publish_repl_failure(session, repl, source, code)
+        self.publish_repl_failure(session, repl, source, diagnostic)
     }
 
     /// Submits one Eval input to the session REPL, publishing the successor REPL
@@ -3751,14 +3758,14 @@ impl ApplicationLiveAdapter {
                         return Ok(LiveEvalResponse::pure(envelope));
                     }
                     Err(error) => {
-                        let code = error.code().to_owned();
-                        return Err(self.publish_repl_failure(session, repl, source, &code));
+                        let diagnostic = error.diagnostic().clone();
+                        return Err(self.publish_repl_failure(session, repl, source, diagnostic));
                     }
                 }
             }
             Err(error) => {
-                let code = error.code().to_owned();
-                return Err(self.fail_repl_input(session, repl, source, &code));
+                let diagnostic = error.diagnostic().clone();
+                return Err(self.fail_repl_input(session, repl, source, diagnostic));
             }
         };
         let mut handler =
@@ -3779,8 +3786,8 @@ impl ApplicationLiveAdapter {
         let (value, successor) = match repl.evaluate_staged_with_effects(staged, &mut handler) {
             Ok(result) => result,
             Err(error) => {
-                let code = error.code().to_owned();
-                return Err(self.fail_repl_input(session, repl, source, &code));
+                let diagnostic = error.diagnostic().clone();
+                return Err(self.fail_repl_input(session, repl, source, diagnostic));
             }
         };
         let effects = handler.effect_report();
@@ -4168,10 +4175,12 @@ impl LiveApplication for ApplicationLiveAdapter {
             let result = match self.submit_repl_input(&mut repl, source) {
                 Ok(result) => result,
                 Err(error) => {
-                    let code = error.code().to_owned();
+                    let diagnostic = error.diagnostic().clone();
                     self.publish_repl_candidate(session, repl);
-                    self.record_run_failure(session, source, &code);
-                    return Err(LiveError::from(ApplicationError::Evaluation(code)));
+                    self.record_run_failure(session, source, diagnostic.code());
+                    return Err(LiveError::from(ApplicationError::Evaluation(Box::new(
+                        diagnostic,
+                    ))));
                 }
             };
             // A declaration, binding or import yields no value; its result is

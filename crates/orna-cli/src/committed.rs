@@ -4,7 +4,8 @@ use super::{
     Rc, RefCell, ReplWriter, RuntimeError, RuntimeIdentity, RuntimeMode,
     RuntimePublicationMetadataRows, RuntimeState, RuntimeTableActivationSnapshot,
     RuntimeTableIdentity, RuntimeTableRows, StagedActivation, StdSnapshotPin,
-    SysHostBindingRegistry, TableObjectId, local_project_path, repl, runtime_identity, sys_host,
+    SysHostBindingRegistry, TableObjectId, application_failure, local_project_path, repl,
+    runtime_identity, sys_host,
 };
 
 /// Runtime authority retained by one CLI REPL session.
@@ -359,11 +360,10 @@ pub(crate) fn evaluate_over_committed_tables(
             publication_rows,
         )
         .map_err(|error| {
-            Diagnostic::target_with_detail(
-                "ORNA-CMD-RUNTIME-UNAVAILABLE",
+            application_failure(
+                &error,
                 "pure project invocation failed",
                 "fix the admitted function or retry the invocation",
-                error.to_string(),
             )
         })?;
     Ok((snapshot, staged))

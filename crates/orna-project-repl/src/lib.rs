@@ -63,7 +63,12 @@ pub struct ReplDetail {
 
 impl ReplError {
     fn runtime(error: EvaluationError) -> Self {
-        Self::redacted(error.code())
+        // The evaluator diagnostic is already redacted and carries only
+        // code-level causes, so its causal chain survives this boundary.
+        Self {
+            diagnostic: Box::new(error.diagnostic().clone()),
+            detail: None,
+        }
     }
 
     fn semantic(code: &str) -> Self {

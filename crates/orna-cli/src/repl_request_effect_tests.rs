@@ -1,6 +1,15 @@
 use super::*;
 use crate::format3::format3_repository_for_table;
 use orna_runtime::{FaultPoint, RecoveryDisposition, RuntimeError};
+use orna_value::{Diagnostic, DiagnosticSeverity, SafeText};
+
+fn divide_by_zero_evaluation() -> ApplicationError {
+    let code = SafeText::new("ORNA-EVAL-DIVIDE-BY-ZERO".to_owned()).expect("safe code");
+    let diagnostic = Diagnostic::new(code, DiagnosticSeverity::Error, SafeText::redacted())
+        .expect("valid diagnostic")
+        .redacted();
+    ApplicationError::Evaluation(Box::new(diagnostic))
+}
 
 const MUSIC_SOURCE: &str = "pub table Music(id: Str) { title: Str, }\n";
 const INSERT_LONDON: &str = r#"main.Music.insert({ id: "london", title: "Live in London" })"#;
@@ -189,7 +198,7 @@ fn repl_pure_evaluation_failure_keeps_its_evaluator_code() {
 #[test]
 fn repl_effect_uncertain_failure_keeps_the_evaluation_cause() {
     let failure = repl_evaluation_failure(ReplEvaluationFailure {
-        error: ApplicationError::Evaluation("ORNA-EVAL-DIVIDE-BY-ZERO".to_owned()),
+        error: divide_by_zero_evaluation(),
         external_effects_possible: true,
     });
     assert_eq!(failure.code, REPL_EFFECT_UNCERTAIN);
@@ -207,7 +216,7 @@ fn repl_effect_uncertain_failure_keeps_the_evaluation_cause() {
 #[test]
 fn repl_effect_free_failure_keeps_its_own_code_without_detail() {
     let failure = repl_evaluation_failure(ReplEvaluationFailure {
-        error: ApplicationError::Evaluation("ORNA-EVAL-DIVIDE-BY-ZERO".to_owned()),
+        error: divide_by_zero_evaluation(),
         external_effects_possible: false,
     });
     assert_eq!(failure.code, "ORNA-EVAL-DIVIDE-BY-ZERO");
