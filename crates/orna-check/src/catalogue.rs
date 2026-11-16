@@ -234,6 +234,15 @@ impl Catalogue {
         }
     }
 
+    /// The core catalogue with every `std` module removed. Standard modules
+    /// are then supplied only by the attached pinned profile, so the host
+    /// never fills a module the pin does not provide.
+    pub fn without_standard_modules(mut self) -> Self {
+        self.modules
+            .retain(|namespace, _| namespace.0.first().map(String::as_str) != Some("std"));
+        self
+    }
+
     /// The explicit core catalogue plus the attached environment used by the
     /// reference conformance examples.  Attached tables and connectors are
     /// declarations supplied by the caller; this profile does not execute or
@@ -265,5 +274,29 @@ impl Catalogue {
             // alias; `work` is a pinned database attached alongside the fixture
             // database (ORNA-ATTACH-002).
             .with_attached_database("work")
+    }
+}
+
+#[cfg(test)]
+mod standard_surface_tests {
+    use super::*;
+
+    #[test]
+    fn without_standard_modules_removes_only_the_std_namespace() {
+        let core = Catalogue::authoritative_core();
+        assert!(
+            core.modules
+                .keys()
+                .any(|namespace| namespace.0.first().map(String::as_str) == Some("std")),
+            "the synthetic core carries std modules to remove"
+        );
+        let stripped = core.clone().without_standard_modules();
+        assert!(
+            stripped
+                .modules
+                .keys()
+                .all(|namespace| namespace.0.first().map(String::as_str) != Some("std")),
+            "no std namespace may survive"
+        );
     }
 }
