@@ -76,5 +76,5 @@ fn import_exits_zero_for_a_fixture_bundle_and_one_for_a_corrupt_payload() {
         "stdout: {}",
         String::from_utf8_lossy(&corrupt.stdout)
     );
-    assert!(String::from_utf8_lossy(&corrupt.stderr).contains("E2000"));
+    assert!(String::from_utf8_lossy(&corrupt.stderr).contains("ORNA-CMD-TARGET-UNAVAILABLE"));
 }

@@ -289,7 +289,7 @@ fn publish_refuses_a_row_whose_table_the_committed_store_lacks() {
     assert_ne!(refused.status.code(), Some(0), "{}", transcript(&refused));
     let message = transcript(&refused);
     assert!(
-        message.contains("error[E2300]")
+        message.contains("error[ORNA-CMD-WORKFLOW-REFUSED]")
             && message.contains("source row table has no relation in the committed store")
             && message.contains("orna commit"),
         "{message}"

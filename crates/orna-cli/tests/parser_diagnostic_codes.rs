@@ -53,7 +53,8 @@ fn assert_primary_parser_code(output: &Output, command: &str) {
         "{command} must report the source location: {stderr:?}"
     );
     assert!(
-        !stderr.contains("E2100") && !stderr.contains("E2101"),
+        !stderr.contains("ORNA-CMD-REPOSITORY-UNAVAILABLE")
+            && !stderr.contains("ORNA-CMD-SEMANTIC-FAILED"),
         "{command} must not replace the parser code with a loader code: {stderr:?}"
     );
 }

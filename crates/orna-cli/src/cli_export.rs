@@ -59,7 +59,7 @@ enum Mode {
 
 fn export_error(title: &'static str, detail: impl Into<String>) -> Diagnostic {
     Diagnostic::target_with_detail(
-        "E2000",
+        "ORNA-CMD-TARGET-UNAVAILABLE",
         title,
         "run `orna export DEST --at SELECTOR` inside an admitted repository",
         detail.into(),
@@ -175,7 +175,7 @@ fn run_export(
 ) -> Result<(), Diagnostic> {
     let repository = Repository::discover(project).map_err(|_| {
         Diagnostic::target(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "local Git worktree could not be discovered",
             "run the command inside a Git worktree or provide a local project path",
         )
@@ -285,7 +285,7 @@ fn describe_export_failure(error: &CompleteCopyError) -> Diagnostic {
         CompleteCopyError::Io(_) => "Archive could not be written",
     };
     Diagnostic::target_with_detail(
-        "E2000",
+        "ORNA-CMD-TARGET-UNAVAILABLE",
         title,
         "export from an admitted repository snapshot and keep every pinned dependency available",
         error.to_string(),

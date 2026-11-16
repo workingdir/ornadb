@@ -183,7 +183,7 @@ async fn publish_refuses_a_legacy_head_without_writing() {
             assert_eq!(output.status.code(), Some(1), "{stderr}");
             assert!(output.stdout.is_empty(), "{stderr}");
             assert!(
-                stderr.contains("error[E2300]: publication target is a read-only legacy snapshot"),
+                stderr.contains("error[ORNA-CMD-WORKFLOW-REFUSED]: publication target is a read-only legacy snapshot"),
                 "{stderr}"
             );
             assert!(
@@ -255,7 +255,7 @@ fn runtime_writes_are_refused_on_a_legacy_head() {
             )
         );
 
-        // The CLI maps every runtime identity failure to one E2200 today; the
+        // The CLI maps every runtime identity failure to one ORNA-CMD-RUNTIME-UNAVAILABLE today; the
         // typed refusal above is what its mapping receives.
         let git_before = git_state(root);
         let output = run(root, &["run", "main.main"]);
@@ -263,7 +263,9 @@ fn runtime_writes_are_refused_on_a_legacy_head() {
         assert_eq!(output.status.code(), Some(1), "{stderr}");
         assert!(output.stdout.is_empty(), "{stderr}");
         assert!(
-            stderr.contains("error[E2200]: repository runtime metadata is unavailable"),
+            stderr.contains(
+                "error[ORNA-CMD-RUNTIME-UNAVAILABLE]: repository runtime metadata is unavailable"
+            ),
             "{stderr}"
         );
         assert_eq!(git_state(root), git_before);
@@ -315,7 +317,7 @@ fn publish_in_a_prepared_migration_copy_names_the_unactivated_candidate() {
         assert_eq!(output.status.code(), Some(1), "{stderr}");
         assert!(output.stdout.is_empty(), "{stderr}");
         assert!(
-            stderr.contains("error[E2300]: publication target is a read-only legacy snapshot"),
+            stderr.contains("error[ORNA-CMD-WORKFLOW-REFUSED]: publication target is a read-only legacy snapshot"),
             "{stderr}"
         );
         assert!(

@@ -438,7 +438,7 @@ fn open_snapshot(
         "run `orna query <relation-hex>` inside an initialized repository",
     )? {
         return Err(Diagnostic::target_with_detail(
-            "E2000",
+            "ORNA-CMD-TARGET-UNAVAILABLE",
             "Snapshot name is ambiguous",
             "use the full ref name (`refs/heads/NAME`, `refs/tags/NAME`, \
                  `refs/remotes/ORIGIN/NAME`) or the commit id `orna history` lists",
@@ -1036,7 +1036,7 @@ fn parse_relation_id(value: &str) -> Result<[u8; 16], Diagnostic> {
 
 fn query_error(title: &'static str, detail: impl Into<String>) -> Diagnostic {
     Diagnostic::target_with_detail(
-        "E2000",
+        "ORNA-CMD-TARGET-UNAVAILABLE",
         title,
         "run `orna query <relation-hex>` inside an initialized repository",
         detail.into(),

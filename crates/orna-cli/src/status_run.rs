@@ -3,14 +3,18 @@ use super::*;
 pub(crate) const DISCOVER_WORKTREE_HELP: &str =
     "run the command inside a Git worktree or provide a local project path";
 
-/// The local Git worktree `endpoint` names, or the `E2100` refusal whose
+/// The local Git worktree `endpoint` names, or the `ORNA-CMD-REPOSITORY-UNAVAILABLE` refusal whose
 /// remedy is `help`.
 pub(crate) fn discover_worktree(
     endpoint: &Endpoint,
     help: &'static str,
 ) -> Result<orna_repository::Repository, Diagnostic> {
     orna_repository::Repository::discover(local_project_path(endpoint)?).map_err(|_| {
-        Diagnostic::target("E2100", "local Git worktree could not be discovered", help)
+        Diagnostic::target(
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
+            "local Git worktree could not be discovered",
+            help,
+        )
     })
 }
 
@@ -27,7 +31,7 @@ pub(crate) fn run_status(endpoint: &Endpoint) -> Result<(), Diagnostic> {
     )?;
     io::stdout().write_all(&output.stdout).map_err(|_| {
         Diagnostic::target(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "local Git worktree status could not be written",
             "retry `status --porcelain`",
         )
@@ -53,7 +57,7 @@ pub(crate) fn run_status_json(endpoint: &Endpoint) -> Result<(), Diagnostic> {
         .output()
         .map_err(|_| {
             Diagnostic::target(
-                "E2100",
+                "ORNA-CMD-REPOSITORY-UNAVAILABLE",
                 "local Git worktree branch could not be read",
                 "check that Git can read the local worktree, then retry `status --format json`",
             )
@@ -61,7 +65,7 @@ pub(crate) fn run_status_json(endpoint: &Endpoint) -> Result<(), Diagnostic> {
     let branch = cli_status::branch_name(branch_output.status.success(), &branch_output.stdout);
     let json = cli_status::encode_status_json(branch, &output.stdout).ok_or_else(|| {
         Diagnostic::target(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "local Git worktree status could not be read",
             "retry `status --format json`",
         )
@@ -69,14 +73,14 @@ pub(crate) fn run_status_json(endpoint: &Endpoint) -> Result<(), Diagnostic> {
     let unpublished_count = unpublished_mutation_count(&repository)?;
     let json = append_unpublished_count_json(json, unpublished_count).ok_or_else(|| {
         Diagnostic::target(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "local Git worktree status could not be read",
             "retry `status --format json`",
         )
     })?;
     io::stdout().lock().write_all(&json).map_err(|_| {
         Diagnostic::target(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "local Git worktree status could not be written",
             "retry `status --format json`",
         )
@@ -96,7 +100,7 @@ pub(crate) fn unpublished_mutation_count(
         .build()
         .map_err(|_| {
             Diagnostic::target(
-                "E2200",
+                "ORNA-CMD-RUNTIME-UNAVAILABLE",
                 "local runtime publication status could not be read",
                 "retry `status` after checking the local runtime state",
             )
@@ -105,7 +109,7 @@ pub(crate) fn unpublished_mutation_count(
         .block_on(RuntimeState::open(repository, identity, initial_digest))
         .map_err(|_| {
             Diagnostic::target(
-                "E2200",
+                "ORNA-CMD-RUNTIME-UNAVAILABLE",
                 "local runtime publication status could not be read",
                 "retry `status` after checking the local runtime state",
             )
@@ -131,7 +135,7 @@ pub(crate) fn unpublished_mutation_count(
         })
         .map_err(|_| {
             Diagnostic::target(
-                "E2200",
+                "ORNA-CMD-RUNTIME-UNAVAILABLE",
                 "local runtime publication status could not be read",
                 "retry `status` after checking the local runtime state",
             )
@@ -150,7 +154,7 @@ pub(crate) fn source_unpublished_mutation_count(
         .build()
         .map_err(|_| {
             Diagnostic::target(
-                "E2200",
+                "ORNA-CMD-RUNTIME-UNAVAILABLE",
                 "local runtime publication status could not be read",
                 "retry `migrate copy` after checking the source runtime state",
             )
@@ -159,7 +163,7 @@ pub(crate) fn source_unpublished_mutation_count(
         .block_on(orna_runtime::RuntimeState::read_pending_count(repository))
         .map_err(|_| {
             Diagnostic::target(
-                "E2200",
+                "ORNA-CMD-RUNTIME-UNAVAILABLE",
                 "local runtime publication status could not be read",
                 "retry `migrate copy` after checking the source runtime state",
             )
@@ -173,7 +177,7 @@ pub(crate) fn runtime_publication_metadata_rows(
     let path = local_project_path(endpoint)?;
     let repository = orna_repository::Repository::discover(path).map_err(|_| {
         Diagnostic::target(
-            "E2200",
+            "ORNA-CMD-RUNTIME-UNAVAILABLE",
             "local runtime publication metadata could not be read",
             "run the command inside an initialized local Orna repository",
         )
@@ -190,7 +194,7 @@ pub(crate) fn runtime_publication_metadata_rows(
         .build()
         .map_err(|_| {
             Diagnostic::target(
-                "E2200",
+                "ORNA-CMD-RUNTIME-UNAVAILABLE",
                 "local runtime publication metadata could not be read",
                 "retry the invocation after checking local runtime state",
             )
@@ -199,7 +203,7 @@ pub(crate) fn runtime_publication_metadata_rows(
         .block_on(RuntimeState::open(&repository, identity, initial_digest))
         .map_err(|_| {
             Diagnostic::target(
-                "E2200",
+                "ORNA-CMD-RUNTIME-UNAVAILABLE",
                 "local runtime publication metadata could not be read",
                 "retry the invocation after checking local runtime state",
             )
@@ -208,7 +212,7 @@ pub(crate) fn runtime_publication_metadata_rows(
         .block_on(state.publication_metadata_rows())
         .map_err(|_| {
             Diagnostic::target(
-                "E2200",
+                "ORNA-CMD-RUNTIME-UNAVAILABLE",
                 "local runtime publication metadata could not be read",
                 "retry the invocation after checking local runtime state",
             )
@@ -562,14 +566,14 @@ pub(crate) fn run_status_human(endpoint: &Endpoint, color_enabled: bool) -> Resu
     )
     .map_err(|_| {
         Diagnostic::target(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "local Git worktree status could not be written",
             "retry `status`",
         )
     })?;
     write_unpublished_summary(&mut stdout, unpublished_count).map_err(|_| {
         Diagnostic::target(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "local Git worktree status could not be written",
             "retry `status`",
         )
@@ -586,7 +590,7 @@ pub(crate) fn run_status_short(endpoint: &Endpoint, color_enabled: bool) -> Resu
     )?;
     let git_dir = String::from_utf8(git_dir_output.stdout).map_err(|_| {
         Diagnostic::target(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "local Git worktree status could not be read",
             RETRY,
         )
@@ -609,7 +613,7 @@ pub(crate) fn run_status_short(endpoint: &Endpoint, color_enabled: bool) -> Resu
     let mut stdout = io::stdout().lock();
     write_short_status(&output.stdout, &mut stdout, color_enabled).map_err(|_| {
         Diagnostic::target(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "local Git worktree status could not be written",
             "retry `status --short`",
         )

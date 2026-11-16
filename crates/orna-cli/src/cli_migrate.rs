@@ -10,7 +10,7 @@ use super::*;
 fn migration_source_admission_diagnostic(error: orna_repository::FormatContextError) -> Diagnostic {
     let title = format!("migration source could not be admitted: {error}");
     Diagnostic {
-        code: "E2100",
+        code: "ORNA-CMD-REPOSITORY-UNAVAILABLE",
         title: std::borrow::Cow::Owned(title),
         help: "verify the source worktree and retry with the same migration coordinates",
         exit: Exit::Target,
@@ -22,7 +22,7 @@ fn migration_source_admission_diagnostic(error: orna_repository::FormatContextEr
 /// The diagnostics every `migrate` form shares.
 fn migrate_usage() -> Diagnostic {
     Diagnostic::usage(
-        "E1002",
+        "ORNA-CMD-ARGUMENT-INVALID",
         "unsupported `migrate` arguments",
         "use `migrate copy DEST [--annotation-defaults N] --no-persistent-consumers` or `migrate abort DEST`",
     )
@@ -45,7 +45,7 @@ pub(super) fn run_migrate(endpoint: &Endpoint, arguments: &[String]) -> Result<(
     let source = std::path::Path::new(local_project_path(endpoint)?);
     let repository = orna_repository::Repository::discover(source).map_err(|error| {
         Diagnostic::target_with_detail(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "legacy migration source could not be opened",
             "run the command from a local format-1 or format-2 worktree",
             format!("{error:?}"),
@@ -66,7 +66,7 @@ fn parse_copy_arguments<'a>(
 ) -> Result<CopyArguments<'a>, Diagnostic> {
     let destination = words.next().ok_or_else(|| {
         Diagnostic::usage(
-            "E1001",
+            "ORNA-CMD-ARGUMENT-MISSING",
             "`migrate copy` needs a destination",
             "supply DEST after `migrate copy`",
         )
@@ -78,14 +78,14 @@ fn parse_copy_arguments<'a>(
             "--annotation-defaults" if annotation_defaults.is_none() => {
                 let value = words.next().ok_or_else(|| {
                     Diagnostic::usage(
-                        "E1001",
+                        "ORNA-CMD-ARGUMENT-MISSING",
                         "`--annotation-defaults` needs a count",
                         "supply the legacy metadata entry count after `--annotation-defaults`",
                     )
                 })?;
                 annotation_defaults = Some(value.parse::<u32>().map_err(|_| {
                     Diagnostic::usage(
-                        "E1002",
+                        "ORNA-CMD-ARGUMENT-INVALID",
                         "invalid `--annotation-defaults` count",
                         "supply a nonnegative integer",
                     )
@@ -99,7 +99,7 @@ fn parse_copy_arguments<'a>(
     }
     if !no_persistent_consumers {
         return Err(Diagnostic::usage(
-            "E1001",
+            "ORNA-CMD-ARGUMENT-MISSING",
             "`migrate copy` needs an explicit consumer-continuity choice",
             "supply `--no-persistent-consumers` to acknowledge that persistent consumer checkpoints are carried under recorded identity correspondence",
         ));
@@ -150,7 +150,7 @@ fn prepare_migration_copy(
     let carry = read_stream_carry(&source_runtime, repository)?;
     let continuity = carry.continuity_record().map_err(|error| {
         Diagnostic::target_with_detail(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "migration consumer continuity could not be represented",
             "retry with the migration continuity inventory available",
             format!("{error:?}"),
@@ -174,7 +174,7 @@ fn declared_annotation_defaults(
         .transpose()
         .map_err(|error| {
             Diagnostic::target_with_detail(
-                "E2100",
+                "ORNA-CMD-REPOSITORY-UNAVAILABLE",
                 "migration annotation metadata was invalid",
                 "supply the count derived from decoded legacy metadata, or omit the flag",
                 format!("{error:?}"),
@@ -190,7 +190,7 @@ fn migration_runtime() -> Result<tokio::runtime::Runtime, Diagnostic> {
         .build()
         .map_err(|_| {
             Diagnostic::target(
-                "E2100",
+                "ORNA-CMD-REPOSITORY-UNAVAILABLE",
                 "migration source runtime could not be inspected",
                 "retry `migrate copy` once the local runtime can start",
             )
@@ -210,14 +210,14 @@ fn read_stream_carry(
         .map_err(|error| match error {
             orna_runtime::StreamCarryError::NotCarriable(tables) => {
                 Diagnostic::target_with_detail(
-                    "E2100",
+                    "ORNA-CMD-REPOSITORY-UNAVAILABLE",
                     "migration source holds live per-attempt stream state",
                     "let the live stream attempts finish or be cancelled, then retry; no copy was prepared and the source is unchanged",
                     format!("tables={}", tables.join(", ")),
                 )
             }
             orna_runtime::StreamCarryError::Runtime(error) => Diagnostic::target_with_detail(
-                "E2100",
+                "ORNA-CMD-REPOSITORY-UNAVAILABLE",
                 "migration source stream state could not be read",
                 "retry `migrate copy` once the source runtime can be read; no copy was prepared",
                 format!("{error:?}"),
@@ -279,12 +279,12 @@ fn migration_copy_error(error: orna_repository::RepositoryError) -> Diagnostic {
             migration_source_admission_diagnostic(context)
         }
         orna_repository::RepositoryError::LegacyMigrationCopy => Diagnostic::target(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "prepared migration copy predates the migration-record removal",
             "discard it with `orna migrate abort DEST`, then run `orna migrate copy` again",
         ),
         orna_repository::RepositoryError::Format2CompactUnimplemented => Diagnostic::target(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "format-2 source holds compact-storage-v2 tables, which have no decoder yet",
             "see MIGRATION.md and bead ornadb-5il1.486; no copy was prepared and the source is unchanged",
         ),
@@ -292,13 +292,13 @@ fn migration_copy_error(error: orna_repository::RepositoryError) -> Diagnostic {
             declared,
             decoded,
         } => Diagnostic::target_with_detail(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "declared annotation defaults do not match the decoded legacy rows",
             "remove `--annotation-defaults` to use the decoded count, or pass the decoded Blob count; no copy was prepared and the source is unchanged",
             format!("declared={declared} decoded={decoded}"),
         ),
         other => Diagnostic::target_with_detail(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "migration copy could not be prepared or recovered",
             "verify the source worktree and retry with the same migration coordinates",
             format!("{other:?}"),
@@ -315,7 +315,7 @@ fn carry_stream_state(
     let destination_repository = orna_repository::Repository::discover(copy.destination())
         .map_err(|error| {
             Diagnostic::target_with_detail(
-                "E2100",
+                "ORNA-CMD-REPOSITORY-UNAVAILABLE",
                 "migration destination could not be opened",
                 "verify the prepared destination and retry with the same migration coordinates",
                 format!("{error:?}"),
@@ -325,7 +325,7 @@ fn carry_stream_state(
         .read_publication_journal()
         .map_err(|error| {
             Diagnostic::target_with_detail(
-                "E2100",
+                "ORNA-CMD-REPOSITORY-UNAVAILABLE",
                 "migration destination journal could not be read",
                 "verify the prepared destination and retry with the same migration coordinates",
                 format!("{error:?}"),
@@ -342,7 +342,7 @@ fn carry_stream_state(
         ))
         .map_err(|error| {
             Diagnostic::target_with_detail(
-                "E2100",
+                "ORNA-CMD-REPOSITORY-UNAVAILABLE",
                 "migration stream checkpoints could not be carried",
                 "verify the destination continuity record; a destination already holding different carried checkpoints is refused and no checkpoint was imported",
                 format!("{error:?}"),
@@ -361,14 +361,14 @@ fn run_migrate_abort<'a>(
 ) -> Result<(), Diagnostic> {
     let destination = arguments.next().ok_or_else(|| {
         Diagnostic::usage(
-            "E1001",
+            "ORNA-CMD-ARGUMENT-MISSING",
             "`migrate abort` needs a destination",
             "supply DEST after `migrate abort`",
         )
     })?;
     if arguments.next().is_some() {
         return Err(Diagnostic::usage(
-            "E1002",
+            "ORNA-CMD-ARGUMENT-INVALID",
             "unsupported `migrate abort` arguments",
             "use `migrate abort DEST`",
         ));
@@ -376,7 +376,7 @@ fn run_migrate_abort<'a>(
     let source = std::path::Path::new(local_project_path(endpoint)?);
     let repository = orna_repository::Repository::discover(source).map_err(|error| {
         Diagnostic::target_with_detail(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "legacy migration source could not be opened",
             "run the command from a local format-1 or format-2 worktree",
             format!("{error:?}"),
@@ -389,12 +389,12 @@ fn run_migrate_abort<'a>(
     )
     .map_err(|error| match error {
         orna_repository::RepositoryError::MigrationCopyAdvanced => Diagnostic::target(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "migration copy has begun activation and cannot be discarded",
             "finish activation with `orna upgrade --to-format 3 DEST --yes-activate`; nothing was removed",
         ),
         other => Diagnostic::target_with_detail(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "migration copy could not be discarded",
             "verify that DEST is the prepared copy of this source; the source worktree is unchanged",
             format!("{other:?}"),
@@ -445,7 +445,7 @@ fn run_upgrade_prepared(
     let source = std::path::Path::new(local_project_path(endpoint)?);
     let repository = orna_repository::Repository::discover(source).map_err(|error| {
         Diagnostic::target_with_detail(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "upgrade source could not be opened",
             "run the command from the local format-1 or format-2 worktree that the copy was prepared from",
             format!("{error:?}"),
@@ -455,7 +455,7 @@ fn run_upgrade_prepared(
     let candidate =
         orna_repository::migration_copy::prepared_candidate(&destination).map_err(|error| {
             Diagnostic::target_with_detail(
-                "E2100",
+                "ORNA-CMD-REPOSITORY-UNAVAILABLE",
                 "prepared migration copy could not be read for activation",
                 "verify that DEST is the prepared copy of this source; nothing was published",
                 format!("{error:?}"),
@@ -464,7 +464,7 @@ fn run_upgrade_prepared(
     match confirm {
         Some(id) if id != candidate.as_str() => {
             return Err(Diagnostic::target_with_detail(
-                "E2100",
+                "ORNA-CMD-REPOSITORY-UNAVAILABLE",
                 "confirmation names a different candidate than the prepared copy",
                 "re-run with the candidate_commit printed by the review; nothing was published",
                 format!("confirmed={id} candidate={}", candidate.as_str()),
@@ -517,7 +517,7 @@ fn activate_prepared(
             // The path is the title so it shows without `--debug`: the edited
             // legacy file is the one thing the user must restore.
             let mut diagnostic = Diagnostic::target_with_detail(
-                "E2300",
+                "ORNA-CMD-WORKFLOW-REFUSED",
                 "legacy file was edited after capture",
                 "restore the legacy file named in the title to its committed bytes or move the edit aside, then re-run `orna upgrade --to-format 3 DEST --yes-activate`; the source worktree is unchanged",
                 format!("{error:?}"),
@@ -526,7 +526,7 @@ fn activate_prepared(
             return diagnostic;
         }
         Diagnostic::target_with_detail(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "prepared migration copy could not be activated",
             "verify that DEST is the prepared copy of this source and re-run the same upgrade to resume; the source worktree is unchanged",
             format!("{error:?}"),
@@ -546,7 +546,7 @@ fn run_upgrade_in_place(
     let source = std::path::Path::new(local_project_path(endpoint)?);
     let repository = orna_repository::Repository::discover(source).map_err(|error| {
         Diagnostic::target_with_detail(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "upgrade source could not be opened",
             "run the command from the local format-1 or format-2 worktree to upgrade",
             format!("{error:?}"),
@@ -554,28 +554,28 @@ fn run_upgrade_in_place(
     })?;
     let root = repository.worktree().canonicalize().map_err(|_| {
         Diagnostic::target(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "upgrade source worktree could not be resolved",
             "run the command from the local format-1 or format-2 worktree to upgrade",
         )
     })?;
     let git_metadata = std::fs::symlink_metadata(root.join(".git")).map_err(|_| {
         Diagnostic::target(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "upgrade source has no Git directory",
             "run the command from a standalone worktree whose `.git` is a directory; nothing was changed",
         )
     })?;
     if !git_metadata.is_dir() {
         return Err(Diagnostic::target(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "in-place upgrade needs a standalone worktree",
             "run it from the worktree whose `.git` is a directory; a linked worktree is refused and nothing was changed",
         ));
     }
     let (Some(parent), Some(name)) = (root.parent(), root.file_name()) else {
         return Err(Diagnostic::target(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "upgrade source worktree has no parent directory",
             "move the worktree under a directory the candidate copy can be created in; nothing was changed",
         ));
@@ -585,7 +585,7 @@ fn run_upgrade_in_place(
         context.repository_format() == orna_repository::RepositoryFormat::Format3
     }) {
         return Err(Diagnostic::target(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "in-place upgrade already completed; nothing changed",
             "the worktree is already format-3; the sibling copy holds the previous snapshot; nothing was changed",
         ));
@@ -593,7 +593,7 @@ fn run_upgrade_in_place(
     let activated = orna_repository::migration_copy::finished_activation_head(&destination)
         .map_err(|error| {
             Diagnostic::target_with_detail(
-                "E2100",
+                "ORNA-CMD-REPOSITORY-UNAVAILABLE",
                 "prepared migration copy could not be inspected",
                 "remove the sibling copy with `orna migrate abort` and re-run; the worktree is unchanged",
                 format!("{error:?}"),
@@ -633,7 +633,7 @@ fn run_upgrade_in_place(
     )
     .map_err(|error| {
         Diagnostic::target_with_detail(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "activated candidate could not be published in place",
             "the worktree is unchanged because the exchange is atomic; the activated copy is kept at destination; re-run the same command to resume the exchange",
             format!("{error:?}"),
@@ -682,7 +682,7 @@ fn confirm_and_activate(
 ) -> Result<(), Diagnostic> {
     let confirmed = match activated {
         Some(head) if head != candidate => Err(Diagnostic::target_with_detail(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "activated sibling was built from a different candidate",
             "the source changed since the sibling was activated; inspect and remove the sibling copy by hand, then re-run; the worktree is unchanged",
             format!(
@@ -718,7 +718,7 @@ fn confirm_candidate(
 ) -> Result<(), Diagnostic> {
     match confirm {
         Some(id) if id != candidate.as_str() => Err(Diagnostic::target_with_detail(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "confirmation names a different candidate than the reviewed one",
             "re-run with the candidate_commit printed above; the worktree is unchanged and the sibling copy is kept",
             format!("confirmed={id} candidate={}", candidate.as_str()),
@@ -726,7 +726,7 @@ fn confirm_candidate(
         Some(_) => Ok(()),
         None if confirm_interactively(candidate.as_str())? => Ok(()),
         None => Err(Diagnostic::target_with_detail(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "publication was not confirmed",
             "re-run with `--confirm <candidate_commit>` shown above, or confirm at an interactive terminal; the worktree is unchanged and the sibling copy is kept",
             format!("candidate={}", candidate.as_str()),
@@ -740,7 +740,7 @@ fn refuse_unpublished_tail(repository: &orna_repository::Repository) -> Result<(
     let unpublished_count = crate::source_unpublished_mutation_count(repository)?;
     if unpublished_count != 0 {
         return Err(Diagnostic::target_with_detail(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "migration source holds unpublished runtime mutations",
             "make the source's unpublished runtime mutations durable where its HEAD allows a publish, or discard them, then retry; the source is unchanged",
             format!("unpublished_mutations={unpublished_count}"),
@@ -764,7 +764,7 @@ fn discard_verification_copy(
         Err(error) => format!("{error:?}"),
     };
     Err(Diagnostic::target_with_detail(
-        "E2100",
+        "ORNA-CMD-REPOSITORY-UNAVAILABLE",
         "verification copy could not be removed",
         "remove the verification copy with `orna migrate abort` and re-run; the worktree and the activated sibling are unchanged",
         detail,
@@ -780,7 +780,7 @@ fn confirm_interactively(candidate: &str) -> Result<bool, Diagnostic> {
     }
     let prompt_failed = || {
         Diagnostic::target(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "confirmation prompt could not be read",
             "re-run with `--confirm <candidate_commit>`; nothing was changed",
         )
@@ -817,14 +817,14 @@ fn parse_upgrade_arguments(arguments: &[String]) -> Result<UpgradeArguments<'_>,
             "--to-format" if !format_three => {
                 let format = words.next().ok_or_else(|| {
                     Diagnostic::usage(
-                        "E1001",
+                        "ORNA-CMD-ARGUMENT-MISSING",
                         "`--to-format` needs a format",
                         "supply `--to-format 3` after `upgrade`",
                     )
                 })?;
                 if format != "3" {
                     return Err(Diagnostic::usage(
-                        "E1002",
+                        "ORNA-CMD-ARGUMENT-INVALID",
                         "unsupported `--to-format` target",
                         "only `--to-format 3` is supported; nothing was changed",
                     ));
@@ -838,7 +838,7 @@ fn parse_upgrade_arguments(arguments: &[String]) -> Result<UpgradeArguments<'_>,
             "--confirm" if confirm.is_none() => {
                 confirm = Some(words.next().ok_or_else(|| {
                     Diagnostic::usage(
-                        "E1001",
+                        "ORNA-CMD-ARGUMENT-MISSING",
                         "`--confirm` needs a candidate commit id",
                         "supply the candidate_commit printed by the review after `--confirm`",
                     )
@@ -847,14 +847,14 @@ fn parse_upgrade_arguments(arguments: &[String]) -> Result<UpgradeArguments<'_>,
             "--annotation-defaults" if annotation_defaults.is_none() => {
                 let value = words.next().ok_or_else(|| {
                     Diagnostic::usage(
-                        "E1001",
+                        "ORNA-CMD-ARGUMENT-MISSING",
                         "`--annotation-defaults` needs a count",
                         "supply the legacy metadata entry count after `--annotation-defaults`",
                     )
                 })?;
                 annotation_defaults = Some(value.parse::<u32>().map_err(|_| {
                     Diagnostic::usage(
-                        "E1002",
+                        "ORNA-CMD-ARGUMENT-INVALID",
                         "invalid `--annotation-defaults` count",
                         "supply a nonnegative integer",
                     )
@@ -863,7 +863,7 @@ fn parse_upgrade_arguments(arguments: &[String]) -> Result<UpgradeArguments<'_>,
             _ if destination.is_none() && !word.starts_with("--") => destination = Some(word),
             _ => {
                 return Err(Diagnostic::usage(
-                    "E1002",
+                    "ORNA-CMD-ARGUMENT-INVALID",
                     "unsupported `upgrade` arguments",
                     "use `upgrade --to-format 3 [--annotation-defaults N] --no-persistent-consumers [--confirm ID]`, or `upgrade --to-format 3 DEST --yes-activate [--confirm ID]`; nothing was changed",
                 ));
@@ -872,7 +872,7 @@ fn parse_upgrade_arguments(arguments: &[String]) -> Result<UpgradeArguments<'_>,
     }
     if !format_three {
         return Err(Diagnostic::usage(
-            "E1001",
+            "ORNA-CMD-ARGUMENT-MISSING",
             "`upgrade` needs `--to-format 3`",
             "supply `--to-format 3` after `upgrade`; nothing was changed",
         ));
@@ -902,14 +902,14 @@ fn check_upgrade_form(
     if destination.is_some() {
         if !yes_activate {
             return Err(Diagnostic::usage(
-                "E1002",
+                "ORNA-CMD-ARGUMENT-INVALID",
                 "`upgrade` activates the prepared copy only with `--yes-activate`",
                 "re-run with `--yes-activate` to publish the prepared candidate into DEST; nothing was changed",
             ));
         }
         if annotation_defaults.is_some() || no_persistent_consumers {
             return Err(Diagnostic::usage(
-                "E1002",
+                "ORNA-CMD-ARGUMENT-INVALID",
                 "`--annotation-defaults` and `--no-persistent-consumers` belong to the preparation",
                 "the prepared copy already records them; pass them to `orna migrate copy DEST` or to the one-step `orna upgrade --to-format 3`; nothing was changed",
             ));
@@ -917,14 +917,14 @@ fn check_upgrade_form(
     } else {
         if yes_activate {
             return Err(Diagnostic::usage(
-                "E1002",
+                "ORNA-CMD-ARGUMENT-INVALID",
                 "`--yes-activate` needs a DEST",
                 "the one-step form publishes after `--confirm` or an interactive confirmation; nothing was changed",
             ));
         }
         if !no_persistent_consumers {
             return Err(Diagnostic::usage(
-                "E1001",
+                "ORNA-CMD-ARGUMENT-MISSING",
                 "`upgrade --to-format 3` needs an explicit consumer-continuity choice",
                 "supply `--no-persistent-consumers` to acknowledge that persistent consumer checkpoints are carried under recorded identity correspondence",
             ));

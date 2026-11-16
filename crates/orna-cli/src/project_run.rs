@@ -15,7 +15,7 @@ pub(crate) fn load_project_without_standard_rejection(
     let path = local_project_path(endpoint)?;
     let repository = orna_repository::Repository::discover(path).map_err(|_| {
         Diagnostic::target(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "project Git worktree could not be discovered",
             "run the command inside a Git worktree or provide a local project path",
         )
@@ -135,7 +135,7 @@ pub(crate) fn runtime_identity(
             "the repository HEAD records a format this build does not know; use a build that supports it",
         ),
         _ => Diagnostic::target(
-            "E2200",
+            "ORNA-CMD-RUNTIME-UNAVAILABLE",
             "repository runtime metadata is unavailable",
             "initialize the Orna repository before running a durable project invocation",
         ),

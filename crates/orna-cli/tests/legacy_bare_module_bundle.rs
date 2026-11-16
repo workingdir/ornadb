@@ -5,7 +5,7 @@
 //! The bundle was produced by the `origin/main` CLI before module tables were
 //! stored under their qualified names: `a.Item` is stored as the bare `Item`
 //! row. The committed state holds that row, so the current build must refuse
-//! every invocation of the project with E2200 instead of reading past it or
+//! every invocation of the project with ORNA-CMD-RUNTIME-UNAVAILABLE instead of reading past it or
 //! forking the relation. Both artifacts are pinned by SHA-256 so they cannot
 //! drift silently.
 
@@ -79,7 +79,7 @@ fn legacy_bare_module_repository_is_refused_with_e2200() {
         "legacy store must be refused: {stderr}"
     );
     assert!(
-        stderr.contains("E2200"),
-        "refusal must carry E2200: {stderr}"
+        stderr.contains("ORNA-CMD-RUNTIME-UNAVAILABLE"),
+        "refusal must carry ORNA-CMD-RUNTIME-UNAVAILABLE: {stderr}"
     );
 }

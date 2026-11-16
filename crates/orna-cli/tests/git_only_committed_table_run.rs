@@ -80,7 +80,8 @@ fn git_only_committed_table_run_reports_missing_identity_inventory() {
     assert!(!output.status.success(), "{output:?}");
     assert!(output.stdout.is_empty(), "{output:?}");
     assert!(
-        stderr.contains("E2200") && stderr.contains("committed table identities are unavailable"),
+        stderr.contains("ORNA-CMD-RUNTIME-UNAVAILABLE")
+            && stderr.contains("committed table identities are unavailable"),
         "expected the identity diagnostic: {stderr}"
     );
     assert!(

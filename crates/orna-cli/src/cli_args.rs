@@ -175,7 +175,7 @@ pub(super) struct ParseReport {
 fn parse_legend_args(args: &[&str]) -> Result<(LegendFormat, Option<usize>), Diagnostic> {
     let usage = || {
         Diagnostic::usage(
-            "E1002",
+            "ORNA-CMD-ARGUMENT-INVALID",
             "unsupported `semantic-legend` option",
             "use `semantic-legend`, `semantic-legend --json`, `semantic-legend --markdown`, `semantic-legend --format csv`, `semantic-legend --quiet`, `semantic-legend --limit N`, `semantic-legend --version`, `semantic-legend --format table` or `semantic-legend --count`",
         )
@@ -187,7 +187,7 @@ fn parse_legend_args(args: &[&str]) -> Result<(LegendFormat, Option<usize>), Dia
             .filter(|count| *count > 0)
             .ok_or_else(|| {
                 Diagnostic::usage(
-                    "E1002",
+                    "ORNA-CMD-ARGUMENT-INVALID",
                     "invalid `semantic-legend --limit` value",
                     "use a positive integer, such as `--limit 5`",
                 )
@@ -256,7 +256,7 @@ fn refused_command(name: &str) -> Diagnostic {
             "use `--help` to list supported commands",
         ),
     };
-    Diagnostic::usage("E1002", title, help)
+    Diagnostic::usage("ORNA-CMD-ARGUMENT-INVALID", title, help)
 }
 
 /// The words of one command line, consumed left to right.
@@ -274,19 +274,20 @@ impl<'a> Words<'a> {
         self.words.get(self.position).map(String::as_str)
     }
 
-    /// The next word, or the `E1001` refusal that names what is missing.
+    /// The next word, or the `ORNA-CMD-ARGUMENT-MISSING` refusal that names what is missing.
     fn require(&mut self, title: &'static str, help: &'static str) -> Result<&'a str, Diagnostic> {
-        self.next().ok_or(Diagnostic::usage("E1001", title, help))
+        self.next()
+            .ok_or(Diagnostic::usage("ORNA-CMD-ARGUMENT-MISSING", title, help))
     }
 
-    /// Refuses (`E1002`) any word left over.
+    /// Refuses (`ORNA-CMD-ARGUMENT-INVALID`) any word left over.
     fn reject_trailing(
         &mut self,
         title: &'static str,
         help: &'static str,
     ) -> Result<(), Diagnostic> {
         match self.next() {
-            Some(_) => Err(Diagnostic::usage("E1002", title, help)),
+            Some(_) => Err(Diagnostic::usage("ORNA-CMD-ARGUMENT-INVALID", title, help)),
             None => Ok(()),
         }
     }
@@ -352,14 +353,14 @@ pub(super) fn parse_cli_reporting(arguments: &[String]) -> ParseReport {
         let command = parse_command(&mut words, &globals)?;
         if globals.output_format.is_some() && !matches!(&command, Command::Status { .. }) {
             return Err(Diagnostic::usage(
-                "E1002",
+                "ORNA-CMD-ARGUMENT-INVALID",
                 "`--format` is supported only by `status`",
                 "use `--format human|short|json status` or `status --format human|short|json`",
             ));
         }
         if words.next().is_some() {
             return Err(Diagnostic::usage(
-                "E1003",
+                "ORNA-CMD-ARGUMENT-UNEXPECTED",
                 "command has unexpected arguments",
                 "this bounded slice accepts no extra arguments",
             ));
@@ -404,7 +405,7 @@ fn parse_global_options(
                 let Some(value) = words.next() else {
                     first_error.get_or_insert_with(|| {
                         Diagnostic::usage(
-                            "E1001",
+                            "ORNA-CMD-ARGUMENT-MISSING",
                             "option `--db` needs a value",
                             "supply an endpoint after `--db`",
                         )
@@ -423,7 +424,7 @@ fn parse_global_options(
                 let Some(value) = words.next() else {
                     first_error.get_or_insert_with(|| {
                         Diagnostic::usage(
-                            "E1001",
+                            "ORNA-CMD-ARGUMENT-MISSING",
                             "option `--color` needs a value",
                             "choose `auto`, `always`, or `never` after `--color`",
                         )
@@ -437,7 +438,7 @@ fn parse_global_options(
                         color_rejected = true;
                         first_error.get_or_insert_with(|| {
                             Diagnostic::usage(
-                                "E1002",
+                                "ORNA-CMD-ARGUMENT-INVALID",
                                 "unsupported value for `--color`",
                                 "choose `auto`, `always`, or `never`",
                             )
@@ -450,7 +451,7 @@ fn parse_global_options(
                 let Some(value) = words.next() else {
                     first_error.get_or_insert_with(|| {
                         Diagnostic::usage(
-                            "E1001",
+                            "ORNA-CMD-ARGUMENT-MISSING",
                             "option `--format` needs a value",
                             "choose `human`, `short`, or `json` after `--format`",
                         )
@@ -462,7 +463,7 @@ fn parse_global_options(
                     None => {
                         first_error.get_or_insert_with(|| {
                             Diagnostic::usage(
-                                "E1002",
+                                "ORNA-CMD-ARGUMENT-INVALID",
                                 "unsupported value for `--format`",
                                 "choose `human`, `short`, or `json`",
                             )
@@ -547,7 +548,7 @@ fn parse_command(words: &mut Words<'_>, globals: &GlobalOptions) -> Result<Comma
         "--version" | "-V" => Ok(Command::Version),
         "run" => parse_run(words),
         _ => Err(Diagnostic::usage(
-            "E1002",
+            "ORNA-CMD-ARGUMENT-INVALID",
             "unknown Orna command",
             "use `--help` to list supported commands",
         )),
@@ -563,21 +564,21 @@ fn parse_init(words: &mut Words<'_>, globals: &GlobalOptions) -> Result<Command,
         && target.as_os_str().to_string_lossy().starts_with('-')
     {
         return Err(Diagnostic::usage(
-            "E1002",
+            "ORNA-CMD-ARGUMENT-INVALID",
             "`init` option is not supported",
             "use `init` or `init DIRECTORY` without Git options",
         ));
     }
     if words.next().is_some() {
         return Err(Diagnostic::usage(
-            "E1003",
+            "ORNA-CMD-ARGUMENT-UNEXPECTED",
             "`init` accepts at most one directory",
             "use `init` or `init DIRECTORY`",
         ));
     }
     if globals.has_explicit_endpoint {
         return Err(Diagnostic::usage(
-            "E1002",
+            "ORNA-CMD-ARGUMENT-INVALID",
             "`init` does not accept `--db`",
             "use `init` or `init DIRECTORY` to choose a local repository",
         ));
@@ -588,7 +589,7 @@ fn parse_init(words: &mut Words<'_>, globals: &GlobalOptions) -> Result<Command,
 fn parse_add_row(words: &mut Words<'_>) -> Result<Command, Diagnostic> {
     if words.next() != Some("--row") {
         return Err(Diagnostic::usage(
-            "E1002",
+            "ORNA-CMD-ARGUMENT-INVALID",
             "`add` requires `--row`",
             "use `add --row TABLE KEY` to stage one logical row",
         ));
@@ -637,14 +638,14 @@ fn parse_status(words: &mut Words<'_>, globals: &GlobalOptions) -> Result<Comman
                 "use `status --format human`, `status --format short`, or `status --format json`",
             )?;
             Some(StatusFormat::parse(value).ok_or(Diagnostic::usage(
-                "E1002",
+                "ORNA-CMD-ARGUMENT-INVALID",
                 "unsupported value for `status --format`",
                 "choose `human`, `short`, or `json` after `status --format`",
             ))?)
         }
         Some(_) => {
             return Err(Diagnostic::usage(
-                "E1002",
+                "ORNA-CMD-ARGUMENT-INVALID",
                 "unsupported `status` option or option placement",
                 "use `status`, `status --porcelain`, `status --short`, `status --format human|short|json`, or `--format human|short|json status`",
             ));
@@ -653,7 +654,7 @@ fn parse_status(words: &mut Words<'_>, globals: &GlobalOptions) -> Result<Comman
     };
     if globals.output_format.is_some() && local_format.is_some() {
         return Err(Diagnostic::usage(
-            "E1002",
+            "ORNA-CMD-ARGUMENT-INVALID",
             "status output format was specified twice",
             "choose either `--format VALUE status` or `status --format VALUE`",
         ));
@@ -729,7 +730,7 @@ fn parse_mount(words: &mut Words<'_>) -> Result<Command, Diagnostic> {
                 )?;
                 if !matches!(mode, MountMode::Unset) {
                     return Err(Diagnostic::usage(
-                        "E1001",
+                        "ORNA-CMD-ARGUMENT-MISSING",
                         "`mount` names one snapshot",
                         "use `mount DIR --at SELECTOR`",
                     ));
@@ -739,7 +740,7 @@ fn parse_mount(words: &mut Words<'_>) -> Result<Command, Diagnostic> {
             "--cwd" => {
                 if !matches!(mode, MountMode::Unset) {
                     return Err(Diagnostic::usage(
-                        "E1001",
+                        "ORNA-CMD-ARGUMENT-MISSING",
                         "mount accepts exactly one view mode",
                         "use mount DIR --cwd or mount DIR --at SELECTOR",
                     ));
@@ -748,7 +749,7 @@ fn parse_mount(words: &mut Words<'_>) -> Result<Command, Diagnostic> {
             }
             _ => {
                 return Err(Diagnostic::usage(
-                    "E1002",
+                    "ORNA-CMD-ARGUMENT-INVALID",
                     "unsupported `mount` option",
                     "use `mount DIR --at SELECTOR`",
                 ));
@@ -762,7 +763,7 @@ fn parse_mount(words: &mut Words<'_>) -> Result<Command, Diagnostic> {
             selector,
         }),
         MountMode::Unset => Err(Diagnostic::usage(
-            "E1001",
+            "ORNA-CMD-ARGUMENT-MISSING",
             "mount needs a view mode",
             "use mount DIR --cwd or mount DIR --at SELECTOR",
         )),
@@ -771,7 +772,7 @@ fn parse_mount(words: &mut Words<'_>) -> Result<Command, Diagnostic> {
 
 fn parse_mount_status(words: &mut Words<'_>) -> Result<Command, Diagnostic> {
     let unsupported = Diagnostic::usage(
-        "E1002",
+        "ORNA-CMD-ARGUMENT-INVALID",
         "unsupported `mount status` option",
         "use `mount status` or `mount status --json`",
     );
@@ -807,7 +808,7 @@ fn parse_serve(words: &mut Words<'_>) -> Result<Command, Diagnostic> {
                 )?;
                 port = value.parse().map_err(|_| {
                     Diagnostic::usage(
-                        "E1002",
+                        "ORNA-CMD-ARGUMENT-INVALID",
                         "`serve --port` is invalid",
                         "supply a port from 0 through 65535 after `--port`",
                     )
@@ -815,7 +816,7 @@ fn parse_serve(words: &mut Words<'_>) -> Result<Command, Diagnostic> {
             }
             _ => {
                 return Err(Diagnostic::usage(
-                    "E1002",
+                    "ORNA-CMD-ARGUMENT-INVALID",
                     "unsupported `serve` option",
                     "use `serve [--port PORT] [--allow-push]`; the listener stays on loopback",
                 ));
@@ -844,12 +845,12 @@ fn parse_checkout(words: &mut Words<'_>) -> Result<Command, Diagnostic> {
             name: (*name).to_owned(),
         }),
         [] => Err(Diagnostic::usage(
-            "E1001",
+            "ORNA-CMD-ARGUMENT-MISSING",
             "`checkout` needs a branch or commit name",
             "supply the branch or commit to select, such as `orna checkout main`",
         )),
         _ => Err(Diagnostic::usage(
-            "E1002",
+            "ORNA-CMD-ARGUMENT-INVALID",
             "`checkout` takes exactly one branch or commit name",
             "use `orna checkout NAME`; options are not available in this build",
         )),
@@ -913,7 +914,7 @@ mod tests {
         }
         assert_eq!(
             parse_cli(&args(&["serve", "--push"])).unwrap_err().code,
-            "E1002"
+            "ORNA-CMD-ARGUMENT-INVALID"
         );
     }
 
@@ -1037,7 +1038,7 @@ mod tests {
         }
         let misplaced = parse_cli(&args(&["--format", "json", "check"]))
             .expect_err("format is limited to status");
-        assert_eq!(misplaced.code, "E1002");
+        assert_eq!(misplaced.code, "ORNA-CMD-ARGUMENT-INVALID");
 
         let invalid_format = parse_cli(&args(&["status", "--format", "xml"]))
             .expect_err("unsupported output format is rejected");
@@ -1048,7 +1049,7 @@ mod tests {
                 invalid_format.help
             ),
             (
-                "E1002",
+                "ORNA-CMD-ARGUMENT-INVALID",
                 "unsupported value for `status --format`",
                 "choose `human`, `short`, or `json` after `status --format`"
             )
@@ -1070,19 +1071,19 @@ mod tests {
             parse_cli(&args(&["mv"]))
                 .expect_err("missing source is rejected")
                 .code,
-            "E1001"
+            "ORNA-CMD-ARGUMENT-MISSING"
         );
         assert_eq!(
             parse_cli(&args(&["mv", "Media"]))
                 .expect_err("missing target is rejected")
                 .code,
-            "E1001"
+            "ORNA-CMD-ARGUMENT-MISSING"
         );
         assert_eq!(
             parse_cli(&args(&["mv", "Media", "Archive", "Extra"]))
                 .expect_err("extra arguments are rejected")
                 .code,
-            "E1003"
+            "ORNA-CMD-ARGUMENT-UNEXPECTED"
         );
     }
 
@@ -1133,7 +1134,10 @@ mod tests {
     #[test]
     fn rejected_command_line_reports_the_requested_color_and_verbosity() {
         let report = parse_cli_reporting(&args(&["--debug", "--color", "always", "unknown"]));
-        assert_eq!(report.result.expect_err("unknown command").code, "E1002");
+        assert_eq!(
+            report.result.expect_err("unknown command").code,
+            "ORNA-CMD-ARGUMENT-INVALID"
+        );
         assert_eq!(report.modes.color, ColorMode::Always);
         assert!(report.modes.debug);
 
@@ -1141,7 +1145,10 @@ mod tests {
         // later `--debug` still selects how the rejection is rendered.
         let report =
             parse_cli_reporting(&args(&["--color", "always", "--color", "bogus", "--debug"]));
-        assert_eq!(report.result.expect_err("invalid color").code, "E1002");
+        assert_eq!(
+            report.result.expect_err("invalid color").code,
+            "ORNA-CMD-ARGUMENT-INVALID"
+        );
         assert_eq!(report.modes.color, ColorMode::Always);
         assert!(report.modes.debug);
     }
@@ -1153,7 +1160,7 @@ mod tests {
         assert_eq!(
             (error.code, error.title.as_ref(), error.help),
             (
-                "E1002",
+                "ORNA-CMD-ARGUMENT-INVALID",
                 "unsupported value for `--color`",
                 "choose `auto`, `always`, or `never`"
             )
@@ -1163,7 +1170,7 @@ mod tests {
         assert_eq!(
             (error.code, error.title.as_ref(), error.help),
             (
-                "E1002",
+                "ORNA-CMD-ARGUMENT-INVALID",
                 "unknown Orna command",
                 "use `--help` to list supported commands"
             )

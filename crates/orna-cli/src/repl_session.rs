@@ -184,10 +184,14 @@ fn repl_tokio_runtime() -> Result<tokio::runtime::Runtime, repl::ReplFailure> {
 pub(crate) const STORE_COMMIT_REMEDY: &str =
     "commit the project and its store with `orna commit -m MESSAGE`, then restart the REPL";
 
-/// A located `E2200` failure: the project REPL has no writable transaction
+/// A located `ORNA-CMD-RUNTIME-UNAVAILABLE` failure: the project REPL has no writable transaction
 /// capability, and the message and remedy say why and how to recover.
 pub(crate) fn transactions_unavailable(message: &str, remedy: &str) -> repl::ReplFailure {
-    repl::ReplFailure::located("E2200", message, vec![remedy.to_owned()])
+    repl::ReplFailure::located(
+        "ORNA-CMD-RUNTIME-UNAVAILABLE",
+        message,
+        vec![remedy.to_owned()],
+    )
 }
 
 /// Collects the admitted tables of an analyzed project: every table whose
@@ -301,7 +305,7 @@ pub(crate) fn repl_repository(
         Endpoint::Path(path) => {
             Some(orna_repository::Repository::discover(path).map_err(|_| {
                 Diagnostic::target(
-                    "E2100",
+                    "ORNA-CMD-REPOSITORY-UNAVAILABLE",
                     "project Git worktree could not be discovered",
                     "run the command inside a Git worktree or provide a local project path",
                 )
@@ -324,13 +328,13 @@ pub(crate) fn repl_session_error(error: &ReplError) -> Diagnostic {
         )
     } else if error.code().starts_with("ORNA-S") || error.code() == "ORNA-REPL-SEMANTIC" {
         Diagnostic::target(
-            "E2101",
+            "ORNA-CMD-SEMANTIC-FAILED",
             "project semantic analysis failed",
             "fix the first reported source contract error before starting a project REPL session",
         )
     } else {
         Diagnostic::target_with_detail(
-            "E2200",
+            "ORNA-CMD-RUNTIME-UNAVAILABLE",
             "project REPL session is not available",
             "use a project supported by the configured REPL runtime",
             error.code().to_owned(),

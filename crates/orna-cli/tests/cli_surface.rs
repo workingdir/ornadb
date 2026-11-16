@@ -40,7 +40,10 @@ fn unavailable_workflow_commands_are_usage_refusals_before_any_repository_opens(
         let output = orna(directory.path(), &[command]);
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert_eq!(output.status.code(), Some(2), "{command}: {stderr}");
-        assert!(stderr.contains("E1002"), "{command}: {stderr}");
+        assert!(
+            stderr.contains("ORNA-CMD-ARGUMENT-INVALID"),
+            "{command}: {stderr}"
+        );
         assert!(
             stderr.contains(&format!("`{command}` is not available in this build")),
             "{command}: {stderr}"
@@ -54,7 +57,7 @@ fn checkout_without_a_target_is_a_usage_error_before_any_repository_opens() {
     let output = orna(directory.path(), &["checkout"]);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(2), "{stderr}");
-    assert!(stderr.contains("E1001"), "{stderr}");
+    assert!(stderr.contains("ORNA-CMD-ARGUMENT-MISSING"), "{stderr}");
 }
 
 #[test]
@@ -63,7 +66,7 @@ fn upgrade_without_a_destination_is_a_usage_error_before_any_repository_opens() 
     let output = orna(directory.path(), &["upgrade", "--to-format", "3"]);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(2), "{stderr}");
-    assert!(stderr.contains("E1001"), "{stderr}");
+    assert!(stderr.contains("ORNA-CMD-ARGUMENT-MISSING"), "{stderr}");
 }
 
 #[test]
@@ -72,7 +75,7 @@ fn restore_without_the_staged_row_form_is_refused() {
     let output = orna(directory.path(), &["restore", "--staged"]);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(2), "{stderr}");
-    assert!(stderr.contains("E1002"), "{stderr}");
+    assert!(stderr.contains("ORNA-CMD-ARGUMENT-INVALID"), "{stderr}");
 }
 
 #[test]
@@ -81,7 +84,7 @@ fn publish_unknown_flag_is_a_usage_error_that_names_the_flag() {
     let output = orna(directory.path(), &["publish", "--bogus"]);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(2), "{stderr}");
-    assert!(stderr.contains("E1002"), "{stderr}");
+    assert!(stderr.contains("ORNA-CMD-ARGUMENT-INVALID"), "{stderr}");
     assert!(stderr.contains("--bogus"), "{stderr}");
 }
 
@@ -158,13 +161,16 @@ fn branch_name_creates_a_branch_at_head_and_makes_no_commit() {
     let again = orna(repository.path(), &["--db", db, "branch", "feature-x"]);
     let stderr = String::from_utf8_lossy(&again.stderr);
     assert_eq!(again.status.code(), Some(1), "{stderr}");
-    assert!(stderr.contains("E2100"), "{stderr}");
+    assert!(
+        stderr.contains("ORNA-CMD-REPOSITORY-UNAVAILABLE"),
+        "{stderr}"
+    );
     assert!(stderr.contains("already exists"), "{stderr}");
 
     let reserved = orna(repository.path(), &["--db", db, "branch", "HEAD"]);
     let stderr = String::from_utf8_lossy(&reserved.stderr);
     assert_eq!(reserved.status.code(), Some(2), "{stderr}");
-    assert!(stderr.contains("E1002"), "{stderr}");
+    assert!(stderr.contains("ORNA-CMD-ARGUMENT-INVALID"), "{stderr}");
 }
 
 #[test]
@@ -235,7 +241,10 @@ fn checkout_to_a_different_commit_is_refused_and_changes_nothing() {
     let cli = orna(repository.path(), &["--db", db, "checkout", "older"]);
     let stderr = String::from_utf8_lossy(&cli.stderr);
     assert_eq!(cli.status.code(), Some(1), "{stderr}");
-    assert!(stderr.contains("E2100"), "{stderr}");
+    assert!(
+        stderr.contains("ORNA-CMD-REPOSITORY-UNAVAILABLE"),
+        "{stderr}"
+    );
     assert!(
         stderr.contains("checkout would overwrite uncommitted changes to a.txt"),
         "{stderr}"
@@ -311,7 +320,10 @@ fn checkout_to_a_different_commit_without_an_admitted_target_changes_nothing() {
     let cli = orna(repository.path(), &["--db", db, "checkout", "older"]);
     let stderr = String::from_utf8_lossy(&cli.stderr);
     assert_eq!(cli.status.code(), Some(1), "{stderr}");
-    assert!(stderr.contains("E2100"), "{stderr}");
+    assert!(
+        stderr.contains("ORNA-CMD-REPOSITORY-UNAVAILABLE"),
+        "{stderr}"
+    );
     assert!(stderr.contains("could not be admitted"), "{stderr}");
 
     let current = git(repository.path(), &["branch", "--show-current"]);

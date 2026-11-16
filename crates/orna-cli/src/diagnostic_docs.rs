@@ -209,6 +209,126 @@ pub(crate) const DIAGNOSTIC_DOCUMENTATION: &[DiagnosticDocumentation] = &[
         explanation: "Field uniqueness and checks are table assertions owned by the table, not field suffixes.",
         help: "write an owner-local table assertion using `all_unique` or `every`",
     },
+    DiagnosticDocumentation {
+        code: "ORNA-CMD-ARGUMENT-MISSING",
+        title: "required argument is missing",
+        explanation: "The command line ends before a word the command requires, so the command cannot choose what to do.",
+        help: "supply the missing argument, then run the command again; `orna help` lists the forms",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA-CMD-ARGUMENT-INVALID",
+        title: "argument is not recognised or not valid",
+        explanation: "A command name, flag, value or extra word is not accepted by this command, so nothing was changed.",
+        help: "correct the spelling or value, or remove the word, then run the command again; `orna help` lists the forms",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA-CMD-ARGUMENT-UNEXPECTED",
+        title: "argument is not allowed here",
+        explanation: "A flag or word appears where this command does not accept it, so the command was refused before it ran.",
+        help: "move the flag to a position the command accepts, or remove it, then run the command again",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA-CMD-ENDPOINT-INVALID",
+        title: "endpoint is not valid",
+        explanation: "The endpoint names a scheme, host, port, path or socket that Orna does not accept, so no connection was attempted.",
+        help: "use a local path, an absolute Orna Unix socket URI, or a secure Orna URI",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA-CMD-ENDPOINT-CREDENTIALS",
+        title: "endpoint carries credentials or debug options",
+        explanation: "The endpoint contains unsupported credentials, query parameters or fragments, so no connection was attempted.",
+        help: "use transport authentication and omit credentials, fragments, and query parameters",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA-CMD-TARGET-UNAVAILABLE",
+        title: "target is unavailable",
+        explanation: "The command named a target, such as a row, table, mount, snapshot or Git object, that does not exist in the current state or cannot be used now.",
+        help: "check the target's name and state, then retry the command",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA-CMD-ANNOTATE-FAILED",
+        title: "annotation was not applied",
+        explanation: "The annotation could not be applied: its media type is invalid, or its output could not be read, staged or installed.",
+        help: "check the media type, source file and destination named in the message, then run the command again",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA-CMD-MOUNT-OUTCOME-UNKNOWN",
+        title: "mount outcome is unknown",
+        explanation: "The mount stopped at a point where Orna cannot tell whether the change was accepted, so the state must be inspected before anything is retried.",
+        help: "inspect the mount and the listed drafts before retrying, so an accepted change is not applied twice",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA-CMD-REPOSITORY-UNAVAILABLE",
+        title: "repository state could not be read",
+        explanation: "The project's repository or source tree could not be read or loaded, so the command has no trusted state to act on.",
+        help: "fix the repository or source boundary the message names, then run the command again",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA-CMD-REMOTE-FAILED",
+        title: "remote operation failed",
+        explanation: "Git or the remote did not complete the requested fetch, push or ref operation, so the local state was not changed to match it.",
+        help: "check the remote's address, credentials and availability, then retry the command",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA-CMD-SEMANTIC-FAILED",
+        title: "project semantic analysis failed",
+        explanation: "The project's source does not type-check or does not satisfy its semantic rules, so the command refused to run or publish it.",
+        help: "fix the first reported source error, then run the command again",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA-CMD-NO-SERVING-ENTRY",
+        title: "no serving entry is declared",
+        explanation: "`orna serve` needs the project's main.orna to declare `pub fn serve()`, and it does not.",
+        help: "add `pub fn serve()` to main.orna to serve `/`; Git transport remains available",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA-CMD-NO-ROOT-MAIN",
+        title: "no root main() is declared",
+        explanation: "`orna run` needs a root `main()` function in the project and the project has none.",
+        help: "declare `main()` in main.orna, or run a qualified function such as `orna run MODULE.FUNCTION`",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA-CMD-RUNTIME-UNAVAILABLE",
+        title: "runtime is unavailable",
+        explanation: "The durable runtime could not start or complete the requested operation, so no result was published.",
+        help: "check the repository and runtime state the message names, then retry the command or start a new session",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA-CMD-OUTPUT-FAILED",
+        title: "command output could not be written",
+        explanation: "The command completed its work but its output stream or terminal rejected the write, so the result could not be shown.",
+        help: "check that the output stream or terminal is available, then retry the command or start a new session",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA-CMD-WORKFLOW-REFUSED",
+        title: "workflow step was refused",
+        explanation: "A workflow step, such as publication, commit, staging or a serve request, was refused because its preconditions do not hold, so nothing was published.",
+        help: "follow the remedy the message names, then retry the workflow step",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA-CMD-GIT-IDENTITY-MISSING",
+        title: "Git identity is missing",
+        explanation: "Git has no author or committer identity for the commit, so Orna cannot record who made it.",
+        help: "set `user.name` and `user.email` for the repository, then commit again",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA-CMD-CANDIDATE-INVALID",
+        title: "candidate is invalid",
+        explanation: "The staged or prepared candidate does not match the committed state it must be built from, so it cannot be published.",
+        help: "restage the change from the committed state, then commit again",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA-CMD-CANDIDATE-CHANGED",
+        title: "candidate changed after it was prepared",
+        explanation: "The candidate changed between preparation and publication, so the prepared result no longer describes what would be committed.",
+        help: "prepare the candidate again, then commit it",
+    },
+    DiagnosticDocumentation {
+        code: "ORNA-CMD-NOTHING-TO-COMMIT",
+        title: "nothing is staged to commit",
+        explanation: "The index holds no change that differs from the committed state, so there is nothing to record.",
+        help: "stage changes with `orna add` or `git add`, then retry `orna commit -m MESSAGE`",
+    },
 ];
 
 pub(crate) fn diagnostic_documentation(code: &str) -> Option<DiagnosticDocumentation> {
@@ -221,7 +341,7 @@ pub(crate) fn diagnostic_documentation(code: &str) -> Option<DiagnosticDocumenta
 pub(crate) fn explain_diagnostic(code: &str) -> Result<String, Diagnostic> {
     let Some(documentation) = diagnostic_documentation(code) else {
         return Err(Diagnostic::usage(
-            "E1002",
+            "ORNA-CMD-ARGUMENT-INVALID",
             "diagnostic code is unknown",
             "supply a code printed by an Orna diagnostic, such as `ORNA-S010-IMPORT`",
         ));

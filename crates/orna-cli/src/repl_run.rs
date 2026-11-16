@@ -409,7 +409,7 @@ where
         Ok(outcome) => {
             repl::write_repl_outcome(writer, &outcome, source, color_enabled).map_err(|_| {
                 Diagnostic::target(
-                    "E2200",
+                    "ORNA-CMD-OUTPUT-FAILED",
                     "REPL console I/O failed",
                     "check the terminal input and output streams, then start a new session",
                 )
@@ -449,7 +449,7 @@ pub(crate) fn run_repl(
 ) -> Result<(), Diagnostic> {
     if matches!(endpoint, Endpoint::UnixSocket(_) | Endpoint::RemoteTls(_)) {
         return Err(Diagnostic::target(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "remote REPL sessions are unavailable",
             "use a local Git worktree until the Orna transport is available",
         ));
@@ -507,7 +507,7 @@ pub(crate) fn run_repl(
     )
     .map_err(|_| {
         Diagnostic::target(
-            "E2200",
+            "ORNA-CMD-OUTPUT-FAILED",
             "REPL console I/O failed",
             "check the terminal input and output streams, then start a new session",
         )
