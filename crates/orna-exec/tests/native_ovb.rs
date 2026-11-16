@@ -9,7 +9,8 @@ use orna_exec::{ExecError, ExecLimits, Value, run_entry};
 use orna_hir::{DefId, DefKind, ModulePath, Name, Program, SourceId, SourceUnit, lower};
 use orna_syntax::parse_module_with_file;
 use orna_value::{
-    CanonicalValue, DURATION_TAG, REFINED_NOMINAL_TAG, Raw, UUID_TAG, base64_encode, enum_type_id,
+    CanonicalValue, DURATION_TAG, ENUM_TAG, RECORD_TAG, REFINED_NOMINAL_TAG, Raw, UUID_TAG,
+    base64_encode, enum_type_id, enum_variant_id,
 };
 
 const LIMITS: ExecLimits = ExecLimits {
@@ -317,5 +318,85 @@ fn decode_reads_money_at_its_currency_and_refuses_another() {
     assert_eq!(
         run_with(&other_currency, LIMITS),
         Err(ExecError::Code("ORNA-EVAL-VALUE"))
+    );
+}
+
+/// A closed enum with a bare variant and one payload variant, encoded and decoded as `Shade`.
+const SHADE: &str = "pub enum Shade {\n    Dark,\n    Tinted { level: Int },\n}\n";
+
+fn shade_program(expression: &str) -> String {
+    format!("{HEAD}{SHADE}pub fn run(): Shade = {expression};\n")
+}
+
+fn uuid_raw(id: [u8; 16]) -> Raw {
+    Raw::Tag(UUID_TAG, Box::new(Raw::Bytes(id.to_vec())))
+}
+
+#[test]
+fn decode_then_encode_rewrites_an_enum_as_its_canonical_bytes() {
+    // Source cannot yet construct an enum value (`ExprKind::Construct` is NotYet in the evaluator), so the enum is
+    // decoded from canonical bytes computed independently of the engine, then encoded back.
+    let tinted = Raw::Tag(
+        ENUM_TAG,
+        Box::new(Raw::Array(vec![
+            uuid_raw(enum_type_id("main.Shade")),
+            uuid_raw(enum_variant_id("main.Shade", "Tinted")),
+            Raw::Tag(
+                RECORD_TAG,
+                Box::new(Raw::Array(vec![
+                    Raw::Null,
+                    Raw::Array(vec![Raw::Array(vec![
+                        Raw::Text("level".to_owned()),
+                        Raw::Int(3.into()),
+                    ])]),
+                ])),
+            ),
+        ])),
+    );
+    let bytes = canonical(tinted);
+    let encoded = base64_encode(&bytes);
+    assert_eq!(
+        run_with(
+            &format!(
+                "{HEAD}{SHADE}pub fn run(): Blob = ovb.encode<Shade>(ovb.decode<Shade>(base64.decode(\"{encoded}\")));\n"
+            ),
+            LIMITS
+        ),
+        Ok(blob(&bytes)),
+        "an enum decoded from its canonical bytes encodes back to the same bytes"
+    );
+}
+
+#[test]
+fn decode_refuses_an_enum_variant_the_type_does_not_declare() {
+    let missing = Raw::Tag(
+        ENUM_TAG,
+        Box::new(Raw::Array(vec![
+            uuid_raw(enum_type_id("main.Shade")),
+            uuid_raw(enum_variant_id("main.Shade", "Missing")),
+            Raw::Null,
+        ])),
+    );
+    assert_eq!(
+        run_with(&shade_program(&decode_raw("Shade", missing)), LIMITS),
+        Err(ExecError::Code("ORNA-EVAL-VALUE"))
+    );
+}
+
+#[test]
+fn encode_writes_a_refined_value_as_its_type_and_base() {
+    let wrapped = Raw::Tag(
+        REFINED_NOMINAL_TAG,
+        Box::new(Raw::Array(vec![
+            uuid_raw(enum_type_id("main.Score")),
+            Raw::Int(50.into()),
+        ])),
+    );
+    assert_eq!(
+        run_with(
+            &format!("{HEAD}{SCORE}pub fn run(): Blob = ovb.encode<Score>(50);\n"),
+            LIMITS
+        ),
+        Ok(blob(&canonical(wrapped)))
     );
 }

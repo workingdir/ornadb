@@ -18,16 +18,23 @@ pub(crate) struct VariantIds {
     pub(crate) variant_id: [u8; 16],
 }
 
+/// The ObjectId of the enum `def`, derived from its qualified name.
+pub(crate) fn enum_type_id_of(program: &Program, def: DefId) -> [u8; 16] {
+    let definition = &program.defs[def];
+    let namespace = program.modules[definition.module].path.to_string();
+    enum_type_id(&qualified_name(Some(&namespace), definition.name.as_str()))
+}
+
 /// Every source enum variant of `program`, keyed by its variant definition.
 pub(crate) fn variant_ids(program: &Program) -> HashMap<DefId, VariantIds> {
     let mut ids = HashMap::new();
-    for definition in program.defs.iter() {
+    for (enum_id, definition) in program.defs.iter_enumerated() {
         let DefKind::Enum(enum_def) = &definition.kind else {
             continue;
         };
         let namespace = program.modules[definition.module].path.to_string();
         let qualified = qualified_name(Some(&namespace), definition.name.as_str());
-        let type_id = enum_type_id(&qualified);
+        let type_id = enum_type_id_of(program, enum_id);
         for &variant in &enum_def.variants {
             let variant_name = program.defs[variant].name.as_str();
             let variant_id = enum_variant_id(&qualified, variant_name);
