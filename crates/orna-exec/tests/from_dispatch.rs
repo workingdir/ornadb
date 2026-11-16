@@ -126,3 +126,33 @@ fn a_conversion_inside_an_implementation_runs_its_own_call() {
     pub fn run(): Bool = Mailbox.from(\"ada@example.test\").email.address == \"ada@example.test\";\n";
     assert_eq!(run(source), Ok(Value::Bool(true)));
 }
+
+/// `Reciprocal` nests a `From<Int>` implementation that divides by its source, so a zero source fails the conversion.
+const RECIPROCAL: &str = "pub type Reciprocal {\n\
+    value: Int,\n\
+    impl From<Int> {\n\
+        fn from(divisor): Reciprocal { Reciprocal { value: 100 / divisor } }\n\
+    }\n\
+}\n";
+
+/// A failing `From` fails the conversion with the error it raised, and the activation aborts (CONVERT-004, CONVERT-010).
+#[test]
+fn a_failing_from_implementation_fails_the_conversion_with_its_error() {
+    assert_eq!(
+        run(&format!(
+            "{RECIPROCAL}pub fn run(): Bool = Reciprocal.from(0).value == 0;\n"
+        )),
+        Err(ExecError::Code("ORNA-EVAL-DIVIDE-BY-ZERO"))
+    );
+}
+
+/// A fallible `From` implementation converts a source it accepts: the failure path above is not taken (CONVERT-004).
+#[test]
+fn a_fallible_from_implementation_converts_a_valid_source() {
+    assert_eq!(
+        run(&format!(
+            "{RECIPROCAL}pub fn run(): Bool = Reciprocal.from(4).value == 25;\n"
+        )),
+        Ok(Value::Bool(true))
+    );
+}
