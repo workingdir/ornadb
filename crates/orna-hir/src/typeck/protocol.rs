@@ -179,10 +179,11 @@ impl BodyCheck<'_> {
             .find(|member| self.program.defs[*member].name == *name)
     }
 
-    /// Names a protocol member as the callee, with its inherited generic arguments filled in.
+    /// Names a function member as the callee, with its inherited generic arguments filled in: a protocol member, or
+    /// the `from` member of a `From` implementation (CONVERT-1), whose inherited arguments are its owner's.
     ///
-    /// `targs` holds the protocol's arguments then the `Self` type; the member's own generics
-    /// are solved by unification at the call.
+    /// `targs` holds the inherited arguments: for a protocol member, the protocol's arguments then the `Self`
+    /// type. The member's own generics are solved by unification at the call.
     pub(super) fn protocol_callee(
         &mut self,
         member: DefId,
