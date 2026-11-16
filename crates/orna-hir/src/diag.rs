@@ -115,6 +115,13 @@ pub const PUBLIC_ANNOTATION: &str = "ORNA-S020-ANNOTATION";
 /// report compares the same mistake under the same code.
 pub const CASE_COVERAGE: &str = "ORNA-S021-TYPE";
 
+/// A private field of a nominal type is read outside the implementations nested
+/// in that type (NOMINAL-006). A conversion reaches the private fields of its
+/// target only (CONVERT-009). The code is the checker's type-error class
+/// (ORNA-S021-TYPE), so the parity report compares the same mistake under the
+/// same code.
+pub const PRIVATE_FIELD: &str = "ORNA-S021-TYPE";
+
 /// Two protocol implementations of one type supply the same member call.
 ///
 /// Overlap is a static error whatever the source order (ORNA-GENERIC-014), so

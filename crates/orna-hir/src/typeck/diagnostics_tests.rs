@@ -3,7 +3,9 @@
 //! [`Program::diagnostics`].
 
 use super::typeck;
-use crate::diag::{GENERIC_OVERLAP, INFER_AMBIGUOUS, INFER_CONFLICT, PUBLIC_ANNOTATION};
+use crate::diag::{
+    GENERIC_OVERLAP, INFER_AMBIGUOUS, INFER_CONFLICT, PRIVATE_FIELD, PUBLIC_ANNOTATION,
+};
 use crate::{HirDiagnostic, ModulePath, Name, Program, SourceId, SourceUnit, lower};
 use orna_syntax::parse_module_with_file;
 
@@ -203,4 +205,100 @@ fn a_sys_row_method_that_is_not_a_legacy_write_is_not_an_admin_rejection() {
     let mut program = lower_source(source);
     typeck(&mut program);
     assert!(with_code(&program, crate::diag::SYS_ADMIN_METHOD).is_empty());
+}
+
+#[test]
+fn a_nested_impl_of_another_type_cannot_read_a_private_field() {
+    // `From<Celsius>` is nested in `Fahrenheit`, which does not own `Celsius`'s `value`.
+    let source = "pub type Celsius {\n    value: Int,\n}\npub type Fahrenheit {\n    degrees: Int,\n    impl From<Celsius> {\n        fn from(c): Fahrenheit { Fahrenheit { degrees: c.value } }\n    }\n}\n";
+    let mut program = lower_source(source);
+    typeck(&mut program);
+    let found = with_code(&program, PRIVATE_FIELD);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(spanned(source, found[0].1).contains("c.value"), "{found:?}");
+}
+
+#[test]
+fn a_free_function_cannot_read_a_private_field() {
+    let source = "pub type Temperature {\n    value: Int,\n}\npub fn reading(t: Temperature): Int = t.value;\n";
+    let mut program = lower_source(source);
+    typeck(&mut program);
+    let found = with_code(&program, PRIVATE_FIELD);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(spanned(source, found[0].1).contains("t.value"), "{found:?}");
+}
+
+#[test]
+fn a_public_field_is_readable_from_a_free_function() {
+    let source = "pub type Temperature {\n    pub value: Int,\n}\npub fn reading(t: Temperature): Int = t.value;\n";
+    let mut program = lower_source(source);
+    typeck(&mut program);
+    assert!(with_code(&program, PRIVATE_FIELD).is_empty());
+}
+
+#[test]
+fn a_protocol_method_nested_in_the_owner_reads_its_own_private_field() {
+    let source = "pub protocol Reading {\n    fn degree(self): Int;\n}\npub type Thermometer {\n    degrees: Int,\n    impl Reading {\n        fn degree(self): Int = self.degrees;\n    }\n}\n";
+    let mut program = lower_source(source);
+    typeck(&mut program);
+    assert!(with_code(&program, PRIVATE_FIELD).is_empty());
+}
+
+#[test]
+fn a_free_function_cannot_bind_a_private_field_in_a_pattern() {
+    let source = "pub type Temperature {\n    value: Int,\n}\npub fn peel(t: Temperature): Int {\n    let { value: v } = t;\n    v\n}\n";
+    let mut program = lower_source(source);
+    typeck(&mut program);
+    let found = with_code(&program, PRIVATE_FIELD);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(spanned(source, found[0].1), "t", "{found:?}");
+}
+
+#[test]
+fn a_protocol_method_nested_in_the_owner_binds_its_own_private_field() {
+    let source = "pub protocol Reading {\n    fn degree(self): Int;\n}\npub type Thermometer {\n    degrees: Int,\n    impl Reading {\n        fn degree(self): Int {\n            let { degrees: d } = self;\n            d\n        }\n    }\n}\n";
+    let mut program = lower_source(source);
+    typeck(&mut program);
+    assert!(with_code(&program, PRIVATE_FIELD).is_empty());
+}
+
+#[test]
+fn every_nested_implementation_of_the_owner_may_read_its_private_field() {
+    // The conformance fixture `valid/nominal-type-nested-impl.orna`: every implementation nested
+    // in `EmailAddress`, whichever protocol it implements, reads the owner's private `value`.
+    let source = r#"pub type EmailAddress {
+    value: Str,
+
+    impl From<Str> {
+        fn from(value): EmailAddress {
+            if !valid_email(value) {
+                fail(error(
+                    code: "email.invalid",
+                    message: "invalid email address",
+                ));
+            }
+            EmailAddress { value: value }
+        }
+    }
+
+    impl From<EmailHeader> {
+        fn from(header) = EmailAddress.from(header.address);
+    }
+
+    impl Display {
+        fn display(self, context): Str = self.value;
+    }
+}
+"#;
+    let mut program = lower_source(source);
+    typeck(&mut program);
+    let found = with_code(&program, PRIVATE_FIELD);
+    assert!(
+        found.is_empty(),
+        "{:?}",
+        found
+            .iter()
+            .map(|(_, d)| spanned(source, d))
+            .collect::<Vec<_>>()
+    );
 }
