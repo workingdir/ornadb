@@ -88,6 +88,10 @@ pub(crate) struct Scope {
     /// apart from ordinary values so only explicitly imported module roots can
     /// begin qualified module-member lookup.
     pub(crate) modules: CowTable<BTreeMap<String, Namespace>>,
+    /// `sys` namespaces bound by a `use` alias (ORNA-SYS-039). A call through
+    /// an alias classifies exactly as the spelled operation; see
+    /// `resolved_callee_path`.
+    pub(crate) sys_aliases: CowTable<BTreeMap<String, Namespace>>,
     /// The closed source/catalogue module set used by qualified lookup. This
     /// is data assembled by the caller, never a filesystem loader.
     pub(crate) available_modules: Arc<BTreeMap<Namespace, ModuleHeader>>,
@@ -171,6 +175,32 @@ pub(crate) struct Scope {
     /// Function bodies being inferred, innermost last. Each frame checks or
     /// joins the `return` statements that it owns.
     pub(crate) return_frames: RefCell<Vec<ReturnFrame>>,
+}
+
+/// The callee's path with a `sys` import alias replaced by the namespace it
+/// denotes (ORNA-SYS-039). The alias applies only while its name still
+/// resolves to that namespace, so a local binding or a shadowing declaration
+/// removes it.
+pub(crate) fn resolved_callee_path<'a>(
+    callee: &'a Expr,
+    scope: &'a Scope,
+    local: &BTreeMap<String, Symbol>,
+) -> Option<Vec<&'a str>> {
+    let path = qualified_path(callee)?;
+    let head = *path.first()?;
+    let Some(namespace) = scope.sys_aliases.get(head) else {
+        return Some(path);
+    };
+    let bound = scope
+        .names
+        .get(head)
+        .is_some_and(|symbol| symbol.ty == Type::Named(namespace.display()));
+    if local.contains_key(head) || !bound {
+        return Some(path);
+    }
+    let mut segments: Vec<&str> = namespace.0.iter().map(String::as_str).collect();
+    segments.extend_from_slice(&path[1..]);
+    Some(segments)
 }
 
 /// The dimension and unit declarations an analysis resolves units against:
