@@ -8,7 +8,7 @@
 
 use orna_project_repl::{AdmittedReplSession, ReplOutcome};
 use orna_repository::Repository;
-use orna_runtime::RuntimeState;
+use orna_runtime::{RuntimePublicationMetadataRows, RuntimeState};
 
 use super::{
     PinnedCommittedRows, ReplTransactionScope, ReplTransactions, RequestIdentity,
@@ -37,6 +37,22 @@ pub(super) fn bound_head_unchanged(
         ));
     }
     Ok(())
+}
+
+/// Reads the durable `sys.Storage` and `sys.MaintenanceJob` rows when `source`
+/// names either relation; `None` otherwise, so other inputs pay no read.
+pub(super) fn publication_rows_for_source(
+    runtime: &tokio::runtime::Runtime,
+    state: &RuntimeState,
+    source: &str,
+) -> Result<Option<RuntimePublicationMetadataRows>, repl::ReplFailure> {
+    if !orna_application::source_requires_publication_metadata(source) {
+        return Ok(None);
+    }
+    runtime
+        .block_on(state.publication_metadata_rows())
+        .map(Some)
+        .map_err(|_| repl::ReplFailure::from("ORNA-REPL-EFFECT".to_owned()))
 }
 
 /// Evaluates a table-read-only input over the CWD snapshot: the committed
@@ -77,6 +93,7 @@ pub(super) fn submit_committed_read(
             state.begin_admitted_table_activation_over_committed(&transactions.tables, committed),
         )
         .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
+    let publication_rows = publication_rows_for_source(&transactions.runtime, &state, source)?;
     let request = RequestIdentity {
         session_id: transactions.session_id,
         request_id: request_nonce().to_be_bytes(),
@@ -88,6 +105,7 @@ pub(super) fn submit_committed_read(
         &snapshot,
         &storage_orders,
         request,
+        publication_rows,
     );
     transactions
         .authority

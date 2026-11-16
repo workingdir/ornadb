@@ -22,9 +22,10 @@ impl ApplicationAuthority {
     ) -> Result<orna_project_repl::ReplOutcome, ReplError> {
         let (tables, table_ids, defaults, functions) =
             admitted_project_tables(self, scope).map_err(read_scope_error)?;
-        let explain_catalogue = orna_evaluator::ActivationExplainCatalogue::new(
+        let explain_catalogue = crate::repl_explain_catalogue(
             &scope.snapshot.context().capture().snapshot(),
             tables.keys().map(String::as_str),
+            scope.publication_rows.is_some(),
         )
         .map_err(read_scope_error)?;
         let (captured_rows, _committed) =
@@ -35,7 +36,8 @@ impl ApplicationAuthority {
             table_ids,
         )
         .map_err(read_scope_error)?
-        .with_insert_defaults(defaults, functions, self.limits);
+        .with_insert_defaults(defaults, functions, self.limits)
+        .with_optional_publication_rows(scope.publication_rows.clone());
         // A read reaches no sys binding: the registry is empty, so any sys
         // call fails closed.
         let mut bindings = SysHostBindingRegistry::default();

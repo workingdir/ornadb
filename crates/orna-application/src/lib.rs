@@ -507,8 +507,7 @@ impl ApplicationAuthority {
         Ok(AdmittedApplication {
             logical_path,
             source_digest: Sha256::digest(source.as_bytes()).into(),
-            requires_publication_metadata: source.contains(SysRelation::Storage.name())
-                || source.contains(SysRelation::MaintenanceJob.name()),
+            requires_publication_metadata: source_requires_publication_metadata(&source),
             entry,
             functions,
             table_insert_defaults,
@@ -890,22 +889,11 @@ impl ApplicationAuthority {
             .map_err(ApplicationError::SourceEffectFailed)?;
         // The activation can name its admitted tables and the system relations
         // it serves from publication metadata, at its pinned CWD snapshot.
-        let explain_catalogue = orna_evaluator::ActivationExplainCatalogue::new(
+        let explain_catalogue = repl_explain_catalogue(
             &context.capture().snapshot(),
-            tables.keys().map(String::as_str).chain(
-                publication_rows
-                    .is_some()
-                    .then_some([
-                        SysRelation::Storage.name(),
-                        SysRelation::MaintenanceJob.name(),
-                    ])
-                    .into_iter()
-                    .flatten(),
-            ),
-        )
-        .map_err(|_| {
-            ApplicationError::Runtime("activation snapshot has no sys.Snapshot key".into())
-        })?;
+            tables.keys().map(String::as_str),
+            publication_rows.is_some(),
+        )?;
         let mut handler = AsyncSourceMutationEffectHandler::new_with_table_object_ids(
             tables,
             publication_rows,
@@ -1826,6 +1814,16 @@ impl SourceMutationEffectHandler {
     ) -> Self {
         Self::with_publication_rows_and_table_object_ids(tables, publication_rows, BTreeMap::new())
             .expect("name-only publication admissions carry no table identities")
+    }
+
+    /// Serves `sys.Storage` and `sys.MaintenanceJob` from `rows` when given;
+    /// without rows those relation scans stay unserved.
+    fn with_optional_publication_rows(
+        mut self,
+        rows: Option<RuntimePublicationMetadataRows>,
+    ) -> Self {
+        self.publication_rows = rows;
+        self
     }
 
     fn with_publication_rows_and_table_object_ids(
@@ -4472,6 +4470,36 @@ fn eval_fingerprint(message: &Message) -> std::result::Result<[u8; 32], LiveErro
         return Err(LiveError::ApplicationRejected);
     };
     Ok(*fingerprint)
+}
+
+/// Whether `source` names a publication relation whose rows the evaluator
+/// must be handed. Admission and every REPL path share this gate.
+#[must_use]
+pub fn source_requires_publication_metadata(source: &str) -> bool {
+    source.contains(SysRelation::Storage.name())
+        || source.contains(SysRelation::MaintenanceJob.name())
+}
+
+/// Pins the activation's admitted tables, plus the publication relations when
+/// their rows are served, to the pinned CWD snapshot for explain bindings.
+pub(crate) fn repl_explain_catalogue<'a>(
+    snapshot: &CanonicalSnapshot,
+    tables: impl Iterator<Item = &'a str>,
+    publication_rows: bool,
+) -> Result<orna_evaluator::ActivationExplainCatalogue, ApplicationError> {
+    orna_evaluator::ActivationExplainCatalogue::new(
+        snapshot,
+        tables.chain(
+            publication_rows
+                .then_some([
+                    SysRelation::Storage.name(),
+                    SysRelation::MaintenanceJob.name(),
+                ])
+                .into_iter()
+                .flatten(),
+        ),
+    )
+    .map_err(|_| ApplicationError::Runtime("activation snapshot has no sys.Snapshot key".into()))
 }
 
 /// An immutable, fully admitted application program.
