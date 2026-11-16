@@ -712,3 +712,24 @@ impl Drop for BatchChild {
         let _ = self.child.wait();
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+mod batch_child_tests {
+    use super::*;
+    use std::path::Path;
+
+    /// Dropping a batch process kills and reaps it: its PID is gone from `/proc`
+    /// when `drop` returns, so no zombie is left behind.
+    #[test]
+    fn dropping_a_batch_child_reaps_its_git_process() {
+        let root = tempfile::TempDir::new().unwrap();
+        crate::test_support::initialize_fixture_repository(root.path());
+        crate::test_support::commit_initial_module(root.path());
+        let repository = Repository::discover(root.path()).unwrap();
+        let batch = BatchChild::start(&repository).unwrap();
+        let proc_entry = Path::new("/proc").join(batch.child.id().to_string());
+        assert!(proc_entry.exists());
+        drop(batch);
+        assert!(!proc_entry.exists());
+    }
+}
