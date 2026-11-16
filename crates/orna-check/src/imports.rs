@@ -315,7 +315,15 @@ pub(crate) fn collect_use_bindings(
             continue;
         }
         let Some(module) = modules.get(&target) else {
-            diagnostics.push(diag(DIAG_IMPORT, "imported module is unavailable"));
+            let message = if target.0.first().is_some_and(|root| root == "std") {
+                format!(
+                    "standard module `{}` is not provided by the project's captured standard dependency",
+                    target.display()
+                )
+            } else {
+                String::from("imported module is unavailable")
+            };
+            diagnostics.push(diag(DIAG_IMPORT, message));
             continue;
         };
         match tail {
