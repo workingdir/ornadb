@@ -411,7 +411,8 @@ pub(crate) fn pipeline_generic_stage(
     if let Expr::Call {
         callee, arguments, ..
     } = rhs
-        && qualified_path(callee).as_deref() == Some(["sys", "explain"].as_slice())
+        && resolved_callee_path(callee, scope, local).as_deref()
+            == Some(["sys", "explain"].as_slice())
     {
         let functions = system_api::embedded_system_api()
             .function("sys.explain")
@@ -436,7 +437,8 @@ pub(crate) fn pipeline_generic_stage(
     if let Expr::Call {
         callee, arguments, ..
     } = rhs
-        && qualified_path(callee).as_deref() == Some(["sys", "cancel"].as_slice())
+        && resolved_callee_path(callee, scope, local).as_deref()
+            == Some(["sys", "cancel"].as_slice())
     {
         let functions = system_api::embedded_system_api()
             .function("sys.cancel")
@@ -1570,7 +1572,7 @@ pub(crate) fn infer_generic_pipeline_stage(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Inferred {
     let mut effects = input.effects;
-    let Some(path) = qualified_path(callee) else {
+    let Some(path) = resolved_callee_path(callee, scope, local) else {
         diagnostics.push(diag(
             DIAG_UNSUPPORTED,
             "generic pipeline stage must be a supported named callable",

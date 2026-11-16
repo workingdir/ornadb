@@ -5731,8 +5731,15 @@ fn infer_ui_action_call(
     })
 }
 
-fn intrinsic_call_effects(callee: &Expr) -> EffectSummary {
-    let Some(path) = qualified_path(callee) else {
+/// Intrinsic effects of a callee. A `sys` import alias resolves to the
+/// operation it names, so an aliased call carries that operation's effects
+/// (ORNA-SYS-039).
+fn intrinsic_call_effects(
+    callee: &Expr,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+) -> EffectSummary {
+    let Some(path) = resolved_callee_path(callee, scope, local) else {
         return EffectSummary::default();
     };
     standard_function_effects(&path)

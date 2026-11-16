@@ -82,15 +82,19 @@ fn assert_success(output: &Output, what: &str) {
 }
 
 fn module_project() -> tempfile::TempDir {
-    let directory = tempfile::tempdir().expect("project directory");
-    for (path, source) in [
+    project_from(&[
         ("main.orna", MAIN),
         ("people.orna", CONTACTS),
         ("a.orna", A),
         ("b.orna", B),
         ("telemetry/rig/main.orna", CORSA),
         ("cloud/drive.orna", GOOGLE),
-    ] {
+    ])
+}
+
+fn project_from(files: &[(&str, &str)]) -> tempfile::TempDir {
+    let directory = tempfile::tempdir().expect("project directory");
+    for (path, source) in files {
         let path = directory.path().join(path);
         std::fs::create_dir_all(path.parent().expect("module directory")).expect("directory");
         std::fs::write(path, source).expect("module source");
@@ -98,6 +102,71 @@ fn module_project() -> tempfile::TempDir {
     let init = orna(&["init", directory.path().to_str().expect("UTF-8 path")]);
     assert_success(&init, "init");
     directory
+}
+
+// Selective, alias and wildcard imports, plus a local table sharing a name
+// with two imported tables: each callback row is typed by its own table
+// (ORNA-IMPORT-002..004, ORNA-IMPORT-007, ORNA-REF-001).
+const FORMS_MAIN: &str = r#"use people.{Contact};
+use a as ai;
+use b as bi;
+use c.*;
+
+pub table Item(id: Str) {
+    z: Int,
+}
+
+pub fn seed() {
+    Contact.insert({ id: "ada", name: "Ada" });
+    Item.insert({ id: "x", z: 5 });
+    ai.Item.insert({ id: "x", v: 1 });
+    bi.Item.insert({ id: "x", w: "wide" });
+    Note.insert({ id: "n", body: "hello" });
+}
+
+pub fn verify() {
+    assert (Contact | filter(contact => contact.name == "Ada") | count()) == 1;
+    assert (Item | filter(item => item.z == 5) | count()) == 1;
+    assert (ai.Item | filter(item => item.v == 1) | count()) == 1;
+    assert (bi.Item | filter(item => item.w == "wide") | count()) == 1;
+    assert (Note | filter(note => note.body == "hello") | count()) == 1;
+}
+
+pub fn verify_rejects() {
+    assert (bi.Item | filter(item => item.w == "wide") | count()) == 2;
+}
+"#;
+
+const NOTES: &str = "pub table Note(id: Str) {\n    body: Str,\n}\n";
+
+#[test]
+fn imported_table_forms_type_callback_rows_per_table() {
+    let directory = project_from(&[
+        ("main.orna", FORMS_MAIN),
+        ("people.orna", CONTACTS),
+        ("a.orna", A),
+        ("b.orna", B),
+        ("c.orna", NOTES),
+    ]);
+
+    let check = project_command(directory.path(), &["check"]);
+    assert_success(&check, "check");
+
+    assert_success(
+        &project_command(directory.path(), &["run", "main.seed"]),
+        "seed",
+    );
+    assert_success(
+        &project_command(directory.path(), &["run", "main.verify"]),
+        "typed callbacks under selective, alias, wildcard and local names",
+    );
+    // The false assertion is well typed, so it must fail at run time, not at check.
+    let rejected = project_command(directory.path(), &["run", "main.verify_rejects"]);
+    assert!(
+        !rejected.status.success(),
+        "a false query assertion must fail the run: {:?}",
+        String::from_utf8_lossy(&rejected.stderr)
+    );
 }
 
 #[test]
