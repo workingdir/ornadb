@@ -89,7 +89,7 @@ pub(crate) fn module_scope(
         ambiguous: CowTable::default(),
         nominal_identities: CowTable::default(),
         modules: CowTable::default(),
-        sys_aliases: CowTable::default(),
+        import_aliases: CowTable::default(),
         available_modules: Arc::clone(inputs.modules),
         historical_modules: Arc::clone(inputs.historical_modules),
         attached_databases: inputs.attached_databases.clone().into(),
@@ -350,7 +350,19 @@ pub(crate) fn collect_use_bindings(
                 );
             }
             UseTail::Names(names) => {
-                import_named_symbols(module, names, &mut explicit, diagnostics)
+                import_named_symbols(module, names, &mut explicit, diagnostics);
+                for import in names {
+                    if let Some(symbol) = module.exports.get(&import.name) {
+                        let mut segments = target.0.clone();
+                        segments.push(import.name.clone());
+                        record_import_alias(
+                            scope,
+                            &import.name,
+                            Namespace(segments),
+                            symbol.clone(),
+                        );
+                    }
+                }
             }
             UseTail::Glob { .. } => import_glob_exports(module, &mut glob),
         }
@@ -358,18 +370,9 @@ pub(crate) fn collect_use_bindings(
     (explicit, glob)
 }
 
-/// The reserved `sys` namespace has no source export table; only a root or
-/// alias binding can name it (ORNA-NS-005, ORNA-IMPORT-002). A name a binding takes is recorded
-/// in `scope.sys_aliases`, so a call through it classifies as the spelled
-/// `sys` operation (ORNA-SYS-039).
-pub(crate) fn import_builtin_namespace(
-    scope: &mut Scope,
-    target: &Namespace,
-    tail: &UseTail,
-    explicit: &mut BTreeMap<String, Symbol>,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    let binding = Symbol {
+/// The symbol a `use` binds for a module root or built-in namespace.
+fn module_root_binding(target: &Namespace) -> Symbol {
+    Symbol {
         table_schema: None,
         kind: SymbolKind::Let,
         ty: Type::Named(target.display()),
@@ -377,17 +380,39 @@ pub(crate) fn import_builtin_namespace(
         effects: EffectSummary::default(),
         generic_parameters: Vec::new(),
         enum_variants: BTreeSet::new(),
-    };
+    }
+}
+
+/// Records that `name` denotes `target` through `binding`, so a call through
+/// the name classifies as the spelled path (ORNA-SYS-039).
+fn record_import_alias(scope: &mut Scope, name: &str, target: Namespace, binding: Symbol) {
+    scope
+        .import_aliases
+        .insert(name.to_owned(), ImportAlias { target, binding });
+}
+
+/// The reserved `sys` namespace has no source export table; only a root or
+/// alias binding can name it (ORNA-NS-005, ORNA-IMPORT-002). A name a binding
+/// takes is recorded in `scope.import_aliases`, so a call through it
+/// classifies as the spelled `sys` operation (ORNA-SYS-039).
+pub(crate) fn import_builtin_namespace(
+    scope: &mut Scope,
+    target: &Namespace,
+    tail: &UseTail,
+    explicit: &mut BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let binding = module_root_binding(target);
     match tail {
         UseTail::None => {
             if let Some(name) = target.0.last() {
-                insert_explicit(explicit, name.clone(), binding, diagnostics);
-                scope.sys_aliases.insert(name.clone(), target.clone());
+                insert_explicit(explicit, name.clone(), binding.clone(), diagnostics);
+                record_import_alias(scope, name, target.clone(), binding);
             }
         }
         UseTail::Alias { name, .. } if name != "_" => {
-            insert_explicit(explicit, name.clone(), binding, diagnostics);
-            scope.sys_aliases.insert(name.clone(), target.clone());
+            insert_explicit(explicit, name.clone(), binding.clone(), diagnostics);
+            record_import_alias(scope, name, target.clone(), binding);
         }
         UseTail::Alias { .. } | UseTail::Glob { .. } | UseTail::Names(_) => {
             diagnostics.push(diag(
@@ -422,22 +447,11 @@ pub(crate) fn bind_module_root(
         }
         return;
     }
+    let binding = module_root_binding(target);
     scope.modules.insert(name.to_owned(), target.clone());
     implicit_roots.remove(name);
-    insert_explicit(
-        explicit,
-        name.to_owned(),
-        Symbol {
-            table_schema: None,
-            kind: SymbolKind::Let,
-            ty: Type::Named(target.display()),
-            public: true,
-            effects: EffectSummary::default(),
-            generic_parameters: Vec::new(),
-            enum_variants: BTreeSet::new(),
-        },
-        diagnostics,
-    );
+    record_import_alias(scope, name, target.clone(), binding.clone());
+    insert_explicit(explicit, name.to_owned(), binding, diagnostics);
 }
 
 /// `use module as _` imports the module's declared prelude exports.

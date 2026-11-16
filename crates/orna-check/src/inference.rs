@@ -473,8 +473,8 @@ pub(crate) fn infer_call(
     {
         return inferred;
     }
-    let presentation_boundary =
-        qualified_path(callee).is_some_and(|path| is_secret_sensitive_presentation_path(&path));
+    let presentation_boundary = resolved_callee_path(callee, scope, local)
+        .is_some_and(|path| is_secret_sensitive_presentation_path(&path));
     let intrinsic = intrinsic_call_effects(callee, scope, local);
     let callee = infer(callee, scope, local, diagnostics);
     let mut effects = callee.effects.clone();

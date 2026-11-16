@@ -5731,9 +5731,12 @@ fn infer_ui_action_call(
     })
 }
 
-/// Intrinsic effects of a callee. A `sys` import alias resolves to the
-/// operation it names, so an aliased call carries that operation's effects
-/// (ORNA-SYS-039).
+/// Intrinsic effects of a callee, classified by the path it names after any
+/// `use` alias is resolved (ORNA-SYS-039). A `std` path that names a symbol
+/// the catalogue declares is not classified by its spelling: the declared
+/// symbol already carries its effects, the host effect of a host-bound
+/// declaration or the body effects of a source-backed one. A `std` path with
+/// no declared symbol, and every `sys` path, is classified by its spelling.
 fn intrinsic_call_effects(
     callee: &Expr,
     scope: &Scope,
@@ -5742,7 +5745,23 @@ fn intrinsic_call_effects(
     let Some(path) = resolved_callee_path(callee, scope, local) else {
         return EffectSummary::default();
     };
+    if path.first() == Some(&"std") && declares_standard_symbol(&path, scope) {
+        return EffectSummary::default();
+    }
     standard_function_effects(&path)
+}
+
+/// Whether the path's last segment is a symbol of the module its earlier
+/// segments name, in the closed module set the checker was given.
+fn declares_standard_symbol(path: &[&str], scope: &Scope) -> bool {
+    let Some((name, module)) = path.split_last() else {
+        return false;
+    };
+    let namespace = Namespace(module.iter().map(|segment| (*segment).to_owned()).collect());
+    scope
+        .available_modules
+        .get(&namespace)
+        .is_some_and(|header| header.symbols.contains_key(*name))
 }
 
 fn qualified_path(expr: &Expr) -> Option<Vec<&str>> {
