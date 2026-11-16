@@ -365,6 +365,7 @@ pub(crate) fn evaluate_over_committed_tables(
                 "pure project invocation failed",
                 "fix the admitted function or retry the invocation",
             )
+            .with_outcome(crate::invoke::ATOMIC_FAILURE)
         })?;
     Ok((snapshot, staged))
 }

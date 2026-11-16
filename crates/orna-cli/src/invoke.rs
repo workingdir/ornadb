@@ -260,11 +260,9 @@ pub(crate) fn report_project_outcome(
             &diagnostic,
             "durable project invocation was rejected",
             "fix the failure named in the detail, then retry the invocation",
-            format!(
-                "the project transaction failed atomically; no partial changes were committed; {}",
-                failure_detail(&diagnostic)
-            ),
-        )),
+            failure_detail(&diagnostic),
+        )
+        .with_outcome(ATOMIC_FAILURE)),
         StageOutcome::Cancelled(diagnostic) => Err(cancellation_diagnostic(&diagnostic)),
         StageOutcome::Skipped { .. } => Err(Diagnostic::unavailable(
             "durable project invocation is not available",
@@ -342,8 +340,13 @@ pub(crate) fn published_runtime_failure(diagnostic: &orna_value::Diagnostic) -> 
         exit: Exit::Target,
         detail: None,
         body: None,
+        outcome: None,
     })
 }
+
+/// The user-visible outcome of an invocation whose project transaction rolled back.
+pub(crate) const ATOMIC_FAILURE: &str =
+    "the project transaction failed atomically; no partial changes were committed";
 
 /// Maps an evaluator failure to its catalogued public diagnostic. An
 /// uncatalogued code keeps the caller's fallback under

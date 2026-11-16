@@ -180,6 +180,7 @@ fn write_cli_line(text: &[u8], color: AnsiColor, color_enabled: bool) -> Result<
             exit: Exit::Presentation,
             detail: None,
             body: None,
+            outcome: None,
         })
 }
 /// The process exit status of a failed command, as the `--help` exit status
@@ -203,6 +204,7 @@ struct Diagnostic {
     exit: Exit,
     detail: Option<String>,
     body: Option<String>,
+    outcome: Option<&'static str>,
 }
 impl Diagnostic {
     const fn usage(code: &'static str, title: &'static str, help: &'static str) -> Self {
@@ -213,6 +215,7 @@ impl Diagnostic {
             exit: Exit::Usage,
             detail: None,
             body: None,
+            outcome: None,
         }
     }
     const fn target(code: &'static str, title: &'static str, help: &'static str) -> Self {
@@ -223,6 +226,7 @@ impl Diagnostic {
             exit: Exit::Target,
             detail: None,
             body: None,
+            outcome: None,
         }
     }
     fn target_with_detail(
@@ -238,10 +242,16 @@ impl Diagnostic {
             exit: Exit::Target,
             detail: Some(detail.into()),
             body: None,
+            outcome: None,
         }
     }
     const fn unavailable(title: &'static str, help: &'static str) -> Self {
         Self::target("ORNA-CMD-TARGET-UNAVAILABLE", title, help)
+    }
+
+    pub(crate) fn with_outcome(mut self, outcome: &'static str) -> Self {
+        self.outcome = Some(outcome);
+        self
     }
 }
 impl From<orna_repository::RepositoryError> for Diagnostic {
@@ -325,6 +335,7 @@ fn project_load_diagnostic(error: orna_project::ProjectLoadError) -> Diagnostic 
             exit: Exit::Target,
             detail: None,
             body: None,
+            outcome: None,
         };
     }
     Diagnostic::target(
@@ -347,6 +358,7 @@ fn cancellation_diagnostic(diagnostic: &orna_value::Diagnostic) -> Diagnostic {
         detail: (code == "ORNA-CMD-RUNTIME-UNAVAILABLE")
             .then(|| format!("cancellation code: {}", diagnostic.code())),
         body: None,
+        outcome: None,
     }
 }
 
@@ -356,6 +368,9 @@ impl fmt::Display for Diagnostic {
             return f.write_str(body);
         }
         write!(f, "error[{}]: {}", self.code, self.title)?;
+        if let Some(outcome) = self.outcome {
+            write!(f, "\n  {outcome}")?;
+        }
         if let Some(detail) = &self.detail {
             write!(f, "\n  {detail}")?;
         }
@@ -387,6 +402,10 @@ fn write_diagnostic<W: io::Write>(
         diagnostic.title.as_bytes(),
         color_enabled,
     )?;
+    if let Some(outcome) = diagnostic.outcome {
+        writer.write_all(b"\n  ")?;
+        writer.write_all(outcome.as_bytes())?;
+    }
     // Semantic source diagnostics remain user-facing. Other attached details
     // can contain repository/runtime implementation data and require --debug.
     if let Some(detail) = &diagnostic.detail

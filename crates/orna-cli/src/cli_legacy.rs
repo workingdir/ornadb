@@ -69,6 +69,7 @@ fn mixed_formats(refusal: &FormatContextError) -> Diagnostic {
         exit: Exit::Target,
         detail: None,
         body: None,
+        outcome: None,
     }
 }
 
@@ -127,5 +128,6 @@ pub(super) fn legacy_read_error(error: &LegacyReadError, help: &'static str) -> 
         exit: Exit::Target,
         detail: None,
         body: None,
+        outcome: None,
     }
 }
