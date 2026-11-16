@@ -74,6 +74,9 @@ impl<'a> BodyCheck<'a> {
         };
         let mut protocol_member = false;
         if let Some((base, name, named)) = pending {
+            if let Some(target) = self.explicit_conversion_target(body, base, &name) {
+                return self.conversion_call_ty(body, call, base, target, !named.is_empty(), span);
+            }
             let Some(settled) = self.settle_pending(body, base, &name, span.clone())? else {
                 return Ok(self.error());
             };
