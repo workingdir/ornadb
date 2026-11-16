@@ -47,15 +47,23 @@ impl Builder {
     }
 
     /// Binds the root-environment names every module sees without an import: `Money` and `Currency`
-    /// from `core.money` (spec 09-standard-library.md; hir-host.md B2). A local declaration or an import
-    /// that already binds the name wins, so this only fills names the module does not otherwise bind.
+    /// from `core.money` (spec 09-standard-library.md; hir-host.md B2), and the `From` protocol from `core`
+    /// (CONVERT-001). A local declaration or an import that already binds the name wins, so this only fills
+    /// names the module does not otherwise bind.
     fn bind_root_environment(&mut self) {
-        let path = ModulePath::new([Name::new("core"), Name::new("money")]);
-        let Some(money) = self.by_path.get(&path).copied() else {
+        self.bind_root_names(&["core", "money"], &["Money", "Currency"]);
+        self.bind_root_names(&["core"], &["From"]);
+    }
+
+    /// Binds each export named in `names` from the module at `segments` into every scope that does not already
+    /// bind that name.
+    fn bind_root_names(&mut self, segments: &[&str], names: &[&str]) {
+        let path = ModulePath::new(segments.iter().map(|segment| Name::new(segment)));
+        let Some(module) = self.by_path.get(&path).copied() else {
             return;
         };
-        let exports = self.program.modules[money].exports.clone();
-        for name in ["Money", "Currency"] {
+        let exports = self.program.modules[module].exports.clone();
+        for name in names {
             let name = Name::new(name);
             let Some(def) = exports.get(&name).copied() else {
                 continue;

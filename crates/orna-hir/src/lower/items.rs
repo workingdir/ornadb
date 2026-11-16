@@ -796,16 +796,94 @@ impl Builder {
                 .into_boxed_slice(),
             _ => Vec::new().into_boxed_slice(),
         };
-        let mut members = Vec::new();
-        for member in &implementation.members {
+        // A `From<Source>` implementation converts values of `Source` into the owner (CONVERT-1). Its
+        // `fn from(value)` member takes the source type its header names.
+        let conversion_source = match &implementation.protocol {
+            TypeExpr::Name {
+                path, arguments, ..
+            } if protocol.is_some() && path.as_slice() == ["From"] && arguments.len() == 1 => {
+                protocol_args.first().copied()
+            }
+            _ => None,
+        };
+        let members = self.build_implementation_members(
+            module,
+            receiver,
+            inherited,
+            &names,
+            &implementation.members,
+            conversion_source,
+        );
+        self.self_ty = None;
+        for member in &members {
+            self.program.implementation_owner.insert(*member, owner);
+        }
+        if let Some(source) = conversion_source
+            && self.conversion_source_declared(owner, source)
+        {
+            self.diagnose(
+                module,
+                crate::diag::GENERIC_OVERLAP,
+                "two `From` implementations of this type accept the same source",
+                span.clone(),
+            );
+        }
+        let implementation_def = self.declare_nested(
+            module,
+            "impl",
+            Visibility::Private,
+            span,
+            DefKind::Impl(ImplDef {
+                owner,
+                protocol,
+                protocol_args,
+                conversion_source,
+                members,
+            }),
+        );
+        if protocol.is_some() {
+            self.program
+                .instances
+                .entry(owner)
+                .or_default()
+                .push(implementation_def);
+        }
+        if conversion_source.is_some() {
+            self.program
+                .conversions
+                .entry(owner)
+                .or_default()
+                .push(implementation_def);
+        }
+        implementation_def
+    }
+
+    /// Builds the members of one protocol implementation, in declaration order. A `From` member's omitted
+    /// `value` parameter takes the source type its header names (CONVERT-001).
+    fn build_implementation_members(
+        &mut self,
+        module: ModuleId,
+        receiver: crate::Ty,
+        inherited: &[GenericParam],
+        names: &[crate::Name],
+        members: &[ImplMember],
+        conversion_source: Option<crate::Ty>,
+    ) -> Vec<DefId> {
+        let mut built = Vec::new();
+        for member in members {
             match member {
                 ImplMember::Function {
                     signature,
                     body,
                     span,
-                } => members.push(
-                    self.build_impl_function(module, receiver, inherited, signature, body, span),
-                ),
+                } => {
+                    let member = self
+                        .build_impl_function(module, receiver, inherited, signature, body, span);
+                    if let Some(source) = conversion_source {
+                        self.give_conversion_source(member, source);
+                    }
+                    built.push(member);
+                }
                 ImplMember::Static {
                     name,
                     ty,
@@ -822,7 +900,7 @@ impl Builder {
                     let body = self.allocate_body(member_def);
                     let declared = ty
                         .as_ref()
-                        .map(|ty| super::types::lower_type(self, module, &names, ty));
+                        .map(|ty| super::types::lower_type(self, module, names, ty));
                     self.pending[member_def.index()].kind =
                         PendingKind::Built(DefKind::Let(LetDef { body, declared }));
                     self.body_jobs.push(BodyJob::Expression {
@@ -831,31 +909,38 @@ impl Builder {
                         expr: Box::new(value.clone()),
                         self_ty: None,
                     });
-                    members.push(member_def);
+                    built.push(member_def);
                 }
             }
         }
-        self.self_ty = None;
-        let implementation_def = self.declare_nested(
-            module,
-            "impl",
-            Visibility::Private,
-            span,
-            DefKind::Impl(ImplDef {
-                owner,
-                protocol,
-                protocol_args,
-                members,
-            }),
-        );
-        if protocol.is_some() {
-            self.program
-                .instances
-                .entry(owner)
-                .or_default()
-                .push(implementation_def);
+        built
+    }
+
+    /// Gives a `From` member's omitted `value` parameter the source type its implementation header names. The
+    /// header declares the parameter's type, as a method's receiver is declared by its type (decision D1).
+    fn give_conversion_source(&mut self, member: DefId, source: Ty) {
+        if let PendingKind::Function(function) = &mut self.pending[member.index()].kind
+            && let Some(parameter) = function.params.first_mut()
+            && !parameter.written
+        {
+            parameter.ty = source;
+            parameter.written = true;
         }
-        implementation_def
+    }
+
+    /// Whether `owner` already declares a `From` implementation for `source` (ORNA-GENERIC-014).
+    fn conversion_source_declared(&self, owner: DefId, source: Ty) -> bool {
+        let Some(implementations) = self.program.conversions.get(&owner) else {
+            return false;
+        };
+        implementations.iter().any(|implementation| {
+            match &self.pending[implementation.index()].kind {
+                PendingKind::Built(DefKind::Impl(declared)) => {
+                    declared.conversion_source == Some(source)
+                }
+                _ => false,
+            }
+        })
     }
 
     /// Builds one function member of a protocol implementation.

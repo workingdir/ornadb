@@ -48,6 +48,7 @@ mod call_targs;
 mod case;
 #[cfg(test)]
 mod case_tests;
+mod conversion;
 mod currency;
 #[cfg(test)]
 mod currency_tests;

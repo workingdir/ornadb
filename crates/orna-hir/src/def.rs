@@ -296,6 +296,9 @@ pub struct ImplDef {
     pub protocol: Option<DefId>,
     /// The protocol's type arguments, in the protocol's parameter order.
     pub protocol_args: Box<[Ty]>,
+    /// The source type of a `From<Source>` implementation: the type a value converts from (CONVERT-1). `None`
+    /// for every other implementation.
+    pub conversion_source: Option<Ty>,
     /// The implementations it contributes.
     pub members: Vec<DefId>,
 }
