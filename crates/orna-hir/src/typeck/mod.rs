@@ -48,6 +48,7 @@ mod call_targs;
 mod case;
 #[cfg(test)]
 mod case_tests;
+mod conversion;
 mod currency;
 #[cfg(test)]
 mod currency_tests;
@@ -166,6 +167,7 @@ impl TypeCheckSummary {
 /// result annotation is filled from its body. The program's diagnostics carry
 /// every inference error.
 pub fn typeck(program: &mut Program) -> TypeCheckSummary {
+    conversion::check_declared_overlaps(program);
     let variant_owner = variant_owners(program);
     let mut checker = TypeChecker {
         program,

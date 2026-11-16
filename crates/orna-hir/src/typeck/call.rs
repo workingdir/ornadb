@@ -74,6 +74,9 @@ impl<'a> BodyCheck<'a> {
         };
         let mut protocol_member = false;
         if let Some((base, name, named)) = pending {
+            if let Some(target) = self.explicit_conversion_target(body, base, &name) {
+                return self.conversion_call_ty(body, call, base, target, !named.is_empty(), span);
+            }
             let Some(settled) = self.settle_pending(body, base, &name, span.clone())? else {
                 return Ok(self.error());
             };
@@ -265,53 +268,7 @@ impl<'a> BodyCheck<'a> {
 
     /// Replaces a generic parameter with a written type argument.
     pub(super) fn substitute(&mut self, ty: Ty, targs: &[Ty]) -> Ty {
-        let Some(kind) = self.kind_of(ty) else {
-            return ty;
-        };
-        let rebuilt = match kind {
-            TyKind::Param(index) => {
-                return targs.get(index.as_u32() as usize).copied().unwrap_or(ty);
-            }
-            TyKind::Option(inner) => TyKind::Option(self.substitute(inner, targs)),
-            TyKind::List(inner) => TyKind::List(self.substitute(inner, targs)),
-            TyKind::Set(inner) => TyKind::Set(self.substitute(inner, targs)),
-            TyKind::Range(inner) => TyKind::Range(self.substitute(inner, targs)),
-            TyKind::Relation(inner) => TyKind::Relation(self.substitute(inner, targs)),
-            TyKind::Stream(inner) => TyKind::Stream(self.substitute(inner, targs)),
-            TyKind::Map(key, value) => {
-                TyKind::Map(self.substitute(key, targs), self.substitute(value, targs))
-            }
-            TyKind::Tuple(elements) => TyKind::Tuple(
-                elements
-                    .iter()
-                    .map(|element| self.substitute(*element, targs))
-                    .collect(),
-            ),
-            TyKind::Record(fields) => TyKind::Record(
-                fields
-                    .iter()
-                    .map(|(name, field)| (name.clone(), self.substitute(*field, targs)))
-                    .collect(),
-            ),
-            TyKind::Adt(def, arguments) => TyKind::Adt(
-                def,
-                arguments
-                    .iter()
-                    .map(|argument| self.substitute(*argument, targs))
-                    .collect(),
-            ),
-            TyKind::Fn(function) => TyKind::Fn(FnTy {
-                params: function
-                    .params
-                    .iter()
-                    .map(|parameter| self.substitute(*parameter, targs))
-                    .collect(),
-                ret: self.substitute(function.ret, targs),
-                effects: function.effects,
-            }),
-            _ => return ty,
-        };
-        self.intern(rebuilt)
+        self.program.tys.substitute(ty, targs)
     }
 
     fn check_argument(

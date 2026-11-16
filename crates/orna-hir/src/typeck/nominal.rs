@@ -4,7 +4,7 @@
 
 use orna_syntax_ast::SourceSpan as SyntaxSpan;
 
-use crate::{DefId, DefKind, Name, Ty, TyKind};
+use crate::{DefId, DefKind, Name, Program, Ty, TyKind};
 
 use super::{BodyCheck, NotYetReason};
 
@@ -12,16 +12,7 @@ impl BodyCheck<'_> {
     /// One fresh unsolved variable per declared parameter of a generic type.
     /// Enums, tables and non-generic types take no arguments.
     pub(super) fn fresh_nominal_args(&mut self, def: DefId, span: &SyntaxSpan) -> Box<[Ty]> {
-        let count = match self
-            .program
-            .defs
-            .get(def)
-            .map(|definition| &definition.kind)
-        {
-            Some(DefKind::Type(definition)) => definition.params.len(),
-            Some(DefKind::NativeType(definition)) => definition.params.len(),
-            _ => 0,
-        };
+        let count = nominal_param_count(self.program, def);
         (0..count)
             .map(|_| self.infer.new_var(&mut self.program.tys, span.clone()))
             .collect()
@@ -52,5 +43,15 @@ impl BodyCheck<'_> {
                 .map(|(name, ty)| (name, self.substitute(ty, &args)))
                 .collect(),
         )
+    }
+}
+
+/// The number of generic parameters a nominal definition declares. Enums, tables and non-generic types
+/// declare none, and so does a definition that is not a nominal type.
+pub(super) fn nominal_param_count(program: &Program, def: DefId) -> usize {
+    match program.defs.get(def).map(|definition| &definition.kind) {
+        Some(DefKind::Type(definition)) => definition.params.len(),
+        Some(DefKind::NativeType(definition)) => definition.params.len(),
+        _ => 0,
     }
 }

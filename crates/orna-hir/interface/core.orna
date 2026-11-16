@@ -42,3 +42,8 @@ pub native fn error(code: Str, message: Str, cause: Error? = null): Error effect
 // activation context; they are not wall-clock values. `HEAD` fails in an unborn repository (sys.git.unborn_head).
 pub native static CWD: sys.SnapshotRef effect none;
 pub native static HEAD: sys.SnapshotRef effect none;
+
+// core.From: explicit conversion (CONVERT-001); a nested impl From<Source> supplies from(value).
+pub protocol From<Source> {
+    fn from(value: Source): Self;
+}

@@ -473,3 +473,28 @@ fn query_status_from_code(code: i64) -> Result<InvocationObservationStatus, Runt
         _ => Err(RuntimeError::RecoveryInvalid),
     }
 }
+
+/// Marks every unfinished query observation as orphaned. A query is never
+/// replayed, and a departed owner's fenced token can no longer finish it, so
+/// its row is settled here instead of staying Running forever.
+pub(crate) async fn orphan_unfinished_query_observations_tx(
+    connection: &Connection,
+) -> Result<(), RuntimeError> {
+    let now = now_ms()?;
+    connection
+        .execute(
+            "UPDATE sys_query_observation
+             SET status = ?1,
+                 ended_ms = MAX(started_ms, ?2),
+                 observed_ms = MAX(started_ms, ?2)
+             WHERE status IN (?3, ?4)",
+            params![
+                query_status_code(InvocationObservationStatus::Orphaned),
+                now,
+                query_status_code(InvocationObservationStatus::Queued),
+                query_status_code(InvocationObservationStatus::Running),
+            ],
+        )
+        .await?;
+    Ok(())
+}

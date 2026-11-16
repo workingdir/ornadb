@@ -32,8 +32,9 @@ use std::{
 
 use orna_repository::Repository;
 use orna_runtime::{
-    NoFault, RecoveryDisposition, RequestIdentity, RequestState, RuntimeError, RuntimeIdentity,
-    RuntimeState, TableMutation, WriterLease, process_owner_id,
+    InvocationObservationStatus, NoFault, QueryObservationRegistration, RecoveryDisposition,
+    RequestIdentity, RequestState, RuntimeError, RuntimeIdentity, RuntimeState, TableMutation,
+    WriterLease, process_owner_id,
 };
 use tempfile::{Builder, TempDir};
 
@@ -41,6 +42,7 @@ const CHILD_REPOSITORY: &str = "ORNA_OWNER_FENCE_CHILD_REPOSITORY";
 const CHILD_MARKER: &str = "ORNA_OWNER_FENCE_CHILD_MARKER";
 const LEASE_CHILD_TEST: &str = "owner_fence_child_holds_writer_lease";
 const RUNNING_CHILD_TEST: &str = "owner_fence_child_leaves_running_request";
+const QUERY_CHILD_TEST: &str = "owner_fence_child_leaves_running_query";
 const SIGKILL: i32 = 9;
 
 /// The repository identity is shared by every writer of one worktree. Writer
@@ -51,6 +53,8 @@ const OTHER_OWNER: [u8; 16] = [0xd2; 16];
 /// A different owner tried through the replacement's own lock-holding handle.
 const THIRD_OWNER: [u8; 16] = [0xd3; 16];
 const INITIAL_DIGEST: [u8; 32] = [3; 32];
+/// The query observation that a killed owner leaves Running.
+const QUERY_ID: [u8; 16] = [7; 16];
 
 /// Row key written by the child before it is killed.
 const CHILD_ROW: &[u8] = &[1];
@@ -272,6 +276,49 @@ fn owner_fence_child_leaves_running_request() {
             .start_request_with_owner_and_admission(request(), [4; 32], lease, capability)
             .await
             .expect("child starts the admitted request, leaving it Running");
+        publish_marker(&marker, encode_lease(lease).as_bytes());
+        loop {
+            thread::sleep(Duration::from_secs(1));
+        }
+    });
+}
+
+/// The owner that gets killed while a query observation is Running. It leaves
+/// a durable `sys_query_observation` row under its process owner, as an
+/// `orna repl` killed mid-query would, and publishes its writer lease token.
+#[test]
+fn owner_fence_child_leaves_running_query() {
+    let Some(repository_path) = env::var_os(CHILD_REPOSITORY) else {
+        return;
+    };
+    let marker = PathBuf::from(env::var_os(CHILD_MARKER).expect("child marker path"));
+    let repository =
+        Repository::discover(PathBuf::from(repository_path)).expect("discover child repository");
+    runtime().block_on(async {
+        let state = RuntimeState::open_with_owner_id(
+            &repository,
+            identity(),
+            INITIAL_DIGEST,
+            process_owner_id(),
+        )
+        .await
+        .expect("open child runtime");
+        let lease = state
+            .acquire_lease(process_owner_id())
+            .await
+            .expect("child acquires the writer lease");
+        let capture = state.capture().await.expect("capture the child runtime");
+        state
+            .begin_query_observation(
+                lease,
+                QueryObservationRegistration {
+                    id: QUERY_ID,
+                    expression: Some("records".to_owned()),
+                    capture,
+                },
+            )
+            .await
+            .expect("child begins the query, leaving it Running");
         publish_marker(&marker, encode_lease(lease).as_bytes());
         loop {
             thread::sleep(Duration::from_secs(1));
@@ -534,6 +581,44 @@ fn running_request_from_killed_run_is_recovered_before_the_next_write() {
                 .unwrap(),
             None
         );
+    });
+}
+
+/// A SIGKILLed `orna repl` or `orna run` leaves a Running query observation
+/// under its dead process owner. Queries are never replayed, so the next owner
+/// to open the worktree under the owner lock marks it Orphaned (spec
+/// ORNA-PROTO item 5) rather than leaving `sys.Query` Running forever.
+#[test]
+fn running_query_from_killed_run_is_orphaned_when_the_next_owner_opens() {
+    let (directory, repository) = repository();
+    let marker = directory.path().join("owner-fence-query-marker");
+    let mut child = spawn_child(QUERY_CHILD_TEST, directory.path(), &marker);
+    wait_for_marker(&marker, &mut child);
+    kill_and_reap(&mut child);
+
+    runtime().block_on(async {
+        let state = RuntimeState::open_with_owner_id(
+            &repository,
+            identity(),
+            INITIAL_DIGEST,
+            process_owner_id(),
+        )
+        .await
+        .expect("reopen after the killed run");
+        assert!(state.holds_runtime_owner_lock());
+        let observations = state
+            .query_observations()
+            .await
+            .expect("read sys.Query after the killed run");
+        assert_eq!(observations.len(), 1, "the killed run's query is retained");
+        let observation = &observations[0];
+        assert_eq!(observation.id, QUERY_ID);
+        assert_eq!(observation.status, InvocationObservationStatus::Orphaned);
+        let ended = observation
+            .ended_ms
+            .expect("the orphaned observation records when it ended");
+        assert_eq!(observation.observed_ms, ended);
+        assert!(ended >= observation.started_ms);
     });
 }
 

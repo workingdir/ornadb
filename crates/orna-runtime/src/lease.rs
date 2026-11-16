@@ -2,6 +2,8 @@
 
 use crate::codec::{fixed, validate_id};
 use crate::error::RuntimeError;
+use crate::invocation::orphan_unfinished_invocations_tx;
+use crate::query::orphan_unfinished_query_observations_tx;
 use crate::request::RequestState;
 use crate::stream_store::{
     encode_status, encode_stream_status, validate_recoverable_stream_attempts,
@@ -332,6 +334,11 @@ impl RuntimeState {
             .epoch
             .checked_add(1)
             .ok_or(RuntimeError::RecoveryInvalid)?;
+        // Both recovery modes orphan the abandoned owner's query and invocation
+        // observations. The fence above has already retired its token, so they
+        // can never be finished, and neither a query nor an invocation is replayed.
+        orphan_unfinished_query_observations_tx(transaction).await?;
+        orphan_unfinished_invocations_tx(transaction).await?;
         match recovery {
             TakeoverRecovery::Barrier => {
                 let mut running = transaction
