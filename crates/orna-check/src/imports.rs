@@ -89,6 +89,7 @@ pub(crate) fn module_scope(
         ambiguous: CowTable::default(),
         nominal_identities: CowTable::default(),
         modules: CowTable::default(),
+        sys_aliases: CowTable::default(),
         available_modules: Arc::clone(inputs.modules),
         historical_modules: Arc::clone(inputs.historical_modules),
         attached_databases: inputs.attached_databases.clone().into(),
@@ -310,7 +311,7 @@ pub(crate) fn collect_use_bindings(
         };
         let target = Namespace(path.iter().map(|x| x.name.clone()).collect());
         if target.0.first().is_some_and(|r| r == "sys") {
-            import_builtin_namespace(&target, tail, &mut explicit, diagnostics);
+            import_builtin_namespace(scope, &target, tail, &mut explicit, diagnostics);
             continue;
         }
         let Some(module) = modules.get(&target) else {
@@ -358,8 +359,11 @@ pub(crate) fn collect_use_bindings(
 }
 
 /// The reserved `sys` namespace has no source export table; only a root or
-/// alias binding can name it (ORNA-NS-001).
+/// alias binding can name it (ORNA-NS-005, ORNA-IMPORT-002). A name a binding takes is recorded
+/// in `scope.sys_aliases`, so a call through it classifies as the spelled
+/// `sys` operation (ORNA-SYS-039).
 pub(crate) fn import_builtin_namespace(
+    scope: &mut Scope,
     target: &Namespace,
     tail: &UseTail,
     explicit: &mut BTreeMap<String, Symbol>,
@@ -378,10 +382,12 @@ pub(crate) fn import_builtin_namespace(
         UseTail::None => {
             if let Some(name) = target.0.last() {
                 insert_explicit(explicit, name.clone(), binding, diagnostics);
+                scope.sys_aliases.insert(name.clone(), target.clone());
             }
         }
         UseTail::Alias { name, .. } if name != "_" => {
             insert_explicit(explicit, name.clone(), binding, diagnostics);
+            scope.sys_aliases.insert(name.clone(), target.clone());
         }
         UseTail::Alias { .. } | UseTail::Glob { .. } | UseTail::Names(_) => {
             diagnostics.push(diag(

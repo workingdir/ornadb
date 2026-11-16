@@ -398,23 +398,26 @@ pub(crate) fn infer_call(
         ));
         return Inferred::error();
     }
-    if qualified_path(callee).as_deref() == Some(["sys", "storage"].as_slice()) {
+    if resolved_callee_path(callee, scope, local).as_deref() == Some(["sys", "storage"].as_slice())
+    {
         diagnostics.push(diag(
             DIAG_SYS_STORAGE_CALL,
             "`sys.storage` is a grouping namespace; use `sys.Storage` or `sys.admin` storage functions",
         ));
         return Inferred::error();
     }
-    if qualified_path(callee).as_deref() == Some(["sys", "Commit", "insert"].as_slice()) {
+    if resolved_callee_path(callee, scope, local).as_deref()
+        == Some(["sys", "Commit", "insert"].as_slice())
+    {
         diagnostics.push(diag(DIAG_SYS_COMMIT_READ_ONLY, "sys.Commit is read-only"));
         return Inferred::error();
     }
-    if let Some(path) = qualified_path(callee)
+    if let Some(path) = resolved_callee_path(callee, scope, local)
         && let Some(inferred) = infer_ui_action_call(&path, arguments, scope, local, diagnostics)
     {
         return inferred;
     }
-    if let Some(path) = qualified_path(callee)
+    if let Some(path) = resolved_callee_path(callee, scope, local)
         && path.first() == Some(&"sys")
         && let Some(inferred) =
             infer_descriptor_system_call(&path, arguments, None, scope, local, diagnostics)
@@ -472,7 +475,7 @@ pub(crate) fn infer_call(
     }
     let presentation_boundary =
         qualified_path(callee).is_some_and(|path| is_secret_sensitive_presentation_path(&path));
-    let intrinsic = intrinsic_call_effects(callee);
+    let intrinsic = intrinsic_call_effects(callee, scope, local);
     let callee = infer(callee, scope, local, diagnostics);
     let mut effects = callee.effects.clone();
     effects.join(&intrinsic);
@@ -583,7 +586,7 @@ pub(crate) fn infer_generic_call(
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Inferred {
-    if let Some(path) = qualified_path(callee)
+    if let Some(path) = resolved_callee_path(callee, scope, local)
         && path.first() == Some(&"sys")
         && let Some(inferred) = infer_descriptor_system_call(
             &path,
@@ -612,7 +615,7 @@ pub(crate) fn infer_generic_call(
     ) {
         return inferred;
     }
-    let intrinsic = intrinsic_call_effects(callee);
+    let intrinsic = intrinsic_call_effects(callee, scope, local);
     let mut effects = infer(callee, scope, local, diagnostics).effects;
     effects.join(&intrinsic);
     for argument in arguments {
