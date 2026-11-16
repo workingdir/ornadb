@@ -136,3 +136,155 @@ pub table User(id: Uuid) { name: Str, assert same_commit(); }"#,
         diagnostic_lines(&analysis)
     );
 }
+
+/// A secret value as the standard library produces it. Presenting it is
+/// rejected by the secret-presentation boundary (ORNA-PRES-002).
+const SECRET_OPEN: &str = r#"std.secret.open(std.secret.ref("fixture.credential"), as: Str)"#;
+
+fn secret_presentation_count(analysis: &Analysis) -> usize {
+    analysis
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.message() == "secret values cannot be presented")
+        .count()
+}
+
+#[test]
+fn secret_presentation_through_std_module_alias_is_rejected() {
+    let source =
+        format!("use std.terminal as t;\npub fn shown() = t.present_table({SECRET_OPEN});");
+    let analysis = analyze(&[ModuleInput::new("consumer.orna", &source)]);
+
+    assert_eq!(
+        secret_presentation_count(&analysis),
+        1,
+        "a std module alias must present as the spelled std path:\n{}",
+        diagnostic_lines(&analysis)
+    );
+}
+
+#[test]
+fn secret_presentation_through_std_root_alias_is_rejected() {
+    let source =
+        format!("use std as core;\npub fn shown() = core.terminal.present_table({SECRET_OPEN});");
+    let analysis = analyze(&[ModuleInput::new("consumer.orna", &source)]);
+
+    assert_eq!(
+        secret_presentation_count(&analysis),
+        1,
+        "a std root alias must present as the spelled std path:\n{}",
+        diagnostic_lines(&analysis)
+    );
+}
+
+#[test]
+fn secret_presentation_through_named_std_import_is_rejected() {
+    let source = format!(
+        "use std.terminal.{{present_table}};\npub fn shown() = present_table({SECRET_OPEN});"
+    );
+    let analysis = analyze(&[ModuleInput::new("consumer.orna", &source)]);
+
+    assert_eq!(
+        secret_presentation_count(&analysis),
+        1,
+        "a named std import must present as the spelled std path:\n{}",
+        diagnostic_lines(&analysis)
+    );
+}
+
+#[test]
+fn secret_presentation_through_spelled_std_path_is_rejected() {
+    let source = format!("pub fn shown() = std.terminal.present_table({SECRET_OPEN});");
+    let analysis = analyze(&[ModuleInput::new("consumer.orna", &source)]);
+
+    assert_eq!(
+        secret_presentation_count(&analysis),
+        1,
+        "{}",
+        diagnostic_lines(&analysis)
+    );
+}
+
+#[test]
+fn table_assertion_through_std_root_alias_is_rejected() {
+    let analysis = analyze(&[ModuleInput::new(
+        "consumer.orna",
+        r#"use std as core;
+pub table User(id: Uuid) { name: Str, assert core.net.http.get("https://example.com") == "ok"; }"#,
+    )]);
+
+    assert_eq!(
+        assertion_effect_count(&analysis),
+        1,
+        "{}",
+        diagnostic_lines(&analysis)
+    );
+}
+
+#[test]
+fn table_assertion_through_std_module_alias_to_secret_access_is_rejected() {
+    let analysis = analyze(&[ModuleInput::new(
+        "consumer.orna",
+        r#"use std.secret as s;
+pub table User(id: Uuid) { name: Str, assert s.open(s.ref("fixture.credential"), as: Str) == "x"; }"#,
+    )]);
+
+    assert_eq!(
+        assertion_effect_count(&analysis),
+        1,
+        "{}",
+        diagnostic_lines(&analysis)
+    );
+}
+
+#[test]
+fn helper_through_std_root_alias_carries_its_effect() {
+    let analysis = analyze(&[ModuleInput::new(
+        "consumer.orna",
+        r#"use std as core;
+pub fn fetch(): Str = core.net.http.get("https://example.com");"#,
+    )]);
+
+    assert!(
+        export_effects(&analysis, "consumer", "fetch").is_effectful(),
+        "a helper calling through a std root alias must export the operation's effect:\n{}",
+        diagnostic_lines(&analysis)
+    );
+}
+
+#[test]
+fn table_assertion_through_helper_using_std_module_alias_is_rejected() {
+    let analysis = analyze(&[ModuleInput::new(
+        "consumer.orna",
+        r#"use std.net.http as http;
+pub fn fetch(): Str = http.get("https://example.com");
+pub table User(id: Uuid) { name: Str, assert fetch() == "ok"; }"#,
+    )]);
+
+    assert_eq!(
+        assertion_effect_count(&analysis),
+        1,
+        "{}",
+        diagnostic_lines(&analysis)
+    );
+}
+
+#[test]
+fn symbol_rename_import_is_not_an_alias_of_a_std_symbol() {
+    // `use a.b.c as x` binds a namespace only (ORNA-IMPORT-002); the symbol
+    // `present_table` is not a module, so the rename is rejected rather than
+    // silently aliasing the operation.
+    let analysis = analyze(&[ModuleInput::new(
+        "consumer.orna",
+        format!("use std.terminal.present_table as p;\npub fn shown() = p({SECRET_OPEN});"),
+    )]);
+
+    assert!(
+        analysis
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == orna_check::DIAG_IMPORT),
+        "a rename of a symbol must not be accepted silently:\n{}",
+        diagnostic_lines(&analysis)
+    );
+}
