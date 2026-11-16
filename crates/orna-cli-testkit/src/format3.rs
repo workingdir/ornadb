@@ -697,20 +697,9 @@ pub fn format3_context_for_snapshot(repository: &Repository, commit: &str) -> Fo
     .unwrap()
 }
 
-/// Runs `git` in `path` with a fixed commit identity and signing off, passed on
-/// the command line. A test repository must not depend on a `user.name`,
-/// `user.email` or signing key in the host's or the copy's own Git config.
 pub fn git(path: &Path, args: &[&str]) {
     assert!(
         Command::new("git")
-            .args([
-                "-c",
-                "user.name=Orna Test",
-                "-c",
-                "user.email=orna-test@example.invalid",
-                "-c",
-                "commit.gpgsign=false",
-            ])
             .args(args)
             .current_dir(path)
             .status()
