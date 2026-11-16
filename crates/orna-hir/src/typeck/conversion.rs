@@ -85,15 +85,14 @@ impl BodyCheck<'_> {
                 );
                 Ok(self.error())
             }
-            [(accepted, protocol)] => {
-                let (accepted, protocol) = (*accepted, *protocol);
-                self.unify(accepted, source, span.clone());
-                let from = Name::new("from");
-                let Some(member) = self.protocol_member(protocol, 1, &from) else {
-                    self.conflict("the `From` protocol declares no `from` member", span);
+            [(accepted, member)] => {
+                let (accepted, member) = (*accepted, *member);
+                let Some(member) = member else {
+                    self.conflict("the `From` implementation declares no `from` member", span);
                     return Ok(self.error());
                 };
-                call.callee = self.protocol_callee(member, vec![accepted, target_ty], span)?;
+                self.unify(accepted, source, span.clone());
+                call.callee = self.protocol_callee(member, target_args.to_vec(), span)?;
                 Ok(target_ty)
             }
             _ => {
@@ -106,33 +105,39 @@ impl BodyCheck<'_> {
         }
     }
 
-    /// The `From` implementations of `target` whose source type accepts `source`, each with its protocol. The
-    /// acceptance test is a trial unification on a copy of the inference state, so nothing is committed here.
+    /// The `From` implementations of `target` whose source type accepts `source`, each with its `from` member: the
+    /// implementation's own function, which a conversion invokes by identity (CONVERT-1). The acceptance test is a
+    /// trial unification on a copy of the inference state, so nothing is committed here.
     fn conversion_candidates(
         &mut self,
         target: DefId,
         target_args: &[Ty],
         source: Ty,
-    ) -> Vec<(Ty, DefId)> {
+    ) -> Vec<(Ty, Option<DefId>)> {
         let implementations = self
             .program
             .conversions
             .get(&target)
             .cloned()
             .unwrap_or_default();
+        let from = Name::new("from");
         let mut candidates = Vec::new();
         for implementation in implementations {
-            let (protocol, raw_source) = match &self.program.defs[implementation].kind {
-                DefKind::Impl(declared) => (declared.protocol, declared.conversion_source),
-                _ => continue,
-            };
-            let (Some(protocol), Some(raw_source)) = (protocol, raw_source) else {
+            let DefKind::Impl(declared) = &self.program.defs[implementation].kind else {
                 continue;
             };
+            let Some(raw_source) = declared.conversion_source else {
+                continue;
+            };
+            let member = declared
+                .members
+                .iter()
+                .copied()
+                .find(|id| self.program.defs[*id].name == from);
             let accepted = self.substitute(raw_source, target_args);
             let mut trial = self.infer.clone();
             if trial.unify(&mut self.program.tys, accepted, source).is_ok() {
-                candidates.push((accepted, protocol));
+                candidates.push((accepted, member));
             }
         }
         candidates
