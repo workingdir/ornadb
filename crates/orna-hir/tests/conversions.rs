@@ -100,3 +100,31 @@ fn a_named_source_is_rejected() {
     let source = format!("{TEMPERATURE}pub fn f(): Temperature = Temperature.from(value: 21);\n");
     assert!(typed_codes(&source).contains(&INFER_CONFLICT));
 }
+
+#[test]
+fn generic_from_sources_that_overlap_are_refused_at_the_declaration() {
+    let source = "pub type Box<T> {\n\
+        value: T,\n\
+        impl From<T> {\n\
+            fn from(value): Box<T> { Box { value: value } }\n\
+        }\n\
+        impl From<Int> {\n\
+            fn from(value): Box<T> { Box { value: value } }\n\
+        }\n\
+    }\n";
+    assert!(typed_codes(source).contains(&GENERIC_OVERLAP));
+}
+
+#[test]
+fn generic_from_sources_that_stay_apart_are_not_refused() {
+    let source = "pub type Box<T> {\n\
+        value: T,\n\
+        impl From<Int> {\n\
+            fn from(value): Box<T> { Box { value: value } }\n\
+        }\n\
+        impl From<Str> {\n\
+            fn from(text): Box<T> { Box { value: text } }\n\
+        }\n\
+    }\n";
+    assert!(!typed_codes(source).contains(&GENERIC_OVERLAP));
+}

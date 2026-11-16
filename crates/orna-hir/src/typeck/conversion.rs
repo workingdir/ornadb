@@ -4,8 +4,14 @@
 
 use orna_syntax_ast::SourceSpan as SyntaxSpan;
 
-use crate::{Arg, ArgValue, Body, Call, DefId, DefKind, ExprId, ExprKind, Name, Ty, TyKind};
+use crate::diag::GENERIC_OVERLAP;
+use crate::infer::InferCtxt;
+use crate::{
+    Arg, ArgValue, Body, Call, DefId, DefKind, ExprId, ExprKind, HirDiagnostic, Name, Program, Ty,
+    TyKind,
+};
 
+use super::nominal::nominal_param_count;
 use super::{BodyCheck, NotYetReason};
 
 impl BodyCheck<'_> {
@@ -137,4 +143,71 @@ impl BodyCheck<'_> {
         }
         candidates
     }
+}
+
+/// Refuses, at the declaration, two `From` implementations of one target whose source types overlap for some
+/// instance of the target's type arguments (CONVERT-003). Identical sources are refused when they are lowered;
+/// this reports the pairs that only unifying the two sources can see, once per later implementation.
+pub(super) fn check_declared_overlaps(program: &mut Program) {
+    let targets: Vec<(DefId, Vec<DefId>)> = program
+        .conversions
+        .iter()
+        .map(|(target, implementations)| (*target, implementations.clone()))
+        .collect();
+    for (target, implementations) in targets {
+        let mut sources: Vec<(DefId, Ty)> = Vec::new();
+        for implementation in implementations {
+            let (protocol, raw_source) = match &program.defs[implementation].kind {
+                DefKind::Impl(declared) => (declared.protocol, declared.conversion_source),
+                _ => continue,
+            };
+            let (Some(_), Some(source)) = (protocol, raw_source) else {
+                continue;
+            };
+            sources.push((implementation, source));
+        }
+        for (position, &(implementation, source)) in sources.iter().enumerate() {
+            let span = program.defs[implementation].span.clone();
+            let mut overlaps = false;
+            for &(_, earlier) in &sources[..position] {
+                if earlier != source
+                    && declared_sources_overlap(program, target, &span, earlier, source)
+                {
+                    overlaps = true;
+                    break;
+                }
+            }
+            if overlaps {
+                let module = program.defs[implementation].module;
+                program.modules[module].diagnostics.push(HirDiagnostic::new(
+                    GENERIC_OVERLAP,
+                    "two `From` implementations of this type accept overlapping sources",
+                    span,
+                ));
+            }
+        }
+    }
+}
+
+/// Whether `left` and `right`, written over the parameters of the nominal `target`, accept a common source for
+/// some instance of those parameters. A source that mentions an error or never type is not compared: its error
+/// was reported where it was written.
+fn declared_sources_overlap(
+    program: &mut Program,
+    target: DefId,
+    span: &SyntaxSpan,
+    left: Ty,
+    right: Ty,
+) -> bool {
+    if program.tys.mentions_bottom(left) || program.tys.mentions_bottom(right) {
+        return false;
+    }
+    let mut infer = InferCtxt::new();
+    let count = nominal_param_count(program, target);
+    let args: Vec<Ty> = (0..count)
+        .map(|_| infer.new_var(&mut program.tys, span.clone()))
+        .collect();
+    let left = program.tys.substitute(left, &args);
+    let right = program.tys.substitute(right, &args);
+    infer.unify(&mut program.tys, left, right).is_ok()
 }

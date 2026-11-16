@@ -76,3 +76,20 @@ fn native_siblings_still_evaluate() {
         );
     }
 }
+
+/// The native/source split is decided by the resolved catalogue entry, never
+/// by the shape of the admitted body. `map` once evaluated its Orna body when
+/// its AST contained a `while` loop (e05e541e7, removed by a741ef33e); that
+/// sniff is gone, so `map` must bind to its `Native` entry unconditionally.
+#[test]
+fn native_siblings_are_catalogue_native() {
+    for name in NATIVE {
+        let intrinsic = lookup(Module::Collection, name)
+            .unwrap_or_else(|| panic!("`std.collection.{name}` is missing from the catalogue"));
+        assert_eq!(
+            intrinsic.dispatch,
+            Dispatch::Native,
+            "`std.collection.{name}` must bind its native arm by resolved identity"
+        );
+    }
+}
