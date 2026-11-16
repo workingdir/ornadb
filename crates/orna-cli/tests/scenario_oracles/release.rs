@@ -63,7 +63,7 @@ const UPGRADE_2_CANDIDATE: &str = "`orna upgrade --to-format 2` is refused as an
 const ANNOTATION_DEFAULTS_FLAG: &str = "`migrate copy --annotation-defaults N` asserts the decoded Blob count and, when omitted, records the decoded count rather than explicit octet-stream and no-suffix defaults";
 const CONSUMER_CARRY_FLAG: &str = "`migrate copy --no-persistent-consumers` acknowledges that consumer checkpoints are carried, not reset, instead of requiring an explicit validated migration map";
 const STORAGE_PREFERENCE_RETIRED: &str = "storage-preference operations are retired, so `orna help` documents no storage option and no storage choice can be driven to check that a legacy layout is not selected; the atomic source/API change needs a legacy-source executor the harness lacks";
-const STORAGE_METADATA: &str = "storage metadata and work counters are unobservable: `sys.Storage` does not evaluate in the project REPL";
+const STORAGE_METADATA: &str = "storage metadata and work counters are unobservable: `sys.Storage` is unsupported in the project REPL (ORNA-EVAL-UNSUPPORTED), so no root, schema, generation, row count or work counter can be read";
 const CHECKOUT: &str = "`orna checkout` to a different commit is refused while drafts are pending or a changed path has uncommitted changes: pending drafts are not carried forward (CHECKOUT-3 step 4) and no checkout journal is written";
 const STAGING: &str = "`orna add --row` cannot stage a published row: format 3 has no row adapter that stages a row into the index store (ORNA-STAGE-001), so the command refuses and stages nothing";
 const OVERFLOW: &str = "a row above the 64 KiB node bound cannot be published: publication cannot prepare the candidate";
@@ -190,9 +190,7 @@ pub fn entries() -> Vec<Entry> {
             "the REPL cannot inspect a Blob value: evaluating a captured Blob fails",
             blob_value_cannot_be_inspected,
         ),
-        Entry::gap("FINAL-BLOB-011", "ornadb-5il1.120", BLOB_OPERATIONS, |db| {
-            blob_operation_unsupported(db, "sys.blob.read(sys.blob.from_bytes([1, 2, 3]), 3, 1)")
-        }),
+        Entry::pass("FINAL-BLOB-011", blob_read_checks_its_bounds),
         Entry::gap("FINAL-BLOB-012", "ornadb-5il1.120", BLOB_OPERATIONS, |db| {
             blob_operation_unsupported(db, "sys.blob.read(sys.blob.from_bytes([1, 2, 3]), 1, 1)")
         }),
@@ -218,9 +216,7 @@ pub fn entries() -> Vec<Entry> {
             blob_operation_unsupported(db, "sys.blob.from_bytes([0])")
         }),
         Entry::gap("FINAL-BLOB-019", "ornadb-gov5.21", NO_CLONE, no_clone),
-        Entry::gap("FINAL-BLOB-020", "ornadb-5il1.120", BLOB_OPERATIONS, |db| {
-            blob_operation_unsupported(db, "sys.blob.read(sys.blob.from_bytes([1, 2, 3]), 0, 1)")
-        }),
+        Entry::pass("FINAL-BLOB-020", blob_slice_drops_media_type),
         Entry::gap("FINAL-BLOB-021", "ornadb-5il1.120", BLOB_OPERATIONS, |db| {
             blob_operation_unsupported(db, "sys.blob.to_bytes(sys.blob.from_bytes([1, 2]))")
         }),
@@ -2883,7 +2879,7 @@ fn checked_out_branch(db: &mut Db) -> Result<String, Failure> {
 
 fn storage_unobservable(db: &mut Db) -> Probe {
     committed_repl_project(db)?;
-    repl_refuses(db, &["sys.Storage"], "ORNA-EVAL-NAME")
+    repl_refuses(db, &["sys.Storage"], "ORNA-EVAL-UNSUPPORTED")
 }
 
 /// The REPL evaluates against a committed HEAD. A fresh project has no HEAD, so
@@ -3015,6 +3011,80 @@ pub fn add(id: Str, track: Blob) = album.insert({ id: id, cover: null, tracks: [
 fn blob_operation_unsupported(db: &mut Db, expression: &str) -> Probe {
     committed_repl_project(db)?;
     repl_refuses(db, &[expression], "ORNA-EVAL-UNSUPPORTED")
+}
+
+/// Evaluates one REPL expression on the committed project; its printed value
+/// must contain `expected` and no evaluation error may be reported.
+fn repl_evaluates(db: &mut Db, expression: &str, expected: &str) -> Check {
+    let run = db.repl(&[expression])?;
+    ensure!(
+        !run.output().contains("error[") && run.output().contains(expected),
+        "`{expression}` did not evaluate to `{expected}`: {}",
+        run.diagnostic()
+    );
+    Ok(())
+}
+
+/// FINAL-BLOB-011: `read` checks nonnegative offsets and lengths, an offset at
+/// or before EOF, checked arithmetic and the 8 MiB bound per call; only a known
+/// EOF clips a successful result.
+fn blob_read_checks_its_bounds(db: &mut Db) -> Check {
+    committed_repl_project(db)?;
+    let blob = "sys.blob.from_bytes([1, 2, 3])";
+    repl_evaluates(
+        db,
+        &format!("sys.blob.to_bytes(sys.blob.read({blob}, 2, 9))"),
+        "[3] : [Int]",
+    )?;
+    repl_evaluates(
+        db,
+        &format!("sys.blob.to_bytes(sys.blob.read({blob}, 3, 1))"),
+        "[] : [Int]",
+    )?;
+    repl_evaluates(
+        db,
+        &format!("sys.blob.length(sys.blob.read({blob}, 0, 8388608))"),
+        "3 : Int",
+    )?;
+    for expression in [
+        format!("sys.blob.read({blob}, 4, 1)"),
+        format!("sys.blob.read({blob}, -1, 1)"),
+        format!("sys.blob.read({blob}, 0, -1)"),
+        format!("sys.blob.read({blob}, 9223372036854775807, 2)"),
+    ] {
+        repl_refuses(db, &[expression.as_str()], "sys.blob.bounds")?;
+    }
+    for expression in [
+        format!("sys.blob.read({blob}, 0, 8388609)"),
+        format!("sys.blob.read({blob}, 0, 9223372036854775807)"),
+    ] {
+        repl_refuses(db, &[expression.as_str()], "sys.blob.limit")?;
+    }
+    Ok(())
+}
+
+/// FINAL-BLOB-020: a slice of annotated bytes is application/octet-stream with
+/// no hint, so part of a JPEG does not remain image/jpeg. The release defines
+/// no `sys.blob` concatenation, so only slicing is observable.
+fn blob_slice_drops_media_type(db: &mut Db) -> Check {
+    committed_repl_project(db)?;
+    let jpeg = "sys.blob.annotate(sys.blob.from_bytes([255, 216]), \"image/jpeg\")";
+    repl_evaluates(
+        db,
+        &format!("sys.blob.media_type({jpeg})"),
+        "\"image/jpeg\" : Str",
+    )?;
+    for slice in [
+        format!("sys.blob.read({jpeg}, 0, 1)"),
+        format!("sys.blob.read({jpeg}, 1, 1)"),
+    ] {
+        repl_evaluates(
+            db,
+            &format!("sys.blob.media_type({slice})"),
+            "\"application/octet-stream\" : Str",
+        )?;
+    }
+    Ok(())
 }
 
 fn blob_value_cannot_be_inspected(db: &mut Db) -> Probe {

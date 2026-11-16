@@ -4,8 +4,8 @@
 # release_scenario_oracles test requires this list to equal the observed STALE
 # set exactly. Remove an ID only by writing its executor or re-recording its
 # next blocker in release.rs. Never add an ID by hand to hide a new STALE.
-# Regenerated from the observed STALE set of release_scenario_oracles after PR #9989.
-# The 28 ids added by that change are tracked by bead ornadb-5il1.232.1 (under ornadb-5il1.232).
+# Regenerated from the observed STALE set of release_scenario_oracles after bead ornadb-5il1.232.1 (64 observed, 64 listed).
+# FINAL-BLOB-011 and FINAL-BLOB-020 now run as executors; eight storage ids record ORNA-EVAL-UNSUPPORTED as their blocker and are GAPs.
 FINAL-APP-001
 FINAL-APP-002
 FINAL-APP-003
@@ -28,41 +28,31 @@ FINAL-BLOB-007
 FINAL-BLOB-008
 FINAL-BLOB-009
 FINAL-BLOB-010
-FINAL-BLOB-011
 FINAL-BLOB-012
 FINAL-BLOB-015
 FINAL-BLOB-016
 FINAL-BLOB-017
 FINAL-BLOB-018
 FINAL-BLOB-019
-FINAL-BLOB-020
 FINAL-BLOB-021
 FINAL-CAP-002
 FINAL-CAP-003
 FINAL-GRAPH-004
-FINAL-MIME-007
 FINAL-MIME-009
 FINAL-OGB-004
-FINAL-OGB-005
 FINAL-ROW-005
 FINAL-ROW-007
-FINAL-ROW-008
-FINAL-ROW-014
 FINAL-UPGRADE-009
 FINAL-UPGRADE-010
-FINAL-VFS-003
 FINAL-VFS-004
 FINAL-VFS-006
 FINAL-VFS-007
 FINAL-VFS-008
-FINAL-VFS-010
 FINAL-VFS-011
 FINAL-VFS-012
 FINAL-VFS-013
 FINAL-VFS-014
 FINAL-VFS-015
-FINAL-VFS-017
-FINAL-VFS-018
 FINAL-VFS-021
 FINAL-VFS-022
 FINAL-VFS-024
