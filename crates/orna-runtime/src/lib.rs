@@ -603,6 +603,11 @@ impl RuntimeState {
         state.migrate_admin_failure_unobservable().await?;
         state.migrate_empty_row_keys().await?;
         let accepted_pending = state.validate_recovery_with_pin_manifest().await?;
+        // This handle holds the owner lock, so every earlier writer process has
+        // exited and none of its query observations can still be finished.
+        if matches!(state.writer_authority, WriterAuthority::Owner { .. }) {
+            query::orphan_unfinished_query_observations_tx(&state.connection).await?;
+        }
         // Receipt recovery opens runtime while the repository journal can still
         // be pending. Owner cleanup defers in that state and retains the full
         // departed-owner chain until publication becomes terminal.
