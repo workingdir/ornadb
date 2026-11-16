@@ -8,14 +8,17 @@ use std::rc::Rc;
 
 use num_bigint::BigInt;
 use orna_hir::{BodyId, DefId, DefKind, FieldInitializer, Name, Program, Ty, TyKind};
-use orna_value::{OPTION_TAG, REFINED_NOMINAL_TAG, Raw, TUPLE_TAG, UNIT_TAG, UUID_TAG};
+use orna_value::{
+    ENUM_TAG, OPTION_TAG, RECORD_TAG, REFINED_NOMINAL_TAG, Raw, TUPLE_TAG, UNIT_TAG, UUID_TAG,
+};
 
 use crate::engine_money::{currency_name, def_qualified_name, is_money_type};
 use crate::error::Stop;
 use crate::frame::{TypeEnv, type_args};
 use crate::machine::Machine;
 use crate::raw_value::{self, object_id};
-use crate::value::Value;
+use crate::value::{Value, key_order};
+use crate::variants::enum_type_id_of;
 
 const SHAPE: &str = "ORNA-EVAL-VALUE";
 const UNSUPPORTED: &str = "decoded type shape (H6)";
@@ -92,6 +95,9 @@ pub(crate) fn from_raw_at(
         }
         Some(TyKind::Adt(def, args)) if matches!(program.defs[*def].kind, DefKind::Type(_)) => {
             type_at(machine, raw, *def, args, env)
+        }
+        Some(TyKind::Adt(def, _)) if matches!(program.defs[*def].kind, DefKind::Enum(_)) => {
+            enum_at(machine, raw, *def)
         }
         _ => Err(Stop::NotYet(UNSUPPORTED)),
     }
@@ -184,12 +190,7 @@ fn type_at(
         .filter(|member| assertion_body(program, *member).is_some())
         .collect();
     let inner = machine.resolve_targs(args, env)?;
-    let refined_base = match assertions.first() {
-        Some(first) if declared.is_empty() => self_ty(program, *first).filter(
-            |base| !matches!(program.tys.kind(*base), Some(TyKind::Adt(owner, _)) if *owner == def),
-        ),
-        _ => None,
-    };
+    let refined_base = refined_base_of(program, def, &type_def.members);
     let value = match refined_base {
         Some(base) => {
             let base_raw = refined_base_raw(machine, raw, def)?;
@@ -226,6 +227,31 @@ fn refined_base_raw<'r>(machine: &Machine<'_>, raw: &'r Raw, def: DefId) -> Resu
     } else {
         Err(Stop::Error(SHAPE))
     }
+}
+
+/// The base type a refined type's values are stored as: the self type of its first refinement, when the type declares
+/// no fields. A refinement whose self type is the type itself names no base, so the type is nominal.
+fn refined_base_of(program: &Program, def: DefId, members: &[DefId]) -> Option<Ty> {
+    if members
+        .iter()
+        .any(|member| declared_field(program, *member).is_some())
+    {
+        return None;
+    }
+    let first = members
+        .iter()
+        .copied()
+        .find(|member| assertion_body(program, *member).is_some())?;
+    self_ty(program, first).filter(
+        |base| !matches!(program.tys.kind(*base), Some(TyKind::Adt(owner, _)) if *owner == def),
+    )
+}
+
+/// The ObjectId of the nominal type `def`, derived from its qualified name.
+fn nominal_id(machine: &Machine<'_>, def: DefId) -> [u8; 16] {
+    machine
+        .host
+        .nominal_type_id(&def_qualified_name(machine.program, def))
 }
 
 /// A Money value, whose currency must be the currency type `Money` names.
@@ -346,4 +372,293 @@ fn record_at(
         fields.push((field.name.clone(), value));
     }
     Ok(raw_value::record(fields))
+}
+
+/// A source enum value at its declared enum type: `[type_id, variant_id, payload]` under the enum tag. The type id
+/// must name `def`, the variant must be one of its variants, and the payload must be exactly that variant's fields
+/// in a record, or `null` for a payload-free variant.
+fn enum_at(machine: &mut Machine<'_>, raw: &Raw, def: DefId) -> Result<Value, Stop> {
+    let program = machine.program;
+    let Raw::Tag(ENUM_TAG, body) = raw else {
+        return Err(Stop::Error(SHAPE));
+    };
+    let Raw::Array(parts) = &**body else {
+        return Err(Stop::Error(SHAPE));
+    };
+    let [
+        Raw::Tag(UUID_TAG, type_body),
+        Raw::Tag(UUID_TAG, variant_body),
+        payload,
+    ] = parts.as_slice()
+    else {
+        return Err(Stop::Error(SHAPE));
+    };
+    let type_id = object_id(type_body).ok_or(Stop::Error(SHAPE))?;
+    let variant_id = object_id(variant_body).ok_or(Stop::Error(SHAPE))?;
+    let DefKind::Enum(enum_def) = &program.defs[def].kind else {
+        return Err(Stop::NotYet(UNSUPPORTED));
+    };
+    if type_id != enum_type_id_of(program, def) {
+        return Err(Stop::Error(SHAPE));
+    }
+    let variant = variant_of(machine, &enum_def.variants, variant_id)?;
+    let DefKind::Variant(variant_def) = &program.defs[variant].kind else {
+        return Err(Stop::NotYet(UNSUPPORTED));
+    };
+    let payload = match (payload, variant_def.fields.is_empty()) {
+        (Raw::Null, true) => None,
+        (Raw::Tag(RECORD_TAG, record), false) => {
+            let entries = record_payload_entries(record)?;
+            let declared: Vec<Declared> = variant_def
+                .fields
+                .iter()
+                .filter_map(|member| declared_field(program, *member))
+                .collect();
+            match record_at(machine, &entries, &declared, &[])? {
+                Value::Record(fields) => Some(fields),
+                _ => return Err(Stop::Error(SHAPE)),
+            }
+        }
+        _ => return Err(Stop::Error(SHAPE)),
+    };
+    Ok(Value::Enum {
+        type_id,
+        variant_id,
+        payload,
+    })
+}
+
+/// The entries of an enum payload record (60009), `[type_object_id_or_null, [[name, value], ...]]`, in the order
+/// the payload writes them.
+fn record_payload_entries(record: &Raw) -> Result<Vec<(Raw, Raw)>, Stop> {
+    let Raw::Array(parts) = record else {
+        return Err(Stop::Error(SHAPE));
+    };
+    let [type_part, Raw::Array(pairs)] = parts.as_slice() else {
+        return Err(Stop::Error(SHAPE));
+    };
+    if !matches!(type_part, Raw::Null | Raw::Tag(UUID_TAG, _)) {
+        return Err(Stop::Error(SHAPE));
+    }
+    pairs
+        .iter()
+        .map(|pair| match pair {
+            Raw::Array(entry) => match entry.as_slice() {
+                [key, value] => Ok((key.clone(), value.clone())),
+                _ => Err(Stop::Error(SHAPE)),
+            },
+            _ => Err(Stop::Error(SHAPE)),
+        })
+        .collect()
+}
+
+/// The source variant of an enum, among `variants`, whose ObjectId is `variant_id`.
+fn variant_of(
+    machine: &Machine<'_>,
+    variants: &[DefId],
+    variant_id: [u8; 16],
+) -> Result<DefId, Stop> {
+    variants
+        .iter()
+        .copied()
+        .find(|variant| {
+            machine
+                .variant_ids_of(*variant)
+                .is_some_and(|ids| ids.variant_id == variant_id)
+        })
+        .ok_or(Stop::Error(SHAPE))
+}
+
+/// The canonical raw form of `value` at type `ty`, the inverse of [`from_raw_at`]. A refined value is written as a
+/// `60020` wrapper over its base, and a source enum value as a `60008` wrapper. Composite values are written at
+/// their declared element types. A value whose shape is not that composite's, and a type this stage does not write
+/// typed, keep the untyped form of [`Value::to_raw`].
+pub(crate) fn to_raw_at(
+    machine: &mut Machine<'_>,
+    value: &Value,
+    ty: Ty,
+    env: &[Ty],
+) -> Result<Raw, Stop> {
+    let program = machine.program;
+    match program.tys.kind(ty) {
+        Some(TyKind::Param(index)) => {
+            let bound = env
+                .get(index.as_u32() as usize)
+                .copied()
+                .ok_or(Stop::NotYet(
+                    "type parameter outside the decode environment (H5)",
+                ))?;
+            to_raw_at(machine, value, bound, &[])
+        }
+        Some(TyKind::Option(item)) => match value {
+            Value::Option(Some(payload)) => {
+                let payload = to_raw_at(machine, payload, *item, env)?;
+                Ok(Raw::Tag(
+                    OPTION_TAG,
+                    Box::new(Raw::Array(vec![Raw::Int(BigInt::from(1)), payload])),
+                ))
+            }
+            _ => untyped(value),
+        },
+        Some(TyKind::List(item)) => match value {
+            Value::List(items) => items
+                .iter()
+                .map(|element| to_raw_at(machine, element, *item, env))
+                .collect::<Result<Vec<_>, _>>()
+                .map(Raw::Array),
+            _ => untyped(value),
+        },
+        Some(TyKind::Tuple(types)) if !types.is_empty() => match value {
+            Value::Tuple(values) if values.len() == types.len() => {
+                let items = values
+                    .iter()
+                    .zip(types.iter())
+                    .map(|(element, ty)| to_raw_at(machine, element, *ty, env))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Raw::Tag(TUPLE_TAG, Box::new(Raw::Array(items))))
+            }
+            _ => untyped(value),
+        },
+        Some(TyKind::Record(fields)) => match value {
+            Value::Record(values) => record_to_raw(machine, values, fields, env),
+            _ => untyped(value),
+        },
+        Some(TyKind::Adt(def, _)) if is_money_type(program, *def) => untyped(value),
+        Some(TyKind::Adt(def, _)) if matches!(program.defs[*def].kind, DefKind::Enum(_)) => {
+            match value {
+                Value::Enum { .. } => enum_to_raw(machine, value, *def),
+                _ => untyped(value),
+            }
+        }
+        Some(TyKind::Adt(def, args)) if matches!(program.defs[*def].kind, DefKind::Type(_)) => {
+            type_to_raw(machine, value, *def, args, env)
+        }
+        _ => untyped(value),
+    }
+}
+
+/// The untyped canonical form of `value`.
+fn untyped(value: &Value) -> Result<Raw, Stop> {
+    value.to_raw().map_err(Stop::Error)
+}
+
+/// An ObjectId as its UUID-tagged 16 bytes.
+fn uuid_raw(id: [u8; 16]) -> Raw {
+    Raw::Tag(UUID_TAG, Box::new(Raw::Bytes(id.to_vec())))
+}
+
+/// A user-defined type's value at its type. A refined type is written as `60020` over its base, which is the value
+/// itself; a nominal record is its fields, each at its declared type.
+fn type_to_raw(
+    machine: &mut Machine<'_>,
+    value: &Value,
+    def: DefId,
+    args: &[Ty],
+    env: &[Ty],
+) -> Result<Raw, Stop> {
+    let program = machine.program;
+    let DefKind::Type(type_def) = &program.defs[def].kind else {
+        return untyped(value);
+    };
+    let inner = machine.resolve_targs(args, env)?;
+    let inner_env = type_args(&inner);
+    if let Some(base) = refined_base_of(program, def, &type_def.members) {
+        let base_raw = to_raw_at(machine, value, base, inner_env)?;
+        let wrapper = Raw::Array(vec![uuid_raw(nominal_id(machine, def)), base_raw]);
+        return Ok(Raw::Tag(REFINED_NOMINAL_TAG, Box::new(wrapper)));
+    }
+    match value {
+        Value::Record(values) => {
+            let types = field_types(program, &type_def.members);
+            record_to_raw(machine, values, &types, inner_env)
+        }
+        _ => untyped(value),
+    }
+}
+
+/// A source enum value at its enum type: `[type_id, variant_id, payload]` under the enum tag, the payload being the
+/// variant's fields in a record, or `null` for a payload-free variant.
+fn enum_to_raw(machine: &mut Machine<'_>, value: &Value, def: DefId) -> Result<Raw, Stop> {
+    let program = machine.program;
+    let Value::Enum {
+        type_id,
+        variant_id,
+        payload,
+    } = value
+    else {
+        return untyped(value);
+    };
+    let DefKind::Enum(enum_def) = &program.defs[def].kind else {
+        return Err(Stop::NotYet(UNSUPPORTED));
+    };
+    if *type_id != enum_type_id_of(program, def) {
+        return Err(Stop::Error(SHAPE));
+    }
+    let variant = variant_of(machine, &enum_def.variants, *variant_id)?;
+    let DefKind::Variant(variant_def) = &program.defs[variant].kind else {
+        return Err(Stop::NotYet(UNSUPPORTED));
+    };
+    let payload_raw = match (payload, variant_def.fields.is_empty()) {
+        (None, true) => Raw::Null,
+        (Some(fields), false) => {
+            let types = field_types(program, &variant_def.fields);
+            let entries = record_entries_to_raw(machine, fields, &types, &[])?;
+            let pairs = entries
+                .into_iter()
+                .map(|(name, value)| Raw::Array(vec![name, value]))
+                .collect();
+            Raw::Tag(
+                RECORD_TAG,
+                Box::new(Raw::Array(vec![Raw::Null, Raw::Array(pairs)])),
+            )
+        }
+        _ => return Err(Stop::Error(SHAPE)),
+    };
+    let wrapper = Raw::Array(vec![uuid_raw(*type_id), uuid_raw(*variant_id), payload_raw]);
+    Ok(Raw::Tag(ENUM_TAG, Box::new(wrapper)))
+}
+
+/// The declared fields among `members`, as their names and types.
+fn field_types(program: &Program, members: &[DefId]) -> Vec<(Name, Ty)> {
+    members
+        .iter()
+        .filter_map(|member| declared_field(program, *member))
+        .map(|field| (field.name, field.ty))
+        .collect()
+}
+
+/// A record's canonical map: each entry written at the type its name declares, in canonical key order. A field the
+/// types do not declare is a value error.
+fn record_to_raw(
+    machine: &mut Machine<'_>,
+    values: &[(Name, Value)],
+    types: &[(Name, Ty)],
+    env: &[Ty],
+) -> Result<Raw, Stop> {
+    record_entries_to_raw(machine, values, types, env).map(Raw::Map)
+}
+
+/// The canonical entries of a record, in canonical key order: each entry written at the type its name declares. A
+/// field the types do not declare is a value error.
+fn record_entries_to_raw(
+    machine: &mut Machine<'_>,
+    values: &[(Name, Value)],
+    types: &[(Name, Ty)],
+    env: &[Ty],
+) -> Result<Vec<(Raw, Raw)>, Stop> {
+    let names: Vec<&str> = values.iter().map(|(name, _)| name.as_str()).collect();
+    let order = key_order(&names).map_err(Stop::Error)?;
+    order
+        .into_iter()
+        .map(|index| -> Result<(Raw, Raw), Stop> {
+            let (name, value) = &values[index];
+            let ty = types
+                .iter()
+                .find(|(declared, _)| declared.as_str() == name.as_str())
+                .map(|(_, ty)| *ty)
+                .ok_or(Stop::Error(SHAPE))?;
+            let raw = to_raw_at(machine, value, ty, env)?;
+            Ok((Raw::Text(name.as_str().to_owned()), raw))
+        })
+        .collect()
 }
