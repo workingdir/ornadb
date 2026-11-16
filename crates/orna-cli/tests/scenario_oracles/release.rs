@@ -711,12 +711,7 @@ pub fn entries() -> Vec<Entry> {
         Entry::gap("V110-OGB-02", "ornadb-5il1.120", BLOB_OPERATIONS, |db| {
             blob_operation_unsupported(db, "sys.blob.verify(sys.blob.from_bytes([1, 2]))")
         }),
-        Entry::gap(
-            "V110-OGB-03",
-            "ornadb-9hjd",
-            SIZE_LIMIT_CHUNK_CAPTURE,
-            ogb_03_blocker,
-        ),
+        Entry::pass("V110-OGB-03", chunking_is_stable_and_reuses_chunks),
         Entry::gap(
             "V110-INGEST-01",
             "ornadb-5il1.196",
@@ -1683,30 +1678,6 @@ export_blocker! {
 
 const EXPORT_COPIES_TAMPERED_STORE: &str =
     "orna export copies a tampered store that every other product reader refuses";
-
-const SIZE_LIMIT_CHUNK_CAPTURE: &str =
-    "a 3 MiB REPL capture fails with sys.blob.limit before the row is inserted";
-
-/// The blocker reproduces when the scenario's executor stops at `needle`,
-/// the product refusal that blocks the scenario, before its own assertions.
-fn executor_stops_at(check: Check, needle: &str) -> Probe {
-    match check {
-        Ok(()) => Err(Failure::Unmet(format!(
-            "the scenario now passes; `{needle}` no longer blocks it"
-        ))),
-        Err(failure) if failure.reason().contains(needle) => Ok(failure
-            .reason()
-            .lines()
-            .next()
-            .unwrap_or_default()
-            .to_owned()),
-        Err(failure) => Err(failure),
-    }
-}
-
-fn ogb_03_blocker(db: &mut Db) -> Probe {
-    executor_stops_at(chunking_is_stable_and_reuses_chunks(db), "sys.blob.limit")
-}
 
 /// Every product reader refuses the committed store.
 fn refused_reading(db: &mut Db, relation: &str) -> Check {

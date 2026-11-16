@@ -7,6 +7,9 @@ use super::{
 };
 use orna_host_fs::FilesystemProvider;
 
+/// ORNA-BLOB-014 format maximum for one captured Blob (2^63-1 bytes).
+const REPL_CAPTURE_MAX_BYTES: u64 = i64::MAX as u64;
+
 #[cfg(test)]
 thread_local! {
     /// Running request rows counted when the first sys binding dispatches.
@@ -96,8 +99,12 @@ pub(crate) fn ensure_host_bindings(
     if host_bindings.is_some() {
         return Ok(());
     }
-    let mut filesystem =
-        FilesystemProvider::with_limits(65_536, 16).map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
+    // The text bound keeps `read_text` in memory at 64 KiB. Capture streams,
+    // so its quota is the per-call `max_bytes` bounded by the format maximum
+    // 2^63-1 (ORNA-BLOB-014), as in `cli_annotate`.
+    let mut filesystem = FilesystemProvider::with_limits(65_536, 16)
+        .and_then(|provider| provider.with_capture_limit(REPL_CAPTURE_MAX_BYTES))
+        .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
     filesystem
         .allow_root(inputs.repository.worktree())
         .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
