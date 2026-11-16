@@ -4,6 +4,7 @@ use std::io::{self, BufRead, Write};
 use std::time::Instant;
 
 use crate::repl_commands::{ConsoleState, run as run_console_command};
+use crate::repl_continuation::read_complete_submission;
 use crate::repl_inspect::{DISPLAY, render};
 use orna_evaluator::{RelationDisplay, RelationWindow, ReplValue};
 use orna_live::live_presentation::{LivePresentationUpdate, ResyncRequest, WatchPresentation};
@@ -11,7 +12,7 @@ use orna_project_repl::{AdmittedReplSession, ReplDetail, ReplError, ReplOutcome}
 use orna_protocol::{Envelope, Limits, Message, PresentNode};
 use orna_value::{CanonicalSnapshot, Raw, canonical_uuid_text};
 
-const MAX_INPUT_BYTES: usize = 65_536;
+pub(crate) const MAX_INPUT_BYTES: usize = 65_536;
 const REPL_HELP: &str = "commands: :help [name], :at CWD|HEAD|ref, :watch expression, :unwatch [id], :type expression, :inspect expression, :members expression, :table expression, :history [query], :timing on|off, :clear, :quit";
 
 type ReplSubmissionHandler<'a> =
@@ -914,7 +915,7 @@ fn run_loop<
         pump_watch_frames(&mut watch, session, writer, color_enabled)?;
         write_styled(writer, AnsiColor::Dim, b"> ", color_enabled)?;
         writer.flush()?;
-        match read_submission(reader)? {
+        match read_complete_submission(reader, writer, color_enabled)? {
             ReadSubmission::Eof => {
                 close_session_watch(&mut watch, writer, color_enabled)?;
                 return Ok(());
@@ -1234,60 +1235,6 @@ pub(crate) fn parse_watch_source(command: &str) -> Option<&str> {
         return None;
     }
     Some(rest)
-}
-
-pub(crate) fn read_submission<R: BufRead>(reader: &mut R) -> io::Result<ReadSubmission> {
-    let mut source = Vec::new();
-    loop {
-        let bytes = reader.fill_buf()?;
-        if bytes.is_empty() {
-            return Ok(if source.is_empty() {
-                ReadSubmission::Eof
-            } else {
-                decode_submission(source)
-            });
-        }
-        let take = bytes
-            .iter()
-            .position(|byte| *byte == b'\n')
-            .map_or(bytes.len(), |position| position + 1);
-        if source.len().saturating_add(take) > MAX_INPUT_BYTES {
-            let complete = bytes.get(take - 1) == Some(&b'\n');
-            reader.consume(take);
-            if !complete {
-                drain_line(reader)?;
-            }
-            return Ok(ReadSubmission::TooLong);
-        }
-        let complete = bytes.get(take - 1) == Some(&b'\n');
-        source.extend_from_slice(&bytes[..take]);
-        reader.consume(take);
-        if complete {
-            return Ok(decode_submission(source));
-        }
-    }
-}
-
-fn decode_submission(source: Vec<u8>) -> ReadSubmission {
-    String::from_utf8(source).map_or(ReadSubmission::InvalidUtf8, ReadSubmission::Source)
-}
-
-fn drain_line<R: BufRead>(reader: &mut R) -> io::Result<()> {
-    loop {
-        let bytes = reader.fill_buf()?;
-        if bytes.is_empty() {
-            return Ok(());
-        }
-        let take = bytes
-            .iter()
-            .position(|byte| *byte == b'\n')
-            .map_or(bytes.len(), |position| position + 1);
-        let complete = bytes.get(take - 1) == Some(&b'\n');
-        reader.consume(take);
-        if complete {
-            return Ok(());
-        }
-    }
 }
 
 #[cfg(test)]

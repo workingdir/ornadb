@@ -37,6 +37,7 @@ mod project_run;
 mod repl;
 mod repl_commands;
 mod repl_committed_read;
+mod repl_continuation;
 mod repl_hir;
 mod repl_inspect;
 mod repl_request;
