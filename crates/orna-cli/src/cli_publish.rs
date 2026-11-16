@@ -33,7 +33,7 @@ const DEFAULT_MESSAGE: &str = "orna: publish runtime data";
 
 fn publish_error(title: &'static str, detail: impl Into<String>) -> Diagnostic {
     Diagnostic::target_with_detail(
-        "E2300",
+        "ORNA-CMD-WORKFLOW-REFUSED",
         title,
         "run `orna publish` inside a format-3 repository with durable runtime changes",
         detail.into(),
@@ -41,7 +41,7 @@ fn publish_error(title: &'static str, detail: impl Into<String>) -> Diagnostic {
 }
 
 /// Parses the optional `--message` value. Every other argument is a usage error
-/// (E1002) that names the offending word, so a misspelled flag never publishes
+/// (ORNA-CMD-ARGUMENT-INVALID) that names the offending word, so a misspelled flag never publishes
 /// under an unintended message.
 fn parse_options(arguments: &[String]) -> Result<String, Diagnostic> {
     let mut message = None;
@@ -70,7 +70,7 @@ fn parse_options(arguments: &[String]) -> Result<String, Diagnostic> {
 
 fn usage_error(title: String) -> Diagnostic {
     Diagnostic {
-        code: "E1002",
+        code: "ORNA-CMD-ARGUMENT-INVALID",
         title: std::borrow::Cow::Owned(title),
         help: USAGE_HELP,
         exit: Exit::Usage,
@@ -331,7 +331,7 @@ fn validate_candidate_source_rows(
         })?;
         if !committed_relations.contains(&table_id.bytes()) {
             return Err(Diagnostic::target_with_detail(
-                "E2300",
+                "ORNA-CMD-WORKFLOW-REFUSED",
                 "source row table has no relation in the committed store",
                 "stage the table's source and run `orna commit -m MESSAGE` to admit it, then retry `orna publish`",
                 format!(
@@ -380,7 +380,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     let path = local_project_path(endpoint)?;
     let repository = orna_repository::Repository::discover(path).map_err(|_| {
         Diagnostic::target(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "local Git worktree could not be discovered",
             "run the command inside a Git worktree or provide a local project path",
         )
@@ -717,7 +717,7 @@ fn legacy_read_only_refusal(
         (LEGACY_READ_ONLY_HELP, "the pending range was preserved")
     };
     Diagnostic::target_with_detail(
-        "E2300",
+        "ORNA-CMD-WORKFLOW-REFUSED",
         title,
         help,
         format!(
@@ -754,7 +754,7 @@ pub(super) fn describe_storage_failure(
         E::LegacyReadOnly { format } => return legacy_read_only_refusal(title, *format, false),
         E::ManagedWorktreeConflict => {
             return Diagnostic::target_with_detail(
-                "E2300",
+                "ORNA-CMD-WORKFLOW-REFUSED",
                 title,
                 MANAGED_EDIT_HELP,
                 "a managed path was edited after capture; the edit is retained on disk and HEAD was not changed"
@@ -763,7 +763,7 @@ pub(super) fn describe_storage_failure(
         }
         E::LegacyPathChanged { path } => {
             return Diagnostic::target_with_detail(
-                "E2300",
+                "ORNA-CMD-WORKFLOW-REFUSED",
                 title,
                 MANAGED_EDIT_HELP,
                 format!(
@@ -812,7 +812,7 @@ mod tests {
         );
         let rendered = diagnostic.to_string();
         assert!(rendered.starts_with(
-            "error[E2300]: publication candidate could not be prepared\n  native graph repository data is malformed: "
+            "error[ORNA-CMD-WORKFLOW-REFUSED]: publication candidate could not be prepared\n  native graph repository data is malformed: "
         ));
         assert!(rendered.contains("(ORNA-REPO-CONTEXT-017)"));
         assert!(!rendered.contains("GraphMalformed"));
@@ -884,7 +884,7 @@ mod tests {
             "pending publication could not be recovered",
             &orna_storage::Error::ManagedWorktreeConflict,
         );
-        assert_eq!(diagnostic.code, "E2300");
+        assert_eq!(diagnostic.code, "ORNA-CMD-WORKFLOW-REFUSED");
         assert_eq!(diagnostic.help, MANAGED_EDIT_HELP);
         assert!(diagnostic.help.contains("not supported"));
         assert!(diagnostic.help.contains("`git show HEAD:<path> > <path>`"));
@@ -931,7 +931,7 @@ mod tests {
             "publication target is a read-only legacy snapshot",
             &orna_storage::Error::LegacyReadOnly { format: 2 },
         );
-        assert_eq!(diagnostic.code, "E2300");
+        assert_eq!(diagnostic.code, "ORNA-CMD-WORKFLOW-REFUSED");
         assert_eq!(
             diagnostic.title,
             "publication target is a read-only legacy snapshot"
@@ -954,7 +954,7 @@ mod tests {
     fn prepared_migration_refusal_names_the_unactivated_candidate() {
         let diagnostic =
             legacy_read_only_refusal("publication target is a read-only legacy snapshot", 1, true);
-        assert_eq!(diagnostic.code, "E2300");
+        assert_eq!(diagnostic.code, "ORNA-CMD-WORKFLOW-REFUSED");
         assert_eq!(diagnostic.help, MIGRATION_PREPARED_HELP);
         assert!(
             diagnostic

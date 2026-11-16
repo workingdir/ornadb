@@ -227,7 +227,7 @@ fn key_error(title: &'static str, detail: impl Into<String>) -> Diagnostic {
     // detail (the valid spelling) is carried in the title.
     let detail = detail.into();
     let mut diagnostic = Diagnostic::target_with_detail(
-        "E2000",
+        "ORNA-CMD-TARGET-UNAVAILABLE",
         title,
         "spell a text key as KEY_TEXT and a byte key as 0x followed by its hex digits",
         detail.clone(),

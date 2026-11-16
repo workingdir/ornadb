@@ -620,7 +620,7 @@ fn pin_snapshot(
         "run `orna history <relation-hex> <key>` inside an initialized repository",
     )? {
         return Err(Diagnostic::target_with_detail(
-            "E2000",
+            "ORNA-CMD-TARGET-UNAVAILABLE",
             "Snapshot name is ambiguous",
             "use the full ref name (`refs/heads/NAME`, `refs/tags/NAME`, \
              `refs/remotes/ORIGIN/NAME`) or the commit id `orna history` lists",
@@ -678,7 +678,7 @@ pub(super) fn bare_ref_selector_is_ambiguous(
         .output()
         .map_err(|error| {
             Diagnostic::target_with_detail(
-                "E2000",
+                "ORNA-CMD-TARGET-UNAVAILABLE",
                 "Git could not be started",
                 help,
                 format!("check that Git is installed and available on PATH: {error}"),
@@ -686,7 +686,7 @@ pub(super) fn bare_ref_selector_is_ambiguous(
         })?;
     if !output.status.success() {
         return Err(Diagnostic::target_with_detail(
-            "E2000",
+            "ORNA-CMD-TARGET-UNAVAILABLE",
             "Git could not list the snapshot names",
             help,
             String::from_utf8_lossy(&output.stderr).trim().to_owned(),
@@ -1380,7 +1380,7 @@ fn history_error(title: &'static str, detail: impl Into<String>) -> Diagnostic {
     // detail is carried in the title as well.
     let detail = detail.into();
     let mut diagnostic = Diagnostic::target_with_detail(
-        "E2000",
+        "ORNA-CMD-TARGET-UNAVAILABLE",
         title,
         "run `orna history <relation-hex> <key>` inside an initialized repository",
         detail.clone(),

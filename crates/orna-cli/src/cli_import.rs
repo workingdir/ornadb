@@ -440,7 +440,7 @@ fn process_io_bytes() -> Option<(u64, u64)> {
 
 fn import_error(title: &'static str, detail: impl Into<String>) -> Diagnostic {
     Diagnostic::target_with_detail(
-        "E2000",
+        "ORNA-CMD-TARGET-UNAVAILABLE",
         title,
         "run `orna import <bundle-dir> --dry-run [--limit N]` on a bundle written by an offline copy",
         detail.into(),

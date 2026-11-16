@@ -25,7 +25,7 @@ fn fetch_accepts_only_continuous_witnesses() {
     ] {
         let diagnostic =
             fetch_continuity_diagnostic(continuity).expect("non-continuous witnesses are rejected");
-        assert_eq!(diagnostic.code, "E2100");
+        assert_eq!(diagnostic.code, "ORNA-CMD-REMOTE-FAILED");
         assert_eq!(diagnostic.title, "Orna continuity witness was rejected");
         assert_eq!(
             diagnostic.help,
@@ -83,7 +83,7 @@ fn parsing_is_bounded_and_diagnostic_is_stable() {
     assert_eq!(
         (error.code, error.title.as_ref(), error.help),
         (
-            "E1002",
+            "ORNA-CMD-ARGUMENT-INVALID",
             "unsupported value for `--color`",
             "choose `auto`, `always`, or `never`"
         )
@@ -91,7 +91,10 @@ fn parsing_is_bounded_and_diagnostic_is_stable() {
     let error = parse_cli(&["--color".into()]).expect_err("color mode value is required");
     assert_eq!(
         (error.code, error.title.as_ref()),
-        ("E1001", "option `--color` needs a value")
+        (
+            "ORNA-CMD-ARGUMENT-MISSING",
+            "option `--color` needs a value"
+        )
     );
     assert_eq!(
         parse_cli(&["check".into()]).unwrap().command,
@@ -143,7 +146,7 @@ fn parsing_is_bounded_and_diagnostic_is_stable() {
     );
     let error =
         parse_cli(&["status".into(), "--porcelain=v2".into()]).expect_err("status format is exact");
-    assert_eq!(error.code, "E1002");
+    assert_eq!(error.code, "ORNA-CMD-ARGUMENT-INVALID");
     assert_eq!(
         (error.title.as_ref(), error.help),
         (
@@ -171,25 +174,25 @@ fn parsing_is_bounded_and_diagnostic_is_stable() {
         parse_cli(&["--db".into(), "project".into(), "init".into()])
             .expect_err("init must not use a database endpoint")
             .code,
-        "E1002"
+        "ORNA-CMD-ARGUMENT-INVALID"
     );
     assert_eq!(
         parse_cli(&["init".into(), "--bare".into()])
             .expect_err("unsupported init option")
             .code,
-        "E1002"
+        "ORNA-CMD-ARGUMENT-INVALID"
     );
     assert_eq!(
         parse_cli(&["init".into(), "one".into(), "two".into()])
             .expect_err("only one target is accepted")
             .code,
-        "E1003"
+        "ORNA-CMD-ARGUMENT-UNEXPECTED"
     );
     assert_eq!(
         parse_cli(&["invoke".into()])
             .expect_err("target is required")
             .code,
-        "E1001"
+        "ORNA-CMD-ARGUMENT-MISSING"
     );
     assert_eq!(
         parse_cli(&["serve".into()]).unwrap().command,
@@ -222,7 +225,10 @@ fn explain_documents_a_stable_diagnostic_and_rejects_unknown_codes() {
         "ORNA-S010-IMPORT: imported module is unavailable\nThe project names a module that is not part of its captured dependencies, so the module cannot be checked or executed.\nhelp: use a captured standard dependency or remove the import"
     );
     let error = explain_diagnostic("ORNA-NOT-A-CODE").expect_err("unknown diagnostic");
-    assert_eq!((error.code, error.exit), ("E1002", Exit::Usage));
+    assert_eq!(
+        (error.code, error.exit),
+        ("ORNA-CMD-ARGUMENT-INVALID", Exit::Usage)
+    );
 }
 
 #[test]
@@ -239,7 +245,11 @@ fn semantic_legend_unknown_class_or_option_exits_with_usage_code_two() {
         match parse_cli(&arguments) {
             Ok(_) => panic!("{words:?} should be rejected"),
             Err(error) => {
-                assert_eq!((error.code, error.exit as i32), ("E1002", 2), "{words:?}");
+                assert_eq!(
+                    (error.code, error.exit as i32),
+                    ("ORNA-CMD-ARGUMENT-INVALID", 2),
+                    "{words:?}"
+                );
             }
         }
     }
@@ -887,14 +897,14 @@ fn project_source_rejects_repl_only_bindings() {
             .err()
             .expect("module source rejects status binding")
             .code,
-        "E2101"
+        "ORNA-CMD-SEMANTIC-FAILED"
     );
 }
 
 #[test]
 fn diagnostic_output_preserves_detail_help_and_final_newline() {
     let diagnostic = Diagnostic::target_with_detail(
-        "E2300",
+        "ORNA-CMD-WORKFLOW-REFUSED",
         "request failed",
         "retry the operation",
         "the expected remote response was unavailable",
@@ -902,7 +912,7 @@ fn diagnostic_output_preserves_detail_help_and_final_newline() {
     let mut plain = Vec::new();
     write_diagnostic(&mut plain, &diagnostic, false, false).expect("plain diagnostic write");
     assert_eq!(
-        plain, b"error[E2300]: request failed\nhelp: retry the operation\n",
+        plain, b"error[ORNA-CMD-WORKFLOW-REFUSED]: request failed\nhelp: retry the operation\n",
         "technical details are hidden in normal output"
     );
 
@@ -910,14 +920,14 @@ fn diagnostic_output_preserves_detail_help_and_final_newline() {
     write_diagnostic(&mut colored, &diagnostic, true, true).expect("colored diagnostic write");
     assert_eq!(
         String::from_utf8(colored).expect("diagnostic is UTF-8"),
-        "\x1b[31merror\x1b[0m[\x1b[31mE2300\x1b[0m]: \x1b[31mrequest failed\x1b[0m\n  \x1b[2mthe expected remote response was unavailable\x1b[0m\nhelp: \x1b[2mretry the operation\x1b[0m\n"
+        "\x1b[31merror\x1b[0m[\x1b[31mORNA-CMD-WORKFLOW-REFUSED\x1b[0m]: \x1b[31mrequest failed\x1b[0m\n  \x1b[2mthe expected remote response was unavailable\x1b[0m\nhelp: \x1b[2mretry the operation\x1b[0m\n"
     );
 }
 
 #[test]
 fn durable_invocation_failure_carries_public_code_and_hides_it_without_debug() {
     let diagnostic = durable_invocation_failed(&orna_runtime::RuntimeError::AdminBusy);
-    assert_eq!(diagnostic.code, "E2200");
+    assert_eq!(diagnostic.code, "ORNA-CMD-RUNTIME-UNAVAILABLE");
     assert_eq!(
         diagnostic.detail.as_deref(),
         Some("runtime failure: sys.admin.busy")
@@ -941,7 +951,7 @@ fn durable_invocation_failure_carries_public_code_and_hides_it_without_debug() {
 #[test]
 fn durable_invocation_failure_without_public_code_carries_display_text() {
     let diagnostic = durable_invocation_failed(&orna_runtime::RuntimeError::LeaseHeld);
-    assert_eq!(diagnostic.code, "E2200");
+    assert_eq!(diagnostic.code, "ORNA-CMD-RUNTIME-UNAVAILABLE");
     assert_eq!(
         diagnostic.detail.as_deref(),
         Some("runtime failure: runtime writer is held")
@@ -967,7 +977,7 @@ fn failure_detail_formats_attached_cause_codes() {
     .with_cause(cause);
 
     let delivery = stream_delivery_failed(&failure);
-    assert_eq!(delivery.code, "E2200");
+    assert_eq!(delivery.code, "ORNA-CMD-RUNTIME-UNAVAILABLE");
     assert_eq!(
         delivery.detail.as_deref(),
         Some("failure code: ORNA-EVAL-SURFACE (causes: ORNA-EVAL-DIVIDE-BY-ZERO)")
@@ -1031,7 +1041,10 @@ fn single_expression_repl_converts_writer_failure_to_console_diagnostic() {
     let mut session = AdmittedReplSession::new(Limits::default());
     let error = run_repl_submission(&mut session, "1", &mut BrokenWriter, false)
         .expect_err("writer failure");
-    assert_eq!((error.code, error.exit), ("E2200", Exit::Target));
+    assert_eq!(
+        (error.code, error.exit),
+        ("ORNA-CMD-OUTPUT-FAILED", Exit::Target)
+    );
 }
 #[test]
 fn execution_project_preserves_reachable_loose_row_metadata() {
@@ -1181,7 +1194,10 @@ fn authoritative_reference_project_runs_seed_exercise_and_sensor_stream() {
         color: ColorMode::Auto,
     })
     .expect_err("duplicate seed must be rejected");
-    assert_eq!((error.code, error.exit), ("E2200", Exit::Target));
+    assert_eq!(
+        (error.code, error.exit),
+        ("ORNA-CMD-RUNTIME-UNAVAILABLE", Exit::Target)
+    );
     assert_eq!(
         execute(&Parsed {
             endpoint: endpoint.clone(),
@@ -1406,7 +1422,10 @@ fn check_rejects_semantic_errors_with_a_stable_cli_diagnostic() {
     let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
     let error = check_project(&endpoint, false).expect_err("semantic error");
     let rendered = error.to_string();
-    assert_eq!((error.code, error.exit), ("E2101", Exit::Target));
+    assert_eq!(
+        (error.code, error.exit),
+        ("ORNA-CMD-SEMANTIC-FAILED", Exit::Target)
+    );
     assert!(rendered.contains("ORNA-S021-TYPE"));
     assert!(rendered.contains("static types are incompatible"));
     assert!(rendered.contains("fix the first reported source contract error"));
@@ -1415,7 +1434,7 @@ fn check_rejects_semantic_errors_with_a_stable_cli_diagnostic() {
 #[test]
 fn stream_failure_diagnostic_describes_delivery_scoped_rollback() {
     let diagnostic = Diagnostic::target(
-        "E2200",
+        "ORNA-CMD-RUNTIME-UNAVAILABLE",
         "durable project stream delivery failed",
         "the failed delivery was rolled back; prior committed deliveries and their checkpoint progress remain; inspect the recorded failure before retrying the stream",
     );
@@ -1448,27 +1467,33 @@ fn endpoints_reject_secrets() {
         Endpoint::parse("orna://a@host/db")
             .expect_err("credentials")
             .code,
-        "E1005"
+        "ORNA-CMD-ENDPOINT-CREDENTIALS"
     );
     assert_eq!(
         Endpoint::parse("orna://host")
             .expect_err("no database")
             .code,
-        "E1004"
+        "ORNA-CMD-ENDPOINT-INVALID"
     );
 }
 
 #[test]
 fn endpoint_parsing_matches_the_closed_client_transport_grammar() {
     for (endpoint, code) in [
-        ("postgres://host/db", "E1004"),
-        ("orna+unix://relative.sock", "E1004"),
-        ("orna+unix:///tmp/orna.sock?debug=1", "E1005"),
-        ("orna://local:7443/default", "E1004"),
-        ("orna://db.example.test:0/work", "E1004"),
-        ("orna://db.example.test/%zz", "E1004"),
-        ("orna://[::1/work", "E1004"),
-        ("orna://db.example.test/work\u{1f}", "E1004"),
+        ("postgres://host/db", "ORNA-CMD-ENDPOINT-INVALID"),
+        ("orna+unix://relative.sock", "ORNA-CMD-ENDPOINT-INVALID"),
+        (
+            "orna+unix:///tmp/orna.sock?debug=1",
+            "ORNA-CMD-ENDPOINT-CREDENTIALS",
+        ),
+        ("orna://local:7443/default", "ORNA-CMD-ENDPOINT-INVALID"),
+        ("orna://db.example.test:0/work", "ORNA-CMD-ENDPOINT-INVALID"),
+        ("orna://db.example.test/%zz", "ORNA-CMD-ENDPOINT-INVALID"),
+        ("orna://[::1/work", "ORNA-CMD-ENDPOINT-INVALID"),
+        (
+            "orna://db.example.test/work\u{1f}",
+            "ORNA-CMD-ENDPOINT-INVALID",
+        ),
     ] {
         let error = Endpoint::parse(endpoint).expect_err(endpoint);
         assert_eq!(error.code, code, "{endpoint}");

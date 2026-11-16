@@ -13,21 +13,21 @@ impl Endpoint {
     pub(crate) fn parse(value: &str) -> Result<Self, Diagnostic> {
         if value.is_empty() {
             return Err(Diagnostic::usage(
-                "E1004",
+                "ORNA-CMD-ENDPOINT-INVALID",
                 "database endpoint is empty",
                 "provide a local path, socket, or secure Orna URI",
             ));
         }
         if value.starts_with('-') || value.bytes().any(|byte| byte.is_ascii_control()) {
             return Err(Diagnostic::usage(
-                "E1004",
+                "ORNA-CMD-ENDPOINT-INVALID",
                 "database endpoint is invalid",
                 "use a local path, an absolute Orna Unix socket URI, or a secure Orna URI",
             ));
         }
         if value.contains('@') || value.contains('#') || value.contains('?') {
             return Err(Diagnostic::usage(
-                "E1005",
+                "ORNA-CMD-ENDPOINT-CREDENTIALS",
                 "database endpoint contains unsupported credentials or URI parts",
                 "use transport authentication and omit credentials, fragments, and query parameters",
             ));
@@ -37,7 +37,7 @@ impl Endpoint {
                 .then(|| Self::UnixSocket(path.to_owned()))
                 .ok_or_else(|| {
                     Diagnostic::usage(
-                        "E1004",
+                        "ORNA-CMD-ENDPOINT-INVALID",
                         "database endpoint is invalid",
                         "use an absolute Orna Unix socket URI",
                     )
@@ -46,7 +46,7 @@ impl Endpoint {
         if let Some(remainder) = value.strip_prefix("orna://") {
             let (authority, database) = remainder.split_once('/').ok_or_else(|| {
                 Diagnostic::usage(
-                    "E1004",
+                    "ORNA-CMD-ENDPOINT-INVALID",
                     "database endpoint is invalid",
                     "use orna://HOST/DATABASE or orna://local/INSTANCE",
                 )
@@ -58,7 +58,7 @@ impl Endpoint {
                 || authority.starts_with("local:")
             {
                 return Err(Diagnostic::usage(
-                    "E1004",
+                    "ORNA-CMD-ENDPOINT-INVALID",
                     "database endpoint is invalid",
                     "use an absolute Orna Unix socket URI or a secure Orna URI with one valid authority",
                 ));
@@ -73,7 +73,7 @@ impl Endpoint {
             .then(|| Self::Path(value.to_owned()))
             .ok_or_else(|| {
                 Diagnostic::usage(
-                    "E1004",
+                    "ORNA-CMD-ENDPOINT-INVALID",
                     "database endpoint is invalid",
                     "use a local path, an absolute Orna Unix socket URI, or a secure Orna URI",
                 )
@@ -148,7 +148,7 @@ pub(crate) fn local_project_path(endpoint: &Endpoint) -> Result<&str, Diagnostic
         Endpoint::ManagedLocal => Ok("."),
         Endpoint::Path(path) => Ok(path),
         Endpoint::UnixSocket(_) | Endpoint::RemoteTls(_) => Err(Diagnostic::target(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "project checking requires a local Git worktree",
             "use `check` with the current worktree or `--db PATH check`",
         )),

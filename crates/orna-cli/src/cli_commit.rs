@@ -26,7 +26,7 @@ use super::{
 
 fn usage() -> Diagnostic {
     Diagnostic::usage(
-        "E1002",
+        "ORNA-CMD-ARGUMENT-INVALID",
         "commit requires a message",
         "use `orna commit -m MESSAGE` to publish the reviewed index candidate",
     )
@@ -39,7 +39,11 @@ const NOTHING_TO_COMMIT_HELP: &str =
 /// The single diagnostic for a commit with no staged tree, shared by the index
 /// (`SysGitNothingToCommit`) and relation-admission (`EmptyIndex`) paths (F9).
 fn nothing_to_commit() -> Diagnostic {
-    Diagnostic::target("E2304", NOTHING_TO_COMMIT_TITLE, NOTHING_TO_COMMIT_HELP)
+    Diagnostic::target(
+        "ORNA-CMD-NOTHING-TO-COMMIT",
+        NOTHING_TO_COMMIT_TITLE,
+        NOTHING_TO_COMMIT_HELP,
+    )
 }
 
 fn message(arguments: &[String]) -> Result<&str, Diagnostic> {
@@ -54,7 +58,7 @@ fn message(arguments: &[String]) -> Result<&str, Diagnostic> {
 
 fn staging_error(title: &'static str, detail: String) -> Diagnostic {
     Diagnostic::target_with_detail(
-        "E2300",
+        "ORNA-CMD-WORKFLOW-REFUSED",
         title,
         "fix the staged source or store, then retry `orna commit -m MESSAGE`; no commit was created",
         detail,
@@ -100,21 +104,21 @@ fn relation_failure(error: RelationAdmissionError, title: &'static str) -> Diagn
     match error {
         RelationAdmissionError::Repository(RepositoryError::PublicationPending) => {
             Diagnostic::target(
-                "E2300",
+                "ORNA-CMD-WORKFLOW-REFUSED",
                 "an interrupted publication has not been recovered",
                 "run `orna publish` to finish recovery first, then retry `orna commit -m MESSAGE`; no commit was created",
             )
         }
         RelationAdmissionError::Repository(RepositoryError::CheckoutRecoveryRequired) => {
             Diagnostic::target(
-                "E2300",
+                "ORNA-CMD-WORKFLOW-REFUSED",
                 "an interrupted checkout has not been recovered",
                 "resolve the interrupted checkout first, then retry `orna commit -m MESSAGE`; no commit was created",
             )
         }
         other @ RelationAdmissionError::CommittedRelationUnstaged { .. } => {
             Diagnostic::target_with_detail(
-                "E2302",
+                "ORNA-CMD-CANDIDATE-INVALID",
                 "staged candidate is not a valid format-3 snapshot",
                 "restore the staged `.orna` metadata, `.orna/store` and `main.orna`, then retry; no commit was created",
                 other.to_string(),
@@ -208,7 +212,7 @@ fn load_staged_project(
             .first()
             .expect("non-empty diagnostics when semantic analysis fails");
         return Err(Diagnostic::target_with_detail(
-            "E2101",
+            "ORNA-CMD-SEMANTIC-FAILED",
             "staged source semantic analysis failed",
             "fix the first reported source contract error, stage it, then commit again",
             format!("{}: {}", first.code(), first.message()),
@@ -348,7 +352,7 @@ fn admission_error(
     match error {
         RelationAdmissionError::PendingRuntimeRows { relation_id } => {
             Diagnostic::target_with_detail(
-                "E2300",
+                "ORNA-CMD-WORKFLOW-REFUSED",
                 "staged schema change waits for unpublished rows",
                 "publish the pending runtime rows with `orna publish`, then retry `orna commit -m MESSAGE`; no commit was created",
                 format!(
@@ -363,7 +367,7 @@ fn admission_error(
             relation_id,
             refusal,
         } => Diagnostic::target_with_detail(
-            "E2101",
+            "ORNA-CMD-SEMANTIC-FAILED",
             "staged schema change does not fit the committed rows",
             "change the staged table so its committed rows fit it (make a new field optional or give it a constant default, keep the primary key, use a lossless type change), stage it, then retry `orna commit -m MESSAGE`; no commit was created",
             format!("table {}: {refusal}", table_name(&relation_id)),
@@ -380,13 +384,13 @@ fn failure(error: &orna_repository::RepositoryError, generic_title: &'static str
     let (code, title, help) = match error {
         RepositoryError::InvalidCommitMessage => {
             return Diagnostic::usage(
-                "E1002",
+                "ORNA-CMD-ARGUMENT-INVALID",
                 "commit message is invalid",
                 "use `orna commit -m MESSAGE` with a non-empty message",
             );
         }
         RepositoryError::MissingGitIdentity => (
-            "E2301",
+            "ORNA-CMD-GIT-IDENTITY-MISSING",
             "Git author identity is not configured",
             "set `user.name` and `user.email` with `git config`, then retry; no commit was created",
         ),
@@ -395,26 +399,28 @@ fn failure(error: &orna_repository::RepositoryError, generic_title: &'static str
         }
         // sys.admin.assertion_failed
         RepositoryError::InvalidCommitCandidate => (
-            "E2302",
+            "ORNA-CMD-CANDIDATE-INVALID",
             "staged candidate is not a valid format-3 snapshot",
             "restore the staged `.orna` metadata, `.orna/store` and `main.orna`, then retry; no commit was created",
         ),
         // sys.git.stale_review
         RepositoryError::StaleReviewedCandidate | RepositoryError::StaleCwd => (
-            "E2303",
+            "ORNA-CMD-CANDIDATE-CHANGED",
             "staged candidate changed while it was being committed",
             "review the staged changes again, then retry `orna commit -m MESSAGE`",
         ),
         // sys.git.nothing_to_commit
-        RepositoryError::SysGitNothingToCommit => {
-            ("E2304", NOTHING_TO_COMMIT_TITLE, NOTHING_TO_COMMIT_HELP)
-        }
+        RepositoryError::SysGitNothingToCommit => (
+            "ORNA-CMD-NOTHING-TO-COMMIT",
+            NOTHING_TO_COMMIT_TITLE,
+            NOTHING_TO_COMMIT_HELP,
+        ),
         // ORNA-ASSERT-048 to ORNA-ASSERT-051: the candidate's assertion gate refused it.
         RepositoryError::CandidateAssertionRefused(refusal) => {
             return refusal_diagnostic(refusal, GatedCommand::Commit, error);
         }
         _ => (
-            "E2300",
+            "ORNA-CMD-WORKFLOW-REFUSED",
             generic_title,
             "check the repository state, then retry `orna commit -m MESSAGE`",
         ),
@@ -427,7 +433,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     let path = local_project_path(endpoint)?;
     let repository = orna_repository::Repository::discover(path).map_err(|error| {
         Diagnostic::target_with_detail(
-            "E2300",
+            "ORNA-CMD-WORKFLOW-REFUSED",
             "Git worktree could not be discovered",
             "run `orna commit -m MESSAGE` inside a local Orna Git worktree",
             format!("{error:?}"),
@@ -438,7 +444,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     let admitted = admit_staged_store(&repository, &runtime, &state)?;
     let capture = runtime.block_on(state.capture()).map_err(|error| {
         Diagnostic::target_with_detail(
-            "E2300",
+            "ORNA-CMD-WORKFLOW-REFUSED",
             "runtime candidate could not be captured",
             "retry after the local runtime state is available",
             format!("{error:?}"),
@@ -477,7 +483,7 @@ fn open_commit_runtime(
         .build()
         .map_err(|error| {
             Diagnostic::target_with_detail(
-                "E2300",
+                "ORNA-CMD-WORKFLOW-REFUSED",
                 "local runtime could not be started",
                 "retry `orna commit -m MESSAGE`",
                 format!("{error:?}"),
@@ -487,7 +493,7 @@ fn open_commit_runtime(
         .block_on(RuntimeState::open(repository, identity, initial_digest))
         .map_err(|error| {
             Diagnostic::target_with_detail(
-                "E2300",
+                "ORNA-CMD-WORKFLOW-REFUSED",
                 "local runtime could not be opened",
                 "repair the local Orna runtime state before committing",
                 format!("{error:?}"),
@@ -506,7 +512,7 @@ fn recover_publication(
 ) -> Result<(), Diagnostic> {
     let pending = repository.read_publication_journal().map_err(|error| {
         Diagnostic::target_with_detail(
-            "E2300",
+            "ORNA-CMD-WORKFLOW-REFUSED",
             "publication journal could not be read",
             "repair the local Orna publication state before committing",
             format!("{error:?}"),
@@ -517,7 +523,7 @@ fn recover_publication(
             .publication_journal_is_reviewed(journal)
             .map_err(|error| {
                 Diagnostic::target_with_detail(
-                    "E2300",
+                    "ORNA-CMD-WORKFLOW-REFUSED",
                     "publication journal could not be classified",
                     "repair the local Orna publication state before committing",
                     format!("{error:?}"),
@@ -530,7 +536,7 @@ fn recover_publication(
             Ok(_) | Err(orna_repository::RepositoryError::RuntimeCompletionRequired) => {}
             Err(error) => {
                 return Err(Diagnostic::target_with_detail(
-                    "E2300",
+                    "ORNA-CMD-WORKFLOW-REFUSED",
                     "pending reviewed commit could not be recovered",
                     "repair the local Orna publication state and retry",
                     format!("{error:?}"),
@@ -562,7 +568,7 @@ fn admit_staged_store(
 ) -> Result<Vec<String>, Diagnostic> {
     let pending = runtime.block_on(state.pending_count()).map_err(|error| {
         Diagnostic::target_with_detail(
-            "E2300",
+            "ORNA-CMD-WORKFLOW-REFUSED",
             "pending runtime rows could not be counted",
             "retry after the local runtime state is available",
             format!("{error:?}"),

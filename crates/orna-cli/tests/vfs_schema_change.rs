@@ -592,7 +592,7 @@ fn vfs_019_commit_the_row_cannot_admit_is_refused_and_mount_keeps_row() {
         String::from_utf8_lossy(&refused.stderr)
     );
     assert!(
-        !refused.status.success() && refusal.contains("E2101"),
+        !refused.status.success() && refusal.contains("ORNA-CMD-SEMANTIC-FAILED"),
         "the commit the committed row cannot admit is refused: {refusal}"
     );
     assert_eq!(

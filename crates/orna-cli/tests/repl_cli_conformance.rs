@@ -134,7 +134,7 @@ fn normal_fetch_diagnostic_hides_raw_repository_detail_but_keeps_remedy() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(1), "{stderr}");
     assert!(
-        stderr.starts_with("error[E2100]: Git fetch failed\n"),
+        stderr.starts_with("error[ORNA-CMD-REPOSITORY-UNAVAILABLE]: Git fetch failed\n"),
         "{stderr}"
     );
     assert!(
@@ -158,7 +158,7 @@ fn debug_fetch_diagnostic_reveals_raw_repository_detail() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(1), "{stderr}");
     assert!(
-        stderr.starts_with("error[E2100]: Git fetch failed\n"),
+        stderr.starts_with("error[ORNA-CMD-REPOSITORY-UNAVAILABLE]: Git fetch failed\n"),
         "{stderr}"
     );
     assert!(
@@ -273,7 +273,7 @@ fn repl_effect_preview_rejects_the_effect_and_preserves_last_value() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
     assert!(
-        stdout.contains("error[E2200]: the repository has no committed HEAD with a readable store"),
+        stdout.contains("error[ORNA-CMD-RUNTIME-UNAVAILABLE]: the repository has no committed HEAD with a readable store"),
         "{stdout}"
     );
     assert!(!stdout.contains("ORNA-REPL-EFFECT"), "{stdout}");

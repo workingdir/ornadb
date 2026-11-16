@@ -128,7 +128,7 @@ fn run_invocation(
         Invocation::LibraryLend { book_id, borrower } => {
             let text_argument = |text: &str, title: &'static str, help: &'static str| {
                 Value::new(OvbRaw::Text(text.to_owned()))
-                    .map_err(|_| Diagnostic::usage("E1002", title, help))
+                    .map_err(|_| Diagnostic::usage("ORNA-CMD-ARGUMENT-INVALID", title, help))
             };
             let arguments = Environment::from([
                 (
@@ -169,7 +169,7 @@ fn run_status_short_with_runtime_summary(
     let path = local_project_path(endpoint)?;
     let repository = orna_repository::Repository::discover(path).map_err(|_| {
         Diagnostic::target(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "local Git worktree could not be discovered",
             "run the command inside a Git worktree or provide a local project path",
         )
@@ -183,7 +183,7 @@ fn run_status_short_with_runtime_summary(
     )
     .map_err(|_| {
         Diagnostic::target(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "local Git worktree status could not be written",
             "retry `status --short`",
         )
@@ -213,7 +213,7 @@ fn run_git_passthrough(
         }
         Endpoint::UnixSocket(_) | Endpoint::RemoteTls(_) => {
             return Err(Diagnostic::target(
-                "E2100",
+                "ORNA-CMD-REPOSITORY-UNAVAILABLE",
                 "Git passthrough requires a local repository",
                 "run the command against a local worktree or with `--db PATH`",
             ));
@@ -225,7 +225,7 @@ fn run_git_passthrough(
         .status()
         .map_err(|error| {
             Diagnostic::target_with_detail(
-                "E2000",
+                "ORNA-CMD-TARGET-UNAVAILABLE",
                 "Git command could not be started",
                 "check that Git is installed and available on PATH",
                 error.to_string(),

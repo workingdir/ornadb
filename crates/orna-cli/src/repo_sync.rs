@@ -68,7 +68,7 @@ pub(crate) fn fetch_failure(error: &orna_repository::FetchError) -> Diagnostic {
         _ => Exit::Target,
     };
     Diagnostic {
-        code: "E2100",
+        code: "ORNA-CMD-REMOTE-FAILED",
         title: Cow::Borrowed("Git fetch failed"),
         help: "check the configured remote and retry `fetch`",
         exit,
@@ -89,7 +89,7 @@ pub(crate) fn run_fetch(
     )?;
     let requested = orna_repository::RequestedRef::branch(branch.to_owned()).map_err(|error| {
         Diagnostic::target_with_detail(
-            "E2100",
+            "ORNA-CMD-REMOTE-FAILED",
             "fetch branch is invalid",
             "supply a valid Git branch name",
             error.to_string(),
@@ -105,7 +105,7 @@ pub(crate) fn run_fetch(
     }
     let fetched = report.ordinary().first().ok_or_else(|| {
         Diagnostic::target(
-            "E2100",
+            "ORNA-CMD-REMOTE-FAILED",
             "Git fetch returned no requested ref",
             "check the configured remote and retry `fetch`",
         )
@@ -139,7 +139,7 @@ pub(crate) fn run_fetch(
         .and_then(|()| stdout.write_all(b")\n"))
         .map_err(|_| {
             Diagnostic::target(
-                "E2200",
+                "ORNA-CMD-OUTPUT-FAILED",
                 "could not write command output",
                 "check that stdout is available, then retry the command",
             )
@@ -171,14 +171,14 @@ pub(crate) fn run_push(
             .checked_out_branch()
             .map_err(|_| {
                 Diagnostic::target(
-                    "E2100",
+                    "ORNA-CMD-REMOTE-FAILED",
                     "the checked-out branch could not be read",
                     "run `push REMOTE BRANCH` or check out a branch first",
                 )
             })?
             .ok_or_else(|| {
                 Diagnostic::target(
-                    "E2100",
+                    "ORNA-CMD-REMOTE-FAILED",
                     "`push` needs a branch when HEAD is detached",
                     "run `push REMOTE BRANCH` or check out a branch first",
                 )
@@ -188,7 +188,7 @@ pub(crate) fn run_push(
         .read_publication_journal()
         .map_err(|error| {
             Diagnostic::target_with_detail(
-                "E2200",
+                "ORNA-CMD-RUNTIME-UNAVAILABLE",
                 "local publication state could not be read",
                 "recover or repair the pending local publication before retrying `push`",
                 error.to_string(),
@@ -198,7 +198,7 @@ pub(crate) fn run_push(
     {
         if !repository.runtime_paths().state_db().exists() {
             return Err(Diagnostic::target(
-                "E2200",
+                "ORNA-CMD-RUNTIME-UNAVAILABLE",
                 "pending local publication has no runtime state",
                 "restore the repository's runtime state and recover the publication before `push`",
             ));
@@ -209,7 +209,7 @@ pub(crate) fn run_push(
             .build()
             .map_err(|_| {
                 Diagnostic::target(
-                    "E2200",
+                    "ORNA-CMD-RUNTIME-UNAVAILABLE",
                     "local runtime publication recovery could not start",
                     "retry `push` after checking the local runtime state",
                 )
@@ -218,7 +218,7 @@ pub(crate) fn run_push(
             .block_on(RuntimeState::open(&repository, identity, initial_digest))
             .map_err(|error| {
                 Diagnostic::target_with_detail(
-                    "E2200",
+                    "ORNA-CMD-RUNTIME-UNAVAILABLE",
                     "local runtime publication state could not be opened",
                     "recover or repair the pending local publication before retrying `push`",
                     error.to_string(),
@@ -231,7 +231,7 @@ pub(crate) fn run_push(
         .push_ordinary_with_local_continuity(remote, branch.clone())
         .map_err(|error| {
             Diagnostic::target_with_detail(
-                "E2100",
+                "ORNA-CMD-REMOTE-FAILED",
                 "Git push failed",
                 "check the configured remote, its continuity refs, and retry `push`",
                 error.to_string(),
@@ -245,7 +245,7 @@ pub(crate) fn run_push(
         .and_then(|()| stdout.write_all(b"\n"))
         .map_err(|_| {
             Diagnostic::target(
-                "E2200",
+                "ORNA-CMD-OUTPUT-FAILED",
                 "could not write command output",
                 "check that stdout is available, then retry the command",
             )
@@ -261,19 +261,19 @@ pub(crate) fn push_publication_recovery_diagnostic(
     use cli_publish::PublicationRecoveryFailure;
     match failure {
         PublicationRecoveryFailure::Recover(error) => Diagnostic::target_with_detail(
-            "E2200",
+            "ORNA-CMD-RUNTIME-UNAVAILABLE",
             "pending local publication could not be recovered",
             "resolve the publication recovery error before retrying `push`",
             error.to_string(),
         ),
         PublicationRecoveryFailure::Unreadable(error) => Diagnostic::target_with_detail(
-            "E2200",
+            "ORNA-CMD-RUNTIME-UNAVAILABLE",
             "local publication state could not be verified",
             "verify the pending publication before retrying `push`",
             error.to_string(),
         ),
         PublicationRecoveryFailure::StillPending => Diagnostic::target(
-            "E2200",
+            "ORNA-CMD-RUNTIME-UNAVAILABLE",
             "local publication recovery remains pending",
             "resolve the publication recovery before retrying `push`",
         ),
@@ -287,7 +287,7 @@ pub(crate) fn fetch_continuity_diagnostic(
         return None;
     }
     Some(Diagnostic::target_with_detail(
-        "E2100",
+        "ORNA-CMD-REMOTE-FAILED",
         "Orna continuity witness was rejected",
         "do not claim allocator or checkpoint continuity until required refs/orna witnesses match",
         format!("remote continuity state: {continuity:?}"),

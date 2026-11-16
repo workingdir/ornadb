@@ -407,7 +407,7 @@ fn migration_refuses_non_carriable_stream_state_and_keeps_checkpoint() {
         "migration must not drop non-carriable stream state: {}",
         String::from_utf8_lossy(&output.stdout)
     );
-    assert!(String::from_utf8_lossy(&output.stderr).contains("E2100"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("ORNA-CMD-REPOSITORY-UNAVAILABLE"));
     assert!(
         !destination.exists(),
         "no migration copy may be prepared when stream state is not carried"
@@ -474,7 +474,10 @@ fn migration_refuses_live_consumer_lease_and_names_it() {
         String::from_utf8_lossy(&output.stdout)
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("E2100"), "{stderr}");
+    assert!(
+        stderr.contains("ORNA-CMD-REPOSITORY-UNAVAILABLE"),
+        "{stderr}"
+    );
     assert!(stderr.contains("tables=stream_lease"), "{stderr}");
     assert!(
         !destination.exists(),
@@ -1305,7 +1308,10 @@ fn migration_refuses_in_flight_failure_and_names_it() {
             String::from_utf8_lossy(&output.stdout)
         );
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("E2100"), "{stderr}");
+        assert!(
+            stderr.contains("ORNA-CMD-REPOSITORY-UNAVAILABLE"),
+            "{stderr}"
+        );
         assert!(stderr.contains("tables=stream_failure"), "{stderr}");
         assert!(
             !destination.exists(),
@@ -1429,7 +1435,10 @@ fn migration_refuses_in_flight_receipt_and_names_it() {
         String::from_utf8_lossy(&output.stdout)
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("E2100"), "{stderr}");
+    assert!(
+        stderr.contains("ORNA-CMD-REPOSITORY-UNAVAILABLE"),
+        "{stderr}"
+    );
     assert!(
         stderr.contains("tables=stream_provider_effect_receipt"),
         "{stderr}"
@@ -1645,7 +1654,7 @@ fn activated_migration_copy_carries_terminal_run_and_stream_observations_verbati
     );
 }
 
-/// A live run has no terminal state to carry. The copy refuses with E2100,
+/// A live run has no terminal state to carry. The copy refuses with ORNA-CMD-REPOSITORY-UNAVAILABLE,
 /// prepares no destination and leaves the source run unchanged.
 #[test]
 fn migration_refuses_live_run_observation_and_keeps_source() {
@@ -1666,7 +1675,7 @@ fn migration_refuses_live_run_observation_and_keeps_source() {
         "migration must not drop a live run: {}",
         String::from_utf8_lossy(&output.stdout)
     );
-    assert!(String::from_utf8_lossy(&output.stderr).contains("E2100"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("ORNA-CMD-REPOSITORY-UNAVAILABLE"));
     assert!(
         !destination.exists(),
         "no migration copy may be prepared for a live run"

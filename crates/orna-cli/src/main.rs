@@ -173,7 +173,7 @@ fn write_cli_line(text: &[u8], color: AnsiColor, color_enabled: bool) -> Result<
     write_styled(&mut stdout, color, text, color_enabled)
         .and_then(|()| stdout.write_all(b"\n"))
         .map_err(|_| Diagnostic {
-            code: "E2200",
+            code: "ORNA-CMD-OUTPUT-FAILED",
             title: Cow::Borrowed("CLI output could not be written"),
             help: "check the output stream, then retry the command",
             exit: Exit::Presentation,
@@ -240,24 +240,24 @@ impl Diagnostic {
         }
     }
     const fn unavailable(title: &'static str, help: &'static str) -> Self {
-        Self::target("E2000", title, help)
+        Self::target("ORNA-CMD-TARGET-UNAVAILABLE", title, help)
     }
 }
 impl From<orna_repository::RepositoryError> for Diagnostic {
     fn from(error: orna_repository::RepositoryError) -> Self {
         match error {
             orna_repository::RepositoryError::RepositoryBusy => Self::target(
-                "E2100",
+                "ORNA-CMD-REPOSITORY-UNAVAILABLE",
                 "repository coordination lock is busy",
                 "wait for the active repository operation to finish, then retry mv",
             ),
             orna_repository::RepositoryError::LocalStateUnavailable => Self::target(
-                "E2100",
+                "ORNA-CMD-REPOSITORY-UNAVAILABLE",
                 "repository coordination state is unavailable",
                 "check local Git worktree permissions, then retry mv",
             ),
             _ => Self::target(
-                "E2100",
+                "ORNA-CMD-REPOSITORY-UNAVAILABLE",
                 "repository coordination lock could not be acquired",
                 "check local Git worktree state, then retry mv",
             ),
@@ -269,7 +269,7 @@ impl From<orna_repository::RepositoryError> for Diagnostic {
 fn project_load_diagnostic(error: orna_project::ProjectLoadError) -> Diagnostic {
     if matches!(error, orna_project::ProjectLoadError::SourceTreeLimit) {
         return Diagnostic::target(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "committed source tree exceeds the fixed walk limit",
             "reduce the committed tree's entry count, nesting depth or path length, then run check again",
         );
@@ -291,7 +291,7 @@ fn project_load_diagnostic(error: orna_project::ProjectLoadError) -> Diagnostic 
             )
         };
         return Diagnostic::target_with_detail(
-            "E2101",
+            "ORNA-CMD-SEMANTIC-FAILED",
             "pinned standard module failed type checking",
             "fix the pinned standard module or pin a corrected standard snapshot, then retry",
             detail,
@@ -327,7 +327,7 @@ fn project_load_diagnostic(error: orna_project::ProjectLoadError) -> Diagnostic 
         };
     }
     Diagnostic::target(
-        "E2100",
+        "ORNA-CMD-REPOSITORY-UNAVAILABLE",
         "project source could not be loaded",
         "fix the project module graph and source boundaries, then run check again",
     )
@@ -336,14 +336,15 @@ fn project_load_diagnostic(error: orna_project::ProjectLoadError) -> Diagnostic 
 fn cancellation_diagnostic(diagnostic: &orna_value::Diagnostic) -> Diagnostic {
     let code = match diagnostic.code() {
         "ORNA-LIST-STREAM-CANCELLED" => "ORNA-LIST-STREAM-CANCELLED",
-        _ => "E2200",
+        _ => "ORNA-CMD-RUNTIME-UNAVAILABLE",
     };
     Diagnostic {
         code,
         title: Cow::Borrowed("operation was cancelled"),
         help: "inspect the durable operation state before retrying",
         exit: Exit::Cancelled,
-        detail: (code == "E2200").then(|| format!("cancellation code: {}", diagnostic.code())),
+        detail: (code == "ORNA-CMD-RUNTIME-UNAVAILABLE")
+            .then(|| format!("cancellation code: {}", diagnostic.code())),
         body: None,
     }
 }
@@ -388,7 +389,7 @@ fn write_diagnostic<W: io::Write>(
     // Semantic source diagnostics remain user-facing. Other attached details
     // can contain repository/runtime implementation data and require --debug.
     if let Some(detail) = &diagnostic.detail
-        && (debug_enabled || diagnostic.code == "E2101")
+        && (debug_enabled || diagnostic.code == "ORNA-CMD-SEMANTIC-FAILED")
     {
         writer.write_all(b"\n  ")?;
         write_styled(writer, AnsiColor::Dim, detail.as_bytes(), color_enabled)?;

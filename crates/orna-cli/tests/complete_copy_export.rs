@@ -1077,8 +1077,9 @@ fn export_fails_locally_for_a_missing_promisor_object() {
         "offline export must fail"
     );
     assert!(
-        stderr(&offline_export)
-            .contains("error[E2000]: A required Git object is unavailable offline"),
+        stderr(&offline_export).contains(
+            "error[ORNA-CMD-TARGET-UNAVAILABLE]: A required Git object is unavailable offline"
+        ),
         "offline diagnostic names the unavailable Git-object scope: {}",
         stderr(&offline_export)
     );
@@ -1253,7 +1254,7 @@ fn export_restores_a_legacy_and_a_format3_snapshot_offline() {
     // The original remote is disabled: nothing below may contact it.
     git(&source, &["remote", "remove", "origin"]);
     // HEAD pins `vendor/stdlib` with no recorded `.gitmodules` origin, which a
-    // complete copy must refuse (E2000). The parent snapshot predates that
+    // complete copy must refuse (ORNA-CMD-TARGET-UNAVAILABLE). The parent snapshot predates that
     // gitlink, so it is the legacy member whose closure is self-contained.
     let legacy = String::from_utf8(git_output(&source, &["rev-parse", "HEAD~1"], None))
         .unwrap()

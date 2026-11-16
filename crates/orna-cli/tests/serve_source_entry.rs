@@ -184,7 +184,7 @@ fn absent_serve_entry_reports_startup_diagnostic_and_no_root_page() {
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
         for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-            if line.contains("E2102") {
+            if line.contains("ORNA-CMD-NO-SERVING-ENTRY") {
                 let _ = sender.send(line);
                 return;
             }
@@ -286,7 +286,10 @@ fn refused_write_leaves_repository_head_and_worktree_unchanged() {
 fn private_serve_is_not_the_serving_entry() {
     let project = project_with_main("fn serve(): Str = \"private-marker-9\";\n");
     let (_server, address, stderr) = start_server_with_stderr(project.path());
-    assert!(stderr.contains("E2102"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("ORNA-CMD-NO-SERVING-ENTRY"),
+        "stderr: {stderr}"
+    );
     let (status, body) = http_get(&address, "/").expect("GET /");
     assert_eq!(status, 404, "body: {body}");
     assert!(!body.contains("private-marker-9"), "body: {body}");
@@ -321,12 +324,18 @@ fn broken_main_reports_and_git_transport_still_serves() {
 fn semantic_broken_main_reports_and_git_transport_still_serves() {
     let project = project_with_main("pub fn serve(): Int = \"text\";\n");
     let (_server, address, stderr) = start_server_with_stderr(project.path());
-    assert!(stderr.contains("E2101"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("ORNA-CMD-SEMANTIC-FAILED"),
+        "stderr: {stderr}"
+    );
     assert!(
         stderr.contains("serving module failed semantic analysis"),
         "stderr: {stderr}"
     );
-    assert!(!stderr.contains("E2102"), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("ORNA-CMD-NO-SERVING-ENTRY"),
+        "stderr: {stderr}"
+    );
     assert!(stderr.contains("ORNA-S021-TYPE"), "stderr: {stderr}");
     let (status, _) = http_get(&address, "/").expect("GET /");
     assert_eq!(status, 404);

@@ -217,7 +217,7 @@ fn mv_renames_a_table_in_a_nested_module() {
 }
 
 /// `mv` never moves a table between module namespaces: a qualified target in
-/// another module is refused with E1002 before any file or index changes.
+/// another module is refused with ORNA-CMD-ARGUMENT-INVALID before any file or index changes.
 #[test]
 fn mv_refuses_a_target_in_another_namespace_without_changing_anything() {
     const MAIN: &str = "use warehouse;\n";
@@ -230,7 +230,7 @@ fn mv_refuses_a_target_in_another_namespace_without_changing_anything() {
 
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     assert!(!output.status.success(), "{stderr}");
-    assert!(stderr.contains("E1002"), "{stderr}");
+    assert!(stderr.contains("ORNA-CMD-ARGUMENT-INVALID"), "{stderr}");
     assert_eq!(
         fs::read_to_string(root.join("warehouse.orna")).unwrap(),
         WAREHOUSE

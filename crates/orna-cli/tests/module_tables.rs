@@ -209,7 +209,7 @@ fn legacy_bare_module_rows_are_refused_not_migrated() {
     );
     let stderr = String::from_utf8_lossy(&rejected.stderr);
     assert!(
-        stderr.contains("E2200"),
-        "refusal must carry E2200: {stderr}"
+        stderr.contains("ORNA-CMD-RUNTIME-UNAVAILABLE"),
+        "refusal must carry ORNA-CMD-RUNTIME-UNAVAILABLE: {stderr}"
     );
 }

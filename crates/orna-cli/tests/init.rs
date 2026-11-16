@@ -340,7 +340,7 @@ fn init_rejects_explicit_database_endpoint_without_creating_the_target() {
         .output()
         .expect("CLI process starts");
 
-    assert_failure(&output, fixture.path(), "error[E1002]");
+    assert_failure(&output, fixture.path(), "error[ORNA-CMD-ARGUMENT-INVALID]");
     assert!(!target.exists(), "rejected command creates no target");
 }
 

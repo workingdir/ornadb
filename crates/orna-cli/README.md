@@ -53,7 +53,7 @@ orna --db ./legacy migrate copy ./migrated --annotation-defaults 0 --no-persiste
 
 `--annotation-defaults N` is optional. When given, it is an assertion that
 must equal the number of Blob values the decoded legacy rows carry; a mismatch
-refuses with E2100, names both counts, and creates no candidate. When omitted,
+refuses with ORNA-CMD-REPOSITORY-UNAVAILABLE, names both counts, and creates no candidate. When omitted,
 the decoded count is used and recorded in the migration journal.
 `--no-persistent-consumers` is required. Despite its
 name, it confirms that persistent consumer checkpoints are carried into the
@@ -91,9 +91,9 @@ nothing to discard once nothing remains. While the sibling exists,
 
 `migrate abort DEST` also refuses a copy whose activation has begun. Once
 `orna upgrade` has moved the copy's publication journal past the prepared
-stage, abort exits 1 with E2100, names the upgrade command, and removes
+stage, abort exits 1 with ORNA-CMD-REPOSITORY-UNAVAILABLE, names the upgrade command, and removes
 nothing. If the copy's ref has moved while its journal still reads prepared,
-abort refuses with E2100 and removes nothing, without that hint. A copy that
+abort refuses with ORNA-CMD-REPOSITORY-UNAVAILABLE and removes nothing, without that hint. A copy that
 is already an activated format-3 repository is kept and reported as nothing
 discarded.
 
@@ -102,9 +102,9 @@ discarded.
 source before the copy's ref moves, publishes it through the copy's
 publication journal, and completes the runtime intent that the publication
 recorded. Without `--yes-activate` the command refuses with a usage error
-(E1002, exit 2) and changes nothing; a missing DEST or a missing
-`--to-format 3` is refused with E1001 (exit 2). While the copy is still
-prepared, activation refuses with E2100, before the copy's ref moves, if the
+(ORNA-CMD-ARGUMENT-INVALID, exit 2) and changes nothing; a missing DEST or a missing
+`--to-format 3` is refused with ORNA-CMD-ARGUMENT-MISSING (exit 2). While the copy is still
+prepared, activation refuses with ORNA-CMD-REPOSITORY-UNAVAILABLE, before the copy's ref moves, if the
 source holds unpublished runtime mutations. Once the ref has moved, activation
 only rolls forward: re-running the same command resumes it, and a copy that is
 already activated reports `already activated`. This command does not prepare a

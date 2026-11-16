@@ -49,7 +49,7 @@ pub(crate) fn check_project(
         return crate::write_success_line("project valid", color_enabled);
     };
     Err(Diagnostic::target_with_detail(
-        "E2101",
+        "ORNA-CMD-SEMANTIC-FAILED",
         "project semantic analysis failed",
         "fix the first reported source contract error, then run check again",
         format!("{}: {}", first.code(), first.message()),
