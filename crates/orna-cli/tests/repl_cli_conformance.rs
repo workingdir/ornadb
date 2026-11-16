@@ -134,7 +134,7 @@ fn normal_fetch_diagnostic_hides_raw_repository_detail_but_keeps_remedy() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(1), "{stderr}");
     assert!(
-        stderr.starts_with("error[ORNA-CMD-REPOSITORY-UNAVAILABLE]: Git fetch failed\n"),
+        stderr.starts_with("error[ORNA-CMD-REMOTE-FAILED]: Git fetch failed\n"),
         "{stderr}"
     );
     assert!(
@@ -158,7 +158,7 @@ fn debug_fetch_diagnostic_reveals_raw_repository_detail() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(1), "{stderr}");
     assert!(
-        stderr.starts_with("error[ORNA-CMD-REPOSITORY-UNAVAILABLE]: Git fetch failed\n"),
+        stderr.starts_with("error[ORNA-CMD-REMOTE-FAILED]: Git fetch failed\n"),
         "{stderr}"
     );
     assert!(
