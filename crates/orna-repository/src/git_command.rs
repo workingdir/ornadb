@@ -124,6 +124,31 @@ pub(crate) fn run_command(mut command: Command) -> Result<Output, RepositoryErro
     }
 }
 
+/// Runs `command` with `input` written to its stdin and returns its captured
+/// output, as [`run_command`] does. A batch of paths goes through one process
+/// this way instead of one process per path.
+pub(crate) fn run_command_with_input(
+    mut command: Command,
+    input: &[u8],
+) -> Result<Output, RepositoryError> {
+    use std::io::Write as _;
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|_| RepositoryError::GitUnavailable)?;
+    let written = child.stdin.take().map(|mut stdin| stdin.write_all(input));
+    let output = child
+        .wait_with_output()
+        .map_err(|_| RepositoryError::GitUnavailable)?;
+    if output.status.success() && matches!(written, Some(Ok(()))) {
+        Ok(output)
+    } else {
+        Err(RepositoryError::GitOperationFailed)
+    }
+}
+
 /// Stops Git's repository discovery at the parent of a repository root so a
 /// corrupt root `.git` cannot fall through to an enclosing repository. Only a
 /// directory that carries its own `.git` entry is a root; a plain subdirectory
@@ -154,9 +179,30 @@ pub(crate) fn canonical_or_absolute(path: &std::path::Path) -> std::path::PathBu
         .unwrap_or_else(|_| path.to_path_buf())
 }
 
+#[cfg(test)]
+thread_local! {
+    static GIT_PROCESS_REQUESTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Git processes this thread has built through [`git_command`] since the last
+/// reset. Every production Git process is built there, so a test can bound the
+/// processes one operation starts.
+#[cfg(test)]
+pub(crate) fn git_process_requests() -> usize {
+    GIT_PROCESS_REQUESTS.with(std::cell::Cell::get)
+}
+
+/// Clears the count read by [`git_process_requests`].
+#[cfg(test)]
+pub(crate) fn reset_git_process_requests() {
+    GIT_PROCESS_REQUESTS.with(|count| count.set(0));
+}
+
 /// A Git command with every inherited routing variable removed, so the
 /// caller's environment cannot select another repository, worktree or index.
 pub(crate) fn git_command() -> Command {
+    #[cfg(test)]
+    GIT_PROCESS_REQUESTS.with(|count| count.set(count.get() + 1));
     let mut command = Command::new("git");
     scrub_git_routing_environment(&mut command);
     command
