@@ -121,7 +121,7 @@ impl ServeApp {
                     _ => error.to_string(),
                 };
                 Err(Diagnostic::target_with_detail(
-                    "E2101",
+                    "ORNA-CMD-SEMANTIC-FAILED",
                     "serving module failed semantic analysis",
                     "fix the first reported source contract error in main.orna, then retry `serve`",
                     detail,
@@ -827,7 +827,7 @@ fn serve_is_public(source: &str) -> bool {
 /// The startup diagnostic for a project without a serving entry.
 pub(super) fn missing_entry_diagnostic() -> Diagnostic {
     Diagnostic::target(
-        "E2102",
+        "ORNA-CMD-NO-SERVING-ENTRY",
         "no serving entry: main.orna does not declare `pub fn serve()`",
         "add `pub fn serve()` to main.orna to serve `/`; Git transport remains available",
     )

@@ -31,12 +31,12 @@ pub(super) fn git_in(worktree: &Path) -> Command {
     git
 }
 
-/// Runs `command` and returns its output, or the `E2100` refusal whose remedy
+/// Runs `command` and returns its output, or the `ORNA-CMD-REPOSITORY-UNAVAILABLE` refusal whose remedy
 /// is `retry` when `git` cannot run or exits unsuccessfully.
 pub(super) fn git_output(command: &mut Command, retry: &'static str) -> Result<Output, Diagnostic> {
     let unreadable = || {
         Diagnostic::target(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "local Git worktree status could not be read",
             retry,
         )

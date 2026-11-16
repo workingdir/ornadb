@@ -15,7 +15,7 @@ fn checked_project_source_path(
 
 fn mv_source_path_error() -> Diagnostic {
     Diagnostic::target(
-        "E2100",
+        "ORNA-CMD-REPOSITORY-UNAVAILABLE",
         "table source path is unavailable or unsafe",
         "restore the source module as a regular worktree file, then retry `mv`",
     )
@@ -45,7 +45,11 @@ impl SourceEdit<'_> {
         {
             return Err(mv_partial_update_error());
         }
-        Err(Diagnostic::target("E2100", title, help))
+        Err(Diagnostic::target(
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
+            title,
+            help,
+        ))
     }
 
     /// Restores the previous source after the inventory update failed. A
@@ -149,7 +153,7 @@ fn staged_store_repository(
 fn discover_worktree(endpoint: &Endpoint) -> Result<orna_repository::Repository, Diagnostic> {
     orna_repository::Repository::discover(local_project_path(endpoint)?).map_err(|_| {
         Diagnostic::target(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "local Git worktree could not be discovered",
             "run mv inside a Git worktree or provide a local project path",
         )
@@ -214,7 +218,7 @@ fn plan_table_rename(
         .position(|module| module_namespace_matches(&module.logical_path, old_namespace_of(names)))
         .ok_or_else(|| {
             Diagnostic::target(
-                "E2101",
+                "ORNA-CMD-SEMANTIC-FAILED",
                 "source table was not found",
                 "use the table's qualified name from the current source project",
             )
@@ -224,7 +228,13 @@ fn plan_table_rename(
         names.old_leaf,
         names.new_leaf,
     )
-    .map_err(|title| Diagnostic::target("E2101", title, "fix the source module, then retry mv"))?
+    .map_err(|title| {
+        Diagnostic::target(
+            "ORNA-CMD-SEMANTIC-FAILED",
+            title,
+            "fix the source module, then retry mv",
+        )
+    })?
     .map(|updated| std::mem::replace(&mut modules[module_index].source, updated));
     let source_already_renamed = original_source.is_none();
 
@@ -236,7 +246,7 @@ fn plan_table_rename(
     );
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
-            "E2101",
+            "ORNA-CMD-SEMANTIC-FAILED",
             "table rename would leave the source project invalid",
             "update affected source references and retry mv",
         ));
@@ -270,7 +280,7 @@ fn plan_table_rename(
     let previous = orna_project::ObjectIdentityManifest::read_staged(repository, &staged)
         .map_err(|error| {
             Diagnostic::target_with_detail(
-                "E2100",
+                "ORNA-CMD-REPOSITORY-UNAVAILABLE",
                 "staged object identities could not be read",
                 "restore the staged `.orna/store`, then retry `mv`",
                 format!("{error:?}"),
@@ -286,7 +296,7 @@ fn plan_table_rename(
                 .is_some())
     {
         return Err(Diagnostic::target(
-            "E2101",
+            "ORNA-CMD-SEMANTIC-FAILED",
             "table identity was not found in the expected rename state",
             "use an active table declaration recorded in the staged object identities",
         ));
@@ -295,7 +305,7 @@ fn plan_table_rename(
         .with_renames(&modules, std::slice::from_ref(&rename))
         .map_err(|_| {
             Diagnostic::target(
-                "E2101",
+                "ORNA-CMD-SEMANTIC-FAILED",
                 "table rename conflicts with the staged object identities",
                 "choose an unused table name and retry mv",
             )
@@ -374,7 +384,7 @@ fn apply_table_rename(
 
 fn mv_usage() -> Diagnostic {
     Diagnostic::usage(
-        "E1002",
+        "ORNA-CMD-ARGUMENT-INVALID",
         "invalid rename names",
         "use `mv OLD NEW` with a qualified name such as `Music` or `Music.title`, renaming only its last part",
     )
@@ -436,7 +446,7 @@ fn refuse_pending_publication(repository: &orna_repository::Repository) -> Resul
 /// The rename would lose the declaration's `ObjectId`.
 fn rename_identity_error(error: orna_project::ObjectIdentityError) -> Diagnostic {
     Diagnostic::target_with_detail(
-        "E2101",
+        "ORNA-CMD-SEMANTIC-FAILED",
         "the rename could not keep the object identity",
         "fix the reported condition, then retry `orna mv`; the source was left unchanged",
         error.to_string(),
@@ -456,7 +466,7 @@ fn renameable_kind(
         .find(|kind| inventory.id(*kind, old).is_some())
         .ok_or_else(|| {
             Diagnostic::target(
-                "E2101",
+                "ORNA-CMD-SEMANTIC-FAILED",
                 "no committed or staged definition has that name",
                 "name a table, field, type, variant or unit by its qualified name, such as `Music.title`; a definition that was never committed has no identity yet, so rename it in source",
             )
@@ -497,7 +507,7 @@ fn plan_store_rename(
     } else {
         let (module_index, _) = declaration_name_span(&modules, kind, new).ok_or_else(|| {
             Diagnostic::target(
-                "E2101",
+                "ORNA-CMD-SEMANTIC-FAILED",
                 "the declaration to rename was not found in the worktree source",
                 "restore the declaration under its committed name, then retry `orna mv`",
             )
@@ -507,7 +517,7 @@ fn plan_store_rename(
     let catalogue = semantic_catalogue(&project)?;
     if !orna_check::analyze_with_catalogue(&modules, &catalogue).is_ok() {
         return Err(Diagnostic::target(
-            "E2101",
+            "ORNA-CMD-SEMANTIC-FAILED",
             "the rename would leave the source project invalid",
             "update the source that refers to the old name, then retry `orna mv`",
         ));
@@ -819,7 +829,7 @@ fn renamed_table_source(
 /// staged, or it does not declare the table under either name.
 fn mv_staged_source_error(title: &'static str) -> Diagnostic {
     Diagnostic::target_with_detail(
-        "E2101",
+        "ORNA-CMD-SEMANTIC-FAILED",
         "the staged source module cannot take the rename",
         "stage the table's source module with `git add`, then retry mv",
         title.to_owned(),
@@ -908,7 +918,7 @@ fn table_declaration_name_span(
 /// would be a delete plus create (ORNA-OBJECT-004).
 fn mv_identity_missing_error() -> Diagnostic {
     Diagnostic::target(
-        "E2101",
+        "ORNA-CMD-SEMANTIC-FAILED",
         "no staged object identities record the table",
         "commit the table with `orna commit -m MESSAGE` before using mv",
     )
@@ -924,19 +934,19 @@ fn mv_staging_error(error: RelationAdmissionError) -> Diagnostic {
             mv_staged_source_error("the table's source module is not staged")
         }
         RelationAdmissionError::StaleIndex => Diagnostic::target(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "the index changed while mv was staging object identities",
             "review the staged changes, then retry `mv`",
         ),
         RelationAdmissionError::Repository(RepositoryError::PublicationPending) => {
             Diagnostic::target(
-                "E2100",
+                "ORNA-CMD-REPOSITORY-UNAVAILABLE",
                 "an interrupted publication has not been recovered",
                 "run `orna publish` to finish recovery first, then retry `mv`",
             )
         }
         other => Diagnostic::target_with_detail(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "staged object identities could not be updated",
             "restore the staged `.orna/store`, then retry `mv`",
             other.to_string(),
@@ -946,7 +956,7 @@ fn mv_staging_error(error: RelationAdmissionError) -> Diagnostic {
 
 fn mv_partial_update_error() -> Diagnostic {
     Diagnostic::target(
-        "E2100",
+        "ORNA-CMD-REPOSITORY-UNAVAILABLE",
         "table rename could not be fully rolled back",
         "inspect the source module and the staged `.orna/store` before retrying `mv`",
     )

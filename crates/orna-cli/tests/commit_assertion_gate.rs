@@ -10,7 +10,7 @@
 //!
 //! Interim gap (bead ornadb-gq4g): the transactional seam reads only scalar
 //! primary keys. A check that reads a table of any other key is refused as
-//! unvalidated at commit (E2300), and no subset of the candidate's assertions is
+//! unvalidated at commit (ORNA-CMD-WORKFLOW-REFUSED), and no subset of the candidate's assertions is
 //! published (ORNA-ASSERT-049, ORNA-ASSERT-050). A project whose assertions do
 //! not read such a table is not refused for it.
 
@@ -137,7 +137,7 @@ fn assert_free_project_commits_its_published_rows() {
 /// Interim gap (bead ornadb-gq4g): the enum-keyed `Task` table's own assertion
 /// reads a table the seam cannot lower, so the commit is refused as unvalidated
 /// with its cause, even with no rows to validate. An enum-keyed row cannot be
-/// published (`E2300 source row key is not canonical`), so this test stages the
+/// published (`ORNA-CMD-WORKFLOW-REFUSED source row key is not canonical`), so this test stages the
 /// table with no rows.
 #[test]
 fn enum_keyed_table_assertion_refuses_the_commit_with_its_cause() {
@@ -153,7 +153,7 @@ fn enum_keyed_table_assertion_refuses_the_commit_with_its_cause() {
     );
     let text = transcript(&refused);
     assert_ne!(refused.status.code(), Some(0), "{text}");
-    assert!(text.contains("E2300"), "{text}");
+    assert!(text.contains("ORNA-CMD-WORKFLOW-REFUSED"), "{text}");
     assert!(
         text.contains("could not be validated against its assertions"),
         "{text}"

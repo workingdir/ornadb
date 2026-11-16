@@ -349,7 +349,7 @@ fn commit_without_a_configured_identity_creates_no_commit_or_ref() {
     assert_eq!(ref_state(root), refs_before, "no ref is created or moved");
     assert_eq!(refused.status.code(), Some(1), "{}", stderr(&refused));
     assert!(
-        stderr(&refused).contains("E2301"),
+        stderr(&refused).contains("ORNA-CMD-GIT-IDENTITY-MISSING"),
         "a missing identity has its own diagnostic: {}",
         stderr(&refused)
     );
@@ -396,7 +396,7 @@ fn invalid_candidate_is_refused_before_any_commit_object_exists() {
     assert_eq!(ref_state(root), refs_before, "no ref is created or moved");
     assert_eq!(refused.status.code(), Some(1), "{}", stderr(&refused));
     assert!(
-        stderr(&refused).contains("E2302"),
+        stderr(&refused).contains("ORNA-CMD-CANDIDATE-INVALID"),
         "an invalid candidate has its own diagnostic: {}",
         stderr(&refused)
     );

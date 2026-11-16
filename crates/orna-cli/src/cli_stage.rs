@@ -7,7 +7,7 @@ use orna_repository::{FormatContextError, ManagedPath, Repository, RepositoryFor
 
 fn error(title: &'static str, detail: impl Into<String>) -> Diagnostic {
     Diagnostic::target_with_detail(
-        "E2300",
+        "ORNA-CMD-WORKFLOW-REFUSED",
         title,
         "run this command inside a local Orna Git worktree",
         detail,

@@ -38,7 +38,7 @@
 //! Activation (`upgrade --to-format 3 DEST --yes-activate`) crosses its own
 //! barriers, killed with the same harness; each row names the journal stage the
 //! parked copy holds. Abort is allowed while the copy's ref is still the old
-//! head, and refused with `E2100` once it has moved to the candidate.
+//! head, and refused with `ORNA-CMD-REPOSITORY-UNAVAILABLE` once it has moved to the candidate.
 //!
 //! The one-step in-place form (`upgrade --to-format 3`, no destination) finishes
 //! its activation and then crosses two exchange barriers. `upgrade-exchanging`
@@ -1484,7 +1484,10 @@ fn upgrade_kill_at_each_activation_boundary_rolls_forward_or_refuses_abort() {
         if advanced {
             let stderr = String::from_utf8_lossy(&aborted.stderr);
             assert_eq!(aborted.status.code(), Some(1), "{boundary}: {stderr}");
-            assert!(stderr.contains("E2100"), "{boundary}: {stderr}");
+            assert!(
+                stderr.contains("ORNA-CMD-REPOSITORY-UNAVAILABLE"),
+                "{boundary}: {stderr}"
+            );
             assert!(
                 stderr.contains("has begun activation"),
                 "{boundary}: the refusal names the activation: {stderr}"
@@ -1763,7 +1766,10 @@ fn discard_refuses_a_prepared_copy_whose_ref_an_ordinary_writer_moved() {
     let aborted = run_abort(&source, &destination);
     let stderr = String::from_utf8_lossy(&aborted.stderr);
     assert_eq!(aborted.status.code(), Some(1), "{stderr}");
-    assert!(stderr.contains("E2100"), "{stderr}");
+    assert!(
+        stderr.contains("ORNA-CMD-REPOSITORY-UNAVAILABLE"),
+        "{stderr}"
+    );
     assert!(stderr.contains("has begun activation"), "{stderr}");
     assert_eq!(committed_copy(&destination), moved, "the copy is unchanged");
     assert_eq!(
@@ -1985,7 +1991,10 @@ fn in_place_upgrade_kill_at_each_exchange_boundary_resumes_or_refuses() {
     let refused = run_in_place(&source, Some(&candidate));
     let stderr = String::from_utf8_lossy(&refused.stderr);
     assert_eq!(refused.status.code(), Some(1), "{stderr}");
-    assert!(stderr.contains("E2100"), "{stderr}");
+    assert!(
+        stderr.contains("ORNA-CMD-REPOSITORY-UNAVAILABLE"),
+        "{stderr}"
+    );
     assert!(stderr.contains("already completed"), "{stderr}");
     assert_eq!(
         committed_copy(&source),
@@ -2016,7 +2025,10 @@ fn in_place_rerun_refuses_an_unpublished_tail_appended_after_the_exchange_parked
     let refused = run_in_place(&source, Some(&candidate));
     let stderr = String::from_utf8_lossy(&refused.stderr);
     assert_eq!(refused.status.code(), Some(1), "{stderr}");
-    assert!(stderr.contains("E2100"), "{stderr}");
+    assert!(
+        stderr.contains("ORNA-CMD-REPOSITORY-UNAVAILABLE"),
+        "{stderr}"
+    );
     assert!(stderr.contains("unpublished runtime mutations"), "{stderr}");
     assert_eq!(
         source_state(&source),

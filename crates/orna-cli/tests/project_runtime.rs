@@ -311,7 +311,7 @@ fn binary_explain_returns_extended_orna_diagnostic_guidance() {
     assert!(unknown.stdout.is_empty());
     assert_eq!(
         unknown.stderr,
-        b"error[E1002]: diagnostic code is unknown\nhelp: supply a code printed by an Orna diagnostic, such as `ORNA-S010-IMPORT`\n"
+        b"error[ORNA-CMD-ARGUMENT-INVALID]: diagnostic code is unknown\nhelp: supply a code printed by an Orna diagnostic, such as `ORNA-S010-IMPORT`\n"
     );
 }
 
@@ -494,7 +494,7 @@ fn binary_repl_rejects_remote_endpoints_before_local_evaluation() {
     assert!(output.stdout.is_empty());
     assert_eq!(
         output.stderr,
-        b"error[E2100]: remote REPL sessions are unavailable\nhelp: use a local Git worktree until the Orna transport is available\n"
+        b"error[ORNA-CMD-REPOSITORY-UNAVAILABLE]: remote REPL sessions are unavailable\nhelp: use a local Git worktree until the Orna transport is available\n"
     );
 }
 
@@ -802,7 +802,10 @@ fn binary_run_reports_false_assertion_with_its_spec_code_without_debug() {
         stderr.contains("error[ORNA-A091-008]: assertion is false"),
         "stderr: {stderr}"
     );
-    assert!(!stderr.contains("E2200"), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("ORNA-CMD-RUNTIME-UNAVAILABLE"),
+        "stderr: {stderr}"
+    );
 }
 
 #[test]
@@ -944,7 +947,7 @@ async fn binary_run_refuses_a_concurrent_writer_while_another_runtime_holds_the_
     );
     assert!(refused.stdout.is_empty());
     assert!(
-        String::from_utf8_lossy(&refused.stderr).contains("error[E2200]"),
+        String::from_utf8_lossy(&refused.stderr).contains("error[ORNA-CMD-RUNTIME-UNAVAILABLE]"),
         "stderr: {}",
         String::from_utf8_lossy(&refused.stderr)
     );
@@ -1004,7 +1007,7 @@ async fn binary_run_debug_detail_names_the_held_runtime_writer_and_plain_output_
     assert!(!plain.status.success(), "plain run unexpectedly succeeded");
     let plain_stderr = String::from_utf8_lossy(&plain.stderr);
     assert!(
-        plain_stderr.contains("error[E2200]"),
+        plain_stderr.contains("error[ORNA-CMD-RUNTIME-UNAVAILABLE]"),
         "stderr: {plain_stderr}"
     );
     assert!(
@@ -1026,7 +1029,7 @@ async fn binary_run_debug_detail_names_the_held_runtime_writer_and_plain_output_
     assert!(debug.stdout.is_empty());
     let debug_stderr = String::from_utf8_lossy(&debug.stderr);
     assert!(
-        debug_stderr.contains("error[E2200]"),
+        debug_stderr.contains("error[ORNA-CMD-RUNTIME-UNAVAILABLE]"),
         "stderr: {debug_stderr}"
     );
     assert!(
@@ -1190,7 +1193,7 @@ fn binary_run_without_a_target_reports_a_missing_root_main() {
     assert!(output.stdout.is_empty());
     assert_eq!(
         output.stderr,
-        b"error[E2103]: no root main(): main.orna declares no `main()` function\nhelp: declare `main()` in main.orna, or run a qualified function such as `orna run MODULE.FUNCTION`\n"
+        b"error[ORNA-CMD-NO-ROOT-MAIN]: no root main(): main.orna declares no `main()` function\nhelp: declare `main()` in main.orna, or run a qualified function such as `orna run MODULE.FUNCTION`\n"
     );
 }
 
@@ -1212,7 +1215,7 @@ fn binary_run_without_a_target_reports_a_missing_root_main_in_a_committed_projec
     assert!(output.stdout.is_empty());
     assert_eq!(
         output.stderr,
-        b"error[E2103]: no root main(): main.orna declares no `main()` function\nhelp: declare `main()` in main.orna, or run a qualified function such as `orna run MODULE.FUNCTION`\n"
+        b"error[ORNA-CMD-NO-ROOT-MAIN]: no root main(): main.orna declares no `main()` function\nhelp: declare `main()` in main.orna, or run a qualified function such as `orna run MODULE.FUNCTION`\n"
     );
 }
 
@@ -1319,7 +1322,7 @@ fn binary_run_rejects_private_function_targets_before_runtime_admission() {
     assert!(output.stdout.is_empty());
     assert_eq!(
         output.stderr,
-        b"error[E2000]: durable project invocation is not available\nhelp: use a supported table transaction; stream roots require the explicit stream runtime\n"
+        b"error[ORNA-CMD-TARGET-UNAVAILABLE]: durable project invocation is not available\nhelp: use a supported table transaction; stream roots require the explicit stream runtime\n"
     );
 }
 
@@ -1350,7 +1353,7 @@ fn binary_run_treats_a_path_like_target_as_an_ordinary_function_name() {
     assert!(output.stdout.is_empty());
     assert_eq!(
         output.stderr,
-        b"error[E2000]: durable project invocation is not available\nhelp: use a supported table transaction; stream roots require the explicit stream runtime\n"
+        b"error[ORNA-CMD-TARGET-UNAVAILABLE]: durable project invocation is not available\nhelp: use a supported table transaction; stream roots require the explicit stream runtime\n"
     );
 }
 
@@ -1531,7 +1534,7 @@ fn binary_status_porcelain_preserves_git_worktree_bytes_and_hides_discovery_path
     assert!(!failure.status.success());
     assert_eq!(
         failure.stderr,
-        b"error[E2100]: local Git worktree could not be discovered\nhelp: run the command inside a Git worktree or provide a local project path\n"
+        b"error[ORNA-CMD-REPOSITORY-UNAVAILABLE]: local Git worktree could not be discovered\nhelp: run the command inside a Git worktree or provide a local project path\n"
     );
     assert!(failure.stdout.is_empty());
     assert!(!String::from_utf8_lossy(&failure.stderr).contains("status repository"));
@@ -1615,7 +1618,9 @@ async fn binary_reference_workflow_reopens_durable_rows_and_preserves_duplicate_
 
     let duplicate = invoke(directory.path(), "run", "seed");
     assert!(!duplicate.status.success());
-    assert!(String::from_utf8_lossy(&duplicate.stderr).contains("error[E2200]"));
+    assert!(
+        String::from_utf8_lossy(&duplicate.stderr).contains("error[ORNA-CMD-RUNTIME-UNAVAILABLE]")
+    );
     assert!(
         !String::from_utf8_lossy(&duplicate.stderr)
             .contains(directory.path().to_string_lossy().as_ref())
@@ -1701,7 +1706,7 @@ async fn binary_reference_workflow_reopens_durable_rows_and_preserves_duplicate_
     let duplicate_exercise = invoke(directory.path(), "run", "exercise");
     assert!(!duplicate_exercise.status.success());
     let stderr = String::from_utf8_lossy(&duplicate_exercise.stderr);
-    assert!(stderr.contains("error[E2200]"));
+    assert!(stderr.contains("error[ORNA-CMD-RUNTIME-UNAVAILABLE]"));
     assert!(stderr.contains("failed atomically"));
     assert!(!stderr.contains(directory.path().to_string_lossy().as_ref()));
 
@@ -1784,7 +1789,7 @@ async fn binary_reference_library_lend_rejects_invalid_and_duplicate_rows_withou
         .expect("CLI process");
     assert!(!missing.status.success());
     let missing_stderr = String::from_utf8_lossy(&missing.stderr);
-    assert!(missing_stderr.contains("error[E2200]"));
+    assert!(missing_stderr.contains("error[ORNA-CMD-RUNTIME-UNAVAILABLE]"));
     assert!(missing_stderr.contains("failed atomically"));
     assert!(!missing_stderr.contains("missing-book"));
     assert!(!missing_stderr.contains("reader-2"));
@@ -1864,7 +1869,7 @@ async fn binary_reference_library_lend_rejects_invalid_and_duplicate_rows_withou
         .expect("CLI process");
     assert!(!duplicate.status.success());
     let duplicate_stderr = String::from_utf8_lossy(&duplicate.stderr);
-    assert!(duplicate_stderr.contains("error[E2200]"));
+    assert!(duplicate_stderr.contains("error[ORNA-CMD-RUNTIME-UNAVAILABLE]"));
     assert!(duplicate_stderr.contains("failed atomically"));
     assert!(!duplicate_stderr.contains("book-1"));
     assert!(!duplicate_stderr.contains("reader-2"));
@@ -2173,7 +2178,7 @@ fn binary_check_and_commit_refuse_a_pinned_standard_module_with_a_type_incorrect
         check.stdout
     );
     for expected in [
-        "error[E2101]",
+        "error[ORNA-CMD-SEMANTIC-FAILED]",
         "std/math.orna:2",
         "ORNA-S021-TYPE",
         "expected Int, found Text",
@@ -2214,7 +2219,7 @@ fn binary_check_and_commit_refuse_a_pinned_standard_module_with_a_type_incorrect
         "a type-incorrect pinned body must not be committed: {stderr}"
     );
     for expected in [
-        "error[E2101]",
+        "error[ORNA-CMD-SEMANTIC-FAILED]",
         "std/math.orna:2",
         "expected Int, found Text",
     ] {
@@ -2696,7 +2701,10 @@ fn binary_invoke_refuses_a_standard_module_alias_import_with_its_import_code() {
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("error[E2101]"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("error[ORNA-CMD-SEMANTIC-FAILED]"),
+        "stderr: {stderr}"
+    );
 }
 
 #[test]

@@ -80,7 +80,7 @@ pub(super) fn run(arguments: &[String]) -> Result<(), Diagnostic> {
         .canonical_annotation(options.media_type, options.suffix)
         .map_err(|error| {
             Diagnostic::target_with_detail(
-                "E2001",
+                "ORNA-CMD-ANNOTATE-FAILED",
                 "annotate media annotation is invalid",
                 "choose a valid MIME-1 type and compatible suffix",
                 format!("{error:?}"),
@@ -101,7 +101,7 @@ pub(super) fn run(arguments: &[String]) -> Result<(), Diagnostic> {
         .tempfile_in(output_parent)
         .map_err(|error| {
             Diagnostic::target_with_detail(
-                "E2001",
+                "ORNA-CMD-ANNOTATE-FAILED",
                 "annotate output could not be staged",
                 "check that the destination directory is writable",
                 format!("{}: {error}", output_parent.display()),
@@ -121,7 +121,7 @@ pub(super) fn run(arguments: &[String]) -> Result<(), Diagnostic> {
         }
         if let Err(cleanup) = cleanup_staging_file(output) {
             return Err(Diagnostic::target_with_detail(
-                "E2001",
+                "ORNA-CMD-ANNOTATE-FAILED",
                 "failed annotate output could not be removed",
                 "remove the temporary staging file listed in the detail",
                 format!("{error:?}; {cleanup}"),
@@ -129,13 +129,13 @@ pub(super) fn run(arguments: &[String]) -> Result<(), Diagnostic> {
         }
         if error == orna_value::Error::Limit {
             return Err(Diagnostic::usage(
-                "E1002",
+                "ORNA-CMD-ARGUMENT-INVALID",
                 "annotate source exceeds the OVB-2 format maximum",
                 "choose a source smaller than 2^63 bytes",
             ));
         }
         return Err(Diagnostic::target_with_detail(
-            "E2001",
+            "ORNA-CMD-ANNOTATE-FAILED",
             "annotated Blob could not be encoded",
             "check the source file and destination storage",
             format!("{error:?}"),
@@ -146,7 +146,7 @@ pub(super) fn run(arguments: &[String]) -> Result<(), Diagnostic> {
     if let Err(error) = output.as_file().sync_all() {
         let cleanup = cleanup_staging_file(output).err();
         return Err(Diagnostic::target_with_detail(
-            "E2001",
+            "ORNA-CMD-ANNOTATE-FAILED",
             "annotated Blob could not be written",
             "check the destination directory and available storage",
             cleanup.map_or_else(
@@ -159,7 +159,7 @@ pub(super) fn run(arguments: &[String]) -> Result<(), Diagnostic> {
         let persist_error = error.error;
         let cleanup = cleanup_staging_file(error.file).err();
         return Err(Diagnostic::target_with_detail(
-            "E2001",
+            "ORNA-CMD-ANNOTATE-FAILED",
             "annotated Blob could not be installed",
             "choose a new writable destination file",
             cleanup.map_or_else(
@@ -213,7 +213,7 @@ fn open_source(path: &Path) -> Result<CaptureFileStream, Diagnostic> {
     let mut filesystem =
         FilesystemProvider::with_limits(max_bytes as usize, 1).map_err(|error| {
             Diagnostic::target_with_detail(
-                "E2001",
+                "ORNA-CMD-ANNOTATE-FAILED",
                 "annotate source could not be opened",
                 "check that the source file exists and is readable",
                 format!("{}: {error:?}", path.display()),
@@ -221,7 +221,7 @@ fn open_source(path: &Path) -> Result<CaptureFileStream, Diagnostic> {
         })?;
     filesystem.allow_root(root).map_err(|error| {
         Diagnostic::target_with_detail(
-            "E2001",
+            "ORNA-CMD-ANNOTATE-FAILED",
             "annotate source could not be opened",
             "check that the source file exists and is readable",
             format!("{}: {error:?}", path.display()),
@@ -255,31 +255,31 @@ fn source_error(path: &Path, error: CaptureFileError, detail: String) -> Diagnos
     };
     match error {
         CaptureFileError::LimitExceeded => Diagnostic::usage(
-            "E1002",
+            "ORNA-CMD-ARGUMENT-INVALID",
             "annotate source exceeds the OVB-2 format maximum",
             "choose a source smaller than 2^63 bytes",
         ),
         // Unreachable from the CLI: it supplies no byte bound. Kept for match exhaustiveness.
         CaptureFileError::BoundOutOfRange => Diagnostic::usage(
-            "E1002",
+            "ORNA-CMD-ARGUMENT-INVALID",
             "annotate source byte bound is out of range",
             "report this as an internal error; the CLI does not set a source byte bound",
         ),
         CaptureFileError::InvalidPath => Diagnostic::target_with_detail(
-            "E2001",
+            "ORNA-CMD-ANNOTATE-FAILED",
             "annotate source is not a regular file",
             "supply a regular file without symbolic-link path components",
             detail,
         ),
         CaptureFileError::SourceChanged => Diagnostic::target_with_detail(
-            "E2001",
+            "ORNA-CMD-ANNOTATE-FAILED",
             "annotate source changed while being read",
             "retry with a stable source file",
             detail,
         ),
         CaptureFileError::UnauthorizedRoot | CaptureFileError::SourceUnavailable => {
             Diagnostic::target_with_detail(
-                "E2001",
+                "ORNA-CMD-ANNOTATE-FAILED",
                 "annotate source could not be opened",
                 "check that the source file exists and is readable",
                 detail,
@@ -294,7 +294,7 @@ fn cleanup_staging_file(output: tempfile::NamedTempFile) -> Result<(), String> {
 }
 
 fn usage(title: &'static str, help: &'static str) -> Diagnostic {
-    Diagnostic::usage("E1002", title, help)
+    Diagnostic::usage("ORNA-CMD-ARGUMENT-INVALID", title, help)
 }
 
 #[cfg(test)]

@@ -76,7 +76,7 @@ fn actual_cli_diagnostic_preserves_detail_and_keeps_stderr_unlinked() {
 
         let stderr = String::from_utf8(output.stderr).expect("diagnostic output is UTF-8");
         assert!(
-            stderr.contains("E2101"),
+            stderr.contains("ORNA-CMD-SEMANTIC-FAILED"),
             "stable CLI diagnostic code: {stderr:?}"
         );
         assert!(

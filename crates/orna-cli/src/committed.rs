@@ -152,7 +152,7 @@ pub(crate) fn table_identities_from_manifest(
 
 pub(crate) fn unavailable_table_identity(detail: String) -> Diagnostic {
     Diagnostic::target_with_detail(
-        "E2200",
+        "ORNA-CMD-RUNTIME-UNAVAILABLE",
         "committed table identities are unavailable",
         "run `orna commit -m MESSAGE` so every table has exactly one identity",
         detail,
@@ -252,7 +252,7 @@ pub(crate) fn refuse_legacy_bare_module_rows(
     }
     let unreadable = || {
         Diagnostic::target(
-            "E2200",
+            "ORNA-CMD-RUNTIME-UNAVAILABLE",
             "committed table rows could not be read",
             "retry the invocation after checking local runtime state",
         )
@@ -262,7 +262,7 @@ pub(crate) fn refuse_legacy_bare_module_rows(
     // absence: refuse it.
     let Ok(commit) = repository.head() else {
         return Err(Diagnostic::target(
-            "E2200",
+            "ORNA-CMD-RUNTIME-UNAVAILABLE",
             "committed HEAD is unreadable",
             "repair the repository HEAD reference, then run again",
         ));
@@ -301,7 +301,7 @@ pub(crate) fn refuse_legacy_bare_module_rows(
 
 pub(crate) fn legacy_module_table_diagnostic(table: &str) -> Diagnostic {
     Diagnostic::target_with_detail(
-        "E2200",
+        "ORNA-CMD-RUNTIME-UNAVAILABLE",
         "committed table rows are stored under a bare module name",
         "re-create the store from the committed project; rows under bare module names are not migrated",
         format!("module table `{table}` has rows stored under its bare name by an earlier build"),
@@ -344,7 +344,7 @@ pub(crate) fn evaluate_over_committed_tables(
         .block_on(state.begin_admitted_table_activation_over_committed(tables, rows))
         .map_err(|_| {
             Diagnostic::target(
-                "E2200",
+                "ORNA-CMD-RUNTIME-UNAVAILABLE",
                 "committed table rows could not be read",
                 "retry the invocation after checking local runtime state",
             )
@@ -360,7 +360,7 @@ pub(crate) fn evaluate_over_committed_tables(
         )
         .map_err(|error| {
             Diagnostic::target_with_detail(
-                "E2200",
+                "ORNA-CMD-RUNTIME-UNAVAILABLE",
                 "pure project invocation failed",
                 "fix the admitted function or retry the invocation",
                 error.to_string(),
@@ -407,7 +407,7 @@ pub(crate) fn committed_invocation_rows(
     let (rows, storage_orders) =
         committed_rows_at(repository, commit, &schemas, tables).map_err(|error| match error {
             CommittedRowsError::Limit => Diagnostic::target(
-                "E2200",
+                "ORNA-CMD-RUNTIME-UNAVAILABLE",
                 "committed table rows exceed the read bound",
                 "keep each table within the evaluator collection limit and the source byte limit",
             ),
@@ -433,7 +433,7 @@ pub(crate) fn pin_committed_tables(
 
 pub(crate) fn committed_rows_read_error() -> Diagnostic {
     Diagnostic::target(
-        "E2200",
+        "ORNA-CMD-RUNTIME-UNAVAILABLE",
         "committed table rows could not be read",
         "retry the invocation after checking local runtime state",
     )
@@ -547,7 +547,7 @@ pub(crate) fn discover_committed_repository(
 ) -> Result<orna_repository::Repository, Diagnostic> {
     orna_repository::Repository::discover(local_project_path(endpoint)?).map_err(|_| {
         Diagnostic::target(
-            "E2200",
+            "ORNA-CMD-RUNTIME-UNAVAILABLE",
             "committed table identities could not be read",
             "run the command inside an initialized local Orna repository",
         )
@@ -560,7 +560,7 @@ pub(crate) fn committed_head(
 ) -> Result<orna_repository::GitCommitRef, Diagnostic> {
     repository.head().ok().flatten().ok_or_else(|| {
         Diagnostic::target(
-            "E2200",
+            "ORNA-CMD-RUNTIME-UNAVAILABLE",
             "table reads need a committed project",
             "commit the project, then run the command again",
         )
@@ -593,7 +593,7 @@ pub(crate) fn admit_committed_metadata(
         .admit_module_with_committed_table_metadata(logical_path, source, entry, committed)
         .map_err(|error| {
             Diagnostic::target_with_detail(
-                "E2101",
+                "ORNA-CMD-SEMANTIC-FAILED",
                 "project semantic analysis failed",
                 "fix the first reported source contract error, then run check again",
                 error.to_string(),
@@ -640,7 +640,7 @@ pub(crate) fn open_committed_runtime(
 > {
     let unavailable = || {
         Diagnostic::target(
-            "E2200",
+            "ORNA-CMD-RUNTIME-UNAVAILABLE",
             "committed table rows could not be read",
             "retry the invocation after checking local runtime state",
         )
@@ -670,7 +670,7 @@ pub(crate) fn open_committed_runtime(
                 .block_on(state.publication_metadata_rows())
                 .map_err(|_| {
                     Diagnostic::target(
-                        "E2200",
+                        "ORNA-CMD-RUNTIME-UNAVAILABLE",
                         "local runtime publication metadata could not be read",
                         "retry the invocation after checking local runtime state",
                     )

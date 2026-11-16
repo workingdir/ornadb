@@ -90,7 +90,7 @@ fn hir_rejects_a_type_mismatch_without_asserting_the_unproven_code_pairing() {
     let output = check(&project, Some("hir"));
     assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
     assert!(
-        stderr(&output).contains("E2101"),
+        stderr(&output).contains("ORNA-CMD-SEMANTIC-FAILED"),
         "stderr: {}",
         stderr(&output)
     );

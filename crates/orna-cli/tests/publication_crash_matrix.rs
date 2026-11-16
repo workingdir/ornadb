@@ -1788,7 +1788,7 @@ async fn publication_later_tail_is_retained_across_kill_boundaries() {
 }
 
 /// W76 S6 / ORNA-PUB-005/010: a user edit to a managed `.orna/store/data` path made inside the
-/// kill window is detected by recovery (E2300), the edited bytes are retained, HEAD is not
+/// kill window is detected by recovery (ORNA-CMD-WORKFLOW-REFUSED), the edited bytes are retained, HEAD is not
 /// rewound, and restoring the bytes lets recovery complete.
 #[tokio::test]
 async fn managed_store_edit_in_kill_window_is_retained_and_not_rewound() {
@@ -1841,7 +1841,8 @@ async fn managed_store_edit_in_kill_window_is_retained_and_not_rewound() {
         );
         let stderr = String::from_utf8_lossy(&rejected.stderr);
         assert!(
-            stderr.contains("E2300") && stderr.contains("a managed path was edited after capture"),
+            stderr.contains("ORNA-CMD-WORKFLOW-REFUSED")
+                && stderr.contains("a managed path was edited after capture"),
             "managed edit at {boundary} not reported as the managed-worktree conflict: {stderr}"
         );
         assert_eq!(
@@ -1887,7 +1888,7 @@ fn store_payload_leaves(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 /// W196 (a) / ORNA-PUB-010: an external edit to a managed store payload leaf made inside the
-/// kill window is refused as E2300, the edited bytes are retained, and HEAD is not rewound.
+/// kill window is refused as ORNA-CMD-WORKFLOW-REFUSED, the edited bytes are retained, and HEAD is not rewound.
 #[tokio::test]
 async fn managed_store_payload_edit_in_kill_window_is_retained_and_not_rewound() {
     let mut exercised = 0;
@@ -1946,8 +1947,8 @@ async fn managed_store_payload_edit_in_kill_window_is_retained_and_not_rewound()
         );
         let stderr = String::from_utf8_lossy(&rejected.stderr);
         assert!(
-            stderr.contains("E2300"),
-            "payload edit at {boundary} not reported as E2300: {stderr}"
+            stderr.contains("ORNA-CMD-WORKFLOW-REFUSED"),
+            "payload edit at {boundary} not reported as ORNA-CMD-WORKFLOW-REFUSED: {stderr}"
         );
         assert_eq!(
             head(&repository),
@@ -1966,7 +1967,7 @@ async fn managed_store_payload_edit_in_kill_window_is_retained_and_not_rewound()
     );
 }
 
-/// W196 (b) / E2300 remedy: the discard sequence printed by MANAGED_EDIT_HELP, run literally on
+/// W196 (b) / ORNA-CMD-WORKFLOW-REFUSED remedy: the discard sequence printed by MANAGED_EDIT_HELP, run literally on
 /// a skip-worktree store payload leaf (edit, refusal, `git checkout -- <path>`, retry), restores
 /// the committed bytes and lets `orna publish` complete.
 #[tokio::test]
@@ -2026,8 +2027,8 @@ async fn managed_store_discard_remedy_restores_payload_and_publishes() {
         );
         let stderr = String::from_utf8_lossy(&rejected.stderr);
         assert!(
-            stderr.contains("E2300"),
-            "payload edit at {boundary} not reported as E2300: {stderr}"
+            stderr.contains("ORNA-CMD-WORKFLOW-REFUSED"),
+            "payload edit at {boundary} not reported as ORNA-CMD-WORKFLOW-REFUSED: {stderr}"
         );
         assert_eq!(
             head(&repository),

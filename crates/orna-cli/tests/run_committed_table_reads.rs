@@ -88,7 +88,7 @@ fn uncommitted_project(source: &str) -> tempfile::TempDir {
 /// Seeds the committed format-3 table through the REPL, whose table mutations
 /// carry their admitted `TableObjectId` (`repl_transaction.rs`). The runtime
 /// tail is then published so the three rows are committed at HEAD. A one-shot
-/// `run` write stages unstamped mutations that `publish` rejects (E2300).
+/// `run` write stages unstamped mutations that `publish` rejects (ORNA-CMD-WORKFLOW-REFUSED).
 fn committed_rows(source: &str) -> tempfile::TempDir {
     let (directory, _repository, _relation) =
         format3::format3_repository_for_table(source, "music");
@@ -427,7 +427,7 @@ const MULTI_HELPER_TABLE: &str = "pub table music(id: Str) { title: Str, artist:
 pub fn count_music() = music | count();\n";
 
 /// A table read reached across a module boundary cannot be proven by the one-shot
-/// pure path: it must fail closed with the named E2200 reason instead of evaluating.
+/// pure path: it must fail closed with the named ORNA-CMD-RUNTIME-UNAVAILABLE reason instead of evaluating.
 #[test]
 fn multi_module_table_read_fails_closed_with_named_reason() {
     let directory = uncommitted_modules(&[
@@ -443,8 +443,8 @@ fn multi_module_table_read_fails_closed_with_named_reason() {
     );
     let text = combined(&output);
     assert!(
-        text.contains("E2200"),
-        "cross-module table read must report E2200: {text}"
+        text.contains("ORNA-CMD-RUNTIME-UNAVAILABLE"),
+        "cross-module table read must report ORNA-CMD-RUNTIME-UNAVAILABLE: {text}"
     );
     assert!(
         text.contains(

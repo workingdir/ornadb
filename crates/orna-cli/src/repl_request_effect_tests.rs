@@ -307,7 +307,7 @@ fn bound_repository_without_transactions_reports_its_unavailable_capability() {
     let Err(unavailable) = transactions else {
         panic!("a repository without HEAD has no transaction capability");
     };
-    assert_eq!(unavailable.code, "E2200");
+    assert_eq!(unavailable.code, "ORNA-CMD-RUNTIME-UNAVAILABLE");
     assert!(repository.is_some(), "the bound repository is retained");
 
     let effect = crate::repl_run::run_repl_input_unavailable(
@@ -316,7 +316,7 @@ fn bound_repository_without_transactions_reports_its_unavailable_capability() {
         &unavailable,
     )
     .expect_err("an effect without transactions is refused");
-    assert_eq!(effect.code, "E2200");
+    assert_eq!(effect.code, "ORNA-CMD-RUNTIME-UNAVAILABLE");
     assert_ne!(effect.code, "ORNA-REPL-EFFECT");
 
     let pure = crate::repl_run::run_repl_input_unavailable(&mut session, "1 + 1", &unavailable);

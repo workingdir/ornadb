@@ -5,7 +5,7 @@
 use std::rc::Rc;
 
 use orna_exec::{ExecError, ExecLimits, Value, run_entry};
-use orna_hir::{DefId, DefKind, ModulePath, Name, Program, SourceId, SourceUnit, lower};
+use orna_hir::{DefId, DefKind, ModulePath, Name, Program, SourceId, SourceUnit, lower, typeck};
 use orna_syntax::parse_module_with_file;
 
 const LIMITS: ExecLimits = ExecLimits {
@@ -18,18 +18,23 @@ const LIMITS: ExecLimits = ExecLimits {
 
 const HEAD: &str = "use core.collection;\n";
 
-fn lower_one(source: &str) -> Program {
+/// Lowers `source`. `typed` runs the type pass, which fills the type arguments of generic callees as the checker does
+/// before execution; the default keeps the untyped lowering the other natives are checked against.
+fn lower_source(source: &str, typed: bool) -> Program {
     let parsed = parse_module_with_file(source, "test.orna");
     assert!(
         parsed.is_ok(),
         "test source must parse: {:?}",
         parsed.diagnostics
     );
-    let program = lower(&[SourceUnit {
+    let mut program = lower(&[SourceUnit {
         source: SourceId::new(0),
         tree: &parsed.value,
         path: ModulePath::new([Name::new("main")]),
     }]);
+    if typed {
+        typeck(&mut program);
+    }
     let user = ModulePath::new([Name::new("main")]);
     let diagnostics: Vec<String> = program
         .modules
@@ -51,7 +56,11 @@ fn lower_one(source: &str) -> Program {
 }
 
 fn run(source: &str) -> Result<Value, ExecError> {
-    let program = lower_one(source);
+    run_source(source, false)
+}
+
+fn run_source(source: &str, typed: bool) -> Result<Value, ExecError> {
+    let program = lower_source(source, typed);
     let run_def: DefId = program
         .modules
         .iter()
@@ -89,6 +98,12 @@ fn pair(first: Value, second: Value) -> Value {
 /// The value of `run` for a body that is one call expression.
 fn call(body: &str) -> Result<Value, ExecError> {
     run(&format!("{HEAD}pub fn run() = {body};\n"))
+}
+
+/// The value of `run` for a body that is one call expression, after the type pass has filled the callee's type
+/// arguments (as the checker does before execution).
+fn call_typed(body: &str) -> Result<Value, ExecError> {
+    run_source(&format!("{HEAD}pub fn run() = {body};\n"), true)
 }
 
 #[test]
@@ -133,10 +148,25 @@ fn first_is_null_when_absent_and_last_min_and_max_are_options() {
 
 #[test]
 fn sum_adds_integers_exactly_and_is_zero_for_no_rows() {
-    assert_eq!(call("collection.sum(collection.drop([1], 1))"), Ok(int(0)));
+    assert_eq!(
+        call_typed("collection.sum(collection.drop([1], 1))"),
+        Ok(int(0))
+    );
     assert_eq!(
         call("collection.sum([9007199254740993, 1])"),
         Ok(int(9007199254740994))
+    );
+}
+
+#[test]
+fn empty_float_and_decimal_sums_are_typed_additive_zeros() {
+    assert_eq!(
+        call_typed("collection.sum(collection.drop([1.5f], 1))"),
+        Ok(Value::Float(0.0_f64.to_bits()))
+    );
+    assert_eq!(
+        call_typed("collection.sum(collection.drop([1.5], 1))"),
+        call_typed("0.0")
     );
 }
 
@@ -318,7 +348,11 @@ fn stats_extremes_range_and_mode_of_no_rows_are_null_or_empty() {
         call_stats("stats.mode(collection.drop([1], 1))"),
         Ok(ints(&[]))
     );
-    assert_eq!(call_stats("stats.sum(collection.drop([1], 1))"), Ok(int(0)));
+    let typed = run_source(
+        "use core.stats;\nuse core.collection;\npub fn run() = stats.sum(collection.drop([1], 1));\n",
+        true,
+    );
+    assert_eq!(typed, Ok(int(0)));
 }
 
 #[test]

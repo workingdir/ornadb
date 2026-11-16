@@ -162,7 +162,10 @@ fn assert_copy_refuses_corrupted_sidecar(
     let output = run_copy(&source, &destination, &git_trace);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "{label}: copy succeeded");
-    assert!(stderr.contains("E2100"), "{label}: {stderr}");
+    assert!(
+        stderr.contains("ORNA-CMD-REPOSITORY-UNAVAILABLE"),
+        "{label}: {stderr}"
+    );
     assert!(
         stderr.contains(expected),
         "{label}: refusal is not `{expected}`: {stderr}"

@@ -63,7 +63,7 @@ pub(crate) fn run_project_function(
     );
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
-            "E2101",
+            "ORNA-CMD-SEMANTIC-FAILED",
             "project semantic analysis failed",
             "fix the first reported source contract error, then run the project again",
         ));
@@ -77,7 +77,7 @@ pub(crate) fn run_project_function(
             .is_some_and(|symbol| symbol.kind == orna_check::SymbolKind::Function);
     if allow_private_root_main && !private_default_main_present {
         return Err(Diagnostic::target(
-            "E2103",
+            "ORNA-CMD-NO-ROOT-MAIN",
             "no root main(): main.orna declares no `main()` function",
             "declare `main()` in main.orna, or run a qualified function such as `orna run MODULE.FUNCTION`",
         ));
@@ -118,7 +118,7 @@ pub(crate) fn run_project_stream_invocation(
     );
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
-            "E2101",
+            "ORNA-CMD-SEMANTIC-FAILED",
             "project semantic analysis failed",
             "fix the first reported source contract error, then run the project again",
         ));
@@ -142,7 +142,7 @@ pub(crate) fn run_project_invocation_with_arguments(
     let repository =
         orna_repository::Repository::discover(local_project_path(endpoint)?).map_err(|_| {
             Diagnostic::target(
-                "E2200",
+                "ORNA-CMD-RUNTIME-UNAVAILABLE",
                 "project runtime could not be discovered",
                 "run the command inside an initialized local Git worktree",
             )
@@ -160,7 +160,7 @@ pub(crate) fn run_project_invocation_with_arguments(
     )
     .map_err(|_| {
         Diagnostic::target(
-            "E2200",
+            "ORNA-CMD-RUNTIME-UNAVAILABLE",
             "project request identity could not be created",
             "retry the durable project invocation",
         )
@@ -184,7 +184,7 @@ pub(crate) fn run_project_invocation_with_arguments(
         .build()
         .map_err(|_| {
             Diagnostic::target(
-                "E2200",
+                "ORNA-CMD-RUNTIME-UNAVAILABLE",
                 "project runtime could not start",
                 "retry the durable project invocation",
             )
@@ -231,7 +231,7 @@ pub(crate) fn admit_project_analysis(
     );
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
-            "E2101",
+            "ORNA-CMD-SEMANTIC-FAILED",
             "project semantic analysis failed",
             "fix the first reported source contract error, then run the project again",
         ));
@@ -265,7 +265,7 @@ pub(crate) fn report_project_outcome(
                 published
             } else {
                 let mut rejection = Diagnostic::target(
-                    "E2200",
+                    "ORNA-CMD-RUNTIME-UNAVAILABLE",
                     "durable project invocation was rejected",
                     "the project transaction failed atomically; no partial changes were committed",
                 );
@@ -291,7 +291,7 @@ pub(crate) fn run_project_stream_invocation_with_project(
     let repository =
         orna_repository::Repository::discover(local_project_path(endpoint)?).map_err(|_| {
             Diagnostic::target(
-                "E2200",
+                "ORNA-CMD-RUNTIME-UNAVAILABLE",
                 "project runtime could not be discovered",
                 "run the command inside an initialized local Git worktree",
             )
@@ -303,7 +303,7 @@ pub(crate) fn run_project_stream_invocation_with_project(
         .build()
         .map_err(|_| {
             Diagnostic::target(
-                "E2200",
+                "ORNA-CMD-RUNTIME-UNAVAILABLE",
                 "project runtime could not start",
                 "retry the durable project invocation",
             )
@@ -381,7 +381,7 @@ pub(crate) fn failure_detail(diagnostic: &orna_value::Diagnostic) -> String {
     format!("failure code: {} (causes: {codes})", diagnostic.code())
 }
 
-/// Maps a failed durable project invocation to `E2200`. The runtime's public
+/// Maps a failed durable project invocation to `ORNA-CMD-RUNTIME-UNAVAILABLE`. The runtime's public
 /// code, or its non-disclosing display text, is carried in the detail, which
 /// renders only with `--debug` (ORNA-UX-004). A legacy head refusal names its
 /// own remedy, because retrying the transaction cannot clear it.
@@ -390,16 +390,20 @@ pub(crate) fn durable_invocation_failed(error: &orna_runtime::RuntimeError) -> D
         orna_runtime::RuntimeError::LegacyHeadReadOnly(refusal) => refusal.remedy(),
         _ => "retry the project transaction after checking its durable state",
     };
-    let mut diagnostic = Diagnostic::target("E2200", "durable project invocation failed", help);
+    let mut diagnostic = Diagnostic::target(
+        "ORNA-CMD-RUNTIME-UNAVAILABLE",
+        "durable project invocation failed",
+        help,
+    );
     diagnostic.detail = Some(runtime_failure_detail(error));
     diagnostic
 }
 
-/// Maps a stream delivery the runtime rolled back to `E2200`, carrying the
+/// Maps a stream delivery the runtime rolled back to `ORNA-CMD-RUNTIME-UNAVAILABLE`, carrying the
 /// evaluator failure code and its nested cause codes in the `--debug` detail.
 pub(crate) fn stream_delivery_failed(diagnostic: &orna_value::Diagnostic) -> Diagnostic {
     let mut delivery = Diagnostic::target(
-        "E2200",
+        "ORNA-CMD-RUNTIME-UNAVAILABLE",
         "durable project stream delivery failed",
         "the failed delivery was rolled back; prior committed deliveries and their checkpoint progress remain; inspect the recorded failure before retrying the stream",
     );
@@ -481,7 +485,7 @@ pub(crate) fn run_authority_invocation(
         .admit_module(identity.logical_path(), module.source.clone(), function)
         .map_err(|error| {
             Diagnostic::target_with_detail(
-                "E2101",
+                "ORNA-CMD-SEMANTIC-FAILED",
                 "project semantic analysis failed",
                 "fix the first reported source contract error, then run check again",
                 error.to_string(),
@@ -515,7 +519,7 @@ pub(crate) fn run_authority_invocation(
             .evaluate_staged_with_publication_rows(&admitted, &Environment::new(), publication_rows)
             .map_err(|error| {
                 Diagnostic::target_with_detail(
-                    "E2200",
+                    "ORNA-CMD-RUNTIME-UNAVAILABLE",
                     "pure project invocation failed",
                     "fix the admitted function or retry the invocation",
                     error.to_string(),
@@ -537,7 +541,7 @@ pub(crate) fn run_authority_invocation(
             .evaluate(&admitted, &Environment::new())
             .map_err(|error| {
                 Diagnostic::target_with_detail(
-                    "E2200",
+                    "ORNA-CMD-RUNTIME-UNAVAILABLE",
                     "pure project invocation failed",
                     "fix the admitted function or retry the invocation",
                     error.to_string(),
@@ -561,14 +565,14 @@ pub(crate) fn admit_function_only_project(
     );
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
-            "E2101",
+            "ORNA-CMD-SEMANTIC-FAILED",
             "project semantic analysis failed",
             "fix the first reported source contract error, then run check again",
         ));
     }
     if multi_module_declares_tables(project) {
         return Err(Diagnostic::target(
-            "E2200",
+            "ORNA-CMD-RUNTIME-UNAVAILABLE",
             "table reads in multi-module projects are not supported by one-shot invocation; use the REPL or orna run",
             "one-shot invocation admits table declarations only in single-module projects",
         ));
