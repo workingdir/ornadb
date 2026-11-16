@@ -2833,6 +2833,29 @@ fn observes_a_partial_clone_and_a_promised_object_without_hydrating() {
 }
 
 #[test]
+fn committed_read_hydrates_a_promised_blob_on_demand() {
+    let Some((fixture, clone, promised)) = filtered_clone() else {
+        // Requires file-protocol filtering; see the sibling promised-object test.
+        return;
+    };
+    let repo = Repository::discover(&clone).unwrap();
+    assert_eq!(
+        repo.observe_git_object(&promised).unwrap(),
+        GitObjectState::Promised
+    );
+    let head = repo.head().unwrap().unwrap();
+    assert_eq!(
+        repo.read_committed_file(&head, "promised.txt", 64).unwrap(),
+        b"promised\n"
+    );
+    assert!(matches!(
+        repo.observe_git_object(&promised).unwrap(),
+        GitObjectState::Materialized { .. }
+    ));
+    drop(fixture);
+}
+
+#[test]
 fn filtered_clone_keeps_promised_unavailable_and_materialized_objects_distinct_without_mutation() {
     let Some((fixture, clone, promised)) = filtered_clone() else {
         // The fixture requires file-protocol filtering support.  A
