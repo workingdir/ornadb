@@ -78,6 +78,12 @@ pub struct Program {
     /// Each type's protocol implementations, in declaration order: the
     /// candidates a member call on a value of that type selects from.
     pub instances: BTreeMap<DefId, Vec<DefId>>,
+    /// Each nominal type's `From` implementations, in declaration order: the candidates a conversion into the
+    /// type selects from (CONVERT-1).
+    pub conversions: BTreeMap<DefId, Vec<DefId>>,
+    /// The type each implementation member belongs to. Lexical ownership of private fields reads through it
+    /// (NOMINAL-010).
+    pub implementation_owner: BTreeMap<DefId, DefId>,
     /// Which engine native ABI the `core` and `sys` declarations were loaded
     /// against.
     pub native_abi: NativeAbi,
@@ -98,6 +104,8 @@ impl Program {
             bodies: IndexVec::new(),
             tys: TyInterner::new(),
             instances: BTreeMap::new(),
+            conversions: BTreeMap::new(),
+            implementation_owner: BTreeMap::new(),
             units: crate::units::UnitTable::default(),
             native_abi: NativeAbi::new(0),
         }
