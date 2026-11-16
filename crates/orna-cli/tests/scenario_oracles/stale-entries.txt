@@ -4,8 +4,8 @@
 # release_scenario_oracles test requires this list to equal the observed STALE
 # set exactly. Remove an ID only by writing its executor or re-recording its
 # next blocker in release.rs. Never add an ID by hand to hide a new STALE.
-# Regenerated from the observed STALE set of release_scenario_oracles after PR #9989.
-# The 18 ids still tracked by bead ornadb-5il1.232.1 (under ornadb-5il1.232) remain STALE, each awaiting an executor or a genuine probe.
+# Regenerated from the observed STALE set of release_scenario_oracles after bead ornadb-5il1.232.1 (64 observed, 64 listed).
+# FINAL-BLOB-011 and FINAL-BLOB-020 now run as executors; eight storage ids record ORNA-EVAL-UNSUPPORTED as their blocker and are GAPs.
 FINAL-APP-001
 FINAL-APP-002
 FINAL-APP-003
