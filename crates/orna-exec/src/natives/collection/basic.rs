@@ -1,13 +1,15 @@
 //! The `core.collection` natives over whole lists that take no closure: counting, union, sums, the ends, slices,
 //! distinct elements and extremes. Each function charges the steps the old evaluator charged.
 
-use orna_hir::Ty;
+use orna_hir::{Ty, TyKind};
 use std::cmp::Ordering;
 use std::collections::HashSet;
 
 use num_bigint::BigInt;
 use num_traits::{Signed, ToPrimitive};
 
+use crate::decimal::Decimal;
+use crate::engine_money;
 use crate::error::Stop;
 use crate::machine::Machine;
 use crate::natives::order::extreme;
@@ -41,14 +43,19 @@ pub(in crate::natives) fn union_rows(
 }
 
 /// `sum<T>(rows: [T]): T`, and `__numeric_sum`. One step per element; only integers are summed here. A non-integer
-/// element is unsupported, as the old evaluator reports it.
+/// element is unsupported, as the old evaluator reports it. An empty list sums to the additive zero of its element
+/// type (ORNA-FLOAT-005): `Int` is `0`, `Float` is `+0.0`, `Decimal` is an exact zero, and `Money<C>` is a zero amount
+/// in `C`.
 pub(in crate::natives) fn sum(
     machine: &mut Machine<'_>,
-    _targs: &[Ty],
+    targs: &[Ty],
     arguments: Vec<Value>,
 ) -> Result<Value, Stop> {
     let [rows] = exactly(arguments)?;
     let rows = list(rows)?;
+    if rows.is_empty() {
+        return additive_zero(machine, targs);
+    }
     let mut total = BigInt::from(0);
     for value in rows.iter() {
         machine.tick(1)?;
@@ -58,6 +65,36 @@ pub(in crate::natives) fn sum(
         total = checked(total + value, &machine.limits)?;
     }
     Ok(Value::Int(total))
+}
+
+/// The additive zero of the element type `targs[0]` (ORNA-FLOAT-005). Any other element type is unsupported.
+fn additive_zero(machine: &mut Machine<'_>, targs: &[Ty]) -> Result<Value, Stop> {
+    let element = targs
+        .first()
+        .copied()
+        .ok_or(Stop::Error("ORNA-EVAL-TYPE"))?;
+    let program = machine.program;
+    match program.tys.kind(element) {
+        Some(TyKind::Int) => Ok(Value::Int(BigInt::from(0))),
+        Some(TyKind::Float) => Ok(Value::Float(0.0_f64.to_bits())),
+        Some(TyKind::Decimal) => Ok(Value::Decimal(Decimal::new(
+            BigInt::from(0),
+            BigInt::from(0),
+        )?)),
+        Some(TyKind::Adt(def, args)) if engine_money::is_money_type(program, *def) => {
+            let [currency] = &args[..] else {
+                return Err(Stop::Error("ORNA-EVAL-TYPE"));
+            };
+            let Some(name) = engine_money::currency_name(program, *currency) else {
+                return Err(Stop::Error("ORNA-EVAL-TYPE"));
+            };
+            Ok(Value::Money {
+                amount: Decimal::new(BigInt::from(0), BigInt::from(0))?,
+                currency: machine.host.nominal_type_id(&name),
+            })
+        }
+        _ => Err(Stop::Error("ORNA-EVAL-UNSUPPORTED")),
+    }
 }
 
 /// `first<T>(rows: [T]): T?`. No step.
