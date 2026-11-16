@@ -615,113 +615,6 @@ impl RuntimeState {
             .ok_or(RuntimeError::RecoveryInvalid)
     }
 
-    /// Transfers unfinished observations owned by an abandoned writer into
-    /// the explicit orphaned terminal state under the replacement fence.
-    pub async fn orphan_abandoned_invocations(
-        &self,
-        replacement: WriterLease,
-    ) -> Result<u64, RuntimeError> {
-        validate_writer_lease(replacement)?;
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await?;
-        self.require_owner(&tx, replacement).await?;
-        let ended_ms = now_ms()?;
-        let mut rows = tx
-            .query(
-                "SELECT invocation_id, parent_invocation_id FROM sys_invocation_observation
-                 WHERE status IN (?1, ?2)
-                   AND (owner_id <> ?3 OR owner_epoch <> ?4)
-                 ORDER BY invocation_id",
-                params![
-                    InvocationObservationStatus::Queued.code(),
-                    InvocationObservationStatus::Running.code(),
-                    replacement.owner_id.to_vec(),
-                    i64::try_from(replacement.epoch).map_err(|_| RuntimeError::RecoveryInvalid)?,
-                ],
-            )
-            .await?;
-        let mut parents = BTreeMap::new();
-        while let Some(row) = rows.next().await? {
-            let id = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
-            let parent = row
-                .get::<Option<Vec<u8>>>(1)
-                .map_err(|_| RuntimeError::RecoveryInvalid)?
-                .map(fixed::<16>)
-                .transpose()?;
-            parents.insert(id, parent);
-        }
-        drop(rows);
-
-        // Task termination publishes children before their parent. Sort the
-        // orphan tail deepest-first so takeover history preserves that order.
-        let mut remaining_children = parents
-            .keys()
-            .map(|id| (*id, 0_usize))
-            .collect::<BTreeMap<_, _>>();
-        for parent in parents.values().flatten() {
-            if let Some(children) = remaining_children.get_mut(parent) {
-                *children += 1;
-            }
-        }
-        let mut ready = remaining_children
-            .iter()
-            .filter_map(|(id, children)| (*children == 0).then_some(*id))
-            .collect::<BTreeSet<_>>();
-        let mut ids = Vec::with_capacity(parents.len());
-        while let Some(id) = ready.iter().next().copied() {
-            ready.remove(&id);
-            ids.push(id);
-            if let Some(Some(parent_id)) = parents.get(&id)
-                && let Some(children) = remaining_children.get_mut(parent_id)
-            {
-                *children -= 1;
-                if *children == 0 {
-                    ready.insert(*parent_id);
-                }
-            }
-        }
-        if ids.len() != parents.len() {
-            return Err(RuntimeError::RecoveryInvalid);
-        }
-        let mut changed = 0_u64;
-        for id in ids {
-            let updated = tx
-                .execute(
-                    "UPDATE sys_invocation_observation
-                     SET status = ?1, failure_code = ?2,
-                         ended_ms = ?3, observed_ms = ?3
-                     WHERE invocation_id = ?4 AND status IN (?5, ?6)
-                       AND (owner_id <> ?7 OR owner_epoch <> ?8)",
-                    params![
-                        InvocationObservationStatus::Orphaned.code(),
-                        orna_sys::SysFailureCode::InvokeOrphaned.as_str(),
-                        ended_ms,
-                        id.to_vec(),
-                        InvocationObservationStatus::Queued.code(),
-                        InvocationObservationStatus::Running.code(),
-                        replacement.owner_id.to_vec(),
-                        i64::try_from(replacement.epoch)
-                            .map_err(|_| RuntimeError::RecoveryInvalid)?,
-                    ],
-                )
-                .await?;
-            if updated == 1 {
-                append_invocation_tail_event(
-                    &tx,
-                    id,
-                    ended_ms,
-                    InvocationObservationStatus::Orphaned,
-                )
-                .await?;
-                changed += 1;
-            }
-        }
-        tx.commit().await?;
-        Ok(changed)
-    }
-
     /// Reads one retained invocation and its redaction-safe argument rows.
     pub async fn invocation_observation(
         &self,
@@ -913,6 +806,100 @@ async fn append_invocation_tail_event(
         )
         .await?;
     Ok(())
+}
+
+/// Settles every unfinished invocation observation as orphaned. Neither the
+/// departed owner nor its replacement can finish such an invocation, and it is
+/// never replayed, so the terminal row is written under the caller's fence
+/// (ORNA-TASK-003).
+pub(crate) async fn orphan_unfinished_invocations_tx(
+    connection: &libsql::Connection,
+) -> Result<u64, RuntimeError> {
+    let ended_ms = now_ms()?;
+    let mut rows = connection
+        .query(
+            "SELECT invocation_id, parent_invocation_id FROM sys_invocation_observation
+             WHERE status IN (?1, ?2)
+             ORDER BY invocation_id",
+            params![
+                InvocationObservationStatus::Queued.code(),
+                InvocationObservationStatus::Running.code(),
+            ],
+        )
+        .await?;
+    let mut parents = BTreeMap::new();
+    while let Some(row) = rows.next().await? {
+        let id = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+        let parent = row
+            .get::<Option<Vec<u8>>>(1)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?
+            .map(fixed::<16>)
+            .transpose()?;
+        parents.insert(id, parent);
+    }
+    drop(rows);
+
+    // Task termination publishes children before their parent. Settle the
+    // orphan tail deepest-first so takeover history preserves that order.
+    let mut remaining_children = parents
+        .keys()
+        .map(|id| (*id, 0_usize))
+        .collect::<BTreeMap<_, _>>();
+    for parent in parents.values().flatten() {
+        if let Some(children) = remaining_children.get_mut(parent) {
+            *children += 1;
+        }
+    }
+    let mut ready = remaining_children
+        .iter()
+        .filter_map(|(id, children)| (*children == 0).then_some(*id))
+        .collect::<BTreeSet<_>>();
+    let mut ids = Vec::with_capacity(parents.len());
+    while let Some(id) = ready.iter().next().copied() {
+        ready.remove(&id);
+        ids.push(id);
+        if let Some(Some(parent_id)) = parents.get(&id)
+            && let Some(children) = remaining_children.get_mut(parent_id)
+        {
+            *children -= 1;
+            if *children == 0 {
+                ready.insert(*parent_id);
+            }
+        }
+    }
+    if ids.len() != parents.len() {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+    let mut changed = 0_u64;
+    for id in ids {
+        let updated = connection
+            .execute(
+                "UPDATE sys_invocation_observation
+                 SET status = ?1, failure_code = ?2,
+                     ended_ms = ?3, observed_ms = ?3
+                 WHERE invocation_id = ?4 AND status IN (?5, ?6)",
+                params![
+                    InvocationObservationStatus::Orphaned.code(),
+                    orna_sys::SysFailureCode::InvokeOrphaned.as_str(),
+                    ended_ms,
+                    id.to_vec(),
+                    InvocationObservationStatus::Queued.code(),
+                    InvocationObservationStatus::Running.code(),
+                ],
+            )
+            .await?;
+        if updated == 1 {
+            append_invocation_tail_event(
+                connection,
+                id,
+                ended_ms,
+                InvocationObservationStatus::Orphaned,
+            )
+            .await?;
+            changed += 1;
+        }
+    }
+    Ok(changed)
 }
 
 fn bind_invocation_arguments(

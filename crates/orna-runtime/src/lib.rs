@@ -604,9 +604,16 @@ impl RuntimeState {
         state.migrate_empty_row_keys().await?;
         let accepted_pending = state.validate_recovery_with_pin_manifest().await?;
         // This handle holds the owner lock, so every earlier writer process has
-        // exited and none of its query observations can still be finished.
+        // exited and none of its query or invocation observations can still be
+        // finished.
         if matches!(state.writer_authority, WriterAuthority::Owner { .. }) {
-            query::orphan_unfinished_query_observations_tx(&state.connection).await?;
+            let tx = state
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .await?;
+            query::orphan_unfinished_query_observations_tx(&tx).await?;
+            invocation::orphan_unfinished_invocations_tx(&tx).await?;
+            tx.commit().await?;
         }
         // Receipt recovery opens runtime while the repository journal can still
         // be pending. Owner cleanup defers in that state and retains the full
@@ -18884,13 +18891,6 @@ mod tests {
         );
         assert_eq!(
             reopened
-                .orphan_abandoned_invocations(replacement)
-                .await
-                .unwrap(),
-            1
-        );
-        assert_eq!(
-            reopened
                 .reset_checkpoint_with_invocation_id(replacement, request, shared_id)
                 .await,
             Ok(receipt)
@@ -19874,7 +19874,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sys_invocation_stale_cursor_rejects_post_reopen_terminal_tail() {
+    async fn sys_invocation_stale_cursor_rejects_takeover_terminal_tail() {
         assert!(orna_syntax::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
@@ -19941,20 +19941,13 @@ mod tests {
 
         let reopened = open_state(&repo).await;
         assert_eq!(reopened.stream_checkpoint(&key).await.unwrap(), receipt);
-        let replacement = reopened.acquire_lease(replacement.owner_id).await.unwrap();
-        assert_eq!(
-            reopened
-                .orphan_abandoned_invocations(replacement)
-                .await
-                .unwrap(),
-            1
-        );
+        reopened.acquire_lease(replacement.owner_id).await.unwrap();
         assert_eq!(
             reopened
                 .invocation_observation_tail(Some(stale_cursor), 1)
                 .await,
             Err(RuntimeError::InvocationTailInvalid),
-            "a cursor from before commit cannot splice in a terminal event appended after reopen"
+            "a cursor from before commit cannot splice in a terminal event appended by takeover"
         );
         let tail = reopened.invocation_observation_tail(None, 4).await.unwrap();
         assert_eq!(
@@ -20048,13 +20041,6 @@ mod tests {
                 .reset_checkpoint_with_invocation_id(replacement, request, receipt_id)
                 .await,
             Ok(receipt)
-        );
-        assert_eq!(
-            reopened
-                .orphan_abandoned_invocations(replacement)
-                .await
-                .unwrap(),
-            2
         );
 
         let continued = reopened
@@ -20158,14 +20144,7 @@ mod tests {
             Err(RuntimeError::InvocationChildrenActive)
         );
 
-        let replacement = state.takeover_lease(writer, id(74)).await.unwrap();
-        assert_eq!(
-            state
-                .orphan_abandoned_invocations(replacement)
-                .await
-                .unwrap(),
-            3
-        );
+        state.takeover_lease(writer, id(74)).await.unwrap();
         assert_eq!(
             state
                 .invocation_observation(parent.id)
@@ -20226,22 +20205,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![grandchild_id, child_id, parent_id]
         );
-        assert_eq!(
-            state
-                .orphan_abandoned_invocations(replacement)
-                .await
-                .unwrap(),
-            0
-        );
-        assert_eq!(
-            state
-                .invocation_observation_tail(None, 8)
-                .await
-                .unwrap()
-                .entries,
-            first_tail.entries,
-            "reconciling an already-terminal procedure does not append duplicate tail events"
-        );
         drop(state);
 
         let reopened = open_state(&repo).await;
@@ -20254,6 +20217,108 @@ mod tests {
             first_tail.entries,
             "procedure tail history and its latest observation survive reopening"
         );
+    }
+
+    #[tokio::test]
+    async fn sys_invocation_owner_open_orphans_running_invocation_once() {
+        assert!(orna_syntax::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(230)).await.unwrap();
+        let procedure = materialize_echo_procedure(&state, writer).await;
+        let invocation_id = id(231);
+        state
+            .begin_invocation_observation(
+                writer,
+                InvocationObservationRegistration {
+                    id: invocation_id,
+                    procedure: procedure.clone(),
+                    owner: InvocationLaunchOwner::OwnerSession(id(232)),
+                    run: None,
+                    arguments: vec![echo_invocation_input(&procedure)],
+                    idempotency_key_hash: None,
+                },
+            )
+            .await
+            .unwrap();
+        drop(state);
+
+        let reopened_state = open_state(&repo).await;
+        let orphaned = reopened_state
+            .invocation_observation(invocation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(orphaned.status, InvocationObservationStatus::Orphaned);
+        assert_eq!(
+            orphaned.failure_code,
+            Some(orna_sys::SysFailureCode::InvokeOrphaned)
+        );
+        assert!(!orphaned.live);
+        let first_tail = reopened_state
+            .invocation_observation_tail(None, 8)
+            .await
+            .unwrap();
+        assert_eq!(
+            first_tail
+                .entries
+                .iter()
+                .map(|entry| (entry.invocation_id, entry.status))
+                .collect::<Vec<_>>(),
+            vec![
+                (invocation_id, InvocationObservationStatus::Running),
+                (invocation_id, InvocationObservationStatus::Orphaned),
+            ],
+            "owner open appends one terminal event for the abandoned running invocation"
+        );
+        drop(reopened_state);
+
+        let again = open_state(&repo).await;
+        assert_eq!(
+            again
+                .invocation_observation_tail(None, 8)
+                .await
+                .unwrap()
+                .entries,
+            first_tail.entries,
+            "a second owner open does not orphan an already terminal invocation again"
+        );
+    }
+
+    #[tokio::test]
+    async fn sys_invocation_stale_writer_cannot_finish_after_takeover() {
+        assert!(orna_syntax::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(240)).await.unwrap();
+        let procedure = materialize_echo_procedure(&state, writer).await;
+        let invocation_id = id(241);
+        state
+            .begin_invocation_observation(
+                writer,
+                InvocationObservationRegistration {
+                    id: invocation_id,
+                    procedure: procedure.clone(),
+                    owner: InvocationLaunchOwner::OwnerSession(id(242)),
+                    run: None,
+                    arguments: vec![echo_invocation_input(&procedure)],
+                    idempotency_key_hash: None,
+                },
+            )
+            .await
+            .unwrap();
+        let replacement = state.takeover_lease(writer, id(243)).await.unwrap();
+        let orphaned = state
+            .invocation_observation(invocation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(orphaned.status, InvocationObservationStatus::Orphaned);
+        let stale = state
+            .finish_invocation_observation(writer, invocation_id, InvocationCompletion::Succeeded)
+            .await;
+        assert_eq!(stale, Err(RuntimeError::OwnerLost));
+        assert_eq!(state.current_lease().await.unwrap(), Some(replacement));
     }
 
     #[test]
@@ -23245,13 +23310,6 @@ mod tests {
             .await
             .unwrap();
         let replacement = state.takeover_lease(writer, id(74)).await.unwrap();
-        assert_eq!(
-            state
-                .orphan_abandoned_invocations(replacement)
-                .await
-                .unwrap(),
-            3
-        );
         let first_tail = state.invocation_observation_tail(None, 4).await.unwrap();
         assert_eq!(first_tail.entries.len(), 4);
         assert!(first_tail.has_more);
@@ -23425,10 +23483,6 @@ mod tests {
             reopened.admin_invocation_audits().await.unwrap(),
             receipts_before_reopen,
             "replays and conflicts do not allocate new audit sequence entries"
-        );
-        assert_eq!(
-            reopened.orphan_abandoned_invocations(writer).await.unwrap(),
-            0
         );
         let full_tail = reopened.invocation_observation_tail(None, 8).await.unwrap();
         assert_eq!(full_tail.entries.len(), 6);
