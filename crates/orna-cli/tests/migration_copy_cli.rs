@@ -240,6 +240,17 @@ fn cli_migration_copy_retry_recovers_the_same_candidate() {
         b"Orna migration <migration@orna.invalid>\n",
         "the migration commit identity is deterministic, not inherited from the host"
     );
+    let local_config = String::from_utf8(git_output(
+        &destination,
+        &["config", "--local", "--list", "--name-only"],
+    ))
+    .unwrap();
+    for key in ["user.name", "user.email", "commit.gpgsign"] {
+        assert!(
+            !local_config.lines().any(|line| line == key),
+            "the copy must not write `{key}` into its local git config: {local_config}"
+        );
+    }
     let retry = run_copy(&source, &destination, "0", &git_trace);
     assert!(
         retry.status.success(),

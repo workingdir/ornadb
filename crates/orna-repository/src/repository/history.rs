@@ -307,7 +307,13 @@ impl Repository {
         changes: &[ManagedFileChange],
         message: &str,
     ) -> Result<PrivateCommit, RepositoryError> {
-        self.build_private_commit_inner(expected_head, changes, None, message, None)
+        self.build_private_commit_inner(
+            expected_head,
+            changes,
+            None,
+            message,
+            CommitStamp::default(),
+        )
     }
 
     /// Builds a private format-3 candidate from a validated native store root.
@@ -328,28 +334,8 @@ impl Repository {
                 root: store_root,
             }),
             message,
-            None,
+            CommitStamp::default(),
         )
-    }
-
-    /// Builds a private commit whose author and committer time is `timestamp`
-    /// (seconds since the Unix epoch, recorded at `+0000`) instead of the wall
-    /// clock.
-    ///
-    /// A caller that must reproduce the *same* commit object from the same
-    /// inputs cannot use the current time: two runs a second apart would record
-    /// different objects for an identical tree, parent and message. Naming the
-    /// time explicitly makes the object a function of its content alone.
-    /// Nothing else about the commit changes; the identity still comes from the
-    /// repository's configured or pinned author and committer.
-    pub fn build_private_commit_at(
-        &self,
-        expected_head: &GitCommitRef,
-        changes: &[ManagedFileChange],
-        message: &str,
-        timestamp: i64,
-    ) -> Result<PrivateCommit, RepositoryError> {
-        self.build_private_commit_inner(expected_head, changes, None, message, Some(timestamp))
     }
 
     pub(crate) fn build_private_commit_inner(
@@ -358,7 +344,7 @@ impl Repository {
         changes: &[ManagedFileChange],
         store_projection: Option<StoreBinding<'_>>,
         message: &str,
-        commit_time: Option<i64>,
+        stamp: CommitStamp<'_>,
     ) -> Result<PrivateCommit, RepositoryError> {
         if changes.is_empty() && store_projection.is_none() {
             return Err(RepositoryError::NoManagedPaths);
@@ -440,7 +426,7 @@ impl Repository {
                 )?;
             }
         }
-        self.commit_private_index(index.path(), expected_head, message, commit_time)
+        self.commit_private_index(index.path(), expected_head, message, stamp)
     }
 
     /// Builds one publication candidate `N = H + P` from the captured base and
@@ -494,7 +480,7 @@ impl Repository {
         graph
             .pin_store_subtree_in_index(index.path(), store_root)
             .map_err(RepositoryError::Graph)?;
-        self.commit_private_index(index.path(), expected_head, message, None)
+        self.commit_private_index(index.path(), expected_head, message, CommitStamp::default())
     }
 
     /// A fresh private index path under the runtime locks directory, for
@@ -520,21 +506,30 @@ impl Repository {
     }
 
     /// Writes the private `index` as a tree and commits it as a child of
-    /// `expected_head`. `commit_time` pins the time of both identities when
-    /// the object must be reproducible. The commit is refused if `HEAD` moved
-    /// while it was built.
+    /// `expected_head`, stamped by `stamp`. The commit is refused if `HEAD`
+    /// moved while it was built.
     pub(crate) fn commit_private_index(
         &self,
         index: &Path,
         expected_head: &GitCommitRef,
         message: &str,
-        commit_time: Option<i64>,
+        stamp: CommitStamp<'_>,
     ) -> Result<PrivateCommit, RepositoryError> {
         let mut write_tree = self.command();
         write_tree.env("GIT_INDEX_FILE", index).args(["write-tree"]);
         let tree = self.index_tree_from_native_oid(trim_output(&self.run(write_tree)?.stdout))?;
 
         let mut commit_tree = self.command();
+        if let Some(identity) = stamp.identity {
+            // The fixed identity reaches this one command only and is never
+            // written into the repository's config. A signature would make
+            // the object depend on the host's keys, so it is disabled here.
+            commit_tree.args(["-c", "commit.gpgSign=false"]);
+            commit_tree.env("GIT_AUTHOR_NAME", identity.name);
+            commit_tree.env("GIT_AUTHOR_EMAIL", identity.email);
+            commit_tree.env("GIT_COMMITTER_NAME", identity.name);
+            commit_tree.env("GIT_COMMITTER_EMAIL", identity.email);
+        }
         commit_tree.args([
             "commit-tree",
             tree.as_str(),
@@ -542,7 +537,7 @@ impl Repository {
             expected_head.as_str(),
             "-m",
         ]);
-        if let Some(timestamp) = commit_time {
+        if let Some(timestamp) = stamp.time {
             // One offset for both identities keeps the object independent
             // of the host's time zone as well as its clock.
             let date = format!("@{timestamp} +0000");

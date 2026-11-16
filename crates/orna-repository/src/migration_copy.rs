@@ -45,12 +45,12 @@ use crate::relation_admission::{
     AllocatorWatermarks, RelationAdmissionError, RelationCandidateContent, StagedRelation,
     StoredObjectIdentity,
 };
+use crate::{CommitIdentity, CommitStamp, ManagedFileChange, ManagedPath, PrivateCommit};
 use crate::{
     DatabaseId, GitCommitRef, IndexGeneration, LegacyAnnotationCandidate,
     MigrationAnnotationDefaults, MigrationContinuityRecord, PublicationJournal,
     PublicationJournalEntry, Repository, RepositoryError, RepositoryFormat, git_command_at_root,
 };
-use crate::{ManagedFileChange, ManagedPath, PrivateCommit};
 
 /// Which legacy file a retirement names. A metadata file lives under `.orna/`;
 /// a loose row unit is a committed `.orna` file under a migrated table's
@@ -995,7 +995,6 @@ fn prepare_format3_migration_in(
     // from. Nothing is published yet and the staged copy has no candidate.
     crate::publication_crash_barrier("migration-staging");
 
-    configure_migration_commit_identity(&root)?;
     let copy = Repository::discover(&root)?;
     let (working_tree_identity, working_tree_entries) = working_tree_identity(&copy)?;
     if working_tree_identity != source_working_tree_identity
@@ -1723,8 +1722,12 @@ fn build_migration_candidate(
 ) -> Result<(PrivateCommit, NativeOid), RepositoryError> {
     let database_bytes = canonical_database_bytes(&database_id);
     let changes = migration_changes(&database_bytes, store)?;
+    let stamp = CommitStamp {
+        time: Some(commit_time),
+        identity: Some(MIGRATION_COMMIT_IDENTITY),
+    };
     let candidate = repository
-        .build_private_commit_with_relations_at(
+        .build_private_commit_with_relations_stamped(
             source_commit,
             &changes,
             RelationCandidateContent {
@@ -1734,7 +1737,7 @@ fn build_migration_candidate(
             },
             database_id,
             message,
-            commit_time,
+            stamp,
         )
         .map_err(admission_error)?;
     let store_root = repository
@@ -1884,26 +1887,14 @@ fn sync_directory(path: &Path) -> Result<(), RepositoryError> {
         .map_err(|_| RepositoryError::LocalStateUnavailable)
 }
 
-/// Gives the migration commit a stable identity independent of the caller's
-/// Git configuration. The source commit remains unchanged; this identity only
-/// names the explicit format-transition commit in the disposable copy.
-fn configure_migration_commit_identity(root: &Path) -> Result<(), RepositoryError> {
-    for (key, value) in [
-        ("user.name", "Orna migration"),
-        ("user.email", "migration@orna.invalid"),
-        ("commit.gpgsign", "false"),
-    ] {
-        let mut command = git_command_at_root(root);
-        command.args(["config", "--local", key, value]);
-        let output = command
-            .output()
-            .map_err(|_| RepositoryError::GitUnavailable)?;
-        if !output.status.success() {
-            return Err(RepositoryError::GitOperationFailed);
-        }
-    }
-    Ok(())
-}
+/// The author and committer of the migration candidate. They are passed to
+/// that one commit only. The copy's Git configuration is never written, so
+/// the repository that the copy becomes keeps the user's own identity and
+/// signing settings.
+const MIGRATION_COMMIT_IDENTITY: CommitIdentity<'static> = CommitIdentity {
+    name: "Orna migration",
+    email: "migration@orna.invalid",
+};
 
 /// The committer time of the legacy snapshot, in seconds since the Unix epoch.
 ///
