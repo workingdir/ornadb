@@ -18151,6 +18151,107 @@ mod tests {
             1
         );
     }
+
+    #[tokio::test]
+    async fn sys_query_barrier_takeover_orphans_running_observation() {
+        let (_temp, repo) = repository();
+        // The unmanaged handle needs the runtime layout that only an owner open
+        // creates. Open and release one first, so no owner lock is held below.
+        drop(open_state(&repo).await);
+        let departed = open_unmanaged_state(&repo).await;
+        let lease = departed.acquire_lease(id(80)).await.unwrap();
+        let capture = departed.capture().await.unwrap();
+        let started = departed
+            .begin_query_observation(
+                lease,
+                QueryObservationRegistration {
+                    id: id(81),
+                    expression: Some("SELECT 1".to_owned()),
+                    capture,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(started.status, InvocationObservationStatus::Running);
+        drop(departed);
+
+        // A departed owner's running query stays Running until a takeover settles
+        // it; the fenced token can no longer finish it, and it is never replayed.
+        let successor = open_unmanaged_state(&repo).await;
+        let running = successor.query_observations().await.unwrap();
+        assert_eq!(running.len(), 1);
+        assert_eq!(running[0].status, InvocationObservationStatus::Running);
+        assert_eq!(running[0].ended_ms, None);
+
+        let replacement = successor.takeover_lease(lease, id(82)).await.unwrap();
+        assert_eq!(replacement.owner_id, id(82));
+        assert_eq!(replacement.epoch, lease.epoch + 1);
+        assert_eq!(successor.current_lease().await.unwrap(), Some(replacement));
+
+        let orphaned = successor.query_observations().await.unwrap();
+        assert_eq!(orphaned.len(), 1);
+        assert_eq!(orphaned[0].id, id(81));
+        assert_eq!(orphaned[0].status, InvocationObservationStatus::Orphaned);
+        let ended = orphaned[0].ended_ms.unwrap();
+        assert_eq!(orphaned[0].observed_ms, ended);
+        assert!(ended >= started.started_ms);
+        assert_eq!(
+            successor
+                .finish_query_observation(lease, id(81), InvocationObservationStatus::Succeeded)
+                .await,
+            Err(RuntimeError::OwnerLost)
+        );
+        assert_eq!(successor.query_observations().await.unwrap(), orphaned);
+    }
+
+    #[tokio::test]
+    async fn sys_query_owner_takeover_orphans_running_observation() {
+        let (_temp, repo) = repository();
+        let owner = open_state(&repo).await;
+        let departed = open_unmanaged_state(&repo).await;
+        let lease = departed.acquire_lease(id(80)).await.unwrap();
+        let capture = departed.capture().await.unwrap();
+        let started = departed
+            .begin_query_observation(
+                lease,
+                QueryObservationRegistration {
+                    id: id(81),
+                    expression: Some("SELECT 1".to_owned()),
+                    capture,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(started.status, InvocationObservationStatus::Running);
+        drop(departed);
+
+        // The owner's lock-bound acquisition takes over the departed lease through
+        // the same fence, which orphans the running query in that transaction.
+        let running = owner.query_observations().await.unwrap();
+        assert_eq!(running.len(), 1);
+        assert_eq!(running[0].status, InvocationObservationStatus::Running);
+
+        let replacement = owner.acquire_lease(id(83)).await.unwrap();
+        assert_eq!(replacement.owner_id, id(83));
+        assert_eq!(replacement.epoch, lease.epoch + 1);
+        assert_eq!(owner.current_lease().await.unwrap(), Some(replacement));
+
+        let orphaned = owner.query_observations().await.unwrap();
+        assert_eq!(orphaned.len(), 1);
+        assert_eq!(orphaned[0].id, id(81));
+        assert_eq!(orphaned[0].status, InvocationObservationStatus::Orphaned);
+        let ended = orphaned[0].ended_ms.unwrap();
+        assert_eq!(orphaned[0].observed_ms, ended);
+        assert!(ended >= started.started_ms);
+        assert_eq!(
+            owner
+                .finish_query_observation(lease, id(81), InvocationObservationStatus::Succeeded)
+                .await,
+            Err(RuntimeError::OwnerLost)
+        );
+        assert_eq!(owner.query_observations().await.unwrap(), orphaned);
+    }
+
     #[tokio::test]
     async fn sys_lifecycle_procedure_materialization_admits_durable_invocation() {
         assert!(orna_syntax::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
