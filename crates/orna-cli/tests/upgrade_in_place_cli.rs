@@ -132,12 +132,15 @@ fn run_abort(source: &Path, destination: &Path) -> Output {
         .unwrap()
 }
 
-/// Asserts that a refused upgrade exited with status 1 and the E2100 diagnostic
+/// Asserts that a refused upgrade exited with status 1 and the ORNA-CMD-REPOSITORY-UNAVAILABLE diagnostic
 /// titled `title`.
 fn assert_refused(output: &Output, title: &str) {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(1), "{stderr}");
-    assert!(stderr.contains("E2100"), "{stderr}");
+    assert!(
+        stderr.contains("ORNA-CMD-REPOSITORY-UNAVAILABLE"),
+        "{stderr}"
+    );
     assert!(stderr.contains(title), "{stderr}");
 }
 
@@ -311,7 +314,7 @@ fn upgrade_in_place_rejects_yes_activate_without_a_destination() {
         .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(2), "{stderr}");
-    assert!(stderr.contains("E1002"), "{stderr}");
+    assert!(stderr.contains("ORNA-CMD-ARGUMENT-INVALID"), "{stderr}");
     assert!(stderr.contains("needs a DEST"), "{stderr}");
     assert!(!sibling_candidate(&source).exists());
     assert_eq!(git_output(&source, &["rev-parse", "HEAD"]), head);
@@ -337,7 +340,7 @@ fn upgrade_in_place_requires_the_consumer_continuity_choice() {
         .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(2), "{stderr}");
-    assert!(stderr.contains("E1001"), "{stderr}");
+    assert!(stderr.contains("ORNA-CMD-ARGUMENT-MISSING"), "{stderr}");
     assert!(stderr.contains("consumer-continuity"), "{stderr}");
     assert!(!sibling_candidate(&source).exists());
 }

@@ -255,7 +255,9 @@ fn cli_migration_copy_retry_recovers_the_same_candidate() {
     .unwrap();
     let changed_source = run_copy(&source, &destination, "0", &git_trace);
     assert_eq!(changed_source.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&changed_source.stderr).contains("E2100"));
+    assert!(
+        String::from_utf8_lossy(&changed_source.stderr).contains("ORNA-CMD-REPOSITORY-UNAVAILABLE")
+    );
     assert_eq!(
         String::from_utf8(git_output(
             &destination,
@@ -275,7 +277,10 @@ fn cli_migration_copy_retry_recovers_the_same_candidate() {
     git_output(&source, &["reset", "--", "tracked-deletion.txt"]);
     let changed_source_index = run_copy(&source, &destination, "0", &git_trace);
     assert_eq!(changed_source_index.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&changed_source_index.stderr).contains("E2100"));
+    assert!(
+        String::from_utf8_lossy(&changed_source_index.stderr)
+            .contains("ORNA-CMD-REPOSITORY-UNAVAILABLE")
+    );
     git_output(&source, &["rm", "--", "tracked-deletion.txt"]);
 
     git_output(&copied_submodule, &["reset", "--", "tracked.txt"]);
@@ -285,7 +290,10 @@ fn cli_migration_copy_retry_recovers_the_same_candidate() {
     );
     let altered_candidate = run_copy(&source, &destination, "0", &git_trace);
     assert_eq!(altered_candidate.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&altered_candidate.stderr).contains("E2100"));
+    assert!(
+        String::from_utf8_lossy(&altered_candidate.stderr)
+            .contains("ORNA-CMD-REPOSITORY-UNAVAILABLE")
+    );
     assert_eq!(
         git_output(&copied_submodule, &["show", ":tracked.txt"]),
         b"dependency committed\n",
@@ -326,7 +334,9 @@ fn cli_migration_copy_retry_recovers_the_same_candidate() {
     );
     let changed_head = run_copy(&source, &metadata_destination, "0", &git_trace);
     assert_eq!(changed_head.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&changed_head.stderr).contains("E2100"));
+    assert!(
+        String::from_utf8_lossy(&changed_head.stderr).contains("ORNA-CMD-REPOSITORY-UNAVAILABLE")
+    );
     git_output(
         &metadata_submodule,
         &["symbolic-ref", "HEAD", "refs/heads/main"],
@@ -353,17 +363,22 @@ fn cli_migration_copy_retry_recovers_the_same_candidate() {
     fs::write(&shared_index, &changed_shared_index).unwrap();
     let changed_split_index = run_copy(&source, &metadata_destination, "0", &git_trace);
     assert_eq!(changed_split_index.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&changed_split_index.stderr).contains("E2100"));
+    assert!(
+        String::from_utf8_lossy(&changed_split_index.stderr)
+            .contains("ORNA-CMD-REPOSITORY-UNAVAILABLE")
+    );
     assert_eq!(fs::read(&shared_index).unwrap(), changed_shared_index);
     let conflict = run_copy(&source, &destination, "1", &git_trace);
     assert_eq!(conflict.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&conflict.stderr).contains("E2100"));
+    assert!(String::from_utf8_lossy(&conflict.stderr).contains("ORNA-CMD-REPOSITORY-UNAVAILABLE"));
     let foreign = parent.path().join("foreign");
     fs::create_dir(&foreign).unwrap();
     fs::write(foreign.join("marker"), b"foreign destination\n").unwrap();
     let foreign_copy = run_copy(&source, &foreign, "0", &git_trace);
     assert_eq!(foreign_copy.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&foreign_copy.stderr).contains("E2100"));
+    assert!(
+        String::from_utf8_lossy(&foreign_copy.stderr).contains("ORNA-CMD-REPOSITORY-UNAVAILABLE")
+    );
     assert_eq!(
         fs::read(foreign.join("marker")).unwrap(),
         b"foreign destination\n",
@@ -436,7 +451,9 @@ fn cli_migration_copy_rejects_mixed_worktree_metadata() {
             "{label} worktree metadata must fail closed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert!(String::from_utf8_lossy(&output.stderr).contains("E2100"));
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("ORNA-CMD-REPOSITORY-UNAVAILABLE")
+        );
         assert!(
             !destination.exists(),
             "{label} source must not create a candidate"
@@ -469,7 +486,10 @@ fn cli_migration_copy_names_unparseable_committed_format_record() {
     let output = run_copy(&source, &destination, "0", &trace);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(1), "{stderr}");
-    assert!(stderr.contains("E2100"), "{stderr}");
+    assert!(
+        stderr.contains("ORNA-CMD-REPOSITORY-UNAVAILABLE"),
+        "{stderr}"
+    );
     assert!(
         stderr.contains("migration source could not be admitted: repository metadata is invalid"),
         "{stderr}"
@@ -936,11 +956,14 @@ fn journal_is_present(copy: &Path) -> bool {
 }
 
 /// Asserts that a migration command refused without panicking: exit status 1
-/// and the E2100 diagnostic titled `title`.
+/// and the ORNA-CMD-REPOSITORY-UNAVAILABLE diagnostic titled `title`.
 fn assert_refused(output: &std::process::Output, title: &str) {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(1), "{stderr}");
-    assert!(stderr.contains("E2100"), "{stderr}");
+    assert!(
+        stderr.contains("ORNA-CMD-REPOSITORY-UNAVAILABLE"),
+        "{stderr}"
+    );
     assert!(stderr.contains(title), "{stderr}");
 }
 
@@ -1532,7 +1555,7 @@ fn cli_migration_copy_declared_annotation_count_matching_decoded_rows_passes() {
 }
 
 /// A declared count that differs from the decoded Blob count refuses with
-/// E2100 naming both counts, creates no destination, and leaves the source
+/// ORNA-CMD-REPOSITORY-UNAVAILABLE naming both counts, creates no destination, and leaves the source
 /// unchanged (ORNA-UPGRADE-004).
 #[test]
 fn cli_migration_copy_declared_annotation_count_mismatch_refuses_without_a_copy() {
@@ -1545,7 +1568,10 @@ fn cli_migration_copy_declared_annotation_count_mismatch_refuses_without_a_copy(
     let copy = run_golden_copy(&source, &destination, Some("0"));
     assert!(!copy.status.success(), "a mismatched count must refuse");
     let stderr = String::from_utf8_lossy(&copy.stderr);
-    assert!(stderr.contains("E2100"), "refusal names E2100: {stderr}");
+    assert!(
+        stderr.contains("ORNA-CMD-REPOSITORY-UNAVAILABLE"),
+        "refusal names ORNA-CMD-REPOSITORY-UNAVAILABLE: {stderr}"
+    );
     assert!(
         stderr.contains("declared=0") && stderr.contains("decoded=2"),
         "refusal names both counts: {stderr}"
@@ -1647,7 +1673,10 @@ fn cli_upgrade_without_yes_activate_refuses_and_changes_nothing() {
     let output = run_upgrade(&source, &destination, false);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(2), "{stderr}");
-    assert!(stderr.contains("E1002"), "usage refusal: {stderr}");
+    assert!(
+        stderr.contains("ORNA-CMD-ARGUMENT-INVALID"),
+        "usage refusal: {stderr}"
+    );
     assert!(
         stderr.contains("--yes-activate"),
         "refusal names the flag: {stderr}"

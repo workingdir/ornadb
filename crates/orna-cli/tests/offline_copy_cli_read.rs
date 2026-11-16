@@ -504,7 +504,7 @@ fn restore_rejects_export_only_dependency_options() {
     );
     assert_eq!(restored.status.code(), Some(1));
     assert!(
-        String::from_utf8_lossy(&restored.stderr).contains("E2000"),
+        String::from_utf8_lossy(&restored.stderr).contains("ORNA-CMD-TARGET-UNAVAILABLE"),
         "restore rejects an export-only option before reconstruction: {}",
         String::from_utf8_lossy(&restored.stderr)
     );

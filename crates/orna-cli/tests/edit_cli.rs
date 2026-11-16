@@ -285,7 +285,9 @@ async fn edit_row_default_output_names_retained_draft() {
         .find(|line| line.contains("draft retained at "))
         .unwrap_or_else(|| panic!("default output names the retained draft: {stderr}"));
     assert!(
-        title.starts_with("error[E2000]: Edit was not accepted; draft retained at "),
+        title.starts_with(
+            "error[ORNA-CMD-TARGET-UNAVAILABLE]: Edit was not accepted; draft retained at "
+        ),
         "retained draft is part of the default title: {stderr}"
     );
     assert!(

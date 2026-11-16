@@ -635,9 +635,9 @@ fn write_editor_script(path: &std::path::Path, body: &str) {
 /// baseline and runs `$EDITOR` against an explicit draft ("providing stronger
 /// CAS protection"). Another writer's commit that lands while that editor
 /// session is open advances the row past the read baseline, so the save is
-/// refused (E2000, the stale-edit cause), the draft is retained, and the other
+/// refused (ORNA-CMD-TARGET-UNAVAILABLE, the stale-edit cause), the draft is retained, and the other
 /// writer's row stays in place.
-/// The `E2000` assertion relies on `ESTALE` on the wire: `EAGAIN` surfaces as EOPNOTSUPP on
+/// The `ORNA-CMD-TARGET-UNAVAILABLE` assertion relies on `ESTALE` on the wire: `EAGAIN` surfaces as EOPNOTSUPP on
 /// this kernel (ornadb-eufo.1.1; `tests/vfs_setxattr_errno_kernel_limit.rs`).
 #[tokio::test]
 async fn orna_edit_refuses_save_when_row_changed_during_editor_session() {
@@ -680,8 +680,8 @@ async fn orna_edit_refuses_save_when_row_changed_during_editor_session() {
         "stale orna edit must fail: {diagnostics}"
     );
     assert!(
-        diagnostics.contains("E2000"),
-        "the refusal is the stale-edit cause E2000: {diagnostics}"
+        diagnostics.contains("ORNA-CMD-TARGET-UNAVAILABLE"),
+        "the refusal is the stale-edit cause ORNA-CMD-TARGET-UNAVAILABLE: {diagnostics}"
     );
     let view = fresh_view(&fixture);
     assert!(
@@ -693,7 +693,7 @@ async fn orna_edit_refuses_save_when_row_changed_during_editor_session() {
         .nth(1)
         .and_then(|rest| rest.split(['\n', ',', '"']).next())
         .map_or_else(
-            || panic!("the E2000 refusal names the retained draft path: {diagnostics}"),
+            || panic!("the ORNA-CMD-TARGET-UNAVAILABLE refusal names the retained draft path: {diagnostics}"),
             |path| PathBuf::from(path.trim()),
         );
     let draft = std::fs::read_to_string(&retained)
@@ -1128,7 +1128,7 @@ async fn reader_opened_before_shrinking_owner_write_keeps_old_bytes() {
 /// ORNA-VFS-011 and 41-vfs.md:75-77: an `orna edit` that starts after an owner-routed
 /// write captures its draft and read-to-save baseline from the accepted row, not from
 /// a stale in-process copy of the row. The editor sees the owner's row and its save
-/// succeeds. A stale baseline would make this save fail (E2000) or overwrite the draft.
+/// succeeds. A stale baseline would make this save fail (ORNA-CMD-TARGET-UNAVAILABLE) or overwrite the draft.
 #[tokio::test]
 async fn orna_edit_started_after_owner_write_starts_from_fresh_row() {
     if !require_fuse_or_skip() {
@@ -1237,7 +1237,7 @@ async fn reader_opened_before_owner_write_keeps_old_bytes() {
 /// editor that read the row, then saw another writer commit, then created its
 /// temporary and renamed it over the row, succeeds and silently replaces the
 /// other writer's change. The same race through `orna edit` (strong read
-/// baseline) is refused with E2000 (the stale-edit cause), which is the supported protection.
+/// baseline) is refused with ORNA-CMD-TARGET-UNAVAILABLE (the stale-edit cause), which is the supported protection.
 #[tokio::test]
 async fn blind_replacement_after_late_temp_overwrites_owner_change_while_orna_edit_refuses() {
     if !require_fuse_or_skip() {
@@ -1303,12 +1303,12 @@ async fn blind_replacement_after_late_temp_overwrites_owner_change_while_orna_ed
         "orna edit's strong read baseline refuses the save: {diagnostics}"
     );
     // The owner refuses the explicit edit with ESTALE, and the CLI reports that reply as the
-    // stale detail with E2000 (cli_mount.rs settle_owner_reply). The spec cause sys.vfs.stale_edit
-    // is in that detail, which --debug renders (ORNA-UX-004). E2000 relies on ESTALE on the wire:
+    // stale detail with ORNA-CMD-TARGET-UNAVAILABLE (cli_mount.rs settle_owner_reply). The spec cause sys.vfs.stale_edit
+    // is in that detail, which --debug renders (ORNA-UX-004). ORNA-CMD-TARGET-UNAVAILABLE relies on ESTALE on the wire:
     // EAGAIN surfaces as EOPNOTSUPP on this kernel (ornadb-eufo.1.1; tests/vfs_setxattr_errno_kernel_limit.rs).
     assert!(
-        diagnostics.contains("E2000"),
-        "the refusal carries the product code E2000: {diagnostics}"
+        diagnostics.contains("ORNA-CMD-TARGET-UNAVAILABLE"),
+        "the refusal carries the product code ORNA-CMD-TARGET-UNAVAILABLE: {diagnostics}"
     );
     assert!(
         diagnostics.contains("sys.vfs.stale_edit"),

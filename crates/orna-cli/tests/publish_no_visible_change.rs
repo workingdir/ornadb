@@ -259,7 +259,10 @@ async fn publish_rejects_noncanonical_source_key_before_candidate_changes() {
     assert!(!published.status.success());
     assert!(stdout(&published).is_empty());
     let error = String::from_utf8_lossy(&published.stderr);
-    assert!(error.contains("E2300"), "typed CLI error: {error}");
+    assert!(
+        error.contains("ORNA-CMD-WORKFLOW-REFUSED"),
+        "typed CLI error: {error}"
+    );
     assert!(
         error.contains("source row key is not canonical"),
         "source failure: {error}"
@@ -660,7 +663,7 @@ async fn publish_recovers_ref_advanced_journal_before_selecting_pending_tail() {
 
     let conflict = run(root_path, &["publish"]);
     assert!(!conflict.status.success());
-    assert!(String::from_utf8_lossy(&conflict.stderr).contains("E2300"));
+    assert!(String::from_utf8_lossy(&conflict.stderr).contains("ORNA-CMD-WORKFLOW-REFUSED"));
     assert_eq!(head(root_path), published_head);
     assert!(repository.read_publication_journal().unwrap().is_some());
     let (runtime_identity, initial_digest) = cli_runtime_identity(&repository);
@@ -686,7 +689,7 @@ async fn publish_recovers_ref_advanced_journal_before_selecting_pending_tail() {
         git_output(root_path, &["diff", "--cached", "--binary"], None);
     let rename_conflict = run(root_path, &["publish"]);
     assert!(!rename_conflict.status.success());
-    assert!(String::from_utf8_lossy(&rename_conflict.stderr).contains("E2300"));
+    assert!(String::from_utf8_lossy(&rename_conflict.stderr).contains("ORNA-CMD-WORKFLOW-REFUSED"));
     assert_eq!(head(root_path), published_head);
     assert!(repository.read_publication_journal().unwrap().is_some());
     let still_pending = RuntimeState::open(&repository, runtime_identity, initial_digest)

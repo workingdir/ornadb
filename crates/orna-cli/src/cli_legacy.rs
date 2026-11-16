@@ -104,7 +104,7 @@ pub(super) fn legacy_address(
         });
     if !safe {
         return Err(Diagnostic::target_with_detail(
-            "E2000",
+            "ORNA-CMD-TARGET-UNAVAILABLE",
             "Legacy table path is not a key-path directory",
             legacy_help,
             format!(
@@ -121,7 +121,7 @@ pub(super) fn legacy_address(
 /// snapshot does not hold, and an attached detail renders only with `--debug`.
 pub(super) fn legacy_read_error(error: &LegacyReadError, help: &'static str) -> Diagnostic {
     Diagnostic {
-        code: "E2000",
+        code: "ORNA-CMD-TARGET-UNAVAILABLE",
         title: Cow::Owned(error.to_string()),
         help,
         exit: Exit::Target,

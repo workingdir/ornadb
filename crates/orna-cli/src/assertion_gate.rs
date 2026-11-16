@@ -351,7 +351,7 @@ pub(crate) fn refusal_diagnostic(
                 }
             };
             (
-                "E2300",
+                "ORNA-CMD-WORKFLOW-REFUSED",
                 format!("{word} candidate could not be validated against its assertions: {cause}"),
                 help,
             )

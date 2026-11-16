@@ -426,7 +426,7 @@ fn devtools_removal_keeps_local_query_mount_and_content_io() {
     // absent entry and `/` is a JSON diagnostic, never HTML.
     remove_frontend(root);
     let (mut server, address) = start(root, true);
-    let diagnostic = server.await_stderr("E2102");
+    let diagnostic = server.await_stderr("ORNA-CMD-NO-SERVING-ENTRY");
     assert!(
         diagnostic.contains("no serving entry"),
         "diagnostic: {diagnostic}"

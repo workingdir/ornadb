@@ -23,33 +23,33 @@ pub(super) fn run_branch_create(endpoint: &Endpoint, name: &str) -> Result<(), D
 fn branch_create_diagnostic(name: &str, error: &RepositoryError) -> Diagnostic {
     match error {
         RepositoryError::InvalidBranchName => Diagnostic::usage(
-            "E1002",
+            "ORNA-CMD-ARGUMENT-INVALID",
             "invalid branch name",
             "use a name Git accepts, such as `orna branch feature-x`; HEAD and @ are reserved",
         ),
         RepositoryError::BranchExists => Diagnostic::target_with_detail(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "branch already exists",
             "choose another name, or switch to the existing branch with `orna checkout NAME`; no branch was created",
             format!("refs/heads/{name}"),
         ),
         RepositoryError::UnbornHead => Diagnostic::target(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "branch needs a commit to start from",
             "make a first commit on the current branch, then retry; no branch was created",
         ),
         RepositoryError::StaleHead => Diagnostic::target(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "HEAD moved while the branch was being created",
             "retry `orna branch NAME`; no branch was created",
         ),
         RepositoryError::RepositoryBusy => Diagnostic::target(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "repository coordination lock is busy",
             "wait for the active repository operation to finish, then retry; no branch was created",
         ),
         other => Diagnostic::target_with_detail(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "branch could not be created",
             "check the repository state, then retry; no branch was created",
             format!("{other:?}"),
@@ -167,7 +167,7 @@ fn read_checkout_runtime(repo: &Repository) -> Result<RuntimeReading, Diagnostic
 
 /// The runtime identity of a repository with Orna metadata. A plain Git
 /// repository has none and maps to `None` (ORNA-CLI-001). Any other failure to
-/// derive the identity keeps E2200.
+/// derive the identity keeps ORNA-CMD-RUNTIME-UNAVAILABLE.
 fn checkout_runtime_identity(
     repo: &Repository,
 ) -> Result<Option<(RuntimeIdentity, [u8; 32])>, Diagnostic> {
@@ -206,7 +206,7 @@ fn read_runtime(
 }
 
 /// True for a repository with a known, writable HEAD format and no database
-/// metadata. Any other failure to derive the runtime identity keeps E2200.
+/// metadata. Any other failure to derive the runtime identity keeps ORNA-CMD-RUNTIME-UNAVAILABLE.
 fn is_plain_git_repository(repo: &Repository) -> bool {
     repo.require_known_head_format().is_ok()
         && repo.require_writable_head_format().is_ok()
@@ -220,7 +220,7 @@ fn is_plain_git_repository(repo: &Repository) -> bool {
 /// them forward (CHECKOUT-3 step 4) is not built, so they would be left behind.
 fn pending_refusal(pending: usize) -> Diagnostic {
     Diagnostic {
-        code: "E2100",
+        code: "ORNA-CMD-REPOSITORY-UNAVAILABLE",
         title: Cow::Owned(format!(
             "checkout to a different commit is refused while {pending} unpublished change(s) are pending"
         )),
@@ -235,7 +235,7 @@ fn pending_refusal(pending: usize) -> Diagnostic {
 /// has uncommitted Git changes: the checkout would overwrite them.
 fn conflict_refusal(paths: &str) -> Diagnostic {
     Diagnostic {
-        code: "E2100",
+        code: "ORNA-CMD-REPOSITORY-UNAVAILABLE",
         title: Cow::Owned(format!(
             "checkout would overwrite uncommitted changes to {paths}"
         )),
@@ -248,7 +248,7 @@ fn conflict_refusal(paths: &str) -> Diagnostic {
 
 fn runtime_in_use() -> Diagnostic {
     Diagnostic::target(
-        "E2100",
+        "ORNA-CMD-REPOSITORY-UNAVAILABLE",
         "local runtime is in use by another Orna process",
         "wait for the other Orna process to finish, then retry `orna checkout NAME`; no change was made",
     )
@@ -256,7 +256,7 @@ fn runtime_in_use() -> Diagnostic {
 
 fn checkout_runtime_unavailable() -> Diagnostic {
     Diagnostic::target(
-        "E2200",
+        "ORNA-CMD-RUNTIME-UNAVAILABLE",
         "local runtime state needed by checkout could not be read",
         "retry after checking local runtime state; no change was made",
     )
@@ -265,17 +265,17 @@ fn checkout_runtime_unavailable() -> Diagnostic {
 fn checkout_diagnostic(error: &RepositoryError) -> Diagnostic {
     match error {
         RepositoryError::InvalidSelector => Diagnostic::usage(
-            "E1002",
+            "ORNA-CMD-ARGUMENT-INVALID",
             "checkout target is not a branch or commit",
             "name an existing branch or commit, such as `orna checkout main`; no change was made",
         ),
         RepositoryError::RepositoryBusy => Diagnostic::target(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "repository coordination lock is busy",
             "wait for the active repository operation to finish, then retry; no change was made",
         ),
         RepositoryError::CheckoutPlanStale | RepositoryError::StaleCwd => Diagnostic::target(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "the checkout plan went stale before it ran",
             "retry `orna checkout NAME`; no change was made",
         ),
@@ -283,17 +283,17 @@ fn checkout_diagnostic(error: &RepositoryError) -> Diagnostic {
             refusal_diagnostic(refusal, GatedCommand::Checkout, error)
         }
         RepositoryError::CheckoutTargetInvalid => Diagnostic::target(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "checkout target could not be admitted",
             "the target commit's Orna format, schema or store is not admitted by this build; no change was made",
         ),
         RepositoryError::CheckoutExecutionUnsafe => Diagnostic::target(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "checkout refused: the working tree cannot be moved to the target safely",
             "no change was made; retry `orna checkout NAME`",
         ),
         other => Diagnostic::target_with_detail(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "checkout could not be completed",
             "check the repository state, then retry; no change was made",
             format!("{other:?}"),

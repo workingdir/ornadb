@@ -2916,7 +2916,7 @@ fn storage_unobservable(db: &mut Db) -> Probe {
 }
 
 /// The REPL evaluates against a committed HEAD. A fresh project has no HEAD, so
-/// the REPL refuses effectful input with E2200 before the blocker is reached.
+/// the REPL refuses effectful input with ORNA-CMD-RUNTIME-UNAVAILABLE before the blocker is reached.
 /// The probe commits one admitted table so the REPL reaches the blocker itself.
 fn committed_repl_project(db: &mut Db) -> Result<(), Failure> {
     db.declare("pub table Note(id: Str) { text: Str, }\n")?;

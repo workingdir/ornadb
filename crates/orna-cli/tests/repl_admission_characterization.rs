@@ -16,8 +16,8 @@ fn combined(output: &ReplRun) -> String {
 }
 
 /// Current behaviour: a namespaced non-std `pub protocol` is not admitted; the
-/// REPL reports the fixed E2200 sentence and does not name the protocol.
-/// R1 changes this to name `Sink` and its span; the E2200 code stays.
+/// REPL reports the fixed ORNA-CMD-RUNTIME-UNAVAILABLE sentence and does not name the protocol.
+/// R1 changes this to name `Sink` and its span; the ORNA-CMD-RUNTIME-UNAVAILABLE code stays.
 #[test]
 fn characterizes_current_behaviour_namespaced_protocol_is_rejected_with_fixed_e2200() {
     let project = initialized_project(&[
@@ -31,7 +31,7 @@ fn characterizes_current_behaviour_namespaced_protocol_is_rejected_with_fixed_e2
     let output = run_one_shot(project.path(), "main.answer()");
     let text = combined(&output);
     assert!(!output.status.success(), "{text}");
-    assert!(text.contains("E2200"), "{text}");
+    assert!(text.contains("ORNA-CMD-RUNTIME-UNAVAILABLE"), "{text}");
     assert!(
         text.contains("project REPL session is not available"),
         "{text}"
@@ -74,7 +74,7 @@ fn characterizes_current_behaviour_fn_main_typed_in_repl_is_accepted_without_ent
 
 /// Current behaviour: a root top-level `assert` declaration is outside the
 /// admitted REPL set (`_ => ORNA-REPL-UNSUPPORTED`), so the whole project
-/// session is refused with the fixed E2200 sentence, even for an unrelated
+/// session is refused with the fixed ORNA-CMD-RUNTIME-UNAVAILABLE sentence, even for an unrelated
 /// root function. R1 names the `assert` declaration.
 #[test]
 fn characterizes_current_behaviour_root_top_level_assert_refuses_the_whole_session() {
@@ -84,5 +84,5 @@ fn characterizes_current_behaviour_root_top_level_assert_refuses_the_whole_sessi
     let output = run_one_shot(project.path(), "main.answer()");
     let text = combined(&output);
     assert!(!output.status.success(), "{text}");
-    assert!(text.contains("E2200"), "{text}");
+    assert!(text.contains("ORNA-CMD-RUNTIME-UNAVAILABLE"), "{text}");
 }

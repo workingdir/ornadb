@@ -36,7 +36,7 @@ pub(crate) fn run_repl_hir(
 ) -> Result<(), Diagnostic> {
     if repl_repository(endpoint)?.is_some() {
         return Err(Diagnostic::target(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "ORNA_REPL_HIR serves only a REPL outside a Git worktree",
             "run `orna repl` outside the project worktree, or unset ORNA_REPL_HIR for the project REPL",
         ));
@@ -62,7 +62,7 @@ pub(crate) fn run_repl_hir(
 
 fn console_failed() -> Diagnostic {
     Diagnostic::target(
-        "E2200",
+        "ORNA-CMD-OUTPUT-FAILED",
         "REPL console I/O failed",
         "check the terminal input and output streams, then start a new session",
     )

@@ -4710,7 +4710,7 @@ async fn cwd_mount_blob_racing_sibling_accepts_never_commit_mixed_bytes() {
     });
     let final_bytes = std::fs::read(&blob_path).unwrap();
     // Siblings that lost the race leave `sys.vfs.stale_edit` drafts, which correctly refuse a clean
-    // unmount (ORNA-VFS-009). Stop the mount process instead; E2000 help says this retains every draft
+    // unmount (ORNA-VFS-009). Stop the mount process instead; ORNA-CMD-TARGET-UNAVAILABLE help says this retains every draft
     // in recovery storage. The `MountedProcess` drop then detaches the FUSE mountpoint.
     stop_mount_retaining_drafts(&mut row.mounted);
     assert!(

@@ -535,7 +535,7 @@ pub(super) fn run(endpoint: &Endpoint, port: u16, allow_push: bool) -> Result<()
     let clone = open_served_clone(endpoint)?;
     let listener = LiveTransport::bind_default_listener(port).map_err(|_| {
         Diagnostic::target(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "the loopback serving listener could not be bound",
             "choose a free port with `serve --port PORT`, then retry",
         )
@@ -558,7 +558,7 @@ pub(super) fn run(endpoint: &Endpoint, port: u16, allow_push: bool) -> Result<()
     )
     .map_err(|_| {
         Diagnostic::target(
-            "E2200",
+            "ORNA-CMD-RUNTIME-UNAVAILABLE",
             "serving status could not be written",
             "check the output stream, then start `serve` again",
         )
@@ -566,7 +566,7 @@ pub(super) fn run(endpoint: &Endpoint, port: u16, allow_push: bool) -> Result<()
 
     serve_listener(listener.listener(), &Arc::new(state)).map_err(|_| {
         Diagnostic::target(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "the serving listener stopped",
             "check local socket access, then retry `serve`",
         )
@@ -597,7 +597,7 @@ fn open_served_clone(endpoint: &Endpoint) -> Result<ServedClone, Diagnostic> {
     let root = local_project_path(endpoint)?;
     let repository = Repository::discover(root).map_err(|_| {
         Diagnostic::target(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "local Git worktree could not be discovered",
             "run `serve` inside an Orna Git worktree or provide a local project path",
         )
@@ -617,7 +617,7 @@ fn open_served_clone(endpoint: &Endpoint) -> Result<ServedClone, Diagnostic> {
     let owner_id = orna_runtime::process_owner_id();
     let executor = current_thread_executor().map_err(|_| {
         Diagnostic::target(
-            "E2200",
+            "ORNA-CMD-RUNTIME-UNAVAILABLE",
             "the clone's runtime state could not be opened",
             "check the local runtime state, then retry `serve`",
         )
@@ -631,7 +631,7 @@ fn open_served_clone(endpoint: &Endpoint) -> Result<ServedClone, Diagnostic> {
         ))
         .map_err(|error| {
             Diagnostic::target_with_detail(
-                "E2200",
+                "ORNA-CMD-RUNTIME-UNAVAILABLE",
                 "the clone's runtime state could not be opened",
                 "check the local runtime state, then retry `serve`",
                 format!("runtime error: {error:?}"),
@@ -812,7 +812,7 @@ fn new_serve_state(
     };
     let origins = loopback.origins().map_err(|_| {
         Diagnostic::target(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "the loopback serving origin is invalid",
             "retry `serve` with a supported local listener",
         )
@@ -823,7 +823,7 @@ fn new_serve_state(
         boundary,
         Serving::new(orna_serving::Limits::default()).map_err(|_| {
             Diagnostic::target(
-                "E2100",
+                "ORNA-CMD-REPOSITORY-UNAVAILABLE",
                 "serving limits could not be initialized",
                 "retry `serve`; the local serving state is unavailable",
             )
@@ -835,7 +835,7 @@ fn new_serve_state(
     )
     .map_err(|_| {
         Diagnostic::target(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "the live protocol host could not be initialized",
             "retry `serve`; the local serving state is unavailable",
         )
@@ -856,7 +856,7 @@ fn new_serve_state(
     };
     let live = LiveTransport::new(host, transport_limits).map_err(|_| {
         Diagnostic::target(
-            "E2100",
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "the live transport could not be initialized",
             "retry `serve`; the local serving state is unavailable",
         )

@@ -1,6 +1,6 @@
 //! Exit-code proof for `orna import --dry-run --type` when the media type cannot
 //! be admitted. The value is rejected while parsing arguments, before any bundle
-//! row is read, so the binary must exit 1 with E2000 and write nothing to stdout.
+//! row is read, so the binary must exit 1 with ORNA-CMD-TARGET-UNAVAILABLE and write nothing to stdout.
 
 use std::{
     path::Path,
@@ -45,7 +45,10 @@ fn unsupported_media_type_exits_one_with_e2000_and_no_report() {
         String::from_utf8_lossy(&rejected.stdout)
     );
     let stderr = String::from_utf8_lossy(&rejected.stderr);
-    assert!(stderr.contains("E2000"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("ORNA-CMD-TARGET-UNAVAILABLE"),
+        "stderr: {stderr}"
+    );
     assert!(
         stderr.contains("--type is not a valid media type"),
         "stderr: {stderr}"

@@ -96,7 +96,7 @@ fn invalid_constructions_fail_check_with_published_codes() {
         assert_eq!(
             String::from_utf8_lossy(&output.stderr),
             format!(
-                "error[E2101]: project semantic analysis failed\n  {detail}\nhelp: fix the first reported source contract error, then run check again\n"
+                "error[ORNA-CMD-SEMANTIC-FAILED]: project semantic analysis failed\n  {detail}\nhelp: fix the first reported source contract error, then run check again\n"
             ),
             "{fixture}"
         );

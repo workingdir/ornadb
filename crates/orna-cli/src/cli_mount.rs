@@ -19,7 +19,7 @@ use orna_repository::{MountStatus, MountView, Repository};
 
 fn mount_error(title: &'static str, detail: impl Into<String>) -> Diagnostic {
     Diagnostic::target_with_detail(
-        "E2000",
+        "ORNA-CMD-TARGET-UNAVAILABLE",
         title,
         "run mount DIR --cwd or mount DIR --at SELECTOR inside an initialized repository",
         detail.into(),
@@ -116,7 +116,7 @@ fn abort_start(view: MountView, mut failure: Diagnostic) -> Diagnostic {
 fn attach_refusal(error: orna_repository::MountError) -> Diagnostic {
     match error {
         orna_repository::MountError::MountpointAlreadyAttached => Diagnostic::target_with_detail(
-            "E2000",
+            "ORNA-CMD-TARGET-UNAVAILABLE",
             "Mount was refused",
             "a view is already registered at this mountpoint; run unmount DIR to release it when no mount process serves it",
             error.to_string(),
@@ -295,7 +295,7 @@ fn serve_mount(
     match end {
         MountEnd::Clean => Ok(()),
         MountEnd::DraftsRetained => Err(Diagnostic::target_with_detail(
-            "E2000",
+            "ORNA-CMD-TARGET-UNAVAILABLE",
             "Mount stopped with unresolved drafts retained",
             "the drafts listed above were not saved: reapply them from the listed recovery records, or from the scratch files the next mount restores",
             "a termination signal stopped the mount while drafts were unresolved",
@@ -360,7 +360,7 @@ fn edit_refusal(error: orna_fuse::EditError) -> Diagnostic {
     // output prints; the technical cause stays in the detail shown under --debug (ORNA-UX-004).
     match error {
         EditError::Stale { message, draft } => Diagnostic::target_with_detail(
-            "E2000",
+            "ORNA-CMD-TARGET-UNAVAILABLE",
             format!(
                 "Edit is stale against the mounted baseline; draft retained at {}",
                 draft.display()
@@ -372,7 +372,7 @@ fn edit_refusal(error: orna_fuse::EditError) -> Diagnostic {
             message,
             draft: Some(draft),
         } => Diagnostic::target_with_detail(
-            "E2000",
+            "ORNA-CMD-TARGET-UNAVAILABLE",
             format!(
                 "Edit was not accepted; draft retained at {}",
                 draft.display()
@@ -520,7 +520,7 @@ fn settle_owner_reply(
         return Ok(());
     }
     Err(Diagnostic::target_with_detail(
-        "E2010",
+        "ORNA-CMD-MOUNT-OUTCOME-UNKNOWN",
         format!(
             "Edit outcome is unknown; draft retained at {}",
             draft.display()
@@ -1288,7 +1288,7 @@ fn unresolved_drafts_refusal(mountpoint: &Path) -> Diagnostic {
         }
     }
     Diagnostic::target_with_detail(
-        "E2000",
+        "ORNA-CMD-TARGET-UNAVAILABLE",
         "Unmount was refused",
         "unresolved workspace drafts remain (listed above): reopen each listed data.orna, which shows the current row, reapply or drop your change and fsync it; rename or remove each listed scratch file; close editors holding unsynced writes; or stop the mount process to retain every draft in recovery storage",
         "the FUSE mount and its repository view remain attached",
@@ -2035,7 +2035,7 @@ mod tests {
             let draft = retained_draft(directory.path());
             let diagnostic = settle_owner_reply(Err(Errno::NOTCONN), &draft)
                 .expect_err("a retained draft leaves the outcome unknown");
-            assert_eq!(diagnostic.code, "E2010");
+            assert_eq!(diagnostic.code, "ORNA-CMD-MOUNT-OUTCOME-UNKNOWN");
             assert!(
                 diagnostic.title.starts_with("Edit outcome is unknown"),
                 "{}",
@@ -2076,7 +2076,7 @@ mod tests {
                 for errno in [Errno::BUSY, Errno::IO, Errno::INVAL, Errno::NODATA] {
                     let diagnostic = settle_owner_reply(Err(errno), &draft)
                         .expect_err("a definite refusal is an error");
-                    assert_eq!(diagnostic.code, "E2000", "{errno}");
+                    assert_eq!(diagnostic.code, "ORNA-CMD-TARGET-UNAVAILABLE", "{errno}");
                     assert!(
                         diagnostic.title.starts_with("Edit was not accepted"),
                         "{errno}: {}",
@@ -2121,7 +2121,7 @@ mod tests {
             let draft = retained_draft(directory.path());
             let diagnostic = settle_owner_reply(Err(Errno::STALE), &draft)
                 .expect_err("a stale baseline is refused");
-            assert_eq!(diagnostic.code, "E2000");
+            assert_eq!(diagnostic.code, "ORNA-CMD-TARGET-UNAVAILABLE");
             assert!(
                 diagnostic
                     .title

@@ -1,5 +1,5 @@
 //! Parse-phase invalid fixtures must reach the CLI with their spec code as the
-//! primary diagnostic and a source location, not the loader's generic E2100
+//! primary diagnostic and a source location, not the loader's generic ORNA-CMD-REPOSITORY-UNAVAILABLE
 //! wrapper. An invalid loose row unit must fail `check` with its parser code.
 
 use std::process::{Command, Output};
@@ -249,7 +249,7 @@ fn parse_phase_module_fixtures_report_their_spec_code() {
             "{name} must report the source location: {stderr:?}"
         );
         assert!(
-            !stderr.contains("E2100"),
+            !stderr.contains("ORNA-CMD-REPOSITORY-UNAVAILABLE"),
             "{name} must not be replaced by the loader code: {stderr:?}"
         );
     }
@@ -275,7 +275,7 @@ fn invalid_loose_row_unit_fails_check_with_parser_code() {
         "row-declaration must report its row location: {stderr:?}"
     );
     assert!(
-        !stderr.contains("E2100"),
+        !stderr.contains("ORNA-CMD-REPOSITORY-UNAVAILABLE"),
         "row-declaration must not be replaced by the loader code: {stderr:?}"
     );
 }

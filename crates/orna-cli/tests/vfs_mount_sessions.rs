@@ -595,7 +595,7 @@ fn repl_update(repository: &Path, key: &str, title: &str) -> Output {
 /// live mount holds the writer lease is refused with `ORNA-REPL-EFFECT` and does
 /// not land, so the row the mount reads is unchanged. The mount's save is then
 /// accepted. Only the lease refusal is proven: no competing change lands under
-/// the lease, so the stale-baseline `E2000` path is not exercised here.
+/// the lease, so the stale-baseline `ORNA-CMD-TARGET-UNAVAILABLE` path is not exercised here.
 #[tokio::test]
 async fn repl_write_refused_by_live_mount_writer_lease_leaves_mount_save_accepted() {
     if !require_fuse_or_skip() {

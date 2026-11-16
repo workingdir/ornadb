@@ -3,17 +3,17 @@
 //! stale expected-version errno. In upstream fs/xattr.c (v6.19),
 //! `__vfs_setxattr_noperm` (lines 245-246) rewrites a `-EAGAIN` returned by a
 //! setxattr handler to `-EOPNOTSUPP` (95). The `orna edit` xattr commit path
-//! therefore cannot carry `EAGAIN`: `orna edit` would report E2010 ("outcome
-//! unknown") instead of E2000. `ESTALE` (116) is not rewritten. The kernel
+//! therefore cannot carry `EAGAIN`: `orna edit` would report ORNA-CMD-MOUNT-OUTCOME-UNKNOWN ("outcome
+//! unknown") instead of ORNA-CMD-TARGET-UNAVAILABLE. `ESTALE` (116) is not rewritten. The kernel
 //! retries a setxattr that fails with `ESTALE` once, with `LOOKUP_REVAL`
 //! (`retry_estale` in `filename_setxattr`, fs/xattr.c lines 669-671), so the
 //! daemon receives two calls. The production daemon uses `ESTALE` for the stale
 //! refusal (`fuse_mount.rs`, the `EditError::Stale` arm of the xattr commit).
 //!
 //! Production coverage of that arm is end to end in `tests/vfs_mount_isolation.rs`:
-//! `orna_edit_refuses_save_when_row_changed_during_editor_session` asserts E2000
+//! `orna_edit_refuses_save_when_row_changed_during_editor_session` asserts ORNA-CMD-TARGET-UNAVAILABLE
 //! at line 446, and `blind_replacement_after_late_temp_overwrites_owner_change_while_orna_edit_refuses`
-//! asserts E2000 at line 824. Tracked by ornadb-eufo.1.1; the spec amendment is
+//! asserts ORNA-CMD-TARGET-UNAVAILABLE at line 824. Tracked by ornadb-eufo.1.1; the spec amendment is
 //! ornadb-eufo.1.2.
 //!
 //! The test mounts a test-only FUSE daemon that replies to `setxattr` with a

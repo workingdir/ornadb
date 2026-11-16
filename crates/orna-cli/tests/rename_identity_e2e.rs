@@ -278,7 +278,7 @@ fn mv_then_commit_keeps_the_table_object_id_and_its_relation() {
 }
 
 /// Before the first commit nothing records the table's identity, so `orna
-/// mv` refuses with E2101 and changes neither the source nor the staged
+/// mv` refuses with ORNA-CMD-SEMANTIC-FAILED and changes neither the source nor the staged
 /// entries (ORNA-OBJECT-004: no committed identity metadata to tie the
 /// rename to). Git may still refresh its own index caches.
 #[test]
@@ -292,7 +292,7 @@ fn mv_before_the_first_commit_refuses_without_changing_anything() {
 
     assert_eq!(refused.status.code(), Some(1), "{}", transcript(&refused));
     assert!(
-        String::from_utf8_lossy(&refused.stderr).contains("E2101"),
+        String::from_utf8_lossy(&refused.stderr).contains("ORNA-CMD-SEMANTIC-FAILED"),
         "{}",
         transcript(&refused)
     );
