@@ -17,7 +17,7 @@ use crate::native_graph::{
     GitHashAlgorithm, GraphError, NativeGraphContext, NativeGraphIssuance, NativeOid,
     RepositoryCaptureCapability,
 };
-use crate::object_reader::{ObjectKind, ObjectReader, TreeEntry, TreeEntryMode};
+use crate::object_reader::{ObjectKind, TreeEntry, TreeEntryMode};
 use crate::row_store::RowMapSnapshot;
 use crate::{Repository, RepositoryError};
 use orna_value::{
@@ -1343,7 +1343,7 @@ impl Repository {
         &self,
         tree: &crate::IndexTreeRef,
     ) -> Result<(), FormatContextError> {
-        let metadata = read_tracked_metadata(self.objects(), tree.as_str())?;
+        let metadata = read_tracked_metadata(self, tree.as_str())?;
         let (format, _) = admit_metadata(&metadata, &[])?;
         if !format.supports_writes() {
             return Err(FormatContextError::LegacyReadOnly(format.number()));
@@ -1523,7 +1523,7 @@ fn read_snapshot_metadata(
             .oid()
             .to_owned(),
     };
-    read_tracked_metadata(objects, &root)
+    read_tracked_metadata(repository, &root)
 }
 
 /// Reads the `.orna` directory of one root tree.
@@ -1537,9 +1537,10 @@ fn read_snapshot_metadata(
 /// grows with the rows it holds, and its size must not decide whether
 /// metadata can be read (ORNA-ROW-009).
 fn read_tracked_metadata(
-    objects: &ObjectReader,
+    repository: &Repository,
     root: &str,
 ) -> Result<TrackedMetadata, FormatContextError> {
+    let objects = repository.objects();
     let mut metadata = TrackedMetadata {
         database: None,
         legacy_format: None,
@@ -1569,7 +1570,7 @@ fn read_tracked_metadata(
         if record.is_some() {
             return Err(FormatContextError::MetadataInvalid);
         }
-        *record = Some(read_metadata_blob(objects, &entry)?);
+        *record = Some(read_metadata_blob(repository, &entry)?);
     }
     Ok(metadata)
 }
@@ -1577,7 +1578,7 @@ fn read_tracked_metadata(
 /// Reads one metadata blob under the record bound. A metadata path that holds
 /// a directory, symlink or submodule is present but invalid.
 fn read_metadata_blob(
-    objects: &ObjectReader,
+    repository: &Repository,
     entry: &TreeEntry,
 ) -> Result<Vec<u8>, FormatContextError> {
     if !matches!(
@@ -1586,8 +1587,13 @@ fn read_metadata_blob(
     ) {
         return Err(FormatContextError::MetadataInvalid);
     }
-    objects
-        .read_blob(entry.oid(), FORMAT_CONTEXT_MAX_METADATA_BYTES)
+    repository
+        .ensure_blob_readable(entry.oid())
+        .and_then(|()| {
+            repository
+                .objects()
+                .read_blob(entry.oid(), FORMAT_CONTEXT_MAX_METADATA_BYTES)
+        })
         .map_err(map_metadata_read_error)
 }
 

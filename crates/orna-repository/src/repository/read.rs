@@ -159,6 +159,7 @@ impl Repository {
         let object = String::from_utf8(record.object.to_vec())
             .map_err(|_| RepositoryError::GitOperationFailed)?;
         require_native_object_id(&object, self.native_object_id_length()?)?;
+        self.ensure_blob_readable(&object)?;
 
         let mut size_command = self.command();
         size_command

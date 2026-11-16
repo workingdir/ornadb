@@ -54,6 +54,7 @@ mod index_lock;
 mod init;
 mod journal;
 mod locks;
+mod metadata_hydration;
 pub mod migration_copy;
 mod mount;
 mod native_graph;
