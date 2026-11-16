@@ -13,9 +13,10 @@ use orna_project_repl::ReplDetail;
 
 use crate::repl::{
     AnsiColor, ReadSubmission, ReplFailure, parse_help_command, parse_snapshot_target,
-    parse_watch_source, read_submission, render_repl_failure, write_rendered_error,
-    write_rendered_value, write_repl_error, write_repl_failure, write_styled,
+    parse_watch_source, render_repl_failure, write_rendered_error, write_rendered_value,
+    write_repl_error, write_repl_failure, write_styled,
 };
+use crate::repl_continuation::read_complete_submission;
 use crate::repl_run::repl_failure_diagnostic;
 use crate::repl_session::repl_repository;
 use crate::{ColorMode, Diagnostic, Endpoint};
@@ -117,7 +118,7 @@ fn run_console<R: BufRead, W: Write>(
     loop {
         write_styled(writer, AnsiColor::Dim, b"> ", color_enabled)?;
         writer.flush()?;
-        let source = match read_submission(reader)? {
+        let source = match read_complete_submission(reader, writer, color_enabled)? {
             ReadSubmission::Eof => return Ok(()),
             ReadSubmission::TooLong => {
                 write_repl_error(writer, "ORNA-REPL-INPUT-LIMIT", color_enabled)?;
