@@ -815,9 +815,6 @@ impl Builder {
             conversion_source,
         );
         self.self_ty = None;
-        for member in &members {
-            self.program.implementation_owner.insert(*member, owner);
-        }
         if let Some(source) = conversion_source
             && self.conversion_source_declared(owner, source)
         {
