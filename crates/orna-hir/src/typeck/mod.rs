@@ -169,9 +169,11 @@ impl TypeCheckSummary {
 pub fn typeck(program: &mut Program) -> TypeCheckSummary {
     conversion::check_declared_overlaps(program);
     let variant_owner = variant_owners(program);
+    let nominal = nominal_owners(program);
     let mut checker = TypeChecker {
         program,
         variant_owner,
+        nominal_owners: nominal,
         outcomes: Vec::new(),
         done: BTreeSet::new(),
     };
@@ -189,6 +191,41 @@ fn variant_owners(program: &Program) -> BTreeMap<DefId, DefId> {
             for variant in &enumeration.variants {
                 owners.insert(*variant, def);
             }
+        }
+    }
+    owners
+}
+
+/// The nominal owners a body check needs: the type each nominal field belongs
+/// to, and the type each implementation member is declared on.
+#[derive(Default)]
+struct NominalOwners {
+    /// Each field of a nominal type, mapped to that type.
+    field_owner: BTreeMap<DefId, DefId>,
+    /// Each member of an implementation, mapped to the type it is declared on.
+    implementation_owner: BTreeMap<DefId, DefId>,
+}
+
+/// Maps each nominal field to its type, and each implementation member to the
+/// type its implementation is declared on.
+fn nominal_owners(program: &Program) -> NominalOwners {
+    let mut owners = NominalOwners::default();
+    for (def, definition) in program.defs.iter_enumerated() {
+        match &definition.kind {
+            DefKind::Type(declared) => {
+                for member in &declared.members {
+                    if program.defs[*member].kind.is_field() {
+                        owners.field_owner.insert(*member, def);
+                    }
+                }
+            }
+            DefKind::Impl(implementation) => {
+                let owner = implementation.owner;
+                for member in &implementation.members {
+                    owners.implementation_owner.insert(*member, owner);
+                }
+            }
+            _ => {}
         }
     }
     owners
@@ -239,6 +276,7 @@ enum Attempt {
 struct TypeChecker<'a> {
     program: &'a mut Program,
     variant_owner: BTreeMap<DefId, DefId>,
+    nominal_owners: NominalOwners,
     outcomes: Vec<BodyOutcome>,
     done: BTreeSet<BodyId>,
 }
@@ -353,7 +391,12 @@ impl TypeChecker<'_> {
             }
             _ => None,
         };
-        let mut check = BodyCheck::new(&mut *self.program, &self.variant_owner, owner);
+        let mut check = BodyCheck::new(
+            &mut *self.program,
+            &self.variant_owner,
+            &self.nominal_owners,
+            owner,
+        );
         let root = check.check_root(body_id, expected);
         let root_ty = match root {
             Ok(root_ty) => root_ty,
@@ -488,6 +531,7 @@ impl TypeChecker<'_> {
 struct BodyCheck<'a> {
     program: &'a mut Program,
     variant_owner: &'a BTreeMap<DefId, DefId>,
+    nominal_owners: &'a NominalOwners,
     /// The definition whose body is being checked; its generics bound the
     /// `Param` types the body names.
     owner: DefId,
@@ -506,11 +550,13 @@ impl<'a> BodyCheck<'a> {
     fn new(
         program: &'a mut Program,
         variant_owner: &'a BTreeMap<DefId, DefId>,
+        nominal_owners: &'a NominalOwners,
         owner: DefId,
     ) -> Self {
         Self {
             program,
             variant_owner,
+            nominal_owners,
             owner,
             infer: crate::infer::InferCtxt::new(),
             diagnostics: Vec::new(),
@@ -679,7 +725,13 @@ impl<'a> BodyCheck<'a> {
     /// Reports one constraint conflict (ORNA-INFER-011). The same conflict at
     /// the same span, reached by two constraints, is reported once.
     fn conflict(&mut self, message: impl Into<Box<str>>, span: SyntaxSpan) {
-        let diagnostic = HirDiagnostic::new(INFER_CONFLICT, message.into(), span);
+        self.reject(INFER_CONFLICT, message, span);
+    }
+
+    /// Records one diagnostic under `code`. The same diagnostic at the same
+    /// span, reached twice, is recorded once.
+    fn reject(&mut self, code: &'static str, message: impl Into<Box<str>>, span: SyntaxSpan) {
+        let diagnostic = HirDiagnostic::new(code, message.into(), span);
         if self.diagnostics.contains(&diagnostic) {
             return;
         }
@@ -996,7 +1048,7 @@ impl<'a> BodyCheck<'a> {
                         }
                         Ok(())
                     }
-                    Some(TyKind::Adt(..)) => {
+                    Some(TyKind::Adt(def, _)) => {
                         let declared = self.nominal_fields_of(resolved).ok_or_else(|| {
                             NotYetReason::Unsupported(
                                 "a record pattern against this nominal type is not on HIR".into(),
@@ -1006,6 +1058,9 @@ impl<'a> BodyCheck<'a> {
                             if let Some((_, field_ty)) =
                                 declared.iter().find(|(field, _)| field == name)
                             {
+                                if let Some(field) = self.find_field(def, name) {
+                                    self.reject_private_pattern_field(field, span.clone());
+                                }
                                 self.bind_pattern(body, *pattern, *field_ty, span.clone())?;
                             } else {
                                 self.conflict(
@@ -1026,6 +1081,7 @@ impl<'a> BodyCheck<'a> {
                 let result = self.ctor_result_ty(def, span.clone())?;
                 self.unify(ty, result, span.clone());
                 for (field, pattern) in &fields {
+                    self.reject_private_pattern_field(*field, span.clone());
                     let field_ty = self.field_in(result, *field)?;
                     self.bind_pattern(body, *pattern, field_ty, span.clone())?;
                 }

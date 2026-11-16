@@ -14,12 +14,15 @@
 /// The source of the attached fixture tables and nominal types that stay under
 /// `fixture.attached`. `Contact` is not here: the `contacts` database below owns it,
 /// and reference cases reach it by its bare name through `use contacts.*;`.
+/// `EmailHeader.address` is public: the valid reference case `nominal-type-nested-impl` reads it from a
+/// nested `impl From<EmailHeader>` outside the module that declares `EmailHeader`, and the catalogue
+/// states no visibility for it.
 pub const ATTACHED_SUPPORT: &str = "\
 use fixture.currencies.*;
 pub type Account {}
 pub type Customer {}
 pub type EmailHeader {
-    address: Str,
+    pub address: Str,
 }
 pub table Note {
     created: Instant,

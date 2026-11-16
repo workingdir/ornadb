@@ -8,7 +8,7 @@ use crate::{Callee, DefKind, ExprKind, FnBody, Program, print_type};
 #[test]
 fn a_generic_constructor_result_carries_its_arguments() {
     let mut program = program(
-        "pub type Box<T> {\n    value: T,\n}\n\
+        "pub type Box<T> {\n    pub value: T,\n}\n\
          pub fn make(): Box<Int> = Box { value: 1 };\n\
          pub fn read(b: Box<Int>): Int = b.value;\n",
     );
@@ -26,7 +26,7 @@ fn a_generic_constructor_result_carries_its_arguments() {
 #[test]
 fn a_user_declared_range_is_the_nominal_range_type() {
     let mut program = program(
-        "pub type Range<T> {\n    lo: T,\n    hi: T,\n}\n\
+        "pub type Range<T> {\n    pub lo: T,\n    hi: T,\n}\n\
          pub fn make(): Range<Int> = Range { lo: 1, hi: 2 };\n\
          pub fn low(r: Range<Int>): Int = r.lo;\n",
     );
