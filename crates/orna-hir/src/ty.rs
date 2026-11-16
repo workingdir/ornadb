@@ -207,6 +207,96 @@ impl TyInterner {
     pub fn error(&mut self) -> Ty {
         self.intern(TyKind::Error)
     }
+
+    /// Replaces each generic parameter in `ty` with the matching argument in `targs`. A parameter with no
+    /// matching argument is kept.
+    pub fn substitute(&mut self, ty: Ty, targs: &[Ty]) -> Ty {
+        let Some(kind) = self.kind(ty).cloned() else {
+            return ty;
+        };
+        let rebuilt = match kind {
+            TyKind::Param(index) => {
+                return targs.get(index.as_u32() as usize).copied().unwrap_or(ty);
+            }
+            TyKind::Option(inner) => TyKind::Option(self.substitute(inner, targs)),
+            TyKind::List(inner) => TyKind::List(self.substitute(inner, targs)),
+            TyKind::Set(inner) => TyKind::Set(self.substitute(inner, targs)),
+            TyKind::Range(inner) => TyKind::Range(self.substitute(inner, targs)),
+            TyKind::Relation(inner) => TyKind::Relation(self.substitute(inner, targs)),
+            TyKind::Stream(inner) => TyKind::Stream(self.substitute(inner, targs)),
+            TyKind::Map(key, value) => {
+                TyKind::Map(self.substitute(key, targs), self.substitute(value, targs))
+            }
+            TyKind::Tuple(elements) => TyKind::Tuple(
+                elements
+                    .iter()
+                    .map(|element| self.substitute(*element, targs))
+                    .collect(),
+            ),
+            TyKind::Record(fields) => TyKind::Record(
+                fields
+                    .iter()
+                    .map(|(name, field)| (name.clone(), self.substitute(*field, targs)))
+                    .collect(),
+            ),
+            TyKind::Adt(def, arguments) => TyKind::Adt(
+                def,
+                arguments
+                    .iter()
+                    .map(|argument| self.substitute(*argument, targs))
+                    .collect(),
+            ),
+            TyKind::Fn(function) => TyKind::Fn(FnTy {
+                params: function
+                    .params
+                    .iter()
+                    .map(|parameter| self.substitute(*parameter, targs))
+                    .collect(),
+                ret: self.substitute(function.ret, targs),
+                effects: function.effects,
+            }),
+            _ => return ty,
+        };
+        self.intern(rebuilt)
+    }
+
+    /// Whether `ty` mentions an error or never type anywhere in its structure. Such a type was already
+    /// reported where it was written, so overlap checks do not compare it.
+    #[must_use]
+    pub fn mentions_bottom(&self, ty: Ty) -> bool {
+        match self.kind(ty) {
+            Some(TyKind::Error | TyKind::Never) => true,
+            Some(
+                TyKind::Quantity(inner, _)
+                | TyKind::Option(inner)
+                | TyKind::List(inner)
+                | TyKind::Set(inner)
+                | TyKind::Range(inner)
+                | TyKind::Relation(inner)
+                | TyKind::Stream(inner),
+            ) => self.mentions_bottom(*inner),
+            Some(TyKind::Map(key, value)) => {
+                self.mentions_bottom(*key) || self.mentions_bottom(*value)
+            }
+            Some(TyKind::Tuple(elements)) => elements
+                .iter()
+                .any(|element| self.mentions_bottom(*element)),
+            Some(TyKind::Record(fields)) => {
+                fields.iter().any(|(_, field)| self.mentions_bottom(*field))
+            }
+            Some(TyKind::Adt(_, arguments)) => arguments
+                .iter()
+                .any(|argument| self.mentions_bottom(*argument)),
+            Some(TyKind::Fn(function)) => {
+                function
+                    .params
+                    .iter()
+                    .any(|parameter| self.mentions_bottom(*parameter))
+                    || self.mentions_bottom(function.ret)
+            }
+            _ => false,
+        }
+    }
 }
 
 #[cfg(test)]
