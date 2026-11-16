@@ -15,12 +15,21 @@ use crate::value::Value;
 /// `encode<T>(value: T): Blob`. The canonical bytes are bounded by the collection limit.
 pub(super) fn encode(
     machine: &mut Machine<'_>,
-    _targs: &[Ty],
+    targs: &[Ty],
     arguments: Vec<Value>,
 ) -> Result<Value, Stop> {
     machine.tick(1)?;
     let [value] = exactly::<1>(arguments)?;
-    let bytes = canonical_bytes(&value)?;
+    let bytes = match targs {
+        [ty] => {
+            let raw = typed_raw::to_raw_at(machine, &value, *ty, &[])?;
+            CanonicalValue::new(raw)
+                .map_err(|_| Stop::Error("ORNA-EVAL-VALUE"))?
+                .encode()
+                .map_err(|_| Stop::Error("ORNA-EVAL-VALUE"))?
+        }
+        _ => canonical_bytes(&value)?,
+    };
     if bytes.len() > machine.limits.max_collection_items {
         return Err(Stop::Error("ORNA-EVAL-LIMIT"));
     }

@@ -232,23 +232,36 @@ fn array(values: &[Value]) -> Result<Raw, &'static str> {
         .map(Raw::Array)
 }
 
-/// A record as a map from text keys in canonical key order. The old pipeline
-/// orders map entries by the canonical encoding of each key, so the sort uses
-/// those bytes rather than the names.
-fn record_raw(fields: &[(Name, Value)]) -> Result<Raw, &'static str> {
-    let mut keyed = Vec::with_capacity(fields.len());
-    for (name, value) in fields {
-        let key = Raw::Text(name.as_str().to_owned());
-        let encoded = CanonicalValue::new(key.clone())
+/// The order of the keys `names` in a record's canonical map: the indices of `names`, sorted by the canonical encoding
+/// of each key. The old pipeline orders map entries by those bytes rather than by the names.
+///
+/// # Errors
+///
+/// `ORNA-EVAL-VALUE` when a key does not encode.
+pub(crate) fn key_order(names: &[&str]) -> Result<Vec<usize>, &'static str> {
+    let mut keyed = Vec::with_capacity(names.len());
+    for (index, name) in names.iter().enumerate() {
+        let encoded = CanonicalValue::new(Raw::Text((*name).to_owned()))
             .map_err(|_| "ORNA-EVAL-VALUE")?
             .encode()
             .map_err(|_| "ORNA-EVAL-VALUE")?;
-        keyed.push((encoded, key, value));
+        keyed.push((encoded, index));
     }
-    keyed.sort_by(|(left, _, _), (right, _, _)| left.cmp(right));
-    let entries = keyed
+    keyed.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(keyed.into_iter().map(|(_, index)| index).collect())
+}
+
+/// A record as a map from text keys in canonical key order.
+fn record_raw(fields: &[(Name, Value)]) -> Result<Raw, &'static str> {
+    let names: Vec<&str> = fields.iter().map(|(name, _)| name.as_str()).collect();
+    let entries = key_order(&names)?
         .into_iter()
-        .map(|(_, key, value)| value.to_raw().map(|value| (key, value)))
+        .map(|index| {
+            let (name, value) = &fields[index];
+            value
+                .to_raw()
+                .map(|raw| (Raw::Text(name.as_str().to_owned()), raw))
+        })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Raw::Map(entries))
 }
