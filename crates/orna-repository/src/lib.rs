@@ -95,9 +95,10 @@ pub use checkout::{
 #[cfg(test)]
 pub(crate) use commit::{AcceptAllAssertions, AcceptAllCheckoutAssertions};
 pub use commit::{
-    CandidateAssertionGate, CandidateAssertionRefusal, CheckoutAssertionGate, CommittedBranch,
-    CommittedLogEntry, CommittedRevisionSnapshot, CommittedTreeEntry, CommittedTreeEntryKind,
-    GitCommitRef, IndexTreeRef, ManagedFileChange, PrivateCommit, ReviewedCandidateReview,
+    CandidateAssertionGate, CandidateAssertionRefusal, CheckoutAssertionGate, CommitIdentity,
+    CommitStamp, CommittedBranch, CommittedLogEntry, CommittedRevisionSnapshot, CommittedTreeEntry,
+    CommittedTreeEntryKind, GitCommitRef, IndexTreeRef, ManagedFileChange, PrivateCommit,
+    ReviewedCandidateReview,
 };
 pub(crate) use commit::{
     MAX_COMMITTED_REVISION_WALK, commit_gate_refusal, reviewed_candidate_runtime_intent_id,

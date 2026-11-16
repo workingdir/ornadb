@@ -38,9 +38,9 @@ use orna_value::{Raw, SchemaDescriptor, Value, decode_canonical_storage_value};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    DatabaseId, FormatContextError, GitCommitRef, GitIndexLock, HistoricalFormatContext,
-    IndexGeneration, IndexTreeRef, PrivateCommit, Repository, RepositoryError, RepositoryFormat,
-    RepositoryFormatContext, StoreBinding, Uuid,
+    CommitStamp, DatabaseId, FormatContextError, GitCommitRef, GitIndexLock,
+    HistoricalFormatContext, IndexGeneration, IndexTreeRef, PrivateCommit, Repository,
+    RepositoryError, RepositoryFormat, RepositoryFormatContext, StoreBinding, Uuid,
     allocator::AllocatorError,
     bind_tree_entry_in_index,
     blob_store::{ContentIdentity, GearChunker},
@@ -1781,22 +1781,22 @@ impl Repository {
             content,
             database_id,
             message,
-            None,
+            CommitStamp::default(),
         )
     }
 
-    /// Same candidate as [`Self::build_private_commit_with_relations`], with
-    /// the commit time named explicitly. A caller that must reproduce the same
-    /// commit object from the same inputs (the migration prepare) names the
-    /// time, so the object is a function of its content alone.
-    pub fn build_private_commit_with_relations_at(
+    /// Same candidate as [`Self::build_private_commit_with_relations`], stamped
+    /// by `stamp`. A caller that must reproduce the same commit object from the
+    /// same inputs (the migration prepare) names the time and the identity, so
+    /// the object is a function of its content alone.
+    pub fn build_private_commit_with_relations_stamped(
         &self,
         expected_head: &GitCommitRef,
         changes: &[crate::ManagedFileChange],
         content: RelationCandidateContent<'_>,
         database_id: DatabaseId,
         message: &str,
-        timestamp: i64,
+        stamp: CommitStamp<'_>,
     ) -> Result<PrivateCommit, RelationAdmissionError> {
         self.build_private_commit_with_relations_inner(
             expected_head,
@@ -1804,7 +1804,7 @@ impl Repository {
             content,
             database_id,
             message,
-            Some(timestamp),
+            stamp,
         )
     }
 
@@ -1815,7 +1815,7 @@ impl Repository {
         content: RelationCandidateContent<'_>,
         database_id: DatabaseId,
         message: &str,
-        commit_time: Option<i64>,
+        stamp: CommitStamp<'_>,
     ) -> Result<PrivateCommit, RelationAdmissionError> {
         let RelationCandidateContent {
             relations,
@@ -1882,7 +1882,7 @@ impl Repository {
                 changes,
                 Some(StoreBinding::Decoded(&store_root)),
                 message,
-                commit_time,
+                stamp,
             )
             .map_err(RelationAdmissionError::Repository)?;
         self.check_orna_entries(candidate.tree())?;

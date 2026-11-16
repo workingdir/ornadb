@@ -227,6 +227,28 @@ pub struct PrivateCommit {
     pub(crate) commit: GitCommitRef,
 }
 
+/// The author and committer a private candidate records in place of the
+/// repository's configured identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CommitIdentity<'a> {
+    pub name: &'a str,
+    pub email: &'a str,
+}
+
+/// How a private candidate commit is stamped. The default is the wall clock
+/// and the repository's configured identity.
+///
+/// A fixed identity also records the commit unsigned. Its object is then a
+/// function of its inputs alone, not of the host's Git configuration, and the
+/// identity reaches only the one `commit-tree` that builds the candidate; it
+/// is never written into the repository's config.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CommitStamp<'a> {
+    /// Seconds since the Unix epoch, recorded at `+0000`.
+    pub time: Option<i64>,
+    pub identity: Option<CommitIdentity<'a>>,
+}
+
 /// Refuses a private candidate commit before it becomes a commit. The
 /// repository crate cannot evaluate table or module assertions itself, so each
 /// reviewed commit path (`commit_reviewed_candidate` and its stage-hook variant)

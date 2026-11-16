@@ -1431,9 +1431,22 @@ fn record_legacy_dependency_origin(copy: &Path) {
         ],
     );
     git(copy, &["add", "--", ".gitmodules"]);
+    // The copy keeps no identity of its own (the migration copy never writes
+    // one), so this one commit names the test identity on its command line.
     git(
         copy,
-        &["commit", "--quiet", "-m", "record legacy dependency origin"],
+        &[
+            "-c",
+            "user.name=Orna Test",
+            "-c",
+            "user.email=orna-test@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--quiet",
+            "-m",
+            "record legacy dependency origin",
+        ],
     );
 }
 
