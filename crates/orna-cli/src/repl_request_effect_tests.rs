@@ -56,6 +56,32 @@ fn committed_repl_insert_finishes_its_request_row() {
     );
 }
 
+/// The REPL's text bound is 64 KiB, but a capture is governed by its own
+/// per-call `max_bytes` and the format maximum (ORNA-BLOB-014), not that bound.
+#[test]
+fn repl_capture_admits_a_source_larger_than_the_text_bound() {
+    let (directory, repository, _relation) = format3_repository_for_table(MUSIC_SOURCE, "Music");
+    let ReplRuntime {
+        repository,
+        mut session,
+        transactions,
+    } = repl_runtime(Some(repository)).expect("repl runtime");
+    let mut transactions = transactions.expect("repl transactions");
+    let payload = vec![b'x'; 65_537];
+    std::fs::write(directory.path().join("large.bin"), &payload).expect("large file");
+    let input = format!(
+        "sys.blob.length(sys.blob.capture_file({:?}, \"large.bin\", 1048576))",
+        directory.path().to_string_lossy().as_ref()
+    );
+    run_repl_input(
+        repository.as_ref(),
+        Some(&mut transactions),
+        &mut session,
+        &input,
+    )
+    .expect("a 64 KiB + 1 byte capture within max_bytes succeeds");
+}
+
 #[test]
 fn sys_dispatch_observes_request_row_already_running() {
     let (directory, repository, _relation) = format3_repository_for_table(MUSIC_SOURCE, "Music");
