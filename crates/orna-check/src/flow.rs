@@ -778,7 +778,7 @@ pub(crate) fn infer_local_generic_call(
             substitutions.insert(generic.name.clone(), argument);
         }
     }
-    let mut effects = intrinsic_call_effects(callee);
+    let mut effects = intrinsic_call_effects(callee, scope, local);
     effects.join(&symbol.effects);
     let mut values = vec![Type::Error; arguments.len()];
     let mut argument_diagnostics = vec![Vec::new(); arguments.len()];
