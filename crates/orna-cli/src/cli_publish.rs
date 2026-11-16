@@ -76,6 +76,7 @@ fn usage_error(title: String) -> Diagnostic {
         exit: Exit::Usage,
         detail: None,
         body: None,
+        outcome: None,
     }
 }
 

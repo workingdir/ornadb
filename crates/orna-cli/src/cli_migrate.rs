@@ -16,6 +16,7 @@ fn migration_source_admission_diagnostic(error: orna_repository::FormatContextEr
         exit: Exit::Target,
         detail: Some(format!("{} ({error:?})", error.code())),
         body: None,
+        outcome: None,
     }
 }
 

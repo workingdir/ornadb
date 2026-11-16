@@ -364,5 +364,6 @@ pub(crate) fn refusal_diagnostic(
         exit: Exit::Target,
         detail: Some(format!("{error:?}")),
         body: None,
+        outcome: None,
     }
 }

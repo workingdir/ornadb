@@ -40,7 +40,7 @@ reason = "checker fixtures feed the semantic adapter, whose per-fixture expected
 
 [[excluded]]
 scope = "crates/orna-cli/tests/fixtures"
-files = 161
+files = 162
 reason = "CLI fixtures are project directories, VFS and media mounts and captured-standard projects driven by process-level tests; they need the project and mount harnesses, not the module observer"
 
 [[excluded]]

@@ -1,0 +1,2 @@
+pub fn depth(n: Int): Int = if n == 0 { 0 } else { 1 + depth(n - 1) };
+pub fn answer(): Int = depth(70);

@@ -314,7 +314,8 @@ pub(crate) fn repl_application_error(error: ApplicationError) -> String {
             .into_iter()
             .next()
             .unwrap_or_else(|| "ORNA-REPL-SEMANTIC".to_owned()),
-        ApplicationError::Evaluation(code) | ApplicationError::EffectRejected(code) => code,
+        ApplicationError::Evaluation(diagnostic) => diagnostic.code().to_owned(),
+        ApplicationError::EffectRejected(code) => code,
         ApplicationError::SourceEffectFailed(code) => code.as_str().to_owned(),
         ApplicationError::UnadmittedTable(_) => "ORNA-EVAL-TABLE-UNADMITTED".to_owned(),
         _ => "ORNA-REPL-EFFECT".to_owned(),

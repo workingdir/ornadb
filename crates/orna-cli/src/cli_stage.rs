@@ -101,6 +101,7 @@ fn is_format3(repository: &Repository, subject: &str) -> Result<bool, Diagnostic
                 exit: Exit::Target,
                 detail: None,
                 body: None,
+                outcome: None,
             }),
         },
         // An unborn branch has no committed format yet: its first commit
@@ -129,6 +130,7 @@ fn require_row_file_layout(repository: &Repository, logical: &str) -> Result<(),
         exit: Exit::Target,
         detail: None,
         body: None,
+        outcome: None,
     })
 }
 
@@ -148,6 +150,7 @@ fn store_only_row_refusal(table: &str, key: &str, verb: &str) -> Diagnostic {
         exit: Exit::Target,
         detail: None,
         body: None,
+        outcome: None,
     }
 }
 

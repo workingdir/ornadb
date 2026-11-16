@@ -185,7 +185,7 @@ pub fn evaluate_contextual_snapshot_read(
         &mut handler,
         &mut budget,
     )
-    .map_err(|error| ApplicationError::Evaluation(error.code().to_owned()))
+    .map_err(|error| ApplicationError::Evaluation(Box::new(error.diagnostic().clone())))
 }
 
 impl ContextValueEffectHandler for SourceMutationEffectHandler {
@@ -301,7 +301,7 @@ pub fn evaluate_contextual_page_read(
         &mut handler,
         &mut budget,
     )
-    .map_err(|error| ApplicationError::Evaluation(error.code().to_owned()))?;
+    .map_err(|error| ApplicationError::Evaluation(Box::new(error.diagnostic().clone())))?;
     if !handler.mutations.is_empty() {
         return Err(ApplicationError::ReadStagedMutation);
     }
