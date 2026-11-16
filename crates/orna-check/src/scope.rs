@@ -88,10 +88,11 @@ pub(crate) struct Scope {
     /// apart from ordinary values so only explicitly imported module roots can
     /// begin qualified module-member lookup.
     pub(crate) modules: CowTable<BTreeMap<String, Namespace>>,
-    /// `sys` namespaces bound by a `use` alias (ORNA-SYS-039). A call through
-    /// an alias classifies exactly as the spelled operation; see
+    /// Names bound by a `use` (module roots, `sys` namespaces, and named
+    /// symbol imports) mapped to the path each denotes (ORNA-SYS-039). A call
+    /// through an alias classifies exactly as the spelled path; see
     /// `resolved_callee_path`.
-    pub(crate) sys_aliases: CowTable<BTreeMap<String, Namespace>>,
+    pub(crate) import_aliases: CowTable<BTreeMap<String, ImportAlias>>,
     /// The closed source/catalogue module set used by qualified lookup. This
     /// is data assembled by the caller, never a filesystem loader.
     pub(crate) available_modules: Arc<BTreeMap<Namespace, ModuleHeader>>,
@@ -177,9 +178,18 @@ pub(crate) struct Scope {
     pub(crate) return_frames: RefCell<Vec<ReturnFrame>>,
 }
 
-/// The callee's path with a `sys` import alias replaced by the namespace it
-/// denotes (ORNA-SYS-039). The alias applies only while its name still
-/// resolves to that namespace, so a local binding or a shadowing declaration
+/// A name bound by a `use` declaration, with the path it denotes and the
+/// exact symbol the binding placed in scope. The binding is the identity
+/// witness: the alias applies only while that same symbol still resolves.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ImportAlias {
+    pub(crate) target: Namespace,
+    pub(crate) binding: Symbol,
+}
+
+/// The callee's path with a `use`-bound head replaced by the path it denotes
+/// (ORNA-SYS-039). The alias applies only while its name still resolves to
+/// the symbol the import bound, so a local binding or a shadowing declaration
 /// removes it.
 pub(crate) fn resolved_callee_path<'a>(
     callee: &'a Expr,
@@ -188,17 +198,14 @@ pub(crate) fn resolved_callee_path<'a>(
 ) -> Option<Vec<&'a str>> {
     let path = qualified_path(callee)?;
     let head = *path.first()?;
-    let Some(namespace) = scope.sys_aliases.get(head) else {
+    let Some(alias) = scope.import_aliases.get(head) else {
         return Some(path);
     };
-    let bound = scope
-        .names
-        .get(head)
-        .is_some_and(|symbol| symbol.ty == Type::Named(namespace.display()));
+    let bound = scope.names.get(head) == Some(&alias.binding);
     if local.contains_key(head) || !bound {
         return Some(path);
     }
-    let mut segments: Vec<&str> = namespace.0.iter().map(String::as_str).collect();
+    let mut segments: Vec<&str> = alias.target.0.iter().map(String::as_str).collect();
     segments.extend_from_slice(&path[1..]);
     Some(segments)
 }

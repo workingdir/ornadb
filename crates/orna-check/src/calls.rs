@@ -2733,8 +2733,7 @@ pub(crate) fn infer_parallel_call(
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<Inferred> {
-    let is_parallel = qualified_path(callee)
-        .as_deref()
+    let is_parallel = resolved_callee_path(callee, scope, local)
         .is_some_and(|path| path == ["std", "concurrent", "parallel"])
         || matches!(callee, Expr::Name { text, .. }
             if text == "parallel"
@@ -2782,8 +2781,7 @@ pub(crate) fn infer_race_call(
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<Inferred> {
-    let is_race = qualified_path(callee)
-        .as_deref()
+    let is_race = resolved_callee_path(callee, scope, local)
         .is_some_and(|path| path == ["std", "concurrent", "race"])
         || matches!(callee, Expr::Name { text, .. }
             if text == "race"
@@ -2828,8 +2826,7 @@ pub(crate) fn infer_timeout_call(
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<Inferred> {
-    let is_timeout = qualified_path(callee)
-        .as_deref()
+    let is_timeout = resolved_callee_path(callee, scope, local)
         .is_some_and(|path| path == ["std", "concurrent", "timeout"])
         || matches!(callee, Expr::Name { text, .. }
             if text == "timeout"
