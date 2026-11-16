@@ -4,9 +4,16 @@
 
 use orna_syntax_ast::SourceSpan as SyntaxSpan;
 
-use crate::{DefId, DefKind, Name, Program, Ty, TyKind};
+use crate::{DefId, DefKind, Name, Program, Ty, TyKind, Visibility};
 
 use super::{BodyCheck, NotYetReason};
+
+/// The message for a read of a private nominal field outside its type's implementations.
+pub(super) const PRIVATE_READ_MESSAGE: &str =
+    "a private nominal field is read outside the implementations of its type";
+/// The message for a pattern binding a private nominal field outside its type's implementations.
+pub(super) const PRIVATE_PATTERN_MESSAGE: &str =
+    "a private nominal field is bound by a pattern outside the implementations of its type";
 
 impl BodyCheck<'_> {
     /// One fresh unsolved variable per declared parameter of a generic type.
@@ -43,6 +50,25 @@ impl BodyCheck<'_> {
                 .map(|(name, ty)| (name, self.substitute(ty, &args)))
                 .collect(),
         )
+    }
+
+    /// Whether this body may not read or bind `field`: the field is private to its type and
+    /// the body is not inside a nested implementation of that type (NOMINAL-006).
+    pub(super) fn private_field_hidden(&self, field: DefId) -> bool {
+        let Some(owner) = self.nominal_owners.field_owner.get(&field) else {
+            return false;
+        };
+        if self.program.defs[field].vis == Visibility::Public {
+            return false;
+        }
+        self.nominal_owners.implementation_owner.get(&self.owner) != Some(owner)
+    }
+
+    /// Rejects a pattern binding private `field` outside the owner's implementations (NOMINAL-006).
+    pub(super) fn reject_private_pattern_field(&mut self, field: DefId, span: SyntaxSpan) {
+        if self.private_field_hidden(field) {
+            self.reject(crate::diag::PRIVATE_FIELD, PRIVATE_PATTERN_MESSAGE, span);
+        }
     }
 }
 

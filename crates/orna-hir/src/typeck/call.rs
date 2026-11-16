@@ -782,12 +782,22 @@ impl<'a> BodyCheck<'a> {
         id: ExprId,
         base: ExprId,
         field: &FieldRef,
-        _span: SyntaxSpan,
+        span: SyntaxSpan,
     ) -> Result<Ty, NotYetReason> {
         let base_ty = self.infer_expr(body, base, None)?;
         let resolved = self.resolved(base_ty);
         match field {
-            FieldRef::Def(def) => self.field_in(resolved, *def),
+            FieldRef::Def(def) => {
+                if self.private_field_hidden(*def) {
+                    self.reject(
+                        crate::diag::PRIVATE_FIELD,
+                        super::nominal::PRIVATE_READ_MESSAGE,
+                        span,
+                    );
+                    return Ok(self.error());
+                }
+                self.field_in(resolved, *def)
+            }
             FieldRef::Index(index) => match self.kind_of(resolved) {
                 Some(TyKind::Record(fields)) => fields
                     .get(*index as usize)
@@ -814,7 +824,16 @@ impl<'a> BodyCheck<'a> {
                             .into(),
                         ));
                     };
-                    let field_ty = self.field_in(resolved, field_def)?;
+                    let field_ty = if self.private_field_hidden(field_def) {
+                        self.reject(
+                            crate::diag::PRIVATE_FIELD,
+                            super::nominal::PRIVATE_READ_MESSAGE,
+                            span,
+                        );
+                        self.error()
+                    } else {
+                        self.field_in(resolved, field_def)?
+                    };
                     body.exprs[id].kind = ExprKind::Field {
                         base,
                         field: FieldRef::Def(field_def),
@@ -869,7 +888,7 @@ impl<'a> BodyCheck<'a> {
     }
 
     /// The definition of `name` among a nominal's fields.
-    fn find_field(&self, owner: DefId, name: &Name) -> Option<DefId> {
+    pub(super) fn find_field(&self, owner: DefId, name: &Name) -> Option<DefId> {
         let fields = self.ctor_fields(owner).ok()?;
         fields.into_iter().find(|field| {
             self.program
