@@ -232,13 +232,16 @@ impl TransactionalEvaluator {
         admitted: &AdmittedTransaction,
     ) -> Result<Vec<TableMutation>, Box<Diagnostic>> {
         self.execute_admitted_with_arguments(admitted, &Environment::new())
+            .map(|(mutations, _)| mutations)
     }
 
+    /// Runs the admitted entry and returns its table mutations together with
+    /// the value the entry evaluated to.
     pub(super) fn execute_admitted_with_arguments(
         &mut self,
         admitted: &AdmittedTransaction,
         arguments: &Environment,
-    ) -> Result<Vec<TableMutation>, Box<Diagnostic>> {
+    ) -> Result<(Vec<TableMutation>, Value), Box<Diagnostic>> {
         let AdmittedTransaction {
             functions,
             key_fields,
@@ -277,7 +280,7 @@ impl TransactionalEvaluator {
                 &mut effects,
                 &mut budget,
             );
-            result.and_then(|_| {
+            result.and_then(|value| {
                 validate_table_assertions(
                     activation,
                     table_assertions,
@@ -291,11 +294,12 @@ impl TransactionalEvaluator {
                     &functions,
                     limits,
                     &mut budget,
-                )
+                )?;
+                Ok(value)
             })
         });
         match result {
-            Ok(()) => Ok(mutations),
+            Ok(value) => Ok((mutations, value)),
             Err(ActivationError::Operation(error)) => Err(Box::new(error.diagnostic().clone())),
             Err(ActivationError::Commit(error)) => {
                 Err(Box::new(transaction_error_diagnostic(error)))

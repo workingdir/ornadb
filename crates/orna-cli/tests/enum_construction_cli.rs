@@ -57,10 +57,7 @@ fn section_six_example_constructs_matches_and_stores_enum_values() {
         assert_output(&orna(directory, &["repl", submission]), expected);
     }
 
-    assert_output(
-        &orna(directory, &["run", "main.seed"]),
-        "invocation completed\n",
-    );
+    assert_output(&orna(directory, &["run", "main.seed"]), "null : Unit\n");
     let status = orna(directory, &["status", "--short"]);
     assert!(status.status.success(), "{status:?}");
     assert!(

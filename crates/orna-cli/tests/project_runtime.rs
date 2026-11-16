@@ -716,7 +716,7 @@ fn binary_run_executes_a_named_public_project_function() {
     let output = invoke(directory.path(), "run", "library.answer");
 
     assert!(output.status.success(), "run stderr: {:?}", output.stderr);
-    assert_eq!(output.stdout, b"invocation completed\n");
+    assert_eq!(output.stdout, b"42 : Int\n");
     assert!(output.stderr.is_empty());
 }
 
@@ -738,7 +738,7 @@ fn binary_run_evaluates_a_sys_enum_constant_in_a_project_function() {
     let output = invoke(directory.path(), "run", "library.answer");
 
     assert!(output.status.success(), "run stderr: {:?}", output.stderr);
-    assert_eq!(output.stdout, b"invocation completed\n");
+    assert_eq!(output.stdout, b"42 : Int\n");
     assert!(output.stderr.is_empty());
 }
 
@@ -894,7 +894,7 @@ fn binary_run_without_a_target_executes_root_main() {
         .expect("CLI process");
 
     assert!(output.status.success(), "run stderr: {:?}", output.stderr);
-    assert_eq!(output.stdout, b"invocation completed\n");
+    assert_eq!(output.stdout, b"42 : Int\n");
     assert!(output.stderr.is_empty());
 }
 
@@ -970,7 +970,7 @@ async fn binary_run_reads_specified_storage_publication_metadata_from_runtime_st
         "run stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(output.stdout, b"invocation completed\n");
+    assert_eq!(output.stdout, b"true : Bool\n");
     assert!(output.stderr.is_empty());
 }
 
@@ -1033,7 +1033,7 @@ async fn binary_run_refuses_a_concurrent_writer_while_another_runtime_holds_the_
         "run stderr: {}",
         String::from_utf8_lossy(&released.stderr)
     );
-    assert_eq!(released.stdout, b"invocation completed\n");
+    assert_eq!(released.stdout, b"42 : Int\n");
     assert!(released.stderr.is_empty());
 }
 
@@ -1166,7 +1166,7 @@ async fn binary_invoke_routes_single_module_std_import_needing_publication_metad
         "invoke stderr: {:?}",
         output.stderr
     );
-    assert_eq!(output.stdout, b"invocation completed\n");
+    assert_eq!(output.stdout, b"true : Bool\n");
     assert!(output.stderr.is_empty());
 }
 
@@ -1230,7 +1230,7 @@ async fn binary_invoke_executes_std_function_calls_through_authority_route() {
         "invoke stderr: {:?}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(output.stdout, b"invocation completed\n");
+    assert_eq!(output.stdout, b"true : Bool\n");
     assert!(output.stderr.is_empty());
 }
 
@@ -1299,7 +1299,7 @@ fn binary_run_without_a_target_invokes_the_root_main_of_a_committed_project_with
     let output = run_bare(directory.path());
 
     assert!(output.status.success(), "stderr: {:?}", output.stderr);
-    assert_eq!(output.stdout, b"invocation completed\n");
+    assert_eq!(output.stdout, b"42 : Int\n");
     assert!(output.stderr.is_empty());
 }
 
@@ -1634,7 +1634,7 @@ async fn binary_reference_workflow_reopens_durable_rows_and_preserves_duplicate_
 
     let first = invoke(directory.path(), "run", "seed");
     assert!(first.status.success(), "seed stderr: {:?}", first.stderr);
-    assert_eq!(first.stdout, b"invocation completed\n");
+    assert_eq!(first.stdout, b"null : Unit\n");
     assert!(first.stderr.is_empty());
 
     let repository = Repository::discover(directory.path()).expect("repository");
@@ -1719,7 +1719,7 @@ async fn binary_reference_workflow_reopens_durable_rows_and_preserves_duplicate_
         "exercise stderr: {:?}",
         exercise.stderr
     );
-    assert_eq!(exercise.stdout, b"invocation completed\n");
+    assert_eq!(exercise.stdout, b"null : Unit\n");
     assert!(exercise.stderr.is_empty());
     let final_state = RuntimeState::open(&repository, runtime_identity, initial_digest)
         .await
@@ -2019,7 +2019,7 @@ async fn core_transactions_and_assertions_work_without_std() {
 
     let seed = invoke(directory.path(), "run", "main.seed");
     assert!(seed.status.success(), "seed stderr: {:?}", seed.stderr);
-    assert_eq!(seed.stdout, b"invocation completed\n");
+    assert_eq!(seed.stdout, b"true : Bool\n");
     assert!(seed.stderr.is_empty());
 
     let violation = invoke(directory.path(), "run", "main.violate");
@@ -2208,7 +2208,7 @@ fn binary_checks_and_runs_an_import_from_the_pinned_standard_git_module() {
         .output()
         .expect("CLI invocation");
     assert!(run.status.success(), "run stderr: {:?}", run.stderr);
-    assert_eq!(run.stdout, b"invocation completed\n");
+    assert_eq!(run.stdout, b"42 : Int\n");
     assert!(run.stderr.is_empty());
 }
 
@@ -2546,7 +2546,7 @@ fn binary_run_admits_a_standard_import_alongside_a_table_assertion() {
     let output = invoke(directory.path(), "run", "main.answer");
 
     assert!(output.status.success(), "run stderr: {:?}", output.stderr);
-    assert_eq!(output.stdout, b"invocation completed\n");
+    assert_eq!(output.stdout, b"42 : Int\n");
     assert!(output.stderr.is_empty());
 }
 
@@ -2563,7 +2563,7 @@ fn binary_run_evaluates_a_module_root_std_call_on_the_production_path() {
     let output = invoke(directory.path(), "run", "main.seed");
 
     assert!(output.status.success(), "run stderr: {:?}", output.stderr);
-    assert_eq!(output.stdout, b"invocation completed\n");
+    assert_eq!(output.stdout, b"[1, 2, 3] : [Int]\n");
     assert!(output.stderr.is_empty());
 }
 
@@ -2580,7 +2580,7 @@ fn binary_run_evaluates_an_aliased_module_root_std_call_on_the_production_path()
     let output = invoke(directory.path(), "run", "main.seed");
 
     assert!(output.status.success(), "run stderr: {:?}", output.stderr);
-    assert_eq!(output.stdout, b"invocation completed\n");
+    assert_eq!(output.stdout, b"[1, 2, 3] : [Int]\n");
     assert!(output.stderr.is_empty());
 }
 
@@ -2647,7 +2647,7 @@ async fn binary_run_refuses_a_committed_row_violating_a_table_assertion_and_keep
         "valid run stderr: {}",
         String::from_utf8_lossy(&accepted.stderr)
     );
-    assert_eq!(accepted.stdout, b"invocation completed\n");
+    assert_eq!(accepted.stdout, b"true : Bool\n");
     assert!(accepted.stderr.is_empty());
 
     let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
@@ -2692,7 +2692,7 @@ async fn binary_run_refuses_a_committed_row_violating_a_table_assertion_and_keep
         "second valid run stderr: {}",
         String::from_utf8_lossy(&accepted_again.stderr)
     );
-    assert_eq!(accepted_again.stdout, b"invocation completed\n");
+    assert_eq!(accepted_again.stdout, b"true : Bool\n");
     assert!(accepted_again.stderr.is_empty());
 
     let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
@@ -2719,7 +2719,7 @@ fn binary_invoke_runs_a_single_module_import_from_the_pinned_standard_module() {
         "invoke stderr: {:?}",
         output.stderr
     );
-    assert_eq!(output.stdout, b"invocation completed\n");
+    assert_eq!(output.stdout, b"42 : Int\n");
     assert!(output.stderr.is_empty());
 }
 
@@ -2746,7 +2746,7 @@ fn binary_invoke_evaluates_a_multi_module_project_importing_the_pinned_standard_
         "invoke stderr: {:?}",
         output.stderr
     );
-    assert_eq!(output.stdout, b"invocation completed\n");
+    assert_eq!(output.stdout, b"[1, 2, 3] : [Int]\n");
     assert!(output.stderr.is_empty());
 }
 

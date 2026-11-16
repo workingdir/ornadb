@@ -169,20 +169,26 @@ impl ColorMode {
     }
 }
 
+/// The diagnostic for a stdout write that failed.
+pub(crate) fn cli_output_failed() -> Diagnostic {
+    Diagnostic {
+        code: "ORNA-CMD-OUTPUT-FAILED",
+        title: Cow::Borrowed("CLI output could not be written"),
+        help: "check the output stream, then retry the command",
+        exit: Exit::Presentation,
+        detail: None,
+        body: None,
+        outcome: None,
+    }
+}
+
 fn write_cli_line(text: &[u8], color: AnsiColor, color_enabled: bool) -> Result<(), Diagnostic> {
     let mut stdout = io::stdout().lock();
     write_styled(&mut stdout, color, text, color_enabled)
         .and_then(|()| stdout.write_all(b"\n"))
-        .map_err(|_| Diagnostic {
-            code: "ORNA-CMD-OUTPUT-FAILED",
-            title: Cow::Borrowed("CLI output could not be written"),
-            help: "check the output stream, then retry the command",
-            exit: Exit::Presentation,
-            detail: None,
-            body: None,
-            outcome: None,
-        })
+        .map_err(|_| cli_output_failed())
 }
+
 /// The process exit status of a failed command, as the `--help` exit status
 /// table lists it. Status 0 (success) is the absence of a diagnostic and
 /// status 4 (authorisation) belongs to remote transports this build does not

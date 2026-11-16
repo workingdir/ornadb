@@ -144,7 +144,8 @@ impl DurableTransactionalEvaluator {
     ///
     /// Unlike the request-free compatibility route, this entry point records
     /// the run observation before admission and retains the terminal result
-    /// with table mutations in one owner-fenced commit.
+    /// with table mutations in one owner-fenced commit. When the entry passes,
+    /// the value it evaluated to is written to `result_value`.
     #[allow(clippy::too_many_arguments)]
     pub async fn execute_project_request_with_arguments(
         &self,
@@ -154,6 +155,7 @@ impl DurableTransactionalEvaluator {
         project: &ProjectUnit,
         root_entry: &str,
         arguments: &Environment,
+        result_value: &mut Option<Value>,
         loaded_project: &LoadedProject,
         table_object_ids: &BTreeMap<String, TableObjectId>,
         storage_orders: &BTreeMap<String, Vec<String>>,
@@ -227,6 +229,7 @@ impl DurableTransactionalEvaluator {
             root_entry,
             admitted,
             arguments,
+            result_value,
             loaded_project,
             table_object_ids,
             storage_orders,

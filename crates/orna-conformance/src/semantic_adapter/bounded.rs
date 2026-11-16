@@ -425,21 +425,33 @@ impl BoundedEvaluator {
     /// Explicitly invokes one retained pure function with named arguments.
     /// Defaults are evaluated only after earlier parameters have been bound.
     pub fn invoke_with(&self, function: &str, arguments: &Environment) -> StageOutcome<Diagnostic> {
-        if !self.functions.contains_key(function) {
-            return StageOutcome::Skipped {
-                reason: "function is not retained by the bounded evaluator".into(),
-            };
+        match self.invoke_value(function, arguments) {
+            Ok(_) => StageOutcome::Passed,
+            Err(outcome) => outcome,
         }
-        match invoke_named_with_nominals(
+    }
+
+    /// Explicitly invokes one retained pure function with named arguments and
+    /// returns its canonical result. An unretained function is `Skipped` and an
+    /// evaluation failure is `Failed`, exactly as [`Self::invoke_with`] reports.
+    pub fn invoke_value(
+        &self,
+        function: &str,
+        arguments: &Environment,
+    ) -> Result<Value, StageOutcome<Diagnostic>> {
+        if !self.functions.contains_key(function) {
+            return Err(StageOutcome::Skipped {
+                reason: "function is not retained by the bounded evaluator".into(),
+            });
+        }
+        invoke_named_with_nominals(
             function,
             &self.functions,
             arguments,
             &self.nominal_definitions,
             self.limits,
-        ) {
-            Ok(_) => StageOutcome::Passed,
-            Err(error) => StageOutcome::Failed(error.diagnostic().clone()),
-        }
+        )
+        .map_err(|error| StageOutcome::Failed(error.diagnostic().clone()))
     }
 
     /// Invokes one retained pure function and returns its canonical result.

@@ -220,8 +220,8 @@ fn invoke_reads_three_committed_rows_as_a_value() {
     let output = orna(directory.path(), &["invoke", "expect_three"]);
     assert_success(&output, "invoke over three committed rows");
     assert!(
-        combined(&output).contains("invocation completed"),
-        "invoke did not complete: {}",
+        combined(&output).contains("true : Bool\n"),
+        "invoke did not print the result: {}",
         combined(&output)
     );
 }
@@ -281,8 +281,8 @@ fn invoke_table_entry_with_sys_host_context_evaluates() {
     let output = orna(directory.path(), &["invoke", "sys_probe"]);
     assert_success(&output, "table-bearing entry reading sys.rt.info");
     assert!(
-        combined(&output).contains("invocation completed"),
-        "sys host read did not complete: {}",
+        combined(&output).contains("\"1.1.0\" : Str\n"),
+        "sys host read did not print the result: {}",
         combined(&output)
     );
 }
@@ -296,8 +296,8 @@ fn uncommitted_project_with_non_table_entry_still_succeeds() {
         "non-table entry of an uncommitted table-bearing project",
     );
     assert!(
-        combined(&output).contains("invocation completed"),
-        "non-table entry did not complete: {}",
+        combined(&output).contains("42 : Int\n"),
+        "non-table entry did not print the result: {}",
         combined(&output)
     );
 }
@@ -332,8 +332,8 @@ fn invoke_table_entry_reading_sys_storage_gets_publication_metadata() {
     let output = orna(directory.path(), &["invoke", "storage_probe"]);
     assert_success(&output, "table-bearing entry reading sys.Storage");
     assert!(
-        combined(&output).contains("invocation completed"),
-        "sys.Storage read did not complete: {}",
+        combined(&output).contains("true : Bool\n"),
+        "sys.Storage read did not print the result: {}",
         combined(&output)
     );
 }
@@ -370,8 +370,8 @@ fn invoke_reads_committed_rows_while_runtime_owner_lock_is_held() {
     let output = child.wait_with_output().expect("orna output");
     assert_success(&output, "invoke while the owner lock is held");
     assert!(
-        combined(&output).contains("invocation completed"),
-        "invoke did not complete under a held lock: {}",
+        combined(&output).contains("true : Bool\n"),
+        "invoke did not print the result under a held lock: {}",
         combined(&output)
     );
 }
@@ -479,8 +479,8 @@ fn invoke_reads_every_scalar_field_type_of_a_committed_row() {
     let output = orna(directory.path(), &["invoke", "check"]);
     assert_success(&output, "invoke over every committed field type");
     assert!(
-        combined(&output).contains("invocation completed"),
-        "invoke did not complete over every field type: {}",
+        combined(&output).contains("true : Bool\n"),
+        "invoke did not print the result over every field type: {}",
         combined(&output)
     );
 }

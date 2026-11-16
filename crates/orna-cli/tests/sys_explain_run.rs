@@ -71,7 +71,7 @@ async fn orna_run_explains_queries_against_the_activation_catalogue() {
         "run stderr: {}",
         String::from_utf8_lossy(&run.stderr)
     );
-    assert_eq!(run.stdout, b"invocation completed\n");
+    assert_eq!(run.stdout, b"null : Unit\n");
 
     let repository = Repository::discover(directory.path()).expect("repository");
     let (identity, initial_digest) = format3::cli_runtime_identity(&repository);
