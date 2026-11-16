@@ -371,3 +371,60 @@ pub type Port = Int {
         result.diagnostics
     );
 }
+
+// Specified: ORNA-CONVERT-001, ORNA-CONVERT-002, CONVERT-1 steps 2 and 6.
+// Exists: the explicit chain B.from(A.from(text)) where A's fields are public and
+// B's From<A> implementation is annotated `fn from(value: A): B`. This is the
+// construction that failed when the source parameter was bound as A's row record.
+// Passed is bounded to the chain analyzing as B with no diagnostics.
+#[test]
+fn annotated_from_implementation_chains_a_public_nominal_source() {
+    let result = analyze(&[ModuleInput::new(
+        "annotated-public-source.orna",
+        r#"
+pub type A {
+    pub v: Str,
+    impl From<Str> { fn from(text: Str): A = A { v: text }; }
+}
+pub type B {
+    pub a: A,
+    impl From<A> { fn from(value: A): B = B { a: value }; }
+}
+pub fn explicit(text: Str): B = B.from(A.from(text));
+"#,
+    )]);
+
+    assert!(result.is_ok(), "{:#?}", result.diagnostics);
+    assert!(
+        returns_nominal(&export(&result, "explicit").ty, "B"),
+        "{:?}",
+        export(&result, "explicit").ty
+    );
+}
+
+// Specified: ORNA-CONVERT-001, CONVERT-1 step 4.
+// Exists: B.from(1) where B declares only From<Str>, so no nested implementation
+// matches the source type Int.
+// Passed is bounded to rejecting the call with the type diagnostic.
+#[test]
+fn explicit_conversion_without_a_matching_source_is_rejected() {
+    let result = analyze(&[ModuleInput::new(
+        "no-matching-source.orna",
+        r#"
+pub type A {
+    v: Str,
+    impl From<Str> { fn from(text: Str): A = A { v: text }; }
+}
+pub fn bad(): A = A.from(1);
+"#,
+    )]);
+
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "{:#?}",
+        result.diagnostics
+    );
+}
