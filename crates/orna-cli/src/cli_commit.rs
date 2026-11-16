@@ -79,6 +79,7 @@ fn mixed_formats(error: &FormatContextError) -> Diagnostic {
         exit: Exit::Target,
         detail: None,
         body: None,
+        outcome: None,
     }
 }
 
@@ -93,6 +94,7 @@ pub(crate) fn mixed_formats_at_head(error: &FormatContextError) -> Diagnostic {
         exit: Exit::Target,
         detail: None,
         body: None,
+        outcome: None,
     }
 }
 

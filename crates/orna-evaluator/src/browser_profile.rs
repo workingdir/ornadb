@@ -29,6 +29,11 @@ impl BrowserProfileError {
         Self { code: code.into() }
     }
 
+    /// Stable redacted code of the failed profile evaluation.
+    pub fn stable_code(&self) -> &str {
+        &self.code
+    }
+
     fn evaluation(error: EvaluationError) -> Self {
         Self::code(error.code())
     }

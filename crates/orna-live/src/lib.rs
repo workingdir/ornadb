@@ -3080,6 +3080,9 @@ impl LiveHost {
                 ) {
                     self.application_sessions.insert(session);
                 }
+                // Set once a user application has run; a later completion failure
+                // is then uncertain rather than a proven failure (REQUEST-1 step 5).
+                let mut applied = false;
                 let dispatched: Result<DispatchOutcome> = async {
                     match &envelope.message {
                         Message::Subscribe { .. } => {
@@ -3185,6 +3188,7 @@ impl LiveHost {
                                     fingerprint,
                                 )
                                 .await?;
+                            applied = true;
                             let outcome = validate_applied_result_response(
                                 request,
                                 fingerprint,
@@ -3203,6 +3207,7 @@ impl LiveHost {
                                     fingerprint,
                                 )
                                 .await?;
+                            applied = true;
                             let outcome = validate_applied_result_response(
                                 request,
                                 fingerprint,
@@ -3331,6 +3336,13 @@ impl LiveHost {
                 }
                 .await;
                 match dispatched {
+                    Err(error) if applied && !matches!(error, Error::ApplicationDeferred) => {
+                        // The application already ran, so its effects may be committed.
+                        // Completion failed after that point: retain the outcome as
+                        // uncertain (REQUEST-1 step 5), never as a proven Failure.
+                        self.retain_uncertain(session, request, fingerprint).await?;
+                        Err(error)
+                    }
                     Err(error) if !matches!(error, Error::ApplicationDeferred) => {
                         // Synchronous dispatch and supervised completions use
                         // the same replay contract: retain a portable rejection
@@ -7165,12 +7177,26 @@ impl LiveTransport {
                 Error::Closed,
             )));
         }
+        let session = upgrade.session;
         self.commit_websocket_upgrade(upgrade, clock())
             .await
             .map_err(HttpConnectionError::Protocol)
             .map_err(HttpIoError::Transport)?;
 
         let mut socket = WebSocketState::new(attachment);
+        // Reconnect: every resumed watch gets its complete current snapshot
+        // before the client's next request is served on this attachment.
+        let delivered = match self.resumed_watch_snapshots(session) {
+            Ok(snapshots) => {
+                write_websocket_outputs(self.limits, writer, cancellation, snapshots).await
+            }
+            Err(error) => Err(HttpIoError::Transport(HttpConnectionError::Protocol(error))),
+        };
+        if let Err(error) = delivered {
+            self.close_websocket_attachment(socket.attachment, clock(), application)
+                .await?;
+            return Err(error);
+        }
         let mut initial = connection.take_buffered();
         loop {
             if initial.is_empty() {
@@ -7842,6 +7868,36 @@ impl LiveTransport {
             .encode(self.host.limits.protocol)
             .map_err(|_| Error::ApplicationRejected)?;
         Ok(WebSocketOutput::Binary { outcome, payload })
+    }
+
+    /// Reconnect delivery: each watch resumed on `session` receives its
+    /// current accepted snapshot as a request-less Snapshot before the client
+    /// may use the new attachment. Deltas are never replayed.
+    fn resumed_watch_snapshots(&self, session: [u8; 16]) -> Result<Vec<WebSocketOutput>> {
+        self.host
+            .watch_snapshots
+            .iter()
+            .filter(|((watch_session, _), _)| *watch_session == session)
+            .map(|((_, watch), accepted)| {
+                let envelope = Envelope {
+                    request: None,
+                    watch: Some(*watch),
+                    message: Message::Snapshot {
+                        revision: accepted.revision,
+                        present: accepted.present.clone(),
+                        snapshot: accepted.snapshot.clone(),
+                    },
+                    extensions: BTreeMap::new(),
+                };
+                let payload = envelope
+                    .encode(self.host.limits.protocol)
+                    .map_err(|_| Error::ApplicationRejected)?;
+                Ok(WebSocketOutput::Binary {
+                    outcome: FrameOutcome::Accepted,
+                    payload,
+                })
+            })
+            .collect()
     }
 }
 
@@ -9053,6 +9109,48 @@ mod tests {
         assert_eq!(candidate.revision, 1);
         assert_eq!(candidate.present, next);
         assert_eq!(candidate.snapshot, snapshot);
+    }
+
+    /// 30-protocol §Limits: on reconnect the host sends a complete snapshot
+    /// for each resumed watch. The frame is request-less, names the watch and
+    /// the current accepted revision, and never includes another session's
+    /// watches.
+    #[test]
+    fn reconnect_sends_each_resumed_watch_snapshot_and_no_other_session() {
+        let mut transport =
+            LiveTransport::new(subscribed_host(None), TransportLimits::default()).unwrap();
+        let session = [91; 16];
+        let watch = [92; 16];
+        let other_session = [94; 16];
+        let other_watch = [95; 16];
+        let snapshot = CanonicalSnapshot::cwd([1; 16], [2; 16], 0.into()).unwrap();
+        let present = orna_protocol::PresentNode::from_value(
+            CanonicalValue::new(OvbRaw::Int(7.into())).unwrap(),
+        )
+        .unwrap();
+        for (owner, id, revision) in [(session, watch, 3), (other_session, other_watch, 9)] {
+            transport.host.watch_snapshots.insert(
+                (owner, id),
+                AcceptedWatchSnapshot {
+                    revision,
+                    present: present.clone(),
+                    snapshot: snapshot.clone(),
+                },
+            );
+        }
+
+        let outputs = transport.resumed_watch_snapshots(session).unwrap();
+        assert_eq!(outputs.len(), 1);
+        let WebSocketOutput::Binary { payload, .. } = &outputs[0] else {
+            panic!("resumed snapshot must be a binary frame");
+        };
+        let envelope = Envelope::decode(payload, ProtocolLimits::default()).unwrap();
+        assert_eq!(envelope.request, None);
+        assert_eq!(envelope.watch, Some(watch));
+        assert!(matches!(
+            envelope.message,
+            Message::Snapshot { revision: 3, .. }
+        ));
     }
 
     fn subscribed_host_with_credential(

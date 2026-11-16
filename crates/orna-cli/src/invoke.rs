@@ -1,12 +1,12 @@
 use super::{
-    ApplicationAuthority, BoundedEvaluator, Cow, Diagnostic, DurableTransactionalEvaluator,
-    Endpoint, Environment, Exit, Limits, ProjectUnit, RuntimeEvaluator, RuntimeMode, StageOutcome,
-    StdSnapshotPin, cancellation_diagnostic, committed_storage_orders, committed_table_object_ids,
-    diagnostic_documentation, execution_project, load_project, local_project_path,
-    project_load_diagnostic, pure_execution_project, pure_sys_host_context,
-    refuse_legacy_bare_module_rows, request_nonce, run_committed_table_invocation,
-    runtime_identity, runtime_publication_metadata_rows, semantic_catalogue, sys_host,
-    write_success_line,
+    ApplicationAuthority, ApplicationError, BoundedEvaluator, Cow, Diagnostic,
+    DurableTransactionalEvaluator, Endpoint, Environment, Exit, Limits, ProjectUnit,
+    RuntimeEvaluator, RuntimeMode, StageOutcome, StdSnapshotPin, cancellation_diagnostic,
+    committed_storage_orders, committed_table_object_ids, diagnostic_documentation,
+    execution_project, load_project, local_project_path, project_load_diagnostic,
+    pure_execution_project, pure_sys_host_context, refuse_legacy_bare_module_rows, request_nonce,
+    run_committed_table_invocation, runtime_identity, runtime_publication_metadata_rows,
+    semantic_catalogue, sys_host, write_success_line,
 };
 
 pub(crate) fn run_project_invocation(
@@ -256,23 +256,13 @@ pub(crate) fn report_project_outcome(
     }
     match outcome {
         StageOutcome::Passed => write_success_line("invocation completed", color_enabled),
-        StageOutcome::Failed(diagnostic) => Err(
-            if let Some(mut published) = published_runtime_failure(&diagnostic) {
-                published.detail = Some(
-                    "the project transaction failed atomically; no partial changes were committed"
-                        .into(),
-                );
-                published
-            } else {
-                let mut rejection = Diagnostic::target(
-                    "ORNA-CMD-RUNTIME-UNAVAILABLE",
-                    "durable project invocation was rejected",
-                    "the project transaction failed atomically; no partial changes were committed",
-                );
-                rejection.detail = Some(failure_detail(&diagnostic));
-                rejection
-            },
-        ),
+        StageOutcome::Failed(diagnostic) => Err(evaluation_failure(
+            &diagnostic,
+            "durable project invocation was rejected",
+            "fix the failure named in the detail, then retry the invocation",
+            failure_detail(&diagnostic),
+        )
+        .with_outcome(ATOMIC_FAILURE)),
         StageOutcome::Cancelled(diagnostic) => Err(cancellation_diagnostic(&diagnostic)),
         StageOutcome::Skipped { .. } => Err(Diagnostic::unavailable(
             "durable project invocation is not available",
@@ -350,7 +340,57 @@ pub(crate) fn published_runtime_failure(diagnostic: &orna_value::Diagnostic) -> 
         exit: Exit::Target,
         detail: None,
         body: None,
+        outcome: None,
     })
+}
+
+/// The user-visible outcome of an invocation whose project transaction rolled back.
+pub(crate) const ATOMIC_FAILURE: &str =
+    "the project transaction failed atomically; no partial changes were committed";
+
+/// Maps an evaluator failure to its catalogued public diagnostic. An
+/// uncatalogued code keeps the caller's fallback under
+/// ORNA-CMD-RUNTIME-UNAVAILABLE. The code and cause detail render only with
+/// `--debug` (ORNA-UX-004).
+pub(crate) fn evaluation_failure(
+    diagnostic: &orna_value::Diagnostic,
+    fallback_title: &'static str,
+    fallback_help: &'static str,
+    detail: String,
+) -> Diagnostic {
+    if let Some(mut published) = published_runtime_failure(diagnostic) {
+        published.detail = Some(detail);
+        return published;
+    }
+    Diagnostic::target_with_detail(
+        "ORNA-CMD-RUNTIME-UNAVAILABLE",
+        fallback_title,
+        fallback_help,
+        detail,
+    )
+}
+
+/// Maps an application-layer failure. Evaluator failures publish through
+/// [`evaluation_failure`]; other failures keep their display text as detail.
+pub(crate) fn application_failure(
+    error: &ApplicationError,
+    fallback_title: &'static str,
+    fallback_help: &'static str,
+) -> Diagnostic {
+    match error {
+        ApplicationError::Evaluation(diagnostic) => evaluation_failure(
+            diagnostic,
+            fallback_title,
+            fallback_help,
+            failure_detail(diagnostic),
+        ),
+        other => Diagnostic::target_with_detail(
+            "ORNA-CMD-RUNTIME-UNAVAILABLE",
+            fallback_title,
+            fallback_help,
+            other.to_string(),
+        ),
+    }
 }
 
 /// Carries the runtime failure's public code, or its non-disclosing display
@@ -518,11 +558,10 @@ pub(crate) fn run_authority_invocation(
         let activation = authority
             .evaluate_staged_with_publication_rows(&admitted, &Environment::new(), publication_rows)
             .map_err(|error| {
-                Diagnostic::target_with_detail(
-                    "ORNA-CMD-RUNTIME-UNAVAILABLE",
+                application_failure(
+                    &error,
                     "pure project invocation failed",
                     "fix the admitted function or retry the invocation",
-                    error.to_string(),
                 )
             })?;
         if !activation.mutations().is_empty() {
@@ -540,11 +579,10 @@ pub(crate) fn run_authority_invocation(
         authority
             .evaluate(&admitted, &Environment::new())
             .map_err(|error| {
-                Diagnostic::target_with_detail(
-                    "ORNA-CMD-RUNTIME-UNAVAILABLE",
+                application_failure(
+                    &error,
                     "pure project invocation failed",
                     "fix the admitted function or retry the invocation",
-                    error.to_string(),
                 )
             })?;
     }
@@ -641,13 +679,12 @@ pub(crate) fn run_bounded_invocation(
     match evaluator.invoke(target) {
         StageOutcome::Passed => write_success_line("invocation completed", color_enabled),
         StageOutcome::Cancelled(diagnostic) => Err(cancellation_diagnostic(&diagnostic)),
-        StageOutcome::Failed(diagnostic) => Err(published_runtime_failure(&diagnostic)
-            .unwrap_or_else(|| {
-                Diagnostic::unavailable(
-                    "requested invocation is not available",
-                    "define a reachable zero-argument pure function with the requested name",
-                )
-            })),
+        StageOutcome::Failed(diagnostic) => Err(evaluation_failure(
+            &diagnostic,
+            "pure project invocation failed",
+            "define a reachable zero-argument pure function with the requested name",
+            failure_detail(&diagnostic),
+        )),
         StageOutcome::Skipped { .. } => Err(Diagnostic::unavailable(
             "requested invocation is not available",
             "define a reachable zero-argument pure function with the requested name",

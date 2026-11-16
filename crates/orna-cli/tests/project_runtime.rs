@@ -778,6 +778,71 @@ fn binary_run_rejects_unequal_sys_enum_constants_in_a_project_function() {
     );
 }
 
+/// ORNA-UX-004: a catalogued evaluator failure renders its code and title
+/// without `--debug`, and keeps the cause detail out of the default output.
+#[test]
+fn binary_run_reports_divide_by_zero_under_its_catalogued_code_without_debug() {
+    let directory = tempfile::tempdir().expect("project directory");
+    std::fs::write(
+        directory.path().join("main.orna"),
+        include_str!("fixtures/run/main.orna"),
+    )
+    .expect("root source");
+    std::fs::write(
+        directory.path().join("library.orna"),
+        include_str!("fixtures/run/sys-enum-mismatch-library.orna"),
+    )
+    .expect("library source");
+    initialize_project(directory.path());
+
+    let output = invoke(directory.path(), "run", "library.answer");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("error[ORNA-EVAL-DIVIDE-BY-ZERO]: division by zero"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("ORNA-CMD-RUNTIME-UNAVAILABLE"),
+        "stderr: {stderr}"
+    );
+    assert!(!stderr.contains("failure code:"), "stderr: {stderr}");
+}
+
+/// ORNA-EVAL-LIMIT: exhausting the call budget renders its catalogued code and
+/// title on the run path, not the generic runtime-unavailable code.
+#[test]
+fn binary_run_reports_call_budget_exhaustion_under_its_catalogued_code() {
+    let directory = tempfile::tempdir().expect("project directory");
+    std::fs::write(
+        directory.path().join("main.orna"),
+        include_str!("fixtures/run/main.orna"),
+    )
+    .expect("root source");
+    std::fs::write(
+        directory.path().join("library.orna"),
+        include_str!("fixtures/run/depth-limit-library.orna"),
+    )
+    .expect("library source");
+    initialize_project(directory.path());
+
+    let output = invoke(directory.path(), "run", "library.answer");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("error[ORNA-EVAL-LIMIT]: evaluation limit exceeded"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("ORNA-CMD-RUNTIME-UNAVAILABLE"),
+        "stderr: {stderr}"
+    );
+}
+
 #[test]
 fn binary_run_reports_false_assertion_with_its_spec_code_without_debug() {
     let directory = tempfile::tempdir().expect("project directory");
