@@ -438,7 +438,11 @@ impl LoadedProject {
     /// extended by the pinned standard profile and its verified sources when
     /// this project captured one.
     pub fn production_catalogue(&self) -> Result<Catalogue, StandardCatalogueError> {
-        let catalogue = Catalogue::authoritative_core();
+        // The synthetic core carries no `std` surface: a standard module is
+        // provided only by the captured pinned profile and its verified
+        // sources, so an unpinned or partially pinned project never resolves
+        // a standard name against host-invented declarations.
+        let catalogue = Catalogue::authoritative_core().without_standard_modules();
         let Some(profile) = self.standard_profile.as_ref() else {
             return Ok(catalogue);
         };
@@ -1679,14 +1683,16 @@ impl ProjectLoader {
             .iter()
             .map(|path| format!("std/{path}"))
             .collect::<BTreeSet<_>>();
+        // A requested module the pinned tree does not provide is left out of
+        // the closure rather than discarding the whole pin: the import stays
+        // unbound and analysis reports it at its `use` declaration.
         let requested = project
             .standard_modules
             .iter()
-            .map(|module| {
+            .filter_map(|module| {
                 canonical_standard_module(module, |candidate| available.contains(candidate))
             })
-            .collect::<Option<BTreeSet<String>>>()
-            .ok_or(StandardAttachError::RequestedModuleUnavailable)?;
+            .collect::<BTreeSet<String>>();
         let mut roots = requested
             .iter()
             .map(|module| module["std/".len()..].to_owned())
@@ -1773,8 +1779,6 @@ enum StandardAttachError {
     SnapshotUnresolvable,
     /// The pinned tree is not a valid source tree.
     TreeInvalid(ProjectLoadError),
-    /// A project-requested module names no file in the pinned tree.
-    RequestedModuleUnavailable,
     /// The pinned closure did not load.
     ClosureUnloaded(ProjectLoadError),
     /// The pinned closure does not contain a requested module.
@@ -1820,9 +1824,6 @@ impl fmt::Display for StandardAttachError {
                 formatter.write_str("the pinned standard commit is unknown to stdlib/std")
             }
             Self::TreeInvalid(error) => write!(formatter, "the pinned tree is invalid: {error}"),
-            Self::RequestedModuleUnavailable => {
-                formatter.write_str("a requested standard module names no file in the pinned tree")
-            }
             Self::ClosureUnloaded(error) => {
                 write!(formatter, "the pinned module closure did not load: {error}")
             }

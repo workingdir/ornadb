@@ -645,7 +645,7 @@ fn binary_check_run_and_invoke_reject_uncaptured_standard_import_without_host_su
         .wait_with_output()
         .expect("unlisted REPL process output");
     assert!(unlisted_repl.status.success());
-    assert_eq!(unlisted_repl.stdout, b"> error[ORNA-S010-IMPORT]: imported module is unavailable\n  --> line 1, column 1\n  |\n1 | use std.collection;\n  | ^^^^^^^^^^^^^^^^^^^\nhelp: use a captured standard dependency or remove the import\n> ");
+    assert_eq!(unlisted_repl.stdout, b"> error[ORNA-S010-IMPORT]: standard module `std.collection` is not provided by the project's captured standard dependency\n  --> line 1, column 1\n  |\n1 | use std.collection;\n  | ^^^^^^^^^^^^^^^^^^^\nhelp: use a captured standard dependency or remove the import\n> ");
     assert!(unlisted_repl.stderr.is_empty());
 }
 
@@ -2285,6 +2285,49 @@ fn binary_repl_evaluates_a_pinned_query_window_operator_from_its_stats_import() 
             CanonicalValue::new(Raw::Array(vec![Raw::Int(6.into())]))
                 .expect("expected value is canonical")
         ))
+    );
+}
+
+#[test]
+fn binary_pinned_standard_snapshot_attaches_when_a_requested_module_is_absent() {
+    let standard_sources = orna_evaluator::reference_standard_sources()
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let standard = [
+        (
+            "collection.orna",
+            standard_sources["std/collection.orna"].as_str(),
+        ),
+        ("query.orna", standard_sources["std/query.orna"].as_str()),
+        ("stats.orna", standard_sources["std/stats.orna"].as_str()),
+        (
+            "math.orna",
+            include_str!("fixtures/captured-standard-math.orna"),
+        ),
+    ];
+    let (directory, _module_commit) = captured_standard_project_with(
+        &standard,
+        &[(
+            "main.orna",
+            "use std.query;\nuse std.secret;\npub fn answer(): [Int] = std.query.window_sum([2, 4], 2);\n",
+        )],
+    );
+
+    let repository = Repository::discover(directory.path()).expect("project repository");
+    let project = orna_project::ProjectLoader::default()
+        .load(&repository)
+        .expect("load pinned snapshot with an absent requested module");
+    assert_eq!(
+        project.standard_attach_failure(),
+        None,
+        "an absent requested module must not discard the whole pin"
+    );
+    assert!(
+        project
+            .standard_runtime_modules()
+            .contains("std/query.orna"),
+        "the modules the pin provides must still join the runtime closure: {:?}",
+        project.standard_runtime_modules()
     );
 }
 
