@@ -15,14 +15,14 @@ mod repl;
 #[allow(clippy::duplicate_mod)]
 #[allow(dead_code)]
 mod repl_commands;
-#[path = "../src/repl_copy.rs"]
-#[allow(clippy::duplicate_mod)]
-#[allow(dead_code)]
-mod repl_copy;
 #[path = "../src/repl_continuation.rs"]
 #[allow(clippy::duplicate_mod)]
 #[allow(dead_code)]
 mod repl_continuation;
+#[path = "../src/repl_copy.rs"]
+#[allow(clippy::duplicate_mod)]
+#[allow(dead_code)]
+mod repl_copy;
 #[path = "../src/repl_inspect.rs"]
 #[allow(clippy::duplicate_mod)]
 #[allow(dead_code)]
