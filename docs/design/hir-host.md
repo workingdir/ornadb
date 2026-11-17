@@ -243,10 +243,19 @@ This is `ProgramCatalog` in `orna-exec/src/host/catalog.rs` (slice HA7). It need
 `sys.Materialization`, `sys.MaintenanceJob` and `sys.Storage` need publication metadata (`orna-runtime`) and are not
 in the first provider; with no data they answer `ORNA-EVAL-UNSUPPORTED`, which is what the old evaluator answers for
 `valid/sys-storage`. `sys.rt.runs` and `sys.rt.streams` come from `orna-runtime`'s `SysCurrentRuntimeProjection`
-(`orna-runtime/src/observation.rs:79`) in slice HA8. That projection states which fields the runtime does not own
-(`FunctionRef`, `ObjectRef`, `InvocationRef`). HA8 does not `null` those non-null fields: the contract is frozen, so HA8
-registers all 25 `sys.rt` fields (`orna-runtime/src/host_rows.rs`) and each member that cannot be answered honestly is
-`ORNA-EVAL-UNSUPPORTED`. HA8 is PARTIAL: the typed `FunctionRef` and `ObjectRef` value kinds are in `orna-exec` (`value/refs.rs`), but no provider fills them, because the runtime keeps names only (`ornadb-jdq5h`). The member-to-bead map is in the `host_rows.rs` module table and row HA8 of 3.1.
+(`orna-runtime/src/observation.rs`) in slice HA8. The runtime stores the catalogue identity of each run's function and of
+each stream's producer and consumer (`sys_run_observation.function_object_id`,
+`sys_stream_observation.producer_object_id` and `consumer_object_id`), resolved when the row is registered in the
+snapshot the row pins, so the projection builds the typed `FunctionRef` and `ObjectRef` from a stored identity and never
+from a name. A row retained before that migration, or whose name its snapshot does not catalogue, keeps NULL; a NULL, or
+a stored identity its snapshot does not confirm, fails the projection closed with `RecoveryInvalid`
+(`orna-runtime/src/run_identity.rs`). HA8 does not `null` a non-null field: the contract is frozen, so HA8 registers all
+25 `sys.rt` fields (`orna-runtime/src/host_rows.rs`) and each member that cannot be answered honestly is
+`ORNA-EVAL-UNSUPPORTED`. HA8 is PARTIAL: `sys.rt.runs` answers the live runs of the projection (`orna-runtime/src/run_rows.rs`
+encodes each `sys.Run`, its `function` the typed `FunctionRef` of `orna-exec` `value/refs.rs`) and is
+`ORNA-EVAL-UNSUPPORTED` only while a run records a failure, because the `sys.Diagnostic` mapping is open
+(`ornadb-5il1.280`); `sys.rt.streams` stays unsupported, since no `sys.Stream` row encoder exists yet. The
+member-to-bead map is in the `host_rows.rs` module table and row HA8 of 3.1.
 
 ### A6. The test provider for the differential harness
 
@@ -498,7 +507,7 @@ independent except HB7 (needs HA3). Within a part the order is the dependency or
 | HA5 relation handles, provider source, `sys_call` | `ornadb-csenl.29` | HA3, HA2 | `value.rs`, `relation/pipeline.rs`, `eval.rs`, `host.rs` (`FixtureHost`) | `tests/sys_host.rs`: rows through `filter\|map\|take\|first\|count`; `take(1)` reads one row; registered member with no data is `ORNA-EVAL-UNSUPPORTED` | `valid/sys-storage` agrees; measured `agreed` recorded |
 | HA6 snapshots, `HEAD`/`CWD`, `as_of` | `ornadb-csenl.30` | HA5 | `orna-hir/interface`, `table.rs`, `host.rs`, `store/memory.rs` | `as_of(HEAD)` reads the snapshot, not current; `sys.rt` handle refuses `as_of`; unknown snapshot is `sys.snapshot.not_found` | `valid/cwd-head` runs, recorded as a harness allowance |
 | HA7 `ProgramCatalog` provider | `ornadb-csenl.31` | HA5 | `orna-exec` `host/catalog.rs`, `raw_value.rs` | `sys_catalog.rs`: tables and columns of a two-table program; `sys.rt.info` from `HostInfo` | rows match the declared tables; unlisted members stay unlinked |
-| HA8 runtime provider, PARTIAL (`sys.rt`, 25 fields; typed reference value kinds landed in `orna-exec` `value/refs.rs`, provider open) | `ornadb-csenl.32` | HA5 | `orna-runtime` `host_rows.rs`, `orna-exec` `host/runtime_rows.rs`, `orna-exec/tests/runtime_rows.rs` | every `sys.rt` member links through `RuntimeHostRows`; `sys.rt.runs` is `ORNA-EVAL-UNSUPPORTED` (not "`count` is 2"): `sys.Run.function` (FunctionRef) and `sys.Stream.producer` (ObjectRef) are non-null and the runtime retains only names (`ornadb-jdq5h`); presentation scalars have no producer (`ornadb-jjgvi`); diagnostics members (`ornadb-5il1.280`); source-level `sys.rt.<member>` paths do not yet execute (`ornadb-5il1.249`) | `orna-exec` `runtime_rows` tests pass; `check_architecture.py` passes |
+| HA8 runtime provider, PARTIAL (`sys.rt`, 25 fields; typed reference value kinds in `orna-exec` `value/refs.rs`; the runtime stores the run function and the stream producer and consumer catalogue identities, `ornadb-jdq5h`) | `ornadb-csenl.32` | HA5 | `orna-runtime` `host_rows.rs`, `run_rows.rs`, `run_identity.rs`, `orna-exec` `host/runtime_rows.rs`, `orna-exec/tests/runtime_rows.rs` | every `sys.rt` member links through `RuntimeHostRows`; `sys.rt.runs` answers the live runs of the projection (two live runs read `count` is 2, `orna-runtime` `tests::run_identity`) and is `ORNA-EVAL-UNSUPPORTED` while a run records a failure (`sys.Diagnostic` mapping, `ornadb-5il1.280`); `sys.rt.streams` has no row encoder yet; presentation scalars have no producer (`ornadb-jjgvi`); diagnostics members (`ornadb-5il1.280`); source-level `sys.rt.<member>` paths do not yet execute (`ornadb-5il1.249`) | `orna-exec` `runtime_rows` tests and `orna-runtime` `tests::run_identity` pass; `check_architecture.py` passes |
 
 ### 3.2 Part B, in order
 

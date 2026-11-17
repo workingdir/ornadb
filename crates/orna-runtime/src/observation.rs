@@ -2,8 +2,8 @@
 
 use crate::codec::{
     bigint_to_i64, capture_tx, decode_capture, decode_component, decode_consumer_identity,
-    decode_optional_component, decode_position, decode_u64, encode_capture, fixed, now_ms,
-    row_text, validate_id, validate_observation_text,
+    decode_optional_component, decode_position, decode_u64, fixed, now_ms, row_text, validate_id,
+    validate_observation_text,
 };
 use crate::error::RuntimeError;
 use crate::lease::{WriterLease, validate_writer_lease};
@@ -11,6 +11,10 @@ use crate::query::{QueryObservation, SysQueryProjection};
 use crate::request::{
     RequestAdmissionCapability, RequestIdentity, RequestOwner, RequestState, RequestStatus,
     admission_capability_digest, request_status_tx, require_fingerprint, validate_request_identity,
+};
+use crate::run_identity::{
+    insert_run_observation_tx, insert_stream_observation_tx, object_id_column,
+    verify_observation_identities,
 };
 use crate::session::ensure_session_admission_open;
 use crate::stream_store::{
@@ -22,11 +26,11 @@ use libsql::{Connection, TransactionBehavior, params};
 use orna_stream::{CommitResult, FailureIdentity, FailureRecord, SafeDiagnostic, StreamStatus};
 use orna_stream_identity::{CheckpointKey, ConsumerIdentity, DeliveryIdentity};
 use orna_value::{
-    CheckpointRef, CwdCapture, FailureRef, InvocationRef, OvbRaw, RowRef, RunRef, SYS_RUN_TABLE_ID,
-    SYS_STREAM_TABLE_ID, SnapshotRef, StreamRef, Value, checkpoint_reference, failure_reference,
-    invocation_reference, snapshot_reference, validate_checkpoint_reference,
-    validate_failure_reference, validate_invocation_reference, validate_run_reference,
-    validate_stream_reference,
+    CheckpointRef, CwdCapture, FailureRef, FunctionRef, InvocationRef, ObjectRef, OvbRaw, RowRef,
+    RunRef, SYS_RUN_TABLE_ID, SYS_STREAM_TABLE_ID, SnapshotRef, StreamRef, Value,
+    checkpoint_reference, failure_reference, invocation_reference, snapshot_reference,
+    validate_checkpoint_reference, validate_failure_reference, validate_invocation_reference,
+    validate_run_reference, validate_stream_reference,
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
@@ -57,7 +61,8 @@ impl RuntimeObservationFence {
 /// type only establishes their membership in this observation instant.
 ///
 /// Invocation, function, and snapshot relation handles are intentionally not
-/// added here: the runtime does not retain their physical coordinates.
+/// added here; the `Sys*` projections derive them from each row's durable
+/// coordinates and catalogue identities.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeObservationView {
     pub capture: CwdCapture,
@@ -70,9 +75,9 @@ pub struct RuntimeObservationView {
 /// `sys.rt.streams` subsets.
 ///
 /// This type preserves the one coherent observation instant established by
-/// [`RuntimeObservationFence`]. It intentionally represents only the Run and
-/// Stream fields for which the runtime has durable evidence; it does not
-/// manufacture physical FunctionRef, ObjectRef, or InvocationRef links.
+/// [`RuntimeObservationFence`]. It represents only the Run and Stream fields
+/// for which the runtime has durable evidence; every FunctionRef and ObjectRef
+/// comes from a catalogue identity stored with the row, never from a name.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SysCurrentRuntimeProjection {
     pub capture: CwdCapture,
@@ -86,9 +91,9 @@ pub struct SysCurrentRuntimeProjection {
 ///
 /// The rows are read from one database snapshot and every Stream is bound to
 /// its retained parent Run before it is exposed. This establishes only the
-/// coherent durable-observation query boundary: fields requiring physical
-/// FunctionRef, ObjectRef, or InvocationRef coordinates remain unavailable
-/// until the runtime durably owns those coordinates.
+/// coherent durable-observation query boundary: a row whose catalogue identity
+/// is missing, or is not confirmed by its pinned snapshot, fails closed
+/// instead of exposing a reference derived from a name.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SysRetainedObservationProjection {
     pub capture: CwdCapture,
@@ -175,6 +180,9 @@ pub struct RunObservation {
     pub request: RequestIdentity,
     pub consumer_identity: ConsumerIdentity,
     pub function: String,
+    /// Catalogue identity of `function` in `snapshot`. `None` for a run retained
+    /// before the identity migration or admitted with an uncatalogued name.
+    pub function_object_id: Option<[u8; 16]>,
     pub source_identity: Option<String>,
     pub snapshot: CwdCapture,
     pub runtime_id: [u8; 16],
@@ -246,6 +254,12 @@ pub struct StreamObservation {
     pub run: RunObservationId,
     pub producer: String,
     pub consumer: Option<String>,
+    /// Catalogue identity of `producer` in `parent_capture`. `None` for a stream
+    /// retained before the identity migration or registered with an uncatalogued name.
+    pub producer_object_id: Option<[u8; 16]>,
+    /// Catalogue identity of `consumer`, which must be a function, in
+    /// `parent_capture`. `None` when no consumer is recorded or it does not resolve.
+    pub consumer_object_id: Option<[u8; 16]>,
     /// Durable consumer identity copied from the stream natural key.
     pub consumer_identity: ConsumerIdentity,
     /// Durable source identity copied from the stream natural key.
@@ -338,16 +352,17 @@ impl StreamObservation {
 
 /// Checked, durable-field-only shape of one `sys.Run` observation.
 ///
-/// This is deliberately a partial relation DTO: the runtime retains no
-/// physical `FunctionRef` coordinates, so that schema field is not represented
-/// here. `snapshot` and `invocation` are reconstructed only from the durable
-/// run capture and admission identity; they cannot be rebound to the caller's
+/// This is deliberately a partial relation DTO. `function` is the catalogue
+/// identity stored with the run and never derived from its function name.
+/// `snapshot` and `invocation` are reconstructed only from the durable run
+/// capture and admission identity; they cannot be rebound to the caller's
 /// later CWD.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SysRunProjection {
     pub reference: RunRef,
     pub id: [u8; 16],
     pub consumer_identity: ConsumerIdentity,
+    pub function: FunctionRef,
     pub source_identity: Option<String>,
     pub snapshot: SnapshotRef,
     pub invocation: InvocationRef,
@@ -391,10 +406,12 @@ impl TryFrom<&RunObservation> for SysRunProjection {
         if observation.status == RunObservationStatus::Failed && observation.diagnostic.is_none() {
             return Err(RuntimeError::RecoveryInvalid);
         }
+        let function = observation.function_reference()?;
         Ok(Self {
             reference,
             id: observation.id.0,
             consumer_identity: observation.consumer_identity.clone(),
+            function,
             source_identity: observation.source_identity.clone(),
             snapshot,
             invocation,
@@ -412,14 +429,16 @@ impl TryFrom<&RunObservation> for SysRunProjection {
 
 /// Checked, durable-field-only shape of one `sys.Stream` observation.
 ///
-/// `producer` and `consumer` are omitted because the runtime only retains
-/// names, not the physical `ObjectRef`/`FunctionRef` coordinates required by
-/// the contract. This DTO is retained-observation data and does not establish
-/// membership in `sys.rt.streams`.
+/// `producer` and `consumer` are the catalogue identities stored with the
+/// stream, pinned to its parent run's capture and never derived from names.
+/// This DTO is retained-observation data and does not establish membership in
+/// `sys.rt.streams`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SysStreamProjection {
     pub reference: StreamRef,
     pub run: RunRef,
+    pub producer: ObjectRef,
+    pub consumer: Option<FunctionRef>,
     pub consumer_identity: ConsumerIdentity,
     pub source_identity: String,
     pub partition: Option<String>,
@@ -497,9 +516,13 @@ impl SysStreamProjection {
         if last_item_at.is_some_and(|last_item_at| last_item_at > observed_at) {
             return Err(RuntimeError::RecoveryInvalid);
         }
+        let producer = observation.producer_reference()?;
+        let consumer = observation.consumer_reference()?;
         Ok(Self {
             reference,
             run: run_reference,
+            producer,
+            consumer,
             consumer_identity: observation.consumer_identity.clone(),
             source_identity: observation.source_identity.clone(),
             partition: observation.partition.clone(),
@@ -740,7 +763,7 @@ pub(crate) async fn load_run_observation_tx(
     id: RunObservationId,
     capture: &CwdCapture,
 ) -> Result<Option<RunObservation>, RuntimeError> {
-    let mut rows = connection.query("SELECT session_id, request_id, consumer_identity, function_name, source_identity, invocation_id, snapshot, generation_digest, runtime_id, runtime_generation, started_ms, ended_ms, observed_ms, status, checkpoint_count, diagnostic_code, diagnostic_class FROM sys_run_observation WHERE run_id = ?1", params![id.0.to_vec()]).await?;
+    let mut rows = connection.query("SELECT session_id, request_id, consumer_identity, function_name, source_identity, invocation_id, snapshot, generation_digest, runtime_id, runtime_generation, started_ms, ended_ms, observed_ms, status, checkpoint_count, diagnostic_code, diagnostic_class, function_object_id FROM sys_run_observation WHERE run_id = ?1", params![id.0.to_vec()]).await?;
     let Some(row) = rows.next().await? else {
         return Ok(None);
     };
@@ -805,6 +828,7 @@ pub(crate) async fn load_run_observation_tx(
         request,
         consumer_identity: decode_consumer_identity(&row_text(&row, 2)?)?,
         function: row_text(&row, 3)?,
+        function_object_id: object_id_column(&row, 17)?,
         source_identity: row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?,
         snapshot,
         runtime_id,
@@ -869,7 +893,7 @@ async fn load_stream_observation_tx(
     id: StreamObservationId,
     capture: &CwdCapture,
 ) -> Result<Option<StreamObservation>, RuntimeError> {
-    let mut rows = connection.query("SELECT observation.run_id, observation.producer, observation.consumer_name, observation.status, observation.items_seen, observation.items_committed, observation.items_failed, observation.diagnostic_code, observation.diagnostic_class, checkpoint.consumer_principal, checkpoint.consumer_root, checkpoint.consumer_function, checkpoint.consumer_binding, checkpoint.source_format, checkpoint.source, checkpoint.partition_format, checkpoint.partition, checkpoint.position_format, run.runtime_id, run.runtime_generation, run.status, observation.consumer_identity, observation.source_identity, observation.partition, observation.last_item_ms, observation.observed_ms, observation.last_failure_identity, observation.checkpoint_key_id FROM sys_stream_observation AS observation JOIN stream_checkpoint AS checkpoint ON checkpoint.key_id = observation.checkpoint_key_id JOIN sys_run_observation AS run ON run.run_id = observation.run_id WHERE observation.stream_id = ?1", params![id.0.to_vec()]).await?;
+    let mut rows = connection.query("SELECT observation.run_id, observation.producer, observation.consumer_name, observation.status, observation.items_seen, observation.items_committed, observation.items_failed, observation.diagnostic_code, observation.diagnostic_class, checkpoint.consumer_principal, checkpoint.consumer_root, checkpoint.consumer_function, checkpoint.consumer_binding, checkpoint.source_format, checkpoint.source, checkpoint.partition_format, checkpoint.partition, checkpoint.position_format, run.runtime_id, run.runtime_generation, run.status, observation.consumer_identity, observation.source_identity, observation.partition, observation.last_item_ms, observation.observed_ms, observation.last_failure_identity, observation.checkpoint_key_id, observation.producer_object_id, observation.consumer_object_id FROM sys_stream_observation AS observation JOIN stream_checkpoint AS checkpoint ON checkpoint.key_id = observation.checkpoint_key_id JOIN sys_run_observation AS run ON run.run_id = observation.run_id WHERE observation.stream_id = ?1", params![id.0.to_vec()]).await?;
     let Some(row) = rows.next().await? else {
         return Ok(None);
     };
@@ -976,6 +1000,8 @@ async fn load_stream_observation_tx(
         run: parent_run_id,
         producer: row_text(&row, 1)?,
         consumer: row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?,
+        producer_object_id: object_id_column(&row, 28)?,
+        consumer_object_id: object_id_column(&row, 29)?,
         consumer_identity: observation_consumer,
         source_identity: observation_source,
         partition: partition.clone(),
@@ -1486,15 +1512,14 @@ impl RuntimeState {
         }
         let capture = capture_tx(&tx).await?;
         let id = RunObservationId(*Uuid::new_v4().as_bytes());
-        tx.execute(
-            "INSERT INTO sys_run_observation (run_id, session_id, request_id, consumer_identity, function_name, source_identity, invocation_id, snapshot, generation_digest, runtime_id, runtime_generation, started_ms, ended_ms, observed_ms, status, checkpoint_count, diagnostic_code, diagnostic_class) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, NULL, ?12, ?13, 0, NULL, NULL)",
-            params![
-                id.0.to_vec(), registration.request.session_id.to_vec(), registration.request.request_id.to_vec(),
-                registration.consumer_identity.canonical(), registration.function, registration.source_identity,
-                registration.invocation_id.to_vec(), encode_capture(&capture)?, capture.generation_digest().to_vec(), capture.runtime_id().to_vec(),
-                bigint_to_i64(capture.generation())?, now_ms()?, run_status_code(RunObservationStatus::Starting),
-            ],
-        ).await?;
+        insert_run_observation_tx(
+            &tx,
+            id,
+            &registration,
+            &capture,
+            RunObservationStatus::Starting,
+        )
+        .await?;
         tx.commit().await?;
         self.run_observation(id)
             .await?
@@ -1565,17 +1590,14 @@ impl RuntimeState {
         .await
         ?;
         let id = RunObservationId(*Uuid::new_v4().as_bytes());
-        tx.execute(
-            "INSERT INTO sys_run_observation (run_id, session_id, request_id, consumer_identity, function_name, source_identity, invocation_id, snapshot, generation_digest, runtime_id, runtime_generation, started_ms, ended_ms, observed_ms, status, checkpoint_count, diagnostic_code, diagnostic_class) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, NULL, ?12, ?13, 0, NULL, NULL)",
-            params![
-                id.0.to_vec(), registration.request.session_id.to_vec(), registration.request.request_id.to_vec(),
-                registration.consumer_identity.canonical(), registration.function, registration.source_identity,
-                registration.invocation_id.to_vec(), encode_capture(&capture)?, capture.generation_digest().to_vec(), capture.runtime_id().to_vec(),
-                bigint_to_i64(capture.generation())?, now_ms()?, run_status_code(RunObservationStatus::Running),
-            ],
+        insert_run_observation_tx(
+            &tx,
+            id,
+            &registration,
+            &capture,
+            RunObservationStatus::Running,
         )
-        .await
-        ?;
+        .await?;
         tx.commit().await?;
         let run = self
             .run_observation(id)
@@ -1724,15 +1746,14 @@ impl RuntimeState {
             return Err(RuntimeError::RequestStateConflict);
         }
         let id = RunObservationId(*Uuid::new_v4().as_bytes());
-        tx.execute(
-            "INSERT INTO sys_run_observation (run_id, session_id, request_id, consumer_identity, function_name, source_identity, invocation_id, snapshot, generation_digest, runtime_id, runtime_generation, started_ms, ended_ms, observed_ms, status, checkpoint_count, diagnostic_code, diagnostic_class) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, NULL, ?12, ?13, 0, NULL, NULL)",
-            params![
-                id.0.to_vec(), registration.request.session_id.to_vec(), registration.request.request_id.to_vec(),
-                registration.consumer_identity.canonical(), registration.function, registration.source_identity,
-                registration.invocation_id.to_vec(), encode_capture(&capture)?, capture.generation_digest().to_vec(), capture.runtime_id().to_vec(),
-                bigint_to_i64(capture.generation())?, now_ms()?, run_status_code(RunObservationStatus::Running),
-            ],
-        ).await?;
+        insert_run_observation_tx(
+            &tx,
+            id,
+            &registration,
+            &capture,
+            RunObservationStatus::Running,
+        )
+        .await?;
         tx.commit().await?;
         let run = self
             .run_observation(id)
@@ -1849,12 +1870,15 @@ impl RuntimeState {
             return Err(RuntimeError::StreamIdentityMismatch);
         }
         let id = StreamObservationId(*Uuid::new_v4().as_bytes());
-        tx.execute(
-            "INSERT INTO sys_stream_observation (stream_id, run_id, checkpoint_key_id, producer, consumer_name, consumer_identity, source_identity, partition, status, items_seen, items_committed, items_failed, checkpoint_version, last_failure_identity, last_item_ms, diagnostic_code, diagnostic_class, observed_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, 0, 0, NULL, NULL, NULL, NULL, NULL, ?10)",
-            params![id.0.to_vec(), registration.run.0.to_vec(), key_id, registration.producer, registration.consumer,
-                registration.checkpoint.consumer.canonical(), registration.checkpoint.source.as_str().to_owned(), partition,
-                stream_observation_status_code(StreamObservationStatus::Starting), now_ms()?],
-        ).await?;
+        insert_stream_observation_tx(
+            &tx,
+            id,
+            &registration,
+            &run.snapshot,
+            &key_id,
+            partition.as_deref(),
+        )
+        .await?;
         tx.commit().await?;
         self.stream_observation(id)
             .await?
@@ -1887,12 +1911,14 @@ impl RuntimeState {
         let runs = load_run_observations(&tx, &capture).await?;
         let streams = load_stream_observations(&tx, &capture).await?;
         tx.commit().await?;
-        project_retained_observations(RuntimeObservationView {
+        let view = RuntimeObservationView {
             capture,
             queries,
             runs,
             streams,
-        })
+        };
+        verify_observation_identities(&self.connection, &view).await?;
+        project_retained_observations(view)
     }
 
     /// Verifies `lease` and captures the current runtime generation in one
@@ -1972,7 +1998,9 @@ impl RuntimeState {
         &self,
         fence: &RuntimeObservationFence,
     ) -> Result<SysCurrentRuntimeProjection, RuntimeError> {
-        project_current_runtime_observations(self.current_runtime_observations(fence).await?)
+        let view = self.current_runtime_observations(fence).await?;
+        verify_observation_identities(&self.connection, &view).await?;
+        project_current_runtime_observations(view)
     }
 
     /// Reads the owner-fenced current-runtime Run subset.
