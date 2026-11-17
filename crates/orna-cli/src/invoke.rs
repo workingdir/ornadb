@@ -4,12 +4,11 @@ use super::{
     ApplicationAuthority, ApplicationError, BoundedEvaluator, Cow, Diagnostic,
     DurableTransactionalEvaluator, Endpoint, Environment, Exit, Limits, ProjectUnit,
     RuntimeEvaluator, RuntimeMode, StageOutcome, StdSnapshotPin, cancellation_diagnostic,
-    cli_output_failed, committed_storage_orders, committed_table_object_ids,
-    diagnostic_documentation, execution_project, load_project, local_project_path,
-    project_load_diagnostic, pure_execution_project, pure_sys_host_context,
-    refuse_legacy_bare_module_rows, request_nonce, run_committed_table_invocation,
-    runtime_identity, runtime_publication_metadata_rows, semantic_catalogue, sys_host,
-    write_success_line,
+    cli_output_failed, committed_base_reader, committed_table_object_ids, diagnostic_documentation,
+    execution_project, load_project, local_project_path, project_load_diagnostic,
+    pure_execution_project, pure_sys_host_context, refuse_legacy_bare_module_rows, request_nonce,
+    run_committed_table_invocation, runtime_identity, runtime_publication_metadata_rows,
+    semantic_catalogue, sys_host, write_success_line,
 };
 use orna_value::CanonicalValue;
 
@@ -171,7 +170,7 @@ pub(crate) fn run_project_invocation_with_arguments(
     })?;
     let std_snapshot = sys_host::std_snapshot_pin(&project);
     let table_object_ids = committed_table_object_ids(&repository, &project)?;
-    let storage_orders = committed_storage_orders(&repository, &project)?;
+    let committed_base = committed_base_reader(&repository, &project);
     // Admission is bound to the committed snapshot when there is one; a
     // repository with no commit yet runs from the worktree project, which is
     // what the seed test exercises (bead ornadb-jm0d).
@@ -218,7 +217,7 @@ pub(crate) fn run_project_invocation_with_arguments(
                     &mut result_value,
                     &loaded_project,
                     &table_object_ids,
-                    &storage_orders,
+                    &committed_base,
                 ),
         )
         .map_err(|error| durable_invocation_failed(&error))?;
