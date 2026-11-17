@@ -7,7 +7,10 @@
 use std::fmt::Write as _;
 
 use orna_sys_id::SysType;
-use orna_value::{CanonicalValue, ContextValue, Raw, canonical_uuid_text};
+use orna_value::{
+    CanonicalValue, ContextValue, OVB2_BLOB_TAG, ROV3_BLOB_TAG, ROV3_OVERFLOW_TAG, Raw,
+    SOV3_BLOB_TAG, canonical_uuid_text,
+};
 
 /// How much of a value the console renders.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -80,6 +83,12 @@ pub(crate) fn render(raw: &Raw, depth: usize, bounds: Bounds) -> (String, &'stat
         Raw::Tag(60011, _) => ("<redacted>".into(), "Diagnostic"),
         Raw::Tag(60012, _) => ("<redacted>".into(), "Present"),
         Raw::Tag(60016, _) => ("<redacted>".into(), "Error"),
+        // Blob payloads show their length and media type only. The bytes and
+        // identity fields are never rendered, so an inspect is not a hex dump.
+        Raw::Tag(OVB2_BLOB_TAG | ROV3_BLOB_TAG | SOV3_BLOB_TAG, payload) => {
+            (blob_text(payload, bounds), "Blob")
+        }
+        Raw::Tag(ROV3_OVERFLOW_TAG, _) => ("<object>".into(), "Overflow"),
         Raw::Tag(60026, _) => ("<redacted>".into(), SysType::Value.name()),
         // OVB tag 37 is the closed 1.0 UUID representation. Keep its
         // structural fallback human-readable without turning presentation
@@ -96,6 +105,21 @@ pub(crate) fn render(raw: &Raw, depth: usize, bounds: Bounds) -> (String, &'stat
             }
         }
     }
+}
+
+/// Length and media type of a Blob payload, such as `Blob(3 bytes, "text/plain")`.
+/// OVB-2 carries the bytes inline; ROV-3 and SOV-3 carry the length as an
+/// integer before the identity fields. Any other shape is `Blob(<invalid>)`.
+fn blob_text(payload: &Raw, bounds: Bounds) -> String {
+    let Raw::Array(fields) = payload else {
+        return "Blob(<invalid>)".into();
+    };
+    let (length, media_type) = match fields.as_slice() {
+        [Raw::Bytes(bytes), Raw::Text(media_type), _] => (bytes.len().to_string(), media_type),
+        [Raw::Int(length), _, Raw::Text(media_type), _, ..] => (length.to_string(), media_type),
+        _ => return "Blob(<invalid>)".into(),
+    };
+    format!("Blob({length} bytes, \"{}\")", escape(media_type, bounds))
 }
 
 fn inspect_uuid(value: &Raw) -> (String, &'static str) {
@@ -566,5 +590,54 @@ mod tests {
             format!("{text} : {ty}"),
             "00000000-0000-0000-0000-000000000000 : Uuid"
         );
+    }
+
+    #[test]
+    fn blob_payloads_show_length_and_media_type_not_wire_tag_or_bytes() {
+        let media = Raw::Text("text/plain".to_owned());
+        // OVB-2: inline bytes. ROV-3: length, sha, media, suffix, descriptor.
+        // SOV-3: length, sha, media, suffix.
+        let ovb2 = Raw::Tag(
+            OVB2_BLOB_TAG,
+            Box::new(Raw::Array(vec![
+                Raw::Bytes(vec![0xde, 0xad, 0xbe]),
+                media.clone(),
+                Raw::Null,
+            ])),
+        );
+        let rov3 = Raw::Tag(
+            ROV3_BLOB_TAG,
+            Box::new(Raw::Array(vec![
+                Raw::Int(12.into()),
+                Raw::Bytes(vec![0xab; 32]),
+                media.clone(),
+                Raw::Null,
+                Raw::Bytes(vec![0xcd; 16]),
+            ])),
+        );
+        let sov3 = Raw::Tag(
+            SOV3_BLOB_TAG,
+            Box::new(Raw::Array(vec![
+                Raw::Int(7.into()),
+                Raw::Bytes(vec![0xab; 32]),
+                media,
+                Raw::Null,
+            ])),
+        );
+        let cases = [
+            (ovb2, "Blob(3 bytes, \"text/plain\") : Blob"),
+            (rov3, "Blob(12 bytes, \"text/plain\") : Blob"),
+            (sov3, "Blob(7 bytes, \"text/plain\") : Blob"),
+        ];
+        for (raw, expected) in cases {
+            let text = inspect_text(&raw, DISPLAY);
+            assert_eq!(text, expected);
+            assert!(!text.contains("Tag<"), "a Blob must not show its wire tag");
+            assert!(!text.contains("0x"), "a Blob must not dump its bytes");
+        }
+        let overflow = Raw::Tag(ROV3_OVERFLOW_TAG, Box::new(Raw::Bytes(vec![0; 16])));
+        assert_eq!(inspect_text(&overflow, DISPLAY), "<object> : Overflow");
+        let malformed = Raw::Tag(ROV3_BLOB_TAG, Box::new(Raw::Null));
+        assert_eq!(inspect_text(&malformed, DISPLAY), "Blob(<invalid>) : Blob");
     }
 }
