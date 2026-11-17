@@ -411,6 +411,36 @@ impl Symbol {
                 _ => None,
             })
     }
+
+    /// The type of a table's primary key as a stored reference carries it: the
+    /// single key's type, or the tuple of a composite key's components in
+    /// declared order (ORNA-KEY-005). `None` when the table declares no key
+    /// admission.
+    fn table_key_type(&self) -> Option<Type> {
+        let keys = &self.table_schema.as_ref()?.admission.as_ref()?.keys;
+        match keys.as_slice() {
+            [] => None,
+            [(_, ty)] => Some(ty.clone()),
+            keys => Some(Type::Tuple(keys.iter().map(|(_, ty)| ty.clone()).collect())),
+        }
+    }
+
+    /// The primary key type of every table in `symbols`, keyed by table identity.
+    fn table_key_types<'a>(
+        namespace: &Namespace,
+        symbols: impl Iterator<Item = (&'a String, &'a Symbol)>,
+    ) -> BTreeMap<String, Type> {
+        symbols
+            .filter(|(_, symbol)| symbol.kind == SymbolKind::Table)
+            .filter_map(|(name, symbol)| {
+                let identity = match &symbol.ty {
+                    Type::Named(identity) => identity.clone(),
+                    _ => nominal_identity(namespace, name),
+                };
+                Some((identity, symbol.table_key_type()?))
+            })
+            .collect()
+    }
 }
 
 /// The primitive, root and operation modules every catalogue exposes.

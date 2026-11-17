@@ -28,6 +28,7 @@ const SOURCE: &str = r#"pub table Owner(id: Str) { name: Str, }
 pub table Vehicle(id: Str) { owner: Owner, }
 pub fn seed() { Vehicle.insert({ id: "v1", owner: Owner.insert({ id: "ada", name: "Ada" }) }); }
 pub fn owner_name(): Str = Vehicle | map(v => v.owner.name) | first() ?? "none";
+pub fn owner_key(): Str = Vehicle | map(v => v.owner.key) | first() ?? "none";
 pub fn dangle() { let ghost = Owner.insert({ id: "ghost", name: "Ghost" }); Owner.delete("ghost"); Vehicle.insert({ id: "v2", owner: ghost }); }
 pub fn drop_owner() { Owner.delete("ada"); }
 pub fn rekey_owner() { Owner.rekey("ada", "ada2"); }
@@ -305,6 +306,30 @@ fn a_row_bound_to_a_table_field_is_stored_as_a_reference_and_reads_back() {
         transcript(&owner).contains("TableRef"),
         "the field holds a stored reference value\n{}",
         transcript(&owner)
+    );
+}
+
+#[test]
+fn a_reference_exposes_the_key_of_its_target_to_the_checker_and_runtime() {
+    // ORNA-REF-002: `vehicle.owner.key` is available without loading the target
+    // row, so the checker types it as the target's primary key and the runtime
+    // answers it from the stored reference.
+    let database = published_garage();
+    let root = database.root();
+
+    let key = orna(&root, &["run", "main.owner_key"]);
+    assert_success(&key, "orna run of the reference's key");
+    assert!(
+        transcript(&key).contains("\"ada\""),
+        "the reference exposes the owner's primary key\n{}",
+        transcript(&key)
+    );
+    let listed = orna_repl(&root, "main.Vehicle | map(v => v.owner.key)");
+    assert_success(&listed, "REPL read of the reference's key");
+    assert!(
+        transcript(&listed).contains("\"ada\""),
+        "{}",
+        transcript(&listed)
     );
 }
 

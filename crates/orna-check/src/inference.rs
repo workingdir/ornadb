@@ -210,6 +210,7 @@ pub(crate) fn infer_field(
                         Type::Record(fields) => fields.get(name).cloned(),
                         _ => None,
                     })
+                    .or_else(|| table_reference_key_type(nominal, name, scope))
                     .or_else(|| error_value_field_type(nominal, name))
                     .unwrap_or_else(|| {
                         diagnostics.push(diag(DIAG_TYPE, "field access requires a record"));
@@ -226,6 +227,19 @@ pub(crate) fn infer_field(
         ty,
         effects: base.effects,
     }
+}
+
+/// The type of `reference.key` on a stored table reference (ORNA-REF-002): the
+/// primary key of the referenced table, which is available without loading the
+/// target row. A composite key is the tuple of its components, as the runtime
+/// and the stored reference carry it (ORNA-KEY-005). A table with a declared
+/// column named `key` keeps that column's type, so `None` only falls through to
+/// the key when no row field answers.
+fn table_reference_key_type(table: &str, name: &str, scope: &Scope) -> Option<Type> {
+    if name != "key" {
+        return None;
+    }
+    scope.table_keys.get(table).cloned()
 }
 
 pub(crate) fn infer_lambda(
