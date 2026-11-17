@@ -214,6 +214,9 @@ truth for which commit ornadb builds against. The Rust mirror in
 for byte. Snapshot identities and accepted
 digests are governed by `docs/decisions/0055-standard-executable-source-units.md`
 and the later snapshot ADRs (0058, 0059); they are not regenerated in place.
+The exact command sequence, including the dry run and `--apply` of
+`scripts/bump_std.py`, is in the [std bump process](process/std-bump.md). The
+numbered steps below are the rules that process enforces.
 
 Bump procedure:
 
