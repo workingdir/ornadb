@@ -1,0 +1,51 @@
+# Intentional gaps in CI test coverage, checked by scripts/check_ci_test_coverage.py.
+# A `uncovered` entry exempts a whole test target; `uncovered_test` exempts one
+# #[ignore]d test or one skipped name. Each entry needs a reason. An entry whose
+# target or test is now run by a workflow step fails the check until removed.
+
+[[uncovered]]
+package = "orna-evaluator"
+target = "bin:orna_bench"
+reason = "benchmark runner executed by `cargo run --bin orna_bench` in cli-tests.yml (hir-benchmarks job), not by cargo test; it has no test functions to run"
+
+[[uncovered_test]]
+package = "orna-evaluator"
+target = "test:std_intrinsic_scale"
+test = "converted_linear_operations_wall_clock"
+reason = "#[ignore]d advisory wall-clock measurement (run with --ignored --nocapture); no workflow step passes --ignored"
+
+[[uncovered_test]]
+package = "orna-runtime"
+target = "test:v1_replay_review_regressions"
+test = "cancelled_plaintext_replay_grant_is_rejected_before_handler"
+reason = "#[ignore]d known Orna 1.0.0 gap #786, run explicitly for review; no workflow step passes --ignored"
+
+[[uncovered_test]]
+package = "orna-runtime"
+target = "test:v1_replay_review_regressions"
+test = "cancelled_protected_replay_grant_is_rejected_before_provider_and_handler"
+reason = "#[ignore]d known Orna 1.0.0 gap #786, run explicitly for review; no workflow step passes --ignored"
+
+[[uncovered_test]]
+package = "orna-runtime"
+target = "test:v1_replay_review_regressions"
+test = "interrupted_replay_recovery_preserves_admitted_attempt"
+reason = "#[ignore]d known Orna 1.0.0 gap #786, run explicitly for review; no workflow step passes --ignored"
+
+[[uncovered_test]]
+package = "orna-runtime"
+target = "test:v1_replay_review_regressions"
+test = "replay_admission_counts_attempt_before_execution"
+reason = "#[ignore]d known Orna 1.0.0 gap #786, run explicitly for review; no workflow step passes --ignored"
+
+[[uncovered_test]]
+package = "orna-runtime"
+target = "test:v1_replay_review_regressions"
+test = "successful_replay_counts_exactly_one_attempt"
+reason = "#[ignore]d known Orna 1.0.0 gap #786, run explicitly for review; no workflow step passes --ignored"
+
+[[uncovered_test]]
+package = "orna-vfs"
+target = "test:runtime_saves"
+test = "replaying_a_published_vfs_save_reports_the_idempotent_outcome"
+reason = "#[ignore]d pending ORNA-VFS-008 outcome shape (SPEC-QUESTIONS Q2, ornadb-5il1.354); no workflow step passes --ignored"

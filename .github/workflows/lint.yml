@@ -69,6 +69,14 @@ jobs:
       - name: Check the size budgets
         run: python3 scripts/check_architecture.py --mode=budget
 
+      # Every workspace test target must run in some workflow step, or be listed
+      # with a reason in scripts/ci-test-coverage-allow.toml.
+      - name: Prove CI test coverage checker behavior
+        run: python3 -m unittest scripts.test_check_ci_test_coverage
+
+      - name: Check that every test target runs in CI
+        run: python3 scripts/check_ci_test_coverage.py
+
       # Pinned and hash-verified because a cargo-deny upgrade changes the
       # dependency policy without any repository change. `gh release download`
       # goes through the API; the release asset redirect returned HTTP 504 on
