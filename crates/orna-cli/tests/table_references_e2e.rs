@@ -547,3 +547,77 @@ fn a_non_root_module_table_reads_through_the_repl_by_its_qualified_name() {
         "the qualified REPL read returns the committed row\n{text}"
     );
 }
+
+/// A project whose modules are `files`, initialised with `orna init` and
+/// committed with `orna commit`. Returns the directory and project root.
+fn committed_project(files: &[(&str, &str)]) -> (TempDir, PathBuf) {
+    let directory = TempDir::new().expect("create the test directory");
+    let root = directory.path().join("garage");
+    let init = orna(
+        directory.path(),
+        &["init", root.to_str().expect("UTF-8 test path")],
+    );
+    assert_success(&init, "orna init");
+    git(&root, &["config", "user.name", "Orna Test"]);
+    git(
+        &root,
+        &["config", "user.email", "orna-test@example.invalid"],
+    );
+    git(&root, &["config", "commit.gpgsign", "false"]);
+    let mut staged = vec!["add", ".orna/database.orna"];
+    for (path, source) in files {
+        let path_on_disk = root.join(path);
+        fs::create_dir_all(path_on_disk.parent().expect("module directory"))
+            .expect("create the module directory");
+        fs::write(path_on_disk, source).expect("write the module source");
+        staged.push(path);
+    }
+    git(&root, &staged);
+    assert_success(
+        &orna(&root, &["commit", "-m", "Declare the project"]),
+        "orna commit",
+    );
+    (directory, root)
+}
+
+/// A table field typed by a table of another module (`owner: owners.Owner`)
+/// stores a reference to that module's row, and the row is inserted and read
+/// back through the qualified table type (ORNA-REF-001, ORNA-REF-002).
+#[test]
+fn a_cross_module_table_field_references_a_row_of_the_other_module() {
+    let (_directory, root) = committed_project(&[
+        (
+            "main.orna",
+            "use owners;\n\
+             pub table Vehicle(id: Str) { owner: owners.Owner, }\n\
+             pub fn seed() { Vehicle.insert({ id: \"v1\", owner: owners.Owner.insert({ id: \"ada\", name: \"Ada\" }) }); }\n\
+             pub fn owner_name(): Str = Vehicle | map(v => v.owner.name) | first() ?? \"none\";\n\
+             pub fn owner_key(): Str = Vehicle | map(v => v.owner.key) | first() ?? \"none\";\n\
+             pub fn main() {}\n",
+        ),
+        ("owners.orna", "pub table Owner(id: Str) { name: Str, }\n"),
+    ]);
+
+    assert_success(&orna(&root, &["run", "seed"]), "orna run seed");
+    assert_success(
+        &orna(&root, &["publish", "--message", "Seed the garage"]),
+        "orna publish of a cross-module reference",
+    );
+    let name = orna(&root, &["run", "main.owner_name"]);
+    assert_success(
+        &name,
+        "orna run of a read through the cross-module reference",
+    );
+    assert!(
+        transcript(&name).contains("\"Ada\""),
+        "the cross-module reference reads back the owner's name\n{}",
+        transcript(&name)
+    );
+    let key = orna(&root, &["run", "main.owner_key"]);
+    assert_success(&key, "orna run of the key of a cross-module reference");
+    assert!(
+        transcript(&key).contains("\"ada\""),
+        "the cross-module reference exposes the owner's key\n{}",
+        transcript(&key)
+    );
+}

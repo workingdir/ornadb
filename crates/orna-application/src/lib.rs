@@ -3640,8 +3640,10 @@ impl ApplicationLiveAdapter {
     /// The write schemas of the tables a served REPL input may mutate. The
     /// session REPL is seeded from the loaded project, so the project's own
     /// tables are admitted alongside the catalogue's, as the local REPL
-    /// admits them. A table name declared twice fails closed instead of one
-    /// declaration silently replacing the other.
+    /// admits them. Tables are keyed by module-qualified name (bare for the
+    /// root module), so a root table and a same-named table in another module
+    /// or the catalogue are distinct. A qualified name declared twice fails
+    /// closed instead of one declaration silently replacing the other.
     fn repl_table_schemas(&self) -> Result<BTreeMap<String, TableSchema>, ApplicationError> {
         let modules = self
             .project
@@ -3654,8 +3656,13 @@ impl ApplicationLiveAdapter {
         );
         let mut tables = BTreeMap::new();
         for module in analysis.modules.values() {
+            let namespace = module.namespace.display();
             for (name, schema) in admitted_table_schemas(module) {
-                if tables.insert(name, schema).is_some() {
+                let qualified = match namespace.as_str() {
+                    "" => name,
+                    prefix => format!("{prefix}.{name}"),
+                };
+                if tables.insert(qualified, schema).is_some() {
                     return Err(ApplicationError::InvalidTableMetadata);
                 }
             }
@@ -5987,11 +5994,11 @@ mod tests {
     }
 
     /// G-2: the served REPL's write schemas union the catalogue's tables with
-    /// the loaded project's. A project table that reuses a catalogue table
-    /// name fails closed with `InvalidTableMetadata` instead of one declaration
-    /// silently replacing the other.
+    /// the loaded project's. A project table named like a catalogue table is
+    /// qualified apart from it (`Note` versus `std.store.Note`), so both are
+    /// admitted under distinct names.
     #[test]
-    fn served_repl_table_schemas_reject_a_project_table_named_like_a_catalogue_table() {
+    fn served_repl_table_schemas_keep_a_project_table_distinct_from_a_catalogue_table() {
         use orna_check::StandardDependencyProfile;
         use orna_repository::Repository;
         use std::{fs, process::Command};
@@ -6039,7 +6046,57 @@ mod tests {
         fs::remove_dir_all(root).expect("test project is removed");
         assert_eq!(
             result.map(|tables| tables.keys().cloned().collect::<Vec<_>>()),
-            Err(ApplicationError::InvalidTableMetadata),
+            Ok(vec!["Note".to_owned(), "std.store.Note".to_owned()]),
+        );
+    }
+
+    #[test]
+    fn served_repl_table_schemas_admit_same_bare_name_in_two_modules() {
+        use orna_repository::Repository;
+        use std::{fs, process::Command};
+
+        let root = std::env::temp_dir().join(format!(
+            "orna-served-repl-two-modules-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock is after Unix epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("project root is created");
+        fs::write(
+            root.join("main.orna"),
+            "use owners;\npub table Note(id: Int) { text: Str, }\n",
+        )
+        .expect("root fixture is written");
+        fs::write(
+            root.join("owners.orna"),
+            "pub table Note(id: Int) { owner: Str, }\n",
+        )
+        .expect("module fixture is written");
+        assert!(
+            Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(&root)
+                .status()
+                .expect("git init starts")
+                .success()
+        );
+        let repository = Repository::discover(&root).expect("test project is a Git worktree");
+        let project = orna_project::ProjectLoader::default()
+            .load_with_standard_profile(&repository, None)
+            .expect("project modules are loaded from the clone");
+        let adapter = ApplicationLiveAdapter::new(ApplicationAuthority::new(
+            Catalogue::authoritative_core(),
+            Limits::default(),
+        ))
+        .with_loaded_project(project);
+        let result = adapter.repl_table_schemas();
+        drop(repository);
+        fs::remove_dir_all(root).expect("test project is removed");
+        assert_eq!(
+            result.map(|tables| tables.keys().cloned().collect::<Vec<_>>()),
+            Ok(vec!["Note".to_owned(), "owners.Note".to_owned()]),
         );
     }
 
