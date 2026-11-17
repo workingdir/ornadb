@@ -17,6 +17,9 @@ use tokio::signal::unix::{Signal, SignalKind, signal};
 use super::*;
 use orna_repository::{MountStatus, MountView, Repository};
 
+mod row_diagnostics;
+use row_diagnostics::{RowDiagnosticListing, status_row_diagnostics};
+
 fn mount_error(title: &'static str, detail: impl Into<String>) -> Diagnostic {
     Diagnostic::target_with_detail(
         "ORNA-CMD-TARGET-UNAVAILABLE",
@@ -1728,80 +1731,6 @@ fn status_drafts(status: &MountStatus) -> DraftListing {
     }
 }
 
-/// One failed row or table projection of a mount, as `mount status` reports it: the
-/// mount path of its node, the exact `sys.*` code when the failure names one, and
-/// the failure message (ORNA-VFS-005).
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct RowDiagnosticEntry {
-    path: String,
-    code: Option<String>,
-    message: String,
-}
-
-/// The row projection failures of a mount, and how many the daemon left out of its
-/// bounded list. `error` is why they could not be listed.
-#[derive(Debug, Default, PartialEq, Eq)]
-struct RowDiagnosticListing {
-    entries: Vec<RowDiagnosticEntry>,
-    omitted: u64,
-    error: Option<String>,
-}
-
-/// Parses the `path<TAB>code<TAB>message` lines of a row diagnostic list. The
-/// `\tomitted\tN` line counts the failures the daemon did not list.
-#[cfg(target_os = "linux")]
-fn parse_row_diagnostics(list: &str) -> RowDiagnosticListing {
-    let mut listing = RowDiagnosticListing::default();
-    for line in list.lines().filter(|line| !line.is_empty()) {
-        if let Some(count) = line.strip_prefix("\tomitted\t") {
-            listing.omitted += count.parse::<u64>().unwrap_or(0);
-            continue;
-        }
-        let fields: Vec<&str> = line.splitn(3, '\t').collect();
-        listing.entries.push(match fields[..] {
-            [path, code, message] => RowDiagnosticEntry {
-                path: path.to_owned(),
-                code: (!code.is_empty()).then(|| code.to_owned()),
-                message: message.to_owned(),
-            },
-            _ => RowDiagnosticEntry {
-                path: line.to_owned(),
-                code: None,
-                message: "unreadable row diagnostic".to_owned(),
-            },
-        });
-    }
-    listing
-}
-
-/// The row projection failures of a mount. Every mount serves them, read-only or
-/// writable, so they are listed for each one.
-#[cfg(target_os = "linux")]
-fn status_row_diagnostics(status: &MountStatus) -> RowDiagnosticListing {
-    match orna_fuse::row_diagnostic_list(status.mountpoint()) {
-        Ok(list) => parse_row_diagnostics(&list),
-        Err(rustix::io::Errno::NODATA) => RowDiagnosticListing {
-            error: Some(
-                "this mount's daemon predates row diagnostics; row projection failures are not reported"
-                    .to_owned(),
-            ),
-            ..RowDiagnosticListing::default()
-        },
-        Err(error) => RowDiagnosticListing {
-            error: Some(mount_listing_failure(error, "row diagnostics")),
-            ..RowDiagnosticListing::default()
-        },
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn status_row_diagnostics(_status: &MountStatus) -> RowDiagnosticListing {
-    RowDiagnosticListing {
-        error: Some("live row diagnostics require Linux FUSE".to_owned()),
-        ..RowDiagnosticListing::default()
-    }
-}
-
 /// One status object with the documented keys. The mountpoint is JSON-escaped
 /// so a path containing a quote, backslash or control character cannot produce
 /// invalid output. `draft_source` names the xattr the drafts came from (`fields`,
@@ -1957,7 +1886,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn row_diagnostic_lines_carry_the_code_and_reach_the_status_json() {
-        use super::{RowDiagnosticEntry, parse_row_diagnostics};
+        use super::row_diagnostics::{RowDiagnosticEntry, parse_row_diagnostics};
 
         let rows = parse_row_diagnostics(
             "Music/london/data.orna\tsys.vfs.stale_edit\tnot accepted\nMusic/bad\t\tfield layout could not be resolved\n\tomitted\t4",
