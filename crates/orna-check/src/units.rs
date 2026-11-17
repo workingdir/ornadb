@@ -13,6 +13,7 @@ use unicode_casefold::UnicodeCaseFold;
 use unicode_normalization::{UnicodeNormalization, is_nfc};
 
 use super::*;
+use crate::canonical_scan::module_needs_canonicalization;
 
 /// Resolves dimension and unit declarations to their reduced dimension bases
 /// and unit metadata. Declarations that cannot be reduced are omitted, so
@@ -1350,24 +1351,6 @@ pub(crate) fn canonicalize_symbol(symbol: &mut Symbol, identities: &BTreeMap<Str
             *source = canonicalize_type_with_identities(source, identities);
         }
     }
-}
-
-/// Whether canonicalizing `module` would change one of its symbols. A module is
-/// written only when this holds, so an unchanged module is never copied out of
-/// the map that scopes share.
-fn module_needs_canonicalization(
-    module: &ModuleHeader,
-    identities: &BTreeMap<String, String>,
-) -> bool {
-    module
-        .symbols
-        .values()
-        .chain(module.exports.values())
-        .any(|symbol| {
-            let mut canonical = symbol.clone();
-            canonicalize_symbol(&mut canonical, identities);
-            canonical != *symbol
-        })
 }
 
 pub(crate) fn canonicalize_scope_metadata(
