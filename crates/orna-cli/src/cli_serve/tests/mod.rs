@@ -699,6 +699,64 @@ fn default_loopback_listener_serves_the_clone_route() {
     assert!(response.contains("\"CWD\":{\"branch\":\"listener-test\""));
 }
 
+/// ORNA-SERVE-006: a non-loopback bind is refused unless the operator names an
+/// interface and passes `--expose`, and a wildcard is never accepted.
+#[test]
+fn non_loopback_bind_requires_an_explicit_interface_and_expose() {
+    let loopback = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+    let interface = std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 10));
+    let wildcard = std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED);
+    assert!(check_serve_exposure(loopback, false).is_ok());
+    assert!(check_serve_exposure(interface, true).is_ok());
+    for (bind, expose) in [
+        (wildcard, false),
+        (wildcard, true),
+        (interface, false),
+        (loopback, true),
+    ] {
+        assert_eq!(
+            check_serve_exposure(bind, expose).unwrap_err().code,
+            "ORNA-CMD-ARGUMENT-INVALID",
+            "bind {bind} expose {expose} must be refused before anything binds"
+        );
+    }
+}
+
+/// ORNA-SERVE-006: the loopback status names no interface, and an exposed
+/// status names the interface and the plain-HTTP transport.
+#[test]
+fn serving_status_reports_exposed_interfaces() {
+    let root = std::path::Path::new("/srv/clone");
+    let loopback = std::net::SocketAddr::from(([127, 0, 0, 1], 8080));
+    let exposed = std::net::SocketAddr::from(([192, 0, 2, 10], 8080));
+    let loopback_status = serving_status(root, loopback, ListenerExposure::Loopback, false);
+    assert!(loopback_status.contains("(loopback)"));
+    assert!(!loopback_status.contains("EXPOSED"));
+    let exposed_status = serving_status(root, exposed, ListenerExposure::Exposed, true);
+    assert!(exposed_status.contains("EXPOSED on interface 192.0.2.10"));
+    assert!(exposed_status.contains("plain HTTP without TLS"));
+    assert!(exposed_status.contains("Git push enabled"));
+}
+
+/// ORNA-SERVE-006: each listener answers to its own authority only. A loopback
+/// listener refuses the interface name, and an exposed listener refuses
+/// loopback names.
+#[test]
+fn serving_authority_follows_the_bound_interface() {
+    let loopback =
+        ServingAuthority::for_listener(std::net::SocketAddr::from(([127, 0, 0, 1], 8080)));
+    assert!(loopback.permits_host("127.0.0.1:8080"));
+    assert!(loopback.permits_host("localhost:8080"));
+    assert!(!loopback.permits_host("192.0.2.10:8080"));
+
+    let exposed =
+        ServingAuthority::for_listener(std::net::SocketAddr::from(([192, 0, 2, 10], 8080)));
+    assert!(exposed.permits_host("192.0.2.10:8080"));
+    assert!(!exposed.permits_host("127.0.0.1:8080"));
+    assert!(!exposed.permits_host("localhost:8080"));
+    assert!(!exposed.permits_host("192.0.2.10:9090"));
+}
+
 #[allow(clippy::too_many_lines)]
 #[test]
 fn smart_http_clones_and_pushes_the_selected_clones_head() {

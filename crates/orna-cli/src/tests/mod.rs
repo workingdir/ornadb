@@ -198,6 +198,8 @@ fn parsing_is_bounded_and_diagnostic_is_stable() {
         parse_cli(&["serve".into()]).unwrap().command,
         Command::Serve {
             port: 8080,
+            bind: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            expose: false,
             allow_push: false
         }
     );
@@ -207,6 +209,8 @@ fn parsing_is_bounded_and_diagnostic_is_stable() {
             .command,
         Command::Serve {
             port: 0,
+            bind: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            expose: false,
             allow_push: false
         }
     );

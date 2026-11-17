@@ -3,9 +3,13 @@
 //! Parsing lives apart from execution so callers can inspect a command without
 //! opening a repository or starting a runtime.
 
+mod serve;
+
+use std::net::IpAddr;
 use std::path::PathBuf;
 
 use super::{ColorMode, Diagnostic, Endpoint};
+use serve::parse_serve;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum Invocation {
@@ -81,11 +85,15 @@ pub(super) enum Command {
         format: LegendFormat,
         limit: Option<usize>,
     },
-    /// `serve [--port PORT] [--allow-push]`: loopback Git transport, listing
-    /// pages and live sessions. Smart-HTTP push is refused unless
-    /// `--allow-push` is given.
+    /// `serve [--port PORT] [--bind ADDR --expose] [--allow-push]`: Git
+    /// transport, listing pages and live sessions. The listener is loopback
+    /// unless `--bind` names an interface and `--expose` admits it
+    /// (ORNA-SERVE-006). Smart-HTTP push is refused unless `--allow-push` is
+    /// given.
     Serve {
         port: u16,
+        bind: IpAddr,
+        expose: bool,
         allow_push: bool,
     },
     /// `mount DIR --at SELECTOR`: one read-only view of an exactly-resolved
@@ -795,37 +803,6 @@ fn parse_unmount(words: &mut Words<'_>) -> Result<Command, Diagnostic> {
     })
 }
 
-fn parse_serve(words: &mut Words<'_>) -> Result<Command, Diagnostic> {
-    let mut port = 8080;
-    let mut allow_push = false;
-    while let Some(option) = words.next() {
-        match option {
-            "--allow-push" => allow_push = true,
-            "--port" => {
-                let value = words.require(
-                    "`serve --port` needs a value",
-                    "supply a port from 0 through 65535 after `--port`",
-                )?;
-                port = value.parse().map_err(|_| {
-                    Diagnostic::usage(
-                        "ORNA-CMD-ARGUMENT-INVALID",
-                        "`serve --port` is invalid",
-                        "supply a port from 0 through 65535 after `--port`",
-                    )
-                })?;
-            }
-            _ => {
-                return Err(Diagnostic::usage(
-                    "ORNA-CMD-ARGUMENT-INVALID",
-                    "unsupported `serve` option",
-                    "use `serve [--port PORT] [--allow-push]`; the listener stays on loopback",
-                ));
-            }
-        }
-    }
-    Ok(Command::Serve { port, allow_push })
-}
-
 /// `branch NAME` creates a branch; every other shape is Git's own `branch`.
 fn parse_branch(words: &mut Words<'_>) -> Command {
     let arguments = words.rest();
@@ -884,6 +861,7 @@ fn parse_run(words: &mut Words<'_>) -> Result<Command, Diagnostic> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::Ipv4Addr;
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
@@ -897,6 +875,8 @@ mod tests {
             parse_cli(&args(&["serve"])).unwrap().command,
             Command::Serve {
                 port: 8080,
+                bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                expose: false,
                 allow_push: false,
             }
         );
@@ -908,6 +888,8 @@ mod tests {
                 parse_cli(&args(&arguments)).unwrap().command,
                 Command::Serve {
                     port: 0,
+                    bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                    expose: false,
                     allow_push: true,
                 }
             );
