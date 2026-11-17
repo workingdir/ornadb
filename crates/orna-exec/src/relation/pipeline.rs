@@ -238,7 +238,7 @@ fn table_field(program: &Program, body: &Body, id: ExprId) -> Option<DefId> {
             .iter()
             .copied()
             .find(|def| program.defs[*def].name == *name),
-        FieldRef::Index(_) => None,
+        FieldRef::Index(_) | FieldRef::Base => None,
     }
 }
 

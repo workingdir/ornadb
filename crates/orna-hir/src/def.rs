@@ -254,6 +254,10 @@ pub struct TypeDef {
     /// Its declared fields, refinements and nested implementations. A field
     /// is a [`DefKind::Field`]; an implementation is a [`DefKind::Impl`].
     pub members: Vec<DefId>,
+    /// The base type a refined type or alias is represented by. It is read
+    /// through `.base` only inside the type's nested implementations
+    /// (ORNA-NOMINAL-006). `None` for a nominal type with fields.
+    pub refined_base: Option<Ty>,
 }
 
 /// An enum.

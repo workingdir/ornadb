@@ -810,9 +810,13 @@ impl<'a> BodyCheck<'a> {
                     "an indexed field access on this type is not on HIR".into(),
                 )),
             },
+            FieldRef::Base => self.refined_base_member_ty(resolved),
             FieldRef::Name(name) => match self.kind_of(resolved) {
                 Some(TyKind::Adt(def, _)) => {
                     let Some(field_def) = self.find_field(def, name) else {
+                        if name.as_str() == super::nominal::REFINED_BASE_MEMBER {
+                            return self.refined_base_read(body, id, base, resolved, def, span);
+                        }
                         if matches!(self.kind_of(resolved), Some(TyKind::Error)) {
                             return Ok(self.error());
                         }
@@ -925,9 +929,27 @@ impl<'a> BodyCheck<'a> {
                             "an indexed field assignment on this type is not on HIR".into(),
                         )),
                     },
+                    FieldRef::Base => {
+                        self.reject(
+                            crate::diag::PRIVATE_FIELD,
+                            super::nominal::REFINED_BASE_WRITE_MESSAGE,
+                            span.clone(),
+                        );
+                        Ok(self.error())
+                    }
                     FieldRef::Name(name) => match self.kind_of(resolved) {
                         Some(TyKind::Adt(def, _)) => {
                             let Some(field) = self.find_field(def, name) else {
+                                if name.as_str() == super::nominal::REFINED_BASE_MEMBER
+                                    && self.declared_refined_base(def).is_some()
+                                {
+                                    self.reject(
+                                        crate::diag::PRIVATE_FIELD,
+                                        super::nominal::REFINED_BASE_WRITE_MESSAGE,
+                                        span.clone(),
+                                    );
+                                    return Ok(self.error());
+                                }
                                 return Err(NotYetReason::Unsupported(
                                     "assignment to an undeclared field is not on HIR".into(),
                                 ));

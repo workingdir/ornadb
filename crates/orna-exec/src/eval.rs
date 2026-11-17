@@ -880,6 +880,10 @@ impl<'p> Machine<'p> {
         field: &FieldRef,
     ) -> Result<Value, Stop> {
         let base = self.eval(body, frame, base)?;
+        // A refined value is represented by its base value, so `.base` yields the receiver.
+        if let FieldRef::Base = field {
+            return Ok(base);
+        }
         // `Money<C>.amount` is the only field of the engine's `Money`; its amount is the exact decimal it holds.
         if let Value::Money { amount, .. } = base {
             return Ok(Value::Decimal(amount));
@@ -895,6 +899,7 @@ impl<'p> Machine<'p> {
                 .iter()
                 .find(|(key, _)| key == name)
                 .map(|(_, value)| value),
+            FieldRef::Base => None,
             FieldRef::Def(def) => {
                 let name = &self.program.defs[*def].name;
                 fields
