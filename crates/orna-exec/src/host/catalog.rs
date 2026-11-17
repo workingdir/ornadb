@@ -1,12 +1,18 @@
 //! The `ProgramCatalog` host: the `sys.catalog.*` relations and `sys.rt.info` of one lowered program (hir-host.md A5).
 //!
-//! The provider needs no publication metadata and no snapshot. Its rows are read from the lowered [`Program`]: one
-//! `sys.Table` row per table, one `sys.Column` row per table field, and a `sys.RuntimeInfo` record the embedder
-//! supplies as a [`HostInfo`]. Every other `sys` member is answered by the wrapped [`StoreHost`], which serves none, so
-//! it stays unlinked.
+//! The provider needs no publication metadata and no snapshot. Its rows are read from the lowered [`Program`] and cover only the
+//! program's own modules (`ModuleOrigin::Project`), not bundled `core`, `sys` or `std` code: one `sys.Table` row per table, one
+//! `sys.Column` row per table field, one `sys.Function` row per function definition, and one `sys.Dependency` row per distinct `use`
+//! edge. A `sys.RuntimeInfo` record the embedder supplies as a [`HostInfo`] answers `sys.rt.info`. Every other `sys` member is
+//! answered by the wrapped [`StoreHost`], which serves none, so it stays unlinked.
+
+use std::collections::HashSet;
 
 use num_bigint::BigInt;
-use orna_hir::{DefKind, FieldDef, Program, TyKind, print_type};
+use orna_hir::{
+    Def, DefId, DefKind, FieldDef, FnDef, ImportTarget, ModuleId, ModuleOrigin, Program, TyKind,
+    print_type,
+};
 use orna_value::{
     ENUM_TAG, OPTION_TAG, Raw, Snapshot, UUID_TAG, enum_type_id, enum_variant_id, qualified_name,
 };
@@ -82,11 +88,9 @@ pub struct HostInfo {
 /// A host that serves the catalogue of one lowered program and the runtime information of the embedder.
 pub struct ProgramCatalog {
     inner: StoreHost,
-    tables_slot: SysSlot,
-    columns_slot: SysSlot,
+    /// The catalogue relations the program supplies, by slot, rows in declaration order.
+    relations: Vec<(SysSlot, Vec<Raw>)>,
     info_slot: SysSlot,
-    table_rows: Vec<Raw>,
-    column_rows: Vec<Raw>,
     info: Raw,
 }
 
@@ -95,30 +99,31 @@ impl ProgramCatalog {
     #[must_use]
     pub fn new(program: &Program, info: &HostInfo, store: Box<dyn TableStore>) -> Self {
         let mut inner = StoreHost::new(store);
-        let tables_slot = inner.manifest.register("sys.catalog.tables");
-        let columns_slot = inner.manifest.register("sys.catalog.columns");
+        let relations = catalogue_relations(program)
+            .into_iter()
+            .map(|(name, rows)| (inner.manifest.register(name), rows))
+            .collect();
         let info_slot = inner.manifest.register("sys.rt.info");
-        let (table_rows, column_rows) = catalogue_rows(program);
         Self {
             inner,
-            tables_slot,
-            columns_slot,
+            relations,
             info_slot,
-            table_rows,
-            column_rows,
             info: runtime_info_raw(info),
         }
     }
 }
 
-/// The rows of the `sys.Table` and `sys.Column` relations of `program`, in declaration order.
-fn catalogue_rows(program: &Program) -> (Vec<Raw>, Vec<Raw>) {
+/// The `sys.Table` and `sys.Column` rows of `program`, in declaration order.
+fn table_and_column_rows(program: &Program) -> (Vec<Raw>, Vec<Raw>) {
     let mut tables = Vec::new();
     let mut columns = Vec::new();
     for definition in program.defs.iter() {
         let DefKind::Table(table) = &definition.kind else {
             continue;
         };
+        if !is_project_module(program, definition.module) {
+            continue;
+        }
         let module = program.modules[definition.module].path.to_string();
         let table_name = qualified_name(Some(&module), definition.name.as_str());
         tables.push(table_row(&table_name));
@@ -144,6 +149,121 @@ fn catalogue_rows(program: &Program) -> (Vec<Raw>, Vec<Raw>) {
         }
     }
     (tables, columns)
+}
+
+/// The catalogue relations of `program` by their canonical `sys.catalog` member name, rows in declaration order.
+fn catalogue_relations(program: &Program) -> Vec<(&'static str, Vec<Raw>)> {
+    let (tables, columns) = table_and_column_rows(program);
+    vec![
+        ("sys.catalog.tables", tables),
+        ("sys.catalog.columns", columns),
+        ("sys.catalog.functions", function_rows(program)),
+        ("sys.catalog.dependencies", dependency_rows(program)),
+    ]
+}
+
+/// The `sys.Function` rows of `program`: one per function definition of the program's own modules, native or with an Orna body.
+fn function_rows(program: &Program) -> Vec<Raw> {
+    program
+        .defs
+        .iter()
+        .filter_map(|definition| match &definition.kind {
+            DefKind::Fn(function) if is_project_module(program, definition.module) => {
+                Some(function_row(program, definition, function))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// One `sys.Function` row. Its relation handles (`parameters`, `failure_types`, `effects`, `reads`, `writes`, `calls`)
+/// are not served by this provider, so they are not part of the row.
+fn function_row(program: &Program, definition: &Def, function: &FnDef) -> Raw {
+    let name = qualified_definition_name(program, definition);
+    // A parameter whose type the author omitted makes the signature inferred (decision D1).
+    let inferred = function.params.iter().any(|parameter| !parameter.written);
+    let docs = (!definition.docs.is_empty()).then(|| Raw::Text(definition.docs.join("\n")));
+    map(vec![
+        ("reference", derived_uuid("function", &name)),
+        ("object", derived_uuid("function-object", &name)),
+        ("definition", derived_uuid("function-definition", &name)),
+        (
+            "return_type",
+            derived_uuid("type", &print_type(program, function.ret)),
+        ),
+        ("inferred_signature", Raw::Bool(inferred)),
+        ("docs", option(docs)),
+    ])
+}
+
+/// An object's identity before it is derived: the domain its id is derived in, and its name there.
+type ObjectKey = (&'static str, String);
+
+/// The object of module `module`.
+fn module_object(program: &Program, module: ModuleId) -> ObjectKey {
+    ("module-object", program.modules[module].path.to_string())
+}
+
+/// The object of a definition, in the domain its kind uses: functions and tables have their own, any other
+/// definition shares `definition-object`.
+fn definition_object(program: &Program, definition: DefId) -> ObjectKey {
+    let definition = &program.defs[definition];
+    let domain = match &definition.kind {
+        DefKind::Fn(_) => "function-object",
+        DefKind::Table(_) => "table-object",
+        _ => "definition-object",
+    };
+    (domain, qualified_definition_name(program, definition))
+}
+
+/// The qualified name of `definition`: its module path, then its name.
+fn qualified_definition_name(program: &Program, definition: &Def) -> String {
+    let module = program.modules[definition.module].path.to_string();
+    qualified_name(Some(&module), definition.name.as_str())
+}
+
+/// Whether `module` is a module of the program being checked, not bundled `core`, `sys` or `std` code.
+fn is_project_module(program: &Program, module: ModuleId) -> bool {
+    program.modules[module].origin == ModuleOrigin::Project
+}
+
+/// The `sys.Dependency` rows of `program`: one `import` edge per distinct (importing module, imported object) pair.
+/// The HIR records `use` declarations without spans, so an import edge has no span and is never conditional.
+fn dependency_rows(program: &Program) -> Vec<Raw> {
+    let mut seen = HashSet::new();
+    let mut rows = Vec::new();
+    for (module_id, module) in program
+        .modules
+        .iter_enumerated()
+        .filter(|(module_id, _)| is_project_module(program, *module_id))
+    {
+        let from = module_object(program, module_id);
+        for import in &module.imports {
+            let to = match import.target {
+                ImportTarget::Module(target) => module_object(program, target),
+                ImportTarget::Def(target) => definition_object(program, target),
+            };
+            if seen.insert((from.clone(), to.clone())) {
+                rows.push(import_dependency_row(&from, &to));
+            }
+        }
+    }
+    rows
+}
+
+/// One `sys.Dependency` row for an `import` edge from `from` to `to`. Its `definition` is not served, so it is `null`.
+fn import_dependency_row(from: &ObjectKey, to: &ObjectKey) -> Raw {
+    let edge = format!("import {}:{} {}:{}", from.0, from.1, to.0, to.1);
+    map(vec![
+        ("reference", derived_uuid("dependency", &edge)),
+        ("from", derived_uuid(from.0, &from.1)),
+        ("to", derived_uuid(to.0, &to.1)),
+        ("kind", enum_tag("sys.DependencyKind", "import")),
+        ("definition", option(None)),
+        ("span", option(None)),
+        ("confidence", enum_tag("sys.DependencyConfidence", "exact")),
+        ("conditional", Raw::Bool(false)),
+    ])
 }
 
 /// One `sys.Table` row. Its relation handles (`columns`, `assertions`, `references`) and its storage and key rows are
@@ -232,11 +352,16 @@ fn runtime_info_raw(info: &HostInfo) -> Raw {
 
 /// A payload-free `sys.RuntimeMode` variant in its canonical enum form.
 fn runtime_mode(mode: HostRuntimeMode) -> Raw {
+    enum_tag("sys.RuntimeMode", mode.variant())
+}
+
+/// A payload-free variant of the `sys` enum `type_name`, in its canonical enum form.
+fn enum_tag(type_name: &str, variant: &str) -> Raw {
     Raw::Tag(
         ENUM_TAG,
         Box::new(Raw::Array(vec![
-            uuid(enum_type_id("sys.RuntimeMode")),
-            uuid(enum_variant_id("sys.RuntimeMode", mode.variant())),
+            uuid(enum_type_id(type_name)),
+            uuid(enum_variant_id(type_name, variant)),
             Raw::Null,
         ])),
     )
@@ -337,11 +462,11 @@ impl Host for ProgramCatalog {
         slot: SysSlot,
         at: Option<&Snapshot>,
     ) -> Result<Box<dyn RowSource>, HostFailure> {
-        let rows = if slot == self.tables_slot {
-            &self.table_rows
-        } else if slot == self.columns_slot {
-            &self.column_rows
-        } else {
+        let Some((_, rows)) = self
+            .relations
+            .iter()
+            .find(|(relation, _)| *relation == slot)
+        else {
             return self.inner.sys_relation(slot, at);
         };
         if at.is_some() {
