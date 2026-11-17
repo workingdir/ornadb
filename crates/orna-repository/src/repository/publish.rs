@@ -83,7 +83,9 @@ impl Repository {
             .map_err(|_| RepositoryError::InvalidFormatMigration)?;
         let candidate_format3 = candidate_context.repository_format() == RepositoryFormat::Format3;
         let candidate_schema_valid = candidate_context.validate_schema_root().is_ok();
-        let candidate_store_valid = candidate_context.validate_store_root().is_ok();
+        // The store root must decode as a format-3 store graph, not merely
+        // exist as a tree entry: a text file at `.orna/store/root` is refused.
+        let candidate_store_valid = candidate_context.store_relation_ids().is_ok();
         if !candidate_format3 || !candidate_schema_valid || !candidate_store_valid {
             return Err(RepositoryError::InvalidFormatMigration);
         }

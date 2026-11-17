@@ -8,14 +8,15 @@ use std::{
 };
 
 use fs2::FileExt;
+use orna_repository::relation_admission::{AllocatorWatermarks, RelationCandidateContent};
 use orna_repository::{
-    CheckoutTarget, CommittedTreeEntryKind, CompactManifest, GitDeclaredObjectSetState,
-    GitObjectKind, GitObjectState, GitRepositoryMode, IndexGeneration, LegacyAnnotationCandidate,
-    ManagedFileChange, ManagedPath, MigrationAnnotationDefaults, MigrationContinuityRecord,
-    MountError, MountView, NativeObjectId, OrnaInternalRef, PublicationJournal,
-    PublicationJournalEntry, PublicationJournalStage, RemoteContinuity, Repository,
-    RepositoryError, RequiredInternalRef, RuntimeGeneration, StreamCheckpointIdentityPredecessor,
-    WorktreeState,
+    CheckoutTarget, CommittedTreeEntryKind, CompactManifest, DatabaseId, GitCommitRef,
+    GitDeclaredObjectSetState, GitObjectKind, GitObjectState, GitRepositoryMode, IndexGeneration,
+    LegacyAnnotationCandidate, ManagedFileChange, ManagedPath, MigrationAnnotationDefaults,
+    MigrationContinuityRecord, MountError, MountView, NativeObjectId, OrnaInternalRef,
+    PrivateCommit, PublicationJournal, PublicationJournalEntry, PublicationJournalStage,
+    RemoteContinuity, Repository, RepositoryError, RequiredInternalRef, RuntimeGeneration,
+    StreamCheckpointIdentityPredecessor, WorktreeState,
 };
 use orna_value::{GitHash, OvbRaw, SchemaDescriptor};
 
@@ -58,6 +59,33 @@ impl orna_repository::CheckoutAssertionGate for CheckoutGate<'_> {
 }
 
 use test_support::git;
+
+/// Builds a private format-3 migration candidate over `old_head`. The builder
+/// writes `.orna/store` itself (a caller may not stage it), so the candidate
+/// carries a real, decodable store graph; a plain-file `.orna/store/root` is
+/// never a store and cannot be staged here.
+fn format3_store_candidate(
+    repository: &Repository,
+    old_head: &GitCommitRef,
+    changes: &[ManagedFileChange],
+    message: &str,
+) -> PrivateCommit {
+    let database_id: DatabaseId = "9f237b7e-6844-4498-bcd5-d24641c07449".parse().unwrap();
+    let watermarks = AllocatorWatermarks::new();
+    repository
+        .build_private_commit_with_relations(
+            old_head,
+            changes,
+            RelationCandidateContent {
+                relations: &[],
+                identities: &[],
+                watermarks: &watermarks,
+            },
+            database_id,
+            message,
+        )
+        .unwrap()
+}
 
 fn decode_oid(object_id: &str) -> Vec<u8> {
     object_id
@@ -5117,23 +5145,18 @@ fn legacy_format_migration_uses_pub3_journal_and_preserves_user_state() {
 
         let expected_index = repo.index_generation().unwrap();
         let database = include_str!("fixtures/format-context/database-final.orna");
-        let candidate = repo
-            .build_private_commit(
-                &old_head,
-                &[
-                    ManagedFileChange::new(
-                        ManagedPath::new(".orna/database.orna").unwrap(),
-                        Some(database.as_bytes().to_vec()),
-                    ),
-                    ManagedFileChange::new(ManagedPath::new(".orna/format.orna").unwrap(), None),
-                    ManagedFileChange::new(
-                        ManagedPath::new(".orna/store/root").unwrap(),
-                        Some(b"verified candidate store root".to_vec()),
-                    ),
-                ],
-                "explicit format 3 migration",
-            )
-            .unwrap();
+        let candidate = format3_store_candidate(
+            &repo,
+            &old_head,
+            &[
+                ManagedFileChange::new(
+                    ManagedPath::new(".orna/database.orna").unwrap(),
+                    Some(database.as_bytes().to_vec()),
+                ),
+                ManagedFileChange::new(ManagedPath::new(".orna/format.orna").unwrap(), None),
+            ],
+            "explicit format 3 migration",
+        );
         let intent = [71; 16];
         let journal_entries = vec![
             PublicationJournalEntry::new(
@@ -5145,11 +5168,6 @@ fn legacy_format_migration_uses_pub3_journal_and_preserves_user_state() {
                 ManagedPath::new(".orna/format.orna").unwrap(),
                 Some(format.as_bytes().to_vec()),
                 None,
-            ),
-            PublicationJournalEntry::new(
-                ManagedPath::new(".orna/store/root").unwrap(),
-                None,
-                Some(b"verified candidate store root".to_vec()),
             ),
         ];
         let missing_continuity = PublicationJournal::new_with_runtime_intent(
@@ -5264,23 +5282,18 @@ fn legacy_format_migration_preserves_protected_pin_refs_across_publication() {
 
     let expected_index = repo.index_generation().unwrap();
     let database = include_str!("fixtures/format-context/database-final.orna");
-    let candidate = repo
-        .build_private_commit(
-            &old_head,
-            &[
-                ManagedFileChange::new(
-                    ManagedPath::new(".orna/database.orna").unwrap(),
-                    Some(database.as_bytes().to_vec()),
-                ),
-                ManagedFileChange::new(ManagedPath::new(".orna/format.orna").unwrap(), None),
-                ManagedFileChange::new(
-                    ManagedPath::new(".orna/store/root").unwrap(),
-                    Some(b"verified candidate store root".to_vec()),
-                ),
-            ],
-            "explicit format 3 migration",
-        )
-        .unwrap();
+    let candidate = format3_store_candidate(
+        &repo,
+        &old_head,
+        &[
+            ManagedFileChange::new(
+                ManagedPath::new(".orna/database.orna").unwrap(),
+                Some(database.as_bytes().to_vec()),
+            ),
+            ManagedFileChange::new(ManagedPath::new(".orna/format.orna").unwrap(), None),
+        ],
+        "explicit format 3 migration",
+    );
     let intent = [72; 16];
     let journal_entries = vec![
         PublicationJournalEntry::new(
@@ -5292,11 +5305,6 @@ fn legacy_format_migration_preserves_protected_pin_refs_across_publication() {
             ManagedPath::new(".orna/format.orna").unwrap(),
             Some(format.as_bytes().to_vec()),
             None,
-        ),
-        PublicationJournalEntry::new(
-            ManagedPath::new(".orna/store/root").unwrap(),
-            None,
-            Some(b"verified candidate store root".to_vec()),
         ),
     ];
     let continuity = MigrationContinuityRecord::new(vec![
@@ -5356,23 +5364,18 @@ fn legacy_format_migration_names_an_edited_retired_file_at_publication() {
     let old_head = repo.head().unwrap().unwrap();
     let expected_index = repo.index_generation().unwrap();
     let database = include_str!("fixtures/format-context/database-final.orna");
-    let candidate = repo
-        .build_private_commit(
-            &old_head,
-            &[
-                ManagedFileChange::new(
-                    ManagedPath::new(".orna/database.orna").unwrap(),
-                    Some(database.as_bytes().to_vec()),
-                ),
-                ManagedFileChange::new(ManagedPath::new(".orna/format.orna").unwrap(), None),
-                ManagedFileChange::new(
-                    ManagedPath::new(".orna/store/root").unwrap(),
-                    Some(b"verified candidate store root".to_vec()),
-                ),
-            ],
-            "explicit format 3 migration",
-        )
-        .unwrap();
+    let candidate = format3_store_candidate(
+        &repo,
+        &old_head,
+        &[
+            ManagedFileChange::new(
+                ManagedPath::new(".orna/database.orna").unwrap(),
+                Some(database.as_bytes().to_vec()),
+            ),
+            ManagedFileChange::new(ManagedPath::new(".orna/format.orna").unwrap(), None),
+        ],
+        "explicit format 3 migration",
+    );
     let journal_entries = vec![
         PublicationJournalEntry::new(
             ManagedPath::new(".orna/database.orna").unwrap(),
@@ -5383,11 +5386,6 @@ fn legacy_format_migration_names_an_edited_retired_file_at_publication() {
             ManagedPath::new(".orna/format.orna").unwrap(),
             Some(format.as_bytes().to_vec()),
             None,
-        ),
-        PublicationJournalEntry::new(
-            ManagedPath::new(".orna/store/root").unwrap(),
-            None,
-            Some(b"verified candidate store root".to_vec()),
         ),
     ];
     let continuity = MigrationContinuityRecord::new(vec![
@@ -5454,23 +5452,18 @@ fn recovery_refuses_to_finish_an_unstarted_legacy_migration_and_keeps_its_pin() 
 
     let expected_index = repo.index_generation().unwrap();
     let database = include_str!("fixtures/format-context/database-final.orna");
-    let candidate = repo
-        .build_private_commit(
-            &old_head,
-            &[
-                ManagedFileChange::new(
-                    ManagedPath::new(".orna/database.orna").unwrap(),
-                    Some(database.as_bytes().to_vec()),
-                ),
-                ManagedFileChange::new(ManagedPath::new(".orna/format.orna").unwrap(), None),
-                ManagedFileChange::new(
-                    ManagedPath::new(".orna/store/root").unwrap(),
-                    Some(b"verified candidate store root".to_vec()),
-                ),
-            ],
-            "explicit format 3 migration",
-        )
-        .unwrap();
+    let candidate = format3_store_candidate(
+        &repo,
+        &old_head,
+        &[
+            ManagedFileChange::new(
+                ManagedPath::new(".orna/database.orna").unwrap(),
+                Some(database.as_bytes().to_vec()),
+            ),
+            ManagedFileChange::new(ManagedPath::new(".orna/format.orna").unwrap(), None),
+        ],
+        "explicit format 3 migration",
+    );
     let journal_entries = vec![
         PublicationJournalEntry::new(
             ManagedPath::new(".orna/database.orna").unwrap(),
@@ -5481,11 +5474,6 @@ fn recovery_refuses_to_finish_an_unstarted_legacy_migration_and_keeps_its_pin() 
             ManagedPath::new(".orna/format.orna").unwrap(),
             Some(format.as_bytes().to_vec()),
             None,
-        ),
-        PublicationJournalEntry::new(
-            ManagedPath::new(".orna/store/root").unwrap(),
-            None,
-            Some(b"verified candidate store root".to_vec()),
         ),
     ];
     let continuity = MigrationContinuityRecord::new(vec![
@@ -5533,6 +5521,71 @@ fn recovery_refuses_to_finish_an_unstarted_legacy_migration_and_keeps_its_pin() 
         pinned_blob,
         "recovery must keep the protected pin pointing at the same Blob"
     );
+}
+
+#[test]
+fn legacy_format_migration_refuses_a_plain_text_store_root_at_publication() {
+    let format = include_str!("fixtures/format-context/format-1-ornadb-1.0.orna");
+    let root = repository_with_legacy_format(format);
+    let repo = Repository::discover(root.path()).unwrap();
+    let old_head = repo.head().unwrap().unwrap();
+    let expected_index = repo.index_generation().unwrap();
+    let database = include_str!("fixtures/format-context/database-final.orna");
+    // A text file where the native store belongs is not a format-3 store: the
+    // publish gate must decode the store graph, not accept any tree entry.
+    let candidate = repo
+        .build_private_commit(
+            &old_head,
+            &[
+                ManagedFileChange::new(
+                    ManagedPath::new(".orna/database.orna").unwrap(),
+                    Some(database.as_bytes().to_vec()),
+                ),
+                ManagedFileChange::new(ManagedPath::new(".orna/format.orna").unwrap(), None),
+                ManagedFileChange::new(
+                    ManagedPath::new(".orna/store/root").unwrap(),
+                    Some(b"verified candidate store root".to_vec()),
+                ),
+            ],
+            "candidate with a text store root",
+        )
+        .unwrap();
+    let mut journal = PublicationJournal::new_with_runtime_intent(
+        old_head.clone(),
+        candidate.commit().clone(),
+        expected_index.tree().unwrap().clone(),
+        [73; 16],
+        vec![PublicationJournalEntry::new(
+            ManagedPath::new(".orna/database.orna").unwrap(),
+            None,
+            Some(database.as_bytes().to_vec()),
+        )],
+    )
+    .unwrap()
+    .with_migration_continuity(
+        MigrationContinuityRecord::new(vec![
+            StreamCheckpointIdentityPredecessor::new(
+                [31; 32],
+                b"legacy-source".to_vec(),
+                None,
+                [32; 32],
+                b"format3-source".to_vec(),
+                None,
+            )
+            .unwrap(),
+        ])
+        .unwrap(),
+    )
+    .unwrap()
+    .with_migration_annotation_defaults(MigrationAnnotationDefaults::new(0).unwrap())
+    .unwrap();
+
+    assert!(matches!(
+        repo.publish_legacy_format_migration(&expected_index, &candidate, &mut journal),
+        Err(RepositoryError::InvalidFormatMigration)
+    ));
+    assert_eq!(repo.head().unwrap(), Some(old_head));
+    assert!(repo.read_publication_journal().unwrap().is_none());
 }
 
 #[test]
@@ -5624,24 +5677,18 @@ fn legacy_format_migration_requires_and_reports_the_annotation_default_coordinat
 
         let expected_index = repo.index_generation().unwrap();
         let database = include_str!("fixtures/format-context/database-final.orna");
-        let store_root = b"verified candidate store root";
-        let candidate = repo
-            .build_private_commit(
-                &old_head,
-                &[
-                    ManagedFileChange::new(
-                        ManagedPath::new(".orna/database.orna").unwrap(),
-                        Some(database.as_bytes().to_vec()),
-                    ),
-                    ManagedFileChange::new(ManagedPath::new(".orna/format.orna").unwrap(), None),
-                    ManagedFileChange::new(
-                        ManagedPath::new(".orna/store/root").unwrap(),
-                        Some(store_root.to_vec()),
-                    ),
-                ],
-                "explicit format 3 migration",
-            )
-            .unwrap();
+        let candidate = format3_store_candidate(
+            &repo,
+            &old_head,
+            &[
+                ManagedFileChange::new(
+                    ManagedPath::new(".orna/database.orna").unwrap(),
+                    Some(database.as_bytes().to_vec()),
+                ),
+                ManagedFileChange::new(ManagedPath::new(".orna/format.orna").unwrap(), None),
+            ],
+            "explicit format 3 migration",
+        );
         let intent = [72; 16];
         let journal_entries = vec![
             PublicationJournalEntry::new(
@@ -5653,11 +5700,6 @@ fn legacy_format_migration_requires_and_reports_the_annotation_default_coordinat
                 ManagedPath::new(".orna/format.orna").unwrap(),
                 Some(format.as_bytes().to_vec()),
                 None,
-            ),
-            PublicationJournalEntry::new(
-                ManagedPath::new(".orna/store/root").unwrap(),
-                None,
-                Some(store_root.to_vec()),
             ),
         ];
         let continuity = MigrationContinuityRecord::new(vec![
@@ -5757,10 +5799,7 @@ fn legacy_format_migration_requires_and_reports_the_annotation_default_coordinat
                 .unwrap(),
             format.as_bytes()
         );
-        assert_eq!(
-            fs::read(root.path().join(".orna/store/root")).unwrap(),
-            store_root
-        );
+        assert!(root.path().join(".orna/store/data").is_file());
     }
 }
 
@@ -5781,24 +5820,18 @@ fn resumed_legacy_migration_reports_the_recorded_successor_identity_without_rese
 
     let expected_index = repo.index_generation().unwrap();
     let database = include_str!("fixtures/format-context/database-final.orna");
-    let store_root = b"verified candidate store root";
-    let candidate = repo
-        .build_private_commit(
-            &old_head,
-            &[
-                ManagedFileChange::new(
-                    ManagedPath::new(".orna/database.orna").unwrap(),
-                    Some(database.as_bytes().to_vec()),
-                ),
-                ManagedFileChange::new(ManagedPath::new(".orna/format.orna").unwrap(), None),
-                ManagedFileChange::new(
-                    ManagedPath::new(".orna/store/root").unwrap(),
-                    Some(store_root.to_vec()),
-                ),
-            ],
-            "explicit format 3 migration",
-        )
-        .unwrap();
+    let candidate = format3_store_candidate(
+        &repo,
+        &old_head,
+        &[
+            ManagedFileChange::new(
+                ManagedPath::new(".orna/database.orna").unwrap(),
+                Some(database.as_bytes().to_vec()),
+            ),
+            ManagedFileChange::new(ManagedPath::new(".orna/format.orna").unwrap(), None),
+        ],
+        "explicit format 3 migration",
+    );
     let journal_entries = vec![
         PublicationJournalEntry::new(
             ManagedPath::new(".orna/database.orna").unwrap(),
@@ -5809,11 +5842,6 @@ fn resumed_legacy_migration_reports_the_recorded_successor_identity_without_rese
             ManagedPath::new(".orna/format.orna").unwrap(),
             Some(format.as_bytes().to_vec()),
             None,
-        ),
-        PublicationJournalEntry::new(
-            ManagedPath::new(".orna/store/root").unwrap(),
-            None,
-            Some(store_root.to_vec()),
         ),
     ];
     let continuity = MigrationContinuityRecord::new(vec![
@@ -5988,24 +6016,18 @@ fn interrupted_legacy_migration_recovers_without_resetting_the_recorded_consumer
     let old_head = repo.head().unwrap().unwrap();
     let expected_index = repo.index_generation().unwrap();
     let database = include_str!("fixtures/format-context/database-final.orna");
-    let store_root = b"verified candidate store root";
-    let candidate = repo
-        .build_private_commit(
-            &old_head,
-            &[
-                ManagedFileChange::new(
-                    ManagedPath::new(".orna/database.orna").unwrap(),
-                    Some(database.as_bytes().to_vec()),
-                ),
-                ManagedFileChange::new(ManagedPath::new(".orna/format.orna").unwrap(), None),
-                ManagedFileChange::new(
-                    ManagedPath::new(".orna/store/root").unwrap(),
-                    Some(store_root.to_vec()),
-                ),
-            ],
-            "interrupted format 3 migration",
-        )
-        .unwrap();
+    let candidate = format3_store_candidate(
+        &repo,
+        &old_head,
+        &[
+            ManagedFileChange::new(
+                ManagedPath::new(".orna/database.orna").unwrap(),
+                Some(database.as_bytes().to_vec()),
+            ),
+            ManagedFileChange::new(ManagedPath::new(".orna/format.orna").unwrap(), None),
+        ],
+        "interrupted format 3 migration",
+    );
     let journal_entries = vec![
         PublicationJournalEntry::new(
             ManagedPath::new(".orna/database.orna").unwrap(),
@@ -6016,11 +6038,6 @@ fn interrupted_legacy_migration_recovers_without_resetting_the_recorded_consumer
             ManagedPath::new(".orna/format.orna").unwrap(),
             Some(format.as_bytes().to_vec()),
             None,
-        ),
-        PublicationJournalEntry::new(
-            ManagedPath::new(".orna/store/root").unwrap(),
-            None,
-            Some(store_root.to_vec()),
         ),
     ];
     let legacy_consumer = [81; 32];
@@ -6134,24 +6151,18 @@ fn interrupted_legacy_migration_recovers_new_snapshot_and_preserves_checkout_edi
     git(root.path(), &["add", "ordinary.txt"]);
     let expected_index = repo.index_generation().unwrap();
     let database = include_str!("fixtures/format-context/database-final.orna");
-    let store_root = b"verified candidate store root";
-    let candidate = repo
-        .build_private_commit(
-            &old_head,
-            &[
-                ManagedFileChange::new(
-                    ManagedPath::new(".orna/database.orna").unwrap(),
-                    Some(database.as_bytes().to_vec()),
-                ),
-                ManagedFileChange::new(ManagedPath::new(".orna/format.orna").unwrap(), None),
-                ManagedFileChange::new(
-                    ManagedPath::new(".orna/store/root").unwrap(),
-                    Some(store_root.to_vec()),
-                ),
-            ],
-            "interrupted explicit format 3 migration",
-        )
-        .unwrap();
+    let candidate = format3_store_candidate(
+        &repo,
+        &old_head,
+        &[
+            ManagedFileChange::new(
+                ManagedPath::new(".orna/database.orna").unwrap(),
+                Some(database.as_bytes().to_vec()),
+            ),
+            ManagedFileChange::new(ManagedPath::new(".orna/format.orna").unwrap(), None),
+        ],
+        "interrupted explicit format 3 migration",
+    );
     let entries = vec![
         PublicationJournalEntry::new(
             ManagedPath::new(".orna/database.orna").unwrap(),
@@ -6162,11 +6173,6 @@ fn interrupted_legacy_migration_recovers_new_snapshot_and_preserves_checkout_edi
             ManagedPath::new(".orna/format.orna").unwrap(),
             Some(format.as_bytes().to_vec()),
             None,
-        ),
-        PublicationJournalEntry::new(
-            ManagedPath::new(".orna/store/root").unwrap(),
-            None,
-            Some(store_root.to_vec()),
         ),
     ];
     let continuity = MigrationContinuityRecord::new(vec![
@@ -6257,10 +6263,7 @@ fn interrupted_legacy_migration_recovers_new_snapshot_and_preserves_checkout_edi
         fs::read(root.path().join(".orna/database.orna")).unwrap(),
         database.as_bytes()
     );
-    assert_eq!(
-        fs::read(root.path().join(".orna/store/root")).unwrap(),
-        store_root
-    );
+    assert!(root.path().join(".orna/store/data").is_file());
     assert!(!root.path().join(".orna/format.orna").exists());
     assert_eq!(
         git(root.path(), &["show", ":ordinary.txt"]),
