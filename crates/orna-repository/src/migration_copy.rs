@@ -1985,10 +1985,13 @@ pub fn migration_marker(source_format: RepositoryFormat) -> String {
 
 /// Clones the source's commit graph into `destination`.
 ///
-/// A clone carries the source's branches, tags and remote refs byte for byte,
-/// which is exactly the immutability an old reader needs. Its checkout is
-/// discarded afterwards, so no clone-generated file can be mistaken for
-/// migrated content.
+/// The copy carries every ref a migration must keep: branches, tags, remote
+/// refs and the continuity refs (automatic-ID allocator watermarks and
+/// consumer checkpoints, `ORNA-AUTOID-004`, `ORNA-GIT-008`). A plain clone drops
+/// the `refs/orna/*` continuity refs and demotes non-HEAD branches to
+/// remote-tracking refs, so the refs are fetched explicitly after the clone.
+/// Its checkout is discarded afterwards, so no clone-generated file can be
+/// mistaken for migrated content.
 fn clone_source_graph(source_root: &Path, destination: &Path) -> Result<PathBuf, RepositoryError> {
     let parent = destination
         .parent()
@@ -2028,7 +2031,46 @@ fn clone_source_graph(source_root: &Path, destination: &Path) -> Result<PathBuf,
     if !output.status.success() {
         return Err(RepositoryError::GitOperationFailed);
     }
+    copy_source_refs(&canonical_source, &root)?;
     Ok(root)
+}
+
+/// Refspecs that carry every ref a copy keeps from its source: branches, tags,
+/// remote refs, and the continuity refs. Other private `refs/orna/*` refs
+/// (capture pins, migration candidates, fixtures) stay with the source.
+const COPIED_SOURCE_REFSPECS: [&str; 5] = [
+    "+refs/heads/*:refs/heads/*",
+    "+refs/tags/*:refs/tags/*",
+    "+refs/remotes/*:refs/remotes/*",
+    "+refs/orna/ids/*:refs/orna/ids/*",
+    "+refs/orna/checkpoints/*:refs/orna/checkpoints/*",
+];
+
+/// Fetches the source's branches, tags, remote refs and continuity refs into
+/// the fresh copy at `root`, forcing each ref to the source's value.
+fn copy_source_refs(source: &Path, root: &Path) -> Result<(), RepositoryError> {
+    let mut command = git_command_at_root(root);
+    command
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .args([
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            "--no-recurse-submodules",
+            "--no-write-fetch-head",
+            "--update-head-ok",
+            "--",
+        ])
+        .arg(source)
+        .args(COPIED_SOURCE_REFSPECS);
+    let output = command
+        .output()
+        .map_err(|_| RepositoryError::GitUnavailable)?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(RepositoryError::GitOperationFailed)
+    }
 }
 
 /// Removes the clone's checkout while retaining its Git metadata.
