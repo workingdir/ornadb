@@ -16,7 +16,7 @@ use std::{
 
 #[cfg(any(test, feature = "compact-writer-fixtures"))]
 use orna_evolution::{MigrationOperation, MigrationPlan};
-use orna_repository::{
+use orna_format3::compact::{
     CompactCommittedSegmentProjection, CompactManifest, CompactManifestEntry, CompactSegmentRole,
 };
 #[cfg(any(test, feature = "compact-writer-fixtures"))]

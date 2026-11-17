@@ -17,6 +17,7 @@ compact-writer-fixtures = []
 bytes = "1.10.1"
 orna-base = { path = "../orna-base" }
 orna-evolution = { path = "../orna-evolution" }
+orna-format3 = { path = "../orna-format3" }
 orna-repository = { path = "../orna-repository" }
 orna-runtime = { path = "../orna-runtime" }
 orna-value = { path = "../orna-value" }

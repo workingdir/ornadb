@@ -8,9 +8,10 @@ use std::{
 };
 
 use fs2::FileExt;
+use orna_format3::compact::CompactManifest;
 use orna_repository::{
-    CheckoutTarget, CommittedTreeEntryKind, CompactManifest, GitDeclaredObjectSetState,
-    GitObjectKind, GitObjectState, GitRepositoryMode, IndexGeneration, LegacyAnnotationCandidate,
+    CheckoutTarget, CommittedTreeEntryKind, GitDeclaredObjectSetState, GitObjectKind,
+    GitObjectState, GitRepositoryMode, IndexGeneration, LegacyAnnotationCandidate,
     ManagedFileChange, ManagedPath, MigrationAnnotationDefaults, MigrationContinuityRecord,
     MountError, MountView, NativeObjectId, OrnaInternalRef, PublicationJournal,
     PublicationJournalEntry, PublicationJournalStage, RemoteContinuity, Repository,
