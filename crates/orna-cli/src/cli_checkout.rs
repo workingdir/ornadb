@@ -228,6 +228,7 @@ fn pending_refusal(pending: usize) -> Diagnostic {
         exit: Exit::Target,
         detail: None,
         body: None,
+        location: None,
         outcome: None,
     }
 }
@@ -244,6 +245,7 @@ fn conflict_refusal(paths: &str) -> Diagnostic {
         exit: Exit::Target,
         detail: None,
         body: None,
+        location: None,
         outcome: None,
     }
 }

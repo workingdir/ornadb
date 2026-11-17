@@ -1261,6 +1261,10 @@ impl Diagnostic {
         self.spans.push(span);
         self
     }
+    /// The protocol spans attached to this diagnostic, in attachment order.
+    pub fn spans(&self) -> &[DiagnosticSpan] {
+        &self.spans
+    }
     pub fn with_note(mut self, note: SafeText) -> Self {
         self.notes.push(note);
         self
