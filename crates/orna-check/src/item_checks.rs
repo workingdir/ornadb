@@ -1154,7 +1154,7 @@ pub(crate) fn validate_implementation_restrictions(
         }
         TypeExpr::Name { path, .. }
             if matches!(path.as_slice(), [protocol] if protocol == "Display" || protocol == "Present")
-                && implementation_has_write(implementation, scope) =>
+                && implementation_has_forbidden_effect(implementation, scope) =>
         {
             diagnostics.push(diag(
                 DIAG_DISPLAY_READ_ONLY,
@@ -1208,7 +1208,7 @@ pub(crate) fn validate_non_overlapping_implementations<'a>(
     }
 }
 
-pub(crate) fn implementation_has_write(
+pub(crate) fn implementation_has_forbidden_effect(
     implementation: &orna_syntax_ast::Implementation,
     scope: &Scope,
 ) -> bool {
@@ -1235,10 +1235,10 @@ pub(crate) fn implementation_has_write(
                     _ => None,
                 })
                 .collect();
-            expr_has_write_in_implementation_body(body, scope, &local)
+            expr_has_forbidden_effect_in_implementation_body(body, scope, &local)
         }
         orna_syntax_ast::ImplMember::Static { value: body, .. } => {
-            expr_has_write(body, scope, &BTreeMap::new())
+            expr_has_forbidden_effect(body, scope, &BTreeMap::new())
         }
     })
 }
@@ -1282,19 +1282,44 @@ pub(crate) fn call_may_write(
     true
 }
 
-pub(crate) fn expr_has_write(expr: &Expr, scope: &Scope, local: &BTreeMap<String, Symbol>) -> bool {
-    expr_has_write_with_return_termination(expr, scope, local, false)
+/// Whether a call in a Display or Present body performs a forbidden effect.
+/// ORNA-PRES-008 makes database writes, connectors, network, filesystem,
+/// process execution, secret reveal and nondeterministic time or randomness
+/// unavailable. Every host effect except a table read is forbidden, an opaque
+/// effect is forbidden, and so is a callee with no proven effect summary.
+pub(crate) fn forbidden_presenter_call(
+    callee: &Expr,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+) -> bool {
+    if call_may_write(callee, scope, local) {
+        return true;
+    }
+    let summary = intrinsic_call_effects(callee, scope, local);
+    summary.opaque
+        || summary
+            .effects
+            .iter()
+            .any(|kind| *kind != EffectKind::TableRead)
 }
 
-pub(crate) fn expr_has_write_in_implementation_body(
+pub(crate) fn expr_has_forbidden_effect(
     expr: &Expr,
     scope: &Scope,
     local: &BTreeMap<String, Symbol>,
 ) -> bool {
-    expr_has_write_with_return_termination(expr, scope, local, true)
+    expr_has_forbidden_effect_with_return_termination(expr, scope, local, false)
 }
 
-pub(crate) fn expr_has_write_with_return_termination(
+pub(crate) fn expr_has_forbidden_effect_in_implementation_body(
+    expr: &Expr,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+) -> bool {
+    expr_has_forbidden_effect_with_return_termination(expr, scope, local, true)
+}
+
+pub(crate) fn expr_has_forbidden_effect_with_return_termination(
     expr: &Expr,
     scope: &Scope,
     local: &BTreeMap<String, Symbol>,
@@ -1307,42 +1332,44 @@ pub(crate) fn expr_has_write_with_return_termination(
         | Expr::GenericCall {
             callee, arguments, ..
         } => {
-            call_may_write(callee, scope, local)
-                || expr_has_write(callee, scope, local)
+            forbidden_presenter_call(callee, scope, local)
+                || expr_has_forbidden_effect(callee, scope, local)
                 || arguments
                     .iter()
-                    .any(|argument| expr_has_write(&argument.value, scope, local))
+                    .any(|argument| expr_has_forbidden_effect(&argument.value, scope, local))
         }
         Expr::Unary { rhs, .. } | Expr::Group { inner: rhs, .. } => {
-            expr_has_write(rhs, scope, local)
+            expr_has_forbidden_effect(rhs, scope, local)
         }
         Expr::Binary { lhs, rhs, .. } => {
-            expr_has_write(lhs, scope, local) || expr_has_write(rhs, scope, local)
+            expr_has_forbidden_effect(lhs, scope, local)
+                || expr_has_forbidden_effect(rhs, scope, local)
         }
         Expr::Range { lower, upper, .. } => {
             lower
                 .as_deref()
-                .is_some_and(|lower| expr_has_write(lower, scope, local))
+                .is_some_and(|lower| expr_has_forbidden_effect(lower, scope, local))
                 || upper
                     .as_deref()
-                    .is_some_and(|upper| expr_has_write(upper, scope, local))
+                    .is_some_and(|upper| expr_has_forbidden_effect(upper, scope, local))
         }
         Expr::Index { base, index, .. } => {
-            expr_has_write(base, scope, local) || expr_has_write(index, scope, local)
+            expr_has_forbidden_effect(base, scope, local)
+                || expr_has_forbidden_effect(index, scope, local)
         }
-        Expr::Field { base, .. } => expr_has_write(base, scope, local),
+        Expr::Field { base, .. } => expr_has_forbidden_effect(base, scope, local),
         Expr::Tuple { elements, .. } | Expr::List { elements, .. } => elements
             .iter()
-            .any(|element| expr_has_write(element, scope, local)),
+            .any(|element| expr_has_forbidden_effect(element, scope, local)),
         Expr::Record { fields, .. } | Expr::Nominal { fields, .. } => fields
             .iter()
-            .any(|field| expr_has_write(&field.value, scope, local)),
-        Expr::Lambda { body, .. } => expr_has_write(body, scope, local),
+            .any(|field| expr_has_forbidden_effect(&field.value, scope, local)),
+        Expr::Lambda { body, .. } => expr_has_forbidden_effect(body, scope, local),
         Expr::Block {
             statements, tail, ..
         } => {
             for statement in statements {
-                if statement_has_write(statement, scope, local) {
+                if statement_has_forbidden_effect(statement, scope, local) {
                     return true;
                 }
                 if terminate_after_direct_return && matches!(statement, Statement::Return { .. }) {
@@ -1350,7 +1377,7 @@ pub(crate) fn expr_has_write_with_return_termination(
                 }
             }
             tail.as_deref()
-                .is_some_and(|tail| expr_has_write(tail, scope, local))
+                .is_some_and(|tail| expr_has_forbidden_effect(tail, scope, local))
         }
         Expr::Control {
             condition,
@@ -1361,25 +1388,25 @@ pub(crate) fn expr_has_write_with_return_termination(
         } => {
             condition
                 .as_deref()
-                .is_some_and(|condition| expr_has_write(condition, scope, local))
+                .is_some_and(|condition| expr_has_forbidden_effect(condition, scope, local))
                 || body
                     .as_deref()
-                    .is_some_and(|body| expr_has_write(body, scope, local))
+                    .is_some_and(|body| expr_has_forbidden_effect(body, scope, local))
                 || arms.iter().any(|arm| {
                     arm.guard
                         .as_ref()
-                        .is_some_and(|guard| expr_has_write(guard, scope, local))
-                        || expr_has_write(&arm.body, scope, local)
+                        .is_some_and(|guard| expr_has_forbidden_effect(guard, scope, local))
+                        || expr_has_forbidden_effect(&arm.body, scope, local)
                 })
                 || alternate
                     .as_deref()
-                    .is_some_and(|alternate| expr_has_write(alternate, scope, local))
+                    .is_some_and(|alternate| expr_has_forbidden_effect(alternate, scope, local))
         }
         _ => false,
     }
 }
 
-pub(crate) fn statement_has_write(
+pub(crate) fn statement_has_forbidden_effect(
     statement: &Statement,
     scope: &Scope,
     local: &BTreeMap<String, Symbol>,
@@ -1389,10 +1416,10 @@ pub(crate) fn statement_has_write(
         | Statement::Assert { value, .. }
         | Statement::Expression { value, .. }
         | Statement::Control { value, .. }
-        | Statement::Assignment { value, .. } => expr_has_write(value, scope, local),
+        | Statement::Assignment { value, .. } => expr_has_forbidden_effect(value, scope, local),
         Statement::Return { value, .. } | Statement::Break { value, .. } => value
             .as_ref()
-            .is_some_and(|value| expr_has_write(value, scope, local)),
+            .is_some_and(|value| expr_has_forbidden_effect(value, scope, local)),
         Statement::Continue { .. } => false,
     }
 }
