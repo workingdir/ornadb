@@ -115,6 +115,7 @@ pub(crate) fn module_scope(
                 _ => None,
             })
             .collect(),
+        table_keys: Symbol::table_key_types(namespace, header.symbols.iter()).into(),
         nominal_rows: tree.items.iter().filter_map(nominal_row_type).collect(),
         nominal_private_fields: CowTable::default(),
         secret_types: CowTable::default(),
@@ -224,6 +225,9 @@ pub(crate) fn install_attached_symbols(
                 .table_rows
                 .entry(name.clone())
                 .or_insert_with(|| Type::Record(row.clone()));
+            if let Some(key) = symbol.table_key_type() {
+                scope.table_keys.entry(name.clone()).or_insert(key);
+            }
         } else if symbol.kind == SymbolKind::Type
             && let Some(row) = symbol.table_fields()
         {
@@ -252,6 +256,9 @@ pub(crate) fn install_module_rows(scope: &mut Scope, modules: &BTreeMap<Namespac
                 Type::Named(identity) => identity.clone(),
                 _ => nominal_identity(module_namespace, name),
             };
+            if let Some(key) = symbol.table_key_type() {
+                scope.table_keys.entry(identity.clone()).or_insert(key);
+            }
             scope
                 .table_rows
                 .entry(identity)

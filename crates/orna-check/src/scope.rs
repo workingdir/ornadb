@@ -110,6 +110,10 @@ pub(crate) struct Scope {
     /// Tables without declared keys use the implicit automatic key and cannot
     /// be explicitly re-keyed by source code.
     pub(crate) auto_key_tables: CowTable<BTreeSet<String>>,
+    /// The declared primary key type of each table, keyed by the same identity
+    /// as `table_rows`: `reference.key` reads it from a stored reference without
+    /// loading the target row (ORNA-REF-002).
+    pub(crate) table_keys: CowTable<BTreeMap<String, Type>>,
     /// Local nominal record constructors elaborate to their declared row shape
     /// so field access remains structural inside inferred stream pipelines.
     pub(crate) nominal_rows: CowTable<BTreeMap<String, Type>>,
