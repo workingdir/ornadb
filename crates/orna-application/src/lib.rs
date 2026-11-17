@@ -71,7 +71,6 @@ mod repl_read;
 mod repl_transaction;
 mod table_reference;
 pub use browser_profile::execute_browser_profile;
-pub use contextual_snapshot::evaluate_contextual_page_read;
 pub use contextual_snapshot::evaluate_contextual_snapshot_read;
 pub use repl_transaction::{ReplEvaluationFailure, ReplTransactionScope};
 mod format3_store;

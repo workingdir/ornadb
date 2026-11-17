@@ -311,7 +311,14 @@ impl ServeApp {
                 storage_orders,
             };
             return evaluate_contextual_serve(
-                &format, &runtime, &state, &admitted, &tables, committed, &rows,
+                &self.authority,
+                &format,
+                &runtime,
+                &state,
+                &admitted,
+                &tables,
+                committed,
+                &rows,
             )
             .map(|value| (ServedValue::Contextual(value), commit));
         }
@@ -882,7 +889,9 @@ fn page(
 /// (ORNA-APP-013). A committed Blob reference keeps its capability context so
 /// the page can name its media descriptor. An uncommitted row that carries a
 /// Blob reference has no committed media authority and is refused.
+#[allow(clippy::too_many_arguments)]
 fn evaluate_contextual_serve(
+    authority: &ApplicationAuthority,
     format: &RepositoryFormatContext,
     runtime: &tokio::runtime::Runtime,
     state: &RuntimeState,
@@ -935,7 +944,8 @@ fn evaluate_contextual_serve(
         .map_err(|_| "serve.table_rows_unavailable")?;
         context_rows.insert(name.clone(), table_rows);
     }
-    orna_application::evaluate_contextual_page_read(admitted, &BTreeMap::new(), plain, context_rows)
+    authority
+        .evaluate_contextual_page_read(admitted, &BTreeMap::new(), plain, context_rows)
         .map_err(|error| match error {
             ApplicationError::ReadStagedMutation => "serve.write_refused",
             _ => "serve.evaluation_failed",
