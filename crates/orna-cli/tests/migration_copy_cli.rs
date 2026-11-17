@@ -1196,6 +1196,53 @@ fn cli_migration_copy_leaves_the_source_refs_unchanged() {
     assert_eq!(git_output(&source, &["for-each-ref"]), refs_before);
 }
 
+/// The copy keeps every ref a migration must carry: non-HEAD branches, tags,
+/// and the continuity refs (allocator watermarks and checkpoints) that a plain
+/// clone would drop. Private `refs/orna/*` refs stay with the source.
+#[test]
+fn cli_migration_copy_carries_branches_tags_and_continuity_refs() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    fs::create_dir(&source).unwrap();
+    initialize_legacy_source(&source);
+    git_output(&source, &["branch", "feature"]);
+    git_output(&source, &["tag", "-a", "v1", "-m", "release"]);
+    git_output(&source, &["update-ref", "refs/orna/ids/tab", "HEAD"]);
+    git_output(
+        &source,
+        &["update-ref", "refs/orna/checkpoints/consumer", "HEAD"],
+    );
+    git_output(&source, &["update-ref", "refs/orna/capture/pin", "HEAD"]);
+    let source_refs = git_output(&source, &["for-each-ref"]);
+    let git_trace = parent.path().join("git-trace.log");
+    let destination = parent.path().join("candidate");
+    let prepared = run_copy(&source, &destination, "0", &git_trace);
+    assert!(
+        prepared.status.success(),
+        "migration copy: {}",
+        String::from_utf8_lossy(&prepared.stderr)
+    );
+
+    let copied = String::from_utf8(git_output(
+        &destination,
+        &["for-each-ref", "--format=%(refname)"],
+    ))
+    .unwrap();
+    for kept in [
+        "refs/heads/feature",
+        "refs/tags/v1",
+        "refs/orna/ids/tab",
+        "refs/orna/checkpoints/consumer",
+    ] {
+        assert!(
+            copied.lines().any(|line| line == kept),
+            "missing {kept}: {copied}"
+        );
+    }
+    assert!(!copied.contains("refs/orna/capture/pin"), "{copied}");
+    assert_eq!(git_output(&source, &["for-each-ref"]), source_refs);
+}
+
 #[test]
 fn cli_migration_copy_unstaged_source_edit_changes_the_runtime_intent() {
     let parent = TempDir::new().unwrap();
