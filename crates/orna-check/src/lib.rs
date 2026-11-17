@@ -65,6 +65,7 @@ mod std_support;
 pub(crate) use std_support::*;
 mod units;
 pub use units::*;
+mod canonical_scan;
 mod imports;
 mod summary_order;
 pub(crate) use imports::*;

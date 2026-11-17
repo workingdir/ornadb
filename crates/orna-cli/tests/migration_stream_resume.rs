@@ -17,10 +17,10 @@ use orna_repository::{Repository, RepositoryFormat};
 use orna_runtime::{
     CheckpointPrecondition, CheckpointResetAudit, CheckpointResetRequest, ListStreamSource,
     RequestIdentity, RunObservationRegistration, RuntimeError, RuntimeIdentity, RuntimeState,
-    StreamCheckpoint, StreamHandler, StreamHandlerResult, StreamItem, StreamMutationBatch,
-    StreamObservationRegistration, StreamStep, TerminalOutcome, WriterLease, import_stream_carry,
-    migration_copy_runtime_identity, read_stream_carry, repository_runtime_identity,
-    runtime_identity_for_database_id,
+    StreamAdministrationOutcome, StreamCheckpoint, StreamHandler, StreamHandlerResult, StreamItem,
+    StreamMutationBatch, StreamObservationRegistration, StreamStep, TerminalOutcome, WriterLease,
+    import_stream_carry, migration_copy_runtime_identity, read_stream_carry,
+    repository_runtime_identity, runtime_identity_for_database_id,
 };
 use orna_runtime::{
     StreamFailurePayload, StreamRunControl, StreamSource, StreamSourceDescriptor, StreamSourceKind,
@@ -267,12 +267,13 @@ fn resume_source_stream(root: &Path) {
     });
 }
 
-/// Runs one delivery step from the destination's carried checkpoint and returns
-/// the step, whether it committed, paused or was rejected.
-fn step_from_destination(root: &Path) -> StreamStep {
+/// Runs one delivery step from a copy's checkpoint, opened by the runtime identity
+/// that `derive_identity` returns for the copy's current HEAD, and returns the step,
+/// whether it committed, paused or was rejected.
+fn step_resumed(root: &Path, derive_identity: DeriveIdentity) -> StreamStep {
     runtime().block_on(async {
         let repository = Repository::discover(root).unwrap();
-        let (identity, digest) = migration_copy_runtime_identity(&repository).unwrap();
+        let (identity, digest) = derive_identity(&repository).unwrap();
         let state = RuntimeState::open(&repository, identity, digest)
             .await
             .expect("open destination runtime");
@@ -337,7 +338,7 @@ fn migration_carries_paused_stream_control_and_keeps_delivery_paused() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("carried_checkpoints=1"));
-    match step_from_destination(&destination) {
+    match step_resumed(&destination, migration_copy_runtime_identity) {
         StreamStep::Paused { checkpoint } => {
             assert_eq!(checkpoint.version, before.version);
             assert_eq!(checkpoint.committed, before.committed);
@@ -722,6 +723,75 @@ fn activated_bridge_count(root: &Path) -> i64 {
     })
 }
 
+/// Pauses the legacy source's stream with a reason, writing the pause reason row.
+fn pause_source_stream_with_reason(root: &Path, reason: &str) {
+    runtime().block_on(async {
+        let repository = Repository::discover(root).unwrap();
+        let (identity, digest) = source_runtime_identity(root);
+        let state = RuntimeState::open(&repository, identity, digest)
+            .await
+            .expect("open source runtime");
+        let writer = state.acquire_lease([48; 16]).await.unwrap();
+        let outcome = state
+            .pause_stream_with_reason(writer, checkpoint_key(), reason.to_owned())
+            .await
+            .expect("pausing the source stream with a reason");
+        assert!(matches!(
+            outcome,
+            StreamAdministrationOutcome::Paused { changed: true }
+        ));
+    });
+}
+
+/// Pauses an activated copy's stream through its format-3 HEAD identity.
+fn pause_activated_stream(root: &Path, reason: Option<&str>) -> StreamAdministrationOutcome {
+    runtime().block_on(async {
+        let repository = Repository::discover(root).unwrap();
+        let (identity, digest) = repository_runtime_identity(&repository).unwrap();
+        let state = RuntimeState::open(&repository, identity, digest)
+            .await
+            .expect("open activated runtime");
+        let writer = state.acquire_lease([49; 16]).await.unwrap();
+        match reason {
+            Some(reason) => {
+                state
+                    .pause_stream_with_reason(writer, checkpoint_key(), reason.to_owned())
+                    .await
+            }
+            None => state.pause_stream(writer, checkpoint_key()).await,
+        }
+        .expect("pausing the activated stream")
+    })
+}
+
+/// Resumes an activated copy's stream through its format-3 HEAD identity.
+fn resume_activated_stream(root: &Path) -> StreamAdministrationOutcome {
+    runtime().block_on(async {
+        let repository = Repository::discover(root).unwrap();
+        let (identity, digest) = repository_runtime_identity(&repository).unwrap();
+        let state = RuntimeState::open(&repository, identity, digest)
+            .await
+            .expect("open activated runtime");
+        let writer = state.acquire_lease([50; 16]).await.unwrap();
+        state
+            .resume_stream(writer, checkpoint_key())
+            .await
+            .expect("resuming the activated stream")
+    })
+}
+
+/// The pause reason stored in an activated copy's format-3 runtime state.
+fn activated_stream_pause_reason(root: &Path) -> Option<String> {
+    runtime().block_on(async {
+        let repository = Repository::discover(root).unwrap();
+        let (identity, digest) = repository_runtime_identity(&repository).unwrap();
+        let state = RuntimeState::open(&repository, identity, digest)
+            .await
+            .expect("open activated runtime");
+        state.stream_pause_reason(&checkpoint_key()).await.unwrap()
+    })
+}
+
 /// Activation publishes the prepared copy. The carried checkpoint and its predecessor
 /// bridge stay in the activated format-3 runtime, delivery resumes after version 2
 /// without a reset, and the source is left unchanged.
@@ -782,6 +852,110 @@ fn activated_migration_copy_resumes_carried_checkpoint_without_reset() {
         git_output(&source, &["status", "--porcelain"]),
         source_status
     );
+}
+
+/// A paused stream and its pause reason survive activation. The activated format-3
+/// copy reports the same reason, stays paused at the carried checkpoint, and delivers
+/// the remaining item only after it is resumed.
+#[test]
+fn activated_migration_copy_keeps_paused_stream_and_reason_until_resumed() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    fs::create_dir(&source).unwrap();
+    dirty_legacy_source(&source);
+    let before = give_source_a_persistent_consumer(&source, false);
+    assert_eq!(before.version, 2);
+    pause_source_stream_with_reason(&source, "maintenance window");
+    let destination = parent.path().join("migrated");
+    let prepared = run_copy(&source, &destination);
+    assert!(
+        prepared.status.success(),
+        "migrate copy: {}",
+        String::from_utf8_lossy(&prepared.stderr)
+    );
+    let source_head = git_output(&source, &["rev-parse", "HEAD"]);
+
+    let activated = run_upgrade(&source, &destination);
+    assert!(
+        activated.status.success(),
+        "upgrade --yes-activate: {}",
+        String::from_utf8_lossy(&activated.stderr)
+    );
+
+    assert_eq!(
+        activated_stream_pause_reason(&destination).as_deref(),
+        Some("maintenance window"),
+        "the pause reason survives activation"
+    );
+    match step_resumed(&destination, repository_runtime_identity) {
+        StreamStep::Paused { checkpoint } => {
+            assert_eq!(checkpoint.version, before.version);
+            assert_eq!(checkpoint.committed, before.committed);
+        }
+        other => panic!("an activated paused stream must stay paused, got {other:?}"),
+    }
+    assert!(matches!(
+        resume_activated_stream(&destination),
+        StreamAdministrationOutcome::Running { changed: true }
+    ));
+    assert_eq!(
+        deliver_from_activated_head(&destination),
+        vec![b"3".to_vec()]
+    );
+    assert_eq!(git_output(&source, &["rev-parse", "HEAD"]), source_head);
+}
+
+/// Stream controls work on an activated copy: a stream carried running can be paused
+/// there with a reason, delivery stops at the carried checkpoint, and resuming it
+/// delivers the remaining item exactly once.
+#[test]
+fn activated_migration_copy_pause_and_resume_control_the_carried_stream() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    fs::create_dir(&source).unwrap();
+    dirty_legacy_source(&source);
+    let before = give_source_a_persistent_consumer(&source, false);
+    assert_eq!(before.version, 2);
+    let destination = parent.path().join("migrated");
+    let prepared = run_copy(&source, &destination);
+    assert!(
+        prepared.status.success(),
+        "migrate copy: {}",
+        String::from_utf8_lossy(&prepared.stderr)
+    );
+    let activated = run_upgrade(&source, &destination);
+    assert!(
+        activated.status.success(),
+        "upgrade --yes-activate: {}",
+        String::from_utf8_lossy(&activated.stderr)
+    );
+
+    assert!(matches!(
+        pause_activated_stream(&destination, Some("operator hold")),
+        StreamAdministrationOutcome::Paused { changed: true }
+    ));
+    assert_eq!(
+        activated_stream_pause_reason(&destination).as_deref(),
+        Some("operator hold")
+    );
+    match step_resumed(&destination, repository_runtime_identity) {
+        StreamStep::Paused { checkpoint } => {
+            assert_eq!(checkpoint.version, before.version);
+            assert_eq!(checkpoint.committed, before.committed);
+        }
+        other => panic!("a paused activated stream must not deliver, got {other:?}"),
+    }
+    assert!(matches!(
+        resume_activated_stream(&destination),
+        StreamAdministrationOutcome::Running { changed: true }
+    ));
+    assert_eq!(
+        deliver_from_activated_head(&destination),
+        vec![b"3".to_vec()]
+    );
+    let source_after = checkpoint_after_reopen(&source);
+    assert_eq!(source_after.version, before.version);
+    assert_eq!(source_after.committed, before.committed);
 }
 
 /// The checkpoint snapshot fixture the runtime's own bootstrap tests use. Its watermark
