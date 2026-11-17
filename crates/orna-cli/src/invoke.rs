@@ -182,6 +182,11 @@ pub(crate) fn run_project_invocation_with_arguments(
         _ => project.clone(),
     };
     let project = execution_project(&loaded_project);
+    let references = crate::stored_references::committed_stored_references(
+        &repository,
+        &loaded_project,
+        &table_object_ids,
+    )?;
     let mut result_value = None;
     let owner_id = orna_runtime::process_owner_id();
     let outcome = tokio::runtime::Builder::new_current_thread()
@@ -203,6 +208,7 @@ pub(crate) fn run_project_invocation_with_arguments(
                     RuntimeMode::Run,
                     std_snapshot,
                 ))
+                .with_stored_references(references)
                 .execute_project_request_with_arguments(
                     orna_conformance::RuntimeTarget {
                         repository: &repository,

@@ -54,6 +54,7 @@ pub mod row_admission;
 #[cfg(feature = "system-host-bindings")]
 mod runtime_info;
 mod source_enums;
+mod stored_reference;
 #[cfg(feature = "system-host-bindings")]
 mod sys_bindings;
 #[cfg(feature = "system-host-bindings")]
@@ -1453,6 +1454,27 @@ pub trait EffectHandler {
         self.resolve_reference(reference)
     }
 
+    /// Resolve a stored table reference (tag 60021) to the row it names in the
+    /// activation's own snapshot (ORNA-REF-002). `None` means no live row
+    /// answers to the reference. A handler that serves no table state fails
+    /// closed, so a reference is never read as if its row were absent.
+    fn resolve_table_reference(
+        &mut self,
+        _reference: &CanonicalValue,
+    ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        Err(error("ORNA-EVAL-UNSUPPORTED"))
+    }
+
+    /// Resolve a stored table reference while sharing the activation's
+    /// evaluator budget.
+    fn resolve_table_reference_with_budget(
+        &mut self,
+        reference: &CanonicalValue,
+        _budget: &mut StepBudget,
+    ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        self.resolve_table_reference(reference)
+    }
+
     /// Validate a relation source without enumerating rows. Runtime handlers
     /// use this to preserve relation visibility when a plan such as `take(0)`
     /// can return without requesting its first page.
@@ -1960,6 +1982,21 @@ impl EffectHandler for ContextValueEffectHandlerAdapter<'_> {
         budget: &mut StepBudget,
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
         EffectHandler::resolve_reference_with_budget(self.handler, reference, budget)
+    }
+
+    fn resolve_table_reference(
+        &mut self,
+        reference: &CanonicalValue,
+    ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        EffectHandler::resolve_table_reference(self.handler, reference)
+    }
+
+    fn resolve_table_reference_with_budget(
+        &mut self,
+        reference: &CanonicalValue,
+        budget: &mut StepBudget,
+    ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        EffectHandler::resolve_table_reference_with_budget(self.handler, reference, budget)
     }
 
     fn validate_relation_source(&mut self, source: &str) -> Result<(), EvaluationError> {
@@ -6008,6 +6045,7 @@ impl Context<'_, '_> {
                 self.nominal_field(&type_id, &fields, name, scope)
             }
             Value::Reference(reference) => self.reference_field(&reference, name, scope),
+            Value::TableReference(reference) => self.table_reference_field(&reference, name, scope),
             Value::Error(failure) => self.error_field(&failure, name),
             Value::Int(value) => self.numeric_postfix(value, name),
             Value::Decimal(value) => self.numeric_decimal_postfix(value, name),

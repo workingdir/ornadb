@@ -17,6 +17,7 @@ pub(super) struct TableEffectHandler<'activation, 'runtime> {
     pub(super) mutation_scope: [u8; 32],
     pub(super) sys_host: Option<&'activation SysHostAttachment>,
     pub(super) explain_catalogue: Option<&'activation ActivationExplainCatalogue>,
+    pub(super) references: Option<&'activation orna_project::ReferenceCatalogue>,
 }
 
 impl EffectHandler for TableEffectHandler<'_, '_> {
@@ -149,6 +150,13 @@ impl EffectHandler for TableEffectHandler<'_, '_> {
     fn explain_catalogue(&self) -> Option<&dyn ExplainCatalogue> {
         self.explain_catalogue
             .map(|catalogue| catalogue as &dyn ExplainCatalogue)
+    }
+
+    fn resolve_table_reference(
+        &mut self,
+        reference: &Value,
+    ) -> Result<Option<Value>, EvaluationError> {
+        self.resolve_stored_reference(reference)
     }
 }
 
@@ -527,6 +535,8 @@ impl TableEffectHandler<'_, '_> {
                 let [row] = arguments else {
                     return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
                 };
+                let bound = self.bind_stored_references(table, row)?;
+                let row = bound.as_ref().unwrap_or(row);
                 let key = key_fields.key_from_row(row).map_err(cursor_error)?;
                 self.activation
                     .insert(table.clone(), key.clone(), row.clone())
@@ -538,6 +548,8 @@ impl TableEffectHandler<'_, '_> {
                 let [row] = arguments else {
                     return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
                 };
+                let bound = self.bind_stored_references(table, row)?;
+                let row = bound.as_ref().unwrap_or(row);
                 let key = key_fields.key_from_row(row).map_err(cursor_error)?;
                 if let Some(existing) = self
                     .activation
@@ -564,6 +576,8 @@ impl TableEffectHandler<'_, '_> {
                 let [key, patch] = arguments else {
                     return Err(transaction_error("ORNA-EVAL-TABLE-ARGUMENT"));
                 };
+                let bound = self.bind_stored_references(table, patch)?;
+                let patch = bound.as_ref().unwrap_or(patch);
                 let key = key_fields
                     .key_from_encoded(&encoded_key(key).map_err(cursor_error)?)
                     .map_err(cursor_error)?;
