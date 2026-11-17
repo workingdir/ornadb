@@ -649,6 +649,49 @@ fn stream_carry_import_is_idempotent_and_refuses_rows_that_differ() {
     });
 }
 
+/// A carry import is a write to the destination runtime, so it is confined to
+/// the runtime-owner lock holder. While a live owner holds the destination
+/// lock, a second handle refuses the carry and writes no checkpoint row.
+#[test]
+fn stream_carry_import_is_refused_while_another_owner_holds_the_destination() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    fs::create_dir(&source).unwrap();
+    dirty_legacy_source(&source);
+    give_source_a_persistent_consumer(&source, false);
+    let destination = parent.path().join("migrated");
+    let output = run_copy(&source, &destination);
+    assert!(
+        output.status.success(),
+        "carry source must prepare a destination: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    runtime().block_on(async {
+        let source_repository = Repository::discover(&source).unwrap();
+        let carry = read_stream_carry(&source_repository)
+            .await
+            .expect("source stream state is carriable");
+        let recorded = carry
+            .continuity_record()
+            .expect("carry continuity is recorded");
+        let destination_repository = Repository::discover(&destination).unwrap();
+        let live_owner = destination_repository
+            .acquire_runtime_owner_lock([0x5e; 16])
+            .expect("a live owner takes the destination lock");
+        let refused = import_stream_carry(&destination_repository, &carry, Some(&recorded)).await;
+        assert_eq!(
+            refused,
+            Err(RuntimeError::LeaseHeld),
+            "a secondary handle must not carry checkpoints into the destination"
+        );
+        drop(live_owner);
+        import_stream_carry(&destination_repository, &carry, Some(&recorded))
+            .await
+            .expect("the identical carry is recognised once the destination lock is free");
+    });
+}
+
 #[test]
 fn migration_copy_retry_after_carry_recovers() {
     let parent = TempDir::new().unwrap();
