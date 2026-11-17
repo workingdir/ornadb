@@ -78,6 +78,9 @@ jobs:
       - name: Prove standard library pin checker behavior
         run: python3 -m unittest scripts.test_standard_library_pin
 
+      - name: Prove standard library bump workflow behavior
+        run: python3 -m unittest scripts.test_bump_std
+
       - name: Prove gate evidence recorder behavior
         run: python3 -m unittest scripts.test_gate_evidence
 

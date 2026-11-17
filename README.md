@@ -80,6 +80,9 @@ default with a single override. The start contract, the one override per
 editor, and the rule that every file under `editors/` is generated are in the
 [editor tooling guide](docs/editor-tooling.md).
 
+Bumping the `stdlib/std` pin and regenerating its pinned-source artefacts is
+described in the [std bump process](docs/process/std-bump.md).
+
 ## Project layout
 
 The workspace contains the Orna 1.1.0 language, value, evaluator, runtime,
