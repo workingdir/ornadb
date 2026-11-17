@@ -1498,6 +1498,29 @@ pub(super) fn run_mount_status(endpoint: &Endpoint, json: bool) -> Result<(), Di
                 writeln!(out, "  drafts could not be listed: {error}")
                     .map_err(|_| stdout_error())?;
             }
+            let rows = status_row_diagnostics(status);
+            for row in &rows.entries {
+                writeln!(
+                    out,
+                    "  row diagnostic {} code {}: {}",
+                    row.path,
+                    row.code.as_deref().unwrap_or("-"),
+                    row.message,
+                )
+                .map_err(|_| stdout_error())?;
+            }
+            if rows.omitted > 0 {
+                writeln!(
+                    out,
+                    "  note: {} more row diagnostic(s) not listed; the daemon bounds its diagnostic list",
+                    rows.omitted
+                )
+                .map_err(|_| stdout_error())?;
+            }
+            if let Some(error) = rows.error {
+                writeln!(out, "  row diagnostics could not be listed: {error}")
+                    .map_err(|_| stdout_error())?;
+            }
         }
     }
     Ok(())
@@ -1529,6 +1552,7 @@ fn status_json(status: &MountStatus) -> String {
         status.is_legacy_format(),
         status.is_writable(),
         &listing,
+        &status_row_diagnostics(status),
     )
 }
 
@@ -1679,10 +1703,17 @@ impl DraftListing {
 /// path is gone, ENOENT) is a stale record; any other error is a live failure.
 #[cfg(target_os = "linux")]
 fn draft_listing_failure(error: rustix::io::Errno) -> String {
+    mount_listing_failure(error, "drafts")
+}
+
+/// Names a failed listing of a mount's `subject`, by the stale-record rule of
+/// `draft_listing_failure`.
+#[cfg(target_os = "linux")]
+fn mount_listing_failure(error: rustix::io::Errno, subject: &str) -> String {
     if error == rustix::io::Errno::NOTCONN || error == rustix::io::Errno::NOENT {
         "stale mount record: the mountpoint is not a live Orna mount (its process is gone); run `orna unmount` to clear it".to_owned()
     } else {
-        format!("could not list Orna mount drafts: {error}")
+        format!("could not list Orna mount {subject}: {error}")
     }
 }
 
@@ -1697,11 +1728,86 @@ fn status_drafts(status: &MountStatus) -> DraftListing {
     }
 }
 
+/// One failed row or table projection of a mount, as `mount status` reports it: the
+/// mount path of its node, the exact `sys.*` code when the failure names one, and
+/// the failure message (ORNA-VFS-005).
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RowDiagnosticEntry {
+    path: String,
+    code: Option<String>,
+    message: String,
+}
+
+/// The row projection failures of a mount, and how many the daemon left out of its
+/// bounded list. `error` is why they could not be listed.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct RowDiagnosticListing {
+    entries: Vec<RowDiagnosticEntry>,
+    omitted: u64,
+    error: Option<String>,
+}
+
+/// Parses the `path<TAB>code<TAB>message` lines of a row diagnostic list. The
+/// `\tomitted\tN` line counts the failures the daemon did not list.
+#[cfg(target_os = "linux")]
+fn parse_row_diagnostics(list: &str) -> RowDiagnosticListing {
+    let mut listing = RowDiagnosticListing::default();
+    for line in list.lines().filter(|line| !line.is_empty()) {
+        if let Some(count) = line.strip_prefix("\tomitted\t") {
+            listing.omitted += count.parse::<u64>().unwrap_or(0);
+            continue;
+        }
+        let fields: Vec<&str> = line.splitn(3, '\t').collect();
+        listing.entries.push(match fields[..] {
+            [path, code, message] => RowDiagnosticEntry {
+                path: path.to_owned(),
+                code: (!code.is_empty()).then(|| code.to_owned()),
+                message: message.to_owned(),
+            },
+            _ => RowDiagnosticEntry {
+                path: line.to_owned(),
+                code: None,
+                message: "unreadable row diagnostic".to_owned(),
+            },
+        });
+    }
+    listing
+}
+
+/// The row projection failures of a mount. Every mount serves them, read-only or
+/// writable, so they are listed for each one.
+#[cfg(target_os = "linux")]
+fn status_row_diagnostics(status: &MountStatus) -> RowDiagnosticListing {
+    match orna_fuse::row_diagnostic_list(status.mountpoint()) {
+        Ok(list) => parse_row_diagnostics(&list),
+        Err(rustix::io::Errno::NODATA) => RowDiagnosticListing {
+            error: Some(
+                "this mount's daemon predates row diagnostics; row projection failures are not reported"
+                    .to_owned(),
+            ),
+            ..RowDiagnosticListing::default()
+        },
+        Err(error) => RowDiagnosticListing {
+            error: Some(mount_listing_failure(error, "row diagnostics")),
+            ..RowDiagnosticListing::default()
+        },
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn status_row_diagnostics(_status: &MountStatus) -> RowDiagnosticListing {
+    RowDiagnosticListing {
+        error: Some("live row diagnostics require Linux FUSE".to_owned()),
+        ..RowDiagnosticListing::default()
+    }
+}
+
 /// One status object with the documented keys. The mountpoint is JSON-escaped
 /// so a path containing a quote, backslash or control character cannot produce
 /// invalid output. `draft_source` names the xattr the drafts came from (`fields`,
 /// or `list` for a daemon without the code and draft fields), or is `null` when
 /// there is no listing. `drafts_omitted` counts drafts the daemon did not list.
+#[allow(clippy::too_many_arguments)]
 fn mount_row_json(
     mountpoint: &Path,
     snapshot_hex: &str,
@@ -1710,6 +1816,7 @@ fn mount_row_json(
     legacy: bool,
     writable: bool,
     listing: &DraftListing,
+    rows: &RowDiagnosticListing,
 ) -> String {
     let drafts = listing
         .drafts
@@ -1730,8 +1837,21 @@ fn mount_row_json(
         None => "null".to_owned(),
     };
     let draft_error = optional_json(listing.error.as_deref());
+    let row_diagnostics = rows
+        .entries
+        .iter()
+        .map(|entry| {
+            format!(
+                "{{\"path\":\"{}\",\"code\":{},\"message\":\"{}\"}}",
+                escape_json(&entry.path),
+                optional_json(entry.code.as_deref()),
+                escape_json(&entry.message)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
     format!(
-        "{{\"mountpoint\":\"{}\",\"snapshot\":\"{}\",\"view\":\"{}\",\"format\":{},\"legacy\":{},\"writable\":{},\"read_only\":{},\"draft_source\":{},\"drafts_truncated\":{},\"drafts_omitted\":{},\"unresolved_drafts\":[{}],\"draft_error\":{}}}",
+        "{{\"mountpoint\":\"{}\",\"snapshot\":\"{}\",\"view\":\"{}\",\"format\":{},\"legacy\":{},\"writable\":{},\"read_only\":{},\"draft_source\":{},\"drafts_truncated\":{},\"drafts_omitted\":{},\"unresolved_drafts\":[{}],\"draft_error\":{},\"row_diagnostics\":[{}],\"row_diagnostics_omitted\":{},\"row_diagnostic_error\":{}}}",
         escape_json(&mountpoint.to_string_lossy()),
         snapshot_hex,
         view_hex,
@@ -1744,6 +1864,9 @@ fn mount_row_json(
         listing.omitted,
         drafts,
         draft_error,
+        row_diagnostics,
+        rows.omitted,
+        optional_json(rows.error.as_deref()),
     )
 }
 
@@ -1775,7 +1898,9 @@ fn optional_json(value: Option<&str>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{DraftEntry, DraftListing, DraftSource, escape_json, mount_row_json};
+    use super::{
+        DraftEntry, DraftListing, DraftSource, RowDiagnosticListing, escape_json, mount_row_json,
+    };
     use std::path::Path;
 
     #[test]
@@ -1788,10 +1913,11 @@ mod tests {
             true,
             false,
             &DraftListing::default(),
+            &RowDiagnosticListing::default(),
         );
         assert_eq!(
             object,
-            "{\"mountpoint\":\"/mnt/old\",\"snapshot\":\"aa\",\"view\":\"bb\",\"format\":1,\"legacy\":true,\"writable\":false,\"read_only\":true,\"draft_source\":null,\"drafts_truncated\":false,\"drafts_omitted\":0,\"unresolved_drafts\":[],\"draft_error\":null}"
+            "{\"mountpoint\":\"/mnt/old\",\"snapshot\":\"aa\",\"view\":\"bb\",\"format\":1,\"legacy\":true,\"writable\":false,\"read_only\":true,\"draft_source\":null,\"drafts_truncated\":false,\"drafts_omitted\":0,\"unresolved_drafts\":[],\"draft_error\":null,\"row_diagnostics\":[],\"row_diagnostics_omitted\":0,\"row_diagnostic_error\":null}"
         );
     }
 
@@ -1815,6 +1941,7 @@ mod tests {
             false,
             true,
             &listing,
+            &RowDiagnosticListing::default(),
         );
         assert!(
             object.contains("\"writable\":true,\"read_only\":false,\"draft_source\":\"fields\",\"drafts_truncated\":false,\"drafts_omitted\":0"),
@@ -1825,6 +1952,49 @@ mod tests {
             "{object}"
         );
         assert!(object.contains("\"draft_error\":null"), "{object}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn row_diagnostic_lines_carry_the_code_and_reach_the_status_json() {
+        use super::{RowDiagnosticEntry, parse_row_diagnostics};
+
+        let rows = parse_row_diagnostics(
+            "Music/london/data.orna\tsys.vfs.stale_edit\tnot accepted\nMusic/bad\t\tfield layout could not be resolved\n\tomitted\t4",
+        );
+        assert_eq!(rows.omitted, 4);
+        assert_eq!(rows.error, None);
+        assert_eq!(
+            rows.entries,
+            vec![
+                RowDiagnosticEntry {
+                    path: "Music/london/data.orna".to_owned(),
+                    code: Some("sys.vfs.stale_edit".to_owned()),
+                    message: "not accepted".to_owned(),
+                },
+                RowDiagnosticEntry {
+                    path: "Music/bad".to_owned(),
+                    code: None,
+                    message: "field layout could not be resolved".to_owned(),
+                },
+            ]
+        );
+        let object = mount_row_json(
+            Path::new("/mnt/library"),
+            "aa",
+            "bb",
+            3,
+            false,
+            true,
+            &DraftListing::default(),
+            &rows,
+        );
+        assert!(
+            object.ends_with(
+                ",\"row_diagnostics\":[{\"path\":\"Music/london/data.orna\",\"code\":\"sys.vfs.stale_edit\",\"message\":\"not accepted\"},{\"path\":\"Music/bad\",\"code\":null,\"message\":\"field layout could not be resolved\"}],\"row_diagnostics_omitted\":4,\"row_diagnostic_error\":null}"
+            ),
+            "{object}"
+        );
     }
 
     #[test]
@@ -1848,6 +2018,7 @@ mod tests {
             false,
             true,
             &listing,
+            &RowDiagnosticListing::default(),
         );
         assert!(
             object.contains(
@@ -1902,6 +2073,7 @@ mod tests {
             false,
             false,
             &DraftListing::default(),
+            &RowDiagnosticListing::default(),
         );
         assert!(object.contains("\\\""), "quote is escaped: {object}");
         assert!(object.contains("\\\\"), "backslash is escaped: {object}");
@@ -1940,6 +2112,7 @@ mod tests {
             false,
             true,
             &stale_listing,
+            &RowDiagnosticListing::default(),
         );
         assert!(
             stale_json.contains("\"draft_error\":\"stale mount record"),
@@ -1958,6 +2131,7 @@ mod tests {
             false,
             true,
             &live_listing,
+            &RowDiagnosticListing::default(),
         );
         assert!(
             live_json.contains("could not list Orna mount drafts"),

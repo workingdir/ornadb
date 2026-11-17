@@ -62,6 +62,7 @@ mod filesystem;
 mod historical;
 mod projection;
 mod retained;
+mod row_diagnostics;
 mod row_save;
 mod scratch;
 mod writer;
@@ -74,8 +75,8 @@ pub(crate) use filesystem::*;
 pub use filesystem::{
     DraftRetentionStop, EditError, UnmountPreparationError, begin_unmount, cancel_unmount,
     edit_path, edit_view_digest, has_unresolved_drafts, retain_drafts_for_shutdown,
-    run_editor_on_draft, spawn_editor, spawn_read_only, unmount_dead_mountpoint,
-    unmount_mountpoint, unresolved_draft_fields, unresolved_draft_list,
+    row_diagnostic_list, run_editor_on_draft, spawn_editor, spawn_read_only,
+    unmount_dead_mountpoint, unmount_mountpoint, unresolved_draft_fields, unresolved_draft_list,
 };
 #[allow(clippy::wildcard_imports)]
 pub(crate) use historical::*;
@@ -84,6 +85,8 @@ pub(crate) use orna_cli_support::runtime_identity::repository_runtime_identity a
 pub(crate) use projection::*;
 #[allow(clippy::wildcard_imports)]
 pub(crate) use retained::*;
+#[allow(clippy::wildcard_imports)]
+pub(crate) use row_diagnostics::*;
 #[allow(clippy::wildcard_imports)]
 pub(crate) use row_save::*;
 #[allow(clippy::wildcard_imports)]
@@ -105,6 +108,8 @@ pub const XATTR_UNRESOLVED_DRAFTS: &str = "user.orna.unresolved-drafts";
 pub const XATTR_UNRESOLVED_DRAFT_LIST: &str = "user.orna.unresolved-draft-list";
 /// One `path<TAB>code<TAB>draft<TAB>detail` line per unresolved draft.
 pub const XATTR_UNRESOLVED_DRAFT_FIELDS: &str = "user.orna.unresolved-draft-fields";
+/// One `path<TAB>code<TAB>message` line per failed row or table projection (ORNA-VFS-005).
+pub const XATTR_ROW_DIAGNOSTICS: &str = "user.orna.row-diagnostics";
 /// An explicit edit request: `mode NUL path NUL draft NUL digest`.
 pub const XATTR_EDIT_COMMIT: &str = "user.orna.edit-commit";
 

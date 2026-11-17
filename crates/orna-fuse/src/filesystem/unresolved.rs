@@ -166,6 +166,16 @@ impl WorkspaceFilesystem {
         })
     }
 
+    /// One `path<TAB>code<TAB>message` line per failed row or table projection, for
+    /// `mount status` (ORNA-VFS-005).
+    pub(crate) fn row_diagnostic_report(&self) -> String {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.render_row_diagnostics()
+    }
+
     /// Renders the drafts as sorted lines, bounded by both a line count and a byte
     /// budget so the xattr value stays small enough for the kernel to return. A draft
     /// that does not fit is not listed; it is counted on one final `\tomitted\tN` line.
