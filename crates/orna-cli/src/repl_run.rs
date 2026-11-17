@@ -1,4 +1,6 @@
-use super::repl_committed_read::{bound_head_unchanged, submit_committed_read, submit_effect_free};
+use super::repl_committed_read::{
+    bound_head_unchanged, publication_rows_for_source, submit_committed_read, submit_effect_free,
+};
 #[cfg(test)]
 use super::repl_request::FIRST_SYS_DISPATCH_RUNNING;
 use super::{
@@ -116,6 +118,7 @@ pub(crate) fn run_repl_input(
             }
         });
     };
+    let publication_rows = publication_rows_for_source(&transactions.runtime, state, source)?;
     let scope = ReplTransactionScope::new(
         &transactions.project,
         repository,
@@ -123,6 +126,7 @@ pub(crate) fn run_repl_input(
         &snapshot,
         &storage_orders,
         request,
+        publication_rows,
     );
     #[cfg(test)]
     let scope = scope.with_dispatch_observer(&observe_first_dispatch);

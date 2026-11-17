@@ -63,7 +63,7 @@ const UPGRADE_2_CANDIDATE: &str = "`orna upgrade --to-format 2` is refused as an
 const ANNOTATION_DEFAULTS_FLAG: &str = "`migrate copy --annotation-defaults N` asserts the decoded Blob count and, when omitted, records the decoded count rather than explicit octet-stream and no-suffix defaults";
 const CONSUMER_CARRY_FLAG: &str = "`migrate copy --no-persistent-consumers` acknowledges that consumer checkpoints are carried, not reset, instead of requiring an explicit validated migration map";
 const STORAGE_PREFERENCE_RETIRED: &str = "storage-preference operations are retired, so `orna help` documents no storage option and no storage choice can be driven to check that a legacy layout is not selected; the atomic source/API change needs a legacy-source executor the harness lacks";
-const STORAGE_METADATA: &str = "storage metadata and work counters are unobservable: `sys.Storage` is unsupported in the project REPL (ORNA-EVAL-UNSUPPORTED), so no root, schema, generation, row count or work counter can be read";
+const STORAGE_METADATA: &str = "storage metadata is incomplete: `sys.Storage` serves the publication counters and policy but not the ORNA-ROW-014 reference, object, rows, bytes, logical_generation or location fields, so the storage object cannot be read (ornadb-5il1.187)";
 const CHECKOUT: &str = "`orna checkout` to a different commit is refused while drafts are pending or a changed path has uncommitted changes: pending drafts are not carried forward (CHECKOUT-3 step 4) and no checkout journal is written";
 const STAGING: &str = "`orna add --row` cannot stage a published row: format 3 has no row adapter that stages a row into the index store (ORNA-STAGE-001), so the command refuses and stages nothing";
 const OVERFLOW: &str = "a row above the 64 KiB node bound cannot be published: publication cannot prepare the candidate";
@@ -96,7 +96,7 @@ pub fn entries() -> Vec<Entry> {
             "FINAL-ROW-008",
             "ornadb-mmsa.28.16",
             STORAGE_METADATA,
-            storage_unobservable,
+            storage_fields_unobservable,
         ),
         Entry::pass("FINAL-ROW-009", query_reports_estimate_and_actual),
         Entry::pass("FINAL-ROW-010", repacking_changes_no_logical_rows),
@@ -112,7 +112,7 @@ pub fn entries() -> Vec<Entry> {
             "FINAL-ROW-014",
             "ornadb-5il1.123",
             STORAGE_METADATA,
-            storage_unobservable,
+            storage_fields_unobservable,
         ),
         Entry::gap(
             "FINAL-ROW-015",
@@ -241,7 +241,7 @@ pub fn entries() -> Vec<Entry> {
             "FINAL-OGB-005",
             "ornadb-4ihd",
             STORAGE_METADATA,
-            storage_unobservable,
+            storage_fields_unobservable,
         ),
         Entry::pass("FINAL-OGB-006", missing_chunks_are_not_empty_content),
         Entry::pass("FINAL-OGB-007", small_blobs_use_one_terminal_chunk),
@@ -267,7 +267,7 @@ pub fn entries() -> Vec<Entry> {
             "FINAL-MIME-007",
             "ornadb-5il1.123",
             STORAGE_METADATA,
-            storage_unobservable,
+            storage_fields_unobservable,
         ),
         Entry::gap(
             "FINAL-MIME-008",
@@ -294,7 +294,7 @@ pub fn entries() -> Vec<Entry> {
             "FINAL-VFS-003",
             "ornadb-5il1.123",
             STORAGE_METADATA,
-            storage_unobservable,
+            storage_fields_unobservable,
         ),
         Entry::gap(
             "FINAL-VFS-004",
@@ -339,7 +339,7 @@ pub fn entries() -> Vec<Entry> {
             "FINAL-VFS-010",
             "ornadb-ame1",
             STORAGE_METADATA,
-            storage_unobservable,
+            storage_fields_unobservable,
         ),
         Entry::gap(
             "FINAL-VFS-011",
@@ -380,13 +380,13 @@ pub fn entries() -> Vec<Entry> {
             "FINAL-VFS-017",
             "ornadb-ame1",
             STORAGE_METADATA,
-            storage_unobservable,
+            storage_fields_unobservable,
         ),
         Entry::gap(
             "FINAL-VFS-018",
             "ornadb-5il1.123",
             STORAGE_METADATA,
-            storage_unobservable,
+            storage_fields_unobservable,
         ),
         Entry::gap(
             "FINAL-VFS-019",
@@ -2877,9 +2877,15 @@ fn checked_out_branch(db: &mut Db) -> Result<String, Failure> {
         .to_owned())
 }
 
-fn storage_unobservable(db: &mut Db) -> Probe {
+/// ORNA-ROW-014: `sys.Storage` serves the publication counters but refuses a
+/// read of `logical_generation`, which the storage object needs to be read.
+fn storage_fields_unobservable(db: &mut Db) -> Probe {
     committed_repl_project(db)?;
-    repl_refuses(db, &["sys.Storage"], "ORNA-EVAL-UNSUPPORTED")
+    repl_refuses(
+        db,
+        &["sys.Storage | map(storage => storage.logical_generation) | first() ?? -1"],
+        "ORNA-EVAL-FIELD",
+    )
 }
 
 /// The REPL evaluates against a committed HEAD. A fresh project has no HEAD, so

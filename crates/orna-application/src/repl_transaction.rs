@@ -18,6 +18,9 @@ pub struct ReplTransactionScope<'a> {
     /// once by the caller alongside the rows that seeded `snapshot`.
     pub committed_storage_orders: &'a BTreeMap<String, Vec<String>>,
     pub request: RequestIdentity,
+    /// Durable `sys.Storage` and `sys.MaintenanceJob` rows at the session's
+    /// pinned publication state. `None` when the input names neither relation.
+    pub publication_rows: Option<RuntimePublicationMetadataRows>,
     #[cfg(feature = "test-support")]
     dispatch_observer: Option<&'a dyn Fn()>,
 }
@@ -31,6 +34,7 @@ impl<'a> ReplTransactionScope<'a> {
         snapshot: &'a RuntimeTableActivationSnapshot,
         committed_storage_orders: &'a BTreeMap<String, Vec<String>>,
         request: RequestIdentity,
+        publication_rows: Option<RuntimePublicationMetadataRows>,
     ) -> Self {
         Self {
             project,
@@ -39,6 +43,7 @@ impl<'a> ReplTransactionScope<'a> {
             snapshot,
             committed_storage_orders,
             request,
+            publication_rows,
             #[cfg(feature = "test-support")]
             dispatch_observer: None,
         }
@@ -91,15 +96,13 @@ impl ApplicationAuthority {
         ReplEvaluationFailure,
     > {
         let (tables, table_ids, defaults, functions) = admitted_project_tables(self, scope)?;
-        // The REPL host serves no publication relation, so its explain
-        // catalogue pins the activation's project tables only.
-        let explain_catalogue = orna_evaluator::ActivationExplainCatalogue::new(
+        // The explain catalogue names the publication relations only when the
+        // scope carries their rows (see `source_requires_publication_metadata`).
+        let explain_catalogue = crate::repl_explain_catalogue(
             &scope.snapshot.context().capture().snapshot(),
             tables.keys().map(String::as_str),
-        )
-        .map_err(|_| {
-            ApplicationError::Runtime("activation snapshot has no sys.Snapshot key".into())
-        })?;
+            scope.publication_rows.is_some(),
+        )?;
         // The effect handler consumes full row maps, so project the source-bound committed store into that form.
         let (captured_rows, committed) = committed_table_rows(scope, &tables)?;
         let watermarks = automatic_id_watermarks(scope, &tables, &table_ids)?;
@@ -111,7 +114,8 @@ impl ApplicationAuthority {
             table_ids,
         )?
         .with_insert_defaults(defaults, functions, self.limits)
-        .with_automatic_id_watermarks(&watermarks);
+        .with_automatic_id_watermarks(&watermarks)
+        .with_optional_publication_rows(scope.publication_rows.clone());
         let mut effects = ReplTransactionEffectHandler {
             bindings,
             mutations,
