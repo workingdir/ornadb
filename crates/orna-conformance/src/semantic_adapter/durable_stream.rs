@@ -431,7 +431,8 @@ impl DurableTransactionalEvaluator {
             .with_activation_time(context.activation_time())
             .with_publication_rows(publication_rows)
             .with_mutation_scope(request_mutation_scope(&request))
-            .with_explain_catalogue(explain_catalogue);
+            .with_explain_catalogue(explain_catalogue)
+            .with_stored_references(self.stored_references.clone());
         for (table, rows) in snapshot.table_rows() {
             for (key, row) in rows {
                 let row = match Value::decode(row) {

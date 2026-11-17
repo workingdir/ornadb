@@ -69,6 +69,7 @@ pub use remote_analysis::{
 };
 mod repl_read;
 mod repl_transaction;
+mod stored_reference;
 mod table_reference;
 pub use browser_profile::execute_browser_profile;
 pub use contextual_snapshot::evaluate_contextual_snapshot_read;
@@ -763,7 +764,7 @@ impl ApplicationAuthority {
         arguments: &Environment,
         rows: RuntimeTableRows,
     ) -> Result<StagedActivation, ApplicationError> {
-        self.evaluate_staged_over_table_rows(application, arguments, rows, None, None)
+        self.evaluate_staged_over_table_rows(application, arguments, rows, None, None, None)
     }
 
     /// Evaluates against `snapshot`'s activation with `rows` as the table
@@ -781,12 +782,18 @@ impl ApplicationAuthority {
     ) -> Result<StagedActivation, ApplicationError> {
         let table_object_ids = application_table_object_ids(application);
         validate_snapshot_table_object_ids(&table_object_ids, snapshot)?;
+        let references = stored_reference::stored_reference_catalogue(
+            snapshot.context().capture().database_id(),
+            &application_table_schemas(application),
+            &table_object_ids,
+        )?;
         self.evaluate_staged_over_table_rows(
             application,
             arguments,
             rows,
             publication_rows,
             Some(snapshot.context().capture().generation_digest()),
+            references,
         )
     }
 
@@ -797,6 +804,7 @@ impl ApplicationAuthority {
         rows: RuntimeTableRows,
         publication_rows: Option<RuntimePublicationMetadataRows>,
         snapshot_generation: Option<[u8; 32]>,
+        references: Option<orna_project::ReferenceCatalogue>,
     ) -> Result<StagedActivation, ApplicationError> {
         let tables = application_table_schemas(application);
         let table_object_ids = application_table_object_ids(application);
@@ -810,7 +818,8 @@ impl ApplicationAuthority {
             application.functions.clone(),
             application.limits,
         )
-        .with_sys_host_context(self.sys_host.clone());
+        .with_sys_host_context(self.sys_host.clone())
+        .with_stored_references(references);
         handler.publication_rows = publication_rows;
         let value = invoke_named_with_effects(
             &application.entry,
@@ -1661,6 +1670,9 @@ pub struct SourceMutationEffectHandler {
     /// context. Served only by the contextual page read; a table absent here
     /// is read through `captured_rows` as before.
     context_table_rows: BTreeMap<String, BTreeMap<Vec<u8>, ContextValue>>,
+    /// Stored references of the activation's committed database, when it has
+    /// one: the identity a table-typed field is written and read through.
+    stored_references: Option<orna_project::ReferenceCatalogue>,
 }
 
 impl SourceMutationEffectHandler {
@@ -1686,6 +1698,7 @@ impl SourceMutationEffectHandler {
             sys_host: None,
             explain_catalogue: None,
             context_table_rows: BTreeMap::new(),
+            stored_references: None,
         }
     }
 
@@ -2044,7 +2057,7 @@ impl SourceMutationEffectHandler {
             )
             .map_err(|_| ApplicationError::Runtime("recorded mutation was invalid".into()))?;
         }
-        Ok(())
+        self.validate_stored_references()
     }
 
     fn effect_error(code: &'static str) -> EvaluationError {
@@ -2340,8 +2353,9 @@ impl SourceMutationEffectHandler {
         entries.sort_by(|(left, _), (right, _)| {
             canonical_map_key(left).cmp(&canonical_map_key(right))
         });
-        CanonicalValue::new(OvbRaw::Map(entries))
-            .map_err(|_| Self::effect_error("ORNA-EVAL-TABLE-ROW"))
+        let row = CanonicalValue::new(OvbRaw::Map(entries))
+            .map_err(|_| Self::effect_error("ORNA-EVAL-TABLE-ROW"))?;
+        self.bind_stored_references(table, row)
     }
 
     fn key_components(
@@ -2879,6 +2893,7 @@ impl EffectHandler for SourceMutationEffectHandler {
                 let key = self.key_from_row(&schema, &keyed_patch)?;
                 if let Some(existing) = self.current_row(&table, &key)? {
                     let row = self.patch_row(&schema, patch, &existing, true)?;
+                    let row = self.bind_stored_references(&table, row)?;
                     self.record(&table, key.clone(), Some(row.clone()))?;
                     self.overlay
                         .entry(table.to_owned())
@@ -2906,6 +2921,7 @@ impl EffectHandler for SourceMutationEffectHandler {
                     .current_row(&table, &key_bytes)?
                     .ok_or_else(|| Self::effect_error("ORNA-EVAL-TABLE-MISSING-ROW"))?;
                 let row = self.patch_row(&schema, patch, &existing, false)?;
+                let row = self.bind_stored_references(&table, row)?;
                 if self.key_from_row(&schema, &row)? != key_bytes {
                     return Err(Self::effect_error("ORNA-EVAL-TABLE-KEY"));
                 }
@@ -3077,6 +3093,13 @@ impl EffectHandler for SourceMutationEffectHandler {
         self.explain_catalogue
             .as_ref()
             .map(|catalogue| catalogue as &dyn orna_evaluator::ExplainCatalogue)
+    }
+
+    fn resolve_table_reference(
+        &mut self,
+        reference: &CanonicalValue,
+    ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        self.resolve_stored_reference(reference)
     }
 }
 

@@ -89,7 +89,10 @@ fn run_rekey_of_a_published_row_moves_it_in_the_merged_view_and_publishes() {
         1
     );
     // The old key is refused as not committed, not answered with an empty page.
-    let absent = orna(&root, &["query", &media, "--key", "london", "--format", "json"]);
+    let absent = orna(
+        &root,
+        &["query", &media, "--key", "london", "--format", "json"],
+    );
     assert!(
         !absent.status.success() && transcript(&absent).contains("Row is not committed"),
         "the moved key is not committed at HEAD: {}",

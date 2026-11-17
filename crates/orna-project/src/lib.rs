@@ -39,6 +39,7 @@ use unicode_normalization::UnicodeNormalization;
 mod attachments;
 mod committed_store;
 mod object_identity;
+mod stored_reference;
 mod table_storage;
 mod typed_row;
 
@@ -47,6 +48,9 @@ pub use committed_store::CommittedTableStore;
 pub use object_identity::{
     OBJECT_IDENTITY_MANIFEST_PATH, ObjectIdentity, ObjectIdentityError, ObjectIdentityManifest,
     ObjectIdentityRename, ObjectKind, SourceTableSchemaArtifact, SourceTableSchemaError,
+};
+pub use stored_reference::{
+    CandidateState, DANGLING_REFERENCE_CODE, ReferenceCatalogue, ReferenceError, ReferenceIdentity,
 };
 pub use table_storage::{
     CommittedReadError, CommittedReadLimits, CommittedTable, StoredBlobReference,

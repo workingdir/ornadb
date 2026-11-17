@@ -491,6 +491,12 @@ pub(crate) const DIAGNOSTIC_DOCUMENTATION: &[DiagnosticDocumentation] = &[
         explanation: "The evaluator cannot represent or return this value, so no result is produced.",
         help: "return a value the evaluator can represent, such as a supported scalar or collection",
     },
+    DiagnosticDocumentation {
+        code: "ORNA-REF-DANGLING",
+        title: "stored reference names no row",
+        explanation: "A stored table reference must name a live row of its table when the activation commits (ORNA-MUT-007). An activation that leaves a reference without its row is refused and none of its writes commit: a reference to a row that does not exist, or the delete or re-key of a row that a reference still names. Non-optional references default to `restrict` and Orna does not cascade (ORNA-MUT-008, ORNA-REF-003).",
+        help: "insert the referenced row, or update the dependent references to a live row in the same activation, before deleting or re-keying the row they name",
+    },
 ];
 
 pub(crate) fn diagnostic_documentation(code: &str) -> Option<DiagnosticDocumentation> {
