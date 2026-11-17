@@ -809,6 +809,8 @@ fn binary_run_reports_divide_by_zero_under_its_catalogued_code_without_debug() {
         "stderr: {stderr}"
     );
     assert!(!stderr.contains("failure code:"), "stderr: {stderr}");
+    assert!(stderr.contains("--> library.orna:1:"), "stderr: {stderr}");
+    assert!(stderr.contains("1 / 0"), "stderr: {stderr}");
 }
 
 /// ORNA-EVAL-LIMIT: exhausting the call budget renders its catalogued code and

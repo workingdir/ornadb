@@ -190,15 +190,7 @@ pub(super) fn admit_transaction_project_with(
     let analysis = analyze_with_providers(
         &application_modules
             .iter()
-            .map(|unit| {
-                let prefix = format!("{}/", project.project_id.trim_end_matches('/'));
-                let path = unit
-                    .source_id
-                    .strip_prefix(&prefix)
-                    .unwrap_or(&unit.source_id)
-                    .to_owned();
-                ModuleInput::new(path, unit.source.clone())
-            })
+            .map(|unit| ModuleInput::new(project_logical_path(project, unit), unit.source.clone()))
             .collect::<Vec<_>>(),
         catalogue,
         SystemProviders::Production,
@@ -231,7 +223,7 @@ pub(super) fn admit_transaction_project_with(
         if let StageOutcome::Failed(diagnostic) = syntax.parse(unit) {
             return Err(Box::new(StageOutcome::Failed(diagnostic)));
         }
-        let parsed = parse_module(&unit.source);
+        let parsed = parse_module_with_file(&unit.source, project_logical_path(project, unit));
         if let Err(error) = limits.check_items(parsed.value.items.len()) {
             return Err(Box::new(StageOutcome::Failed(error.diagnostic().clone())));
         }
@@ -457,6 +449,16 @@ pub(super) fn project_semantic_namespace(
         components.pop();
     }
     Some(Namespace(components))
+}
+
+/// The project-relative logical path of a module: the identity its source
+/// spans carry, matching the loaded project's `logical_path`.
+pub(super) fn project_logical_path(project: &ProjectUnit, unit: &SourceUnit) -> String {
+    let prefix = format!("{}/", project.project_id.trim_end_matches('/'));
+    unit.source_id
+        .strip_prefix(&prefix)
+        .unwrap_or(&unit.source_id)
+        .to_owned()
 }
 
 pub(super) fn project_transaction_namespace(

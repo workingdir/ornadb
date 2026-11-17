@@ -20,7 +20,7 @@ use orna_check::StandardDependencyProfile;
 use orna_syntax::{parse_expression, parse_repl};
 use orna_syntax_ast::{
     AssignmentOperator, AssignmentTarget, ControlKind, Expr, LiteralKind, Parameter, Pattern,
-    PatternField, ReplInput, Statement, StringSegment,
+    PatternField, ReplInput, SourceSpan, Statement, StringSegment,
 };
 use orna_value::{
     CANONICAL_NAN_BITS, ContentIdentity, ContextValue, Error as ValueError,
@@ -1240,6 +1240,9 @@ pub struct EvaluationError {
     diagnostic: Box<Diagnostic>,
     canonical: Option<CanonicalErrorValue>,
     deliberate: bool,
+    /// The innermost expression the failure was raised in, when its module was
+    /// parsed with a file location. Set once, by the first `evaluate` frame.
+    source: Option<SourceSpan>,
 }
 
 impl EvaluationError {
@@ -1258,6 +1261,7 @@ impl EvaluationError {
                     .expect("redacted error is canonical"),
             ),
             deliberate: false,
+            source: None,
         }
     }
 
@@ -1275,6 +1279,7 @@ impl EvaluationError {
             diagnostic: Box::new(diagnostic.redacted()),
             canonical: Some(value),
             deliberate: true,
+            source: None,
         }
     }
 
@@ -1291,6 +1296,16 @@ impl EvaluationError {
     }
     pub fn code(&self) -> &str {
         self.diagnostic.code()
+    }
+    /// The source span of the expression the failure was raised in, when known.
+    pub fn source_span(&self) -> Option<&SourceSpan> {
+        self.source.as_ref()
+    }
+    fn with_source_span(mut self, span: impl FnOnce() -> SourceSpan) -> Self {
+        if self.source.is_none() {
+            self.source = Some(span());
+        }
+        self
     }
 }
 impl fmt::Display for EvaluationError {
@@ -6012,6 +6027,7 @@ impl Context<'_, '_> {
         // stack well before those bounds. Grow onto a fresh segment near the limit.
         stacker::maybe_grow(EVALUATOR_STACK_RED_ZONE, EVALUATOR_STACK_SEGMENT, || {
             self.evaluate_node(expression, scope, depth)
+                .map_err(|error| error.with_source_span(|| expression.span().clone()))
         })
     }
 
