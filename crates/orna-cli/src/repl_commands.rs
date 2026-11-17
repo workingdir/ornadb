@@ -1,5 +1,5 @@
 //! Console commands that read or present the session: `:type`, `:inspect`,
-//! `:members`, `:table`, `:history`, `:timing`, and `:clear`.
+//! `:members`, `:table`, `:history`, `:timing`, `:copy`, and `:clear`.
 //!
 //! `repl.rs` dispatches the session, watch, and help commands itself. Every
 //! other `:name` reaches [`run`], which either runs the command or refuses it
@@ -15,6 +15,7 @@ use orna_evaluator::{RelationDisplay, ReplValue};
 use orna_project_repl::{AdmittedReplSession, ReplDetail};
 
 use crate::repl::{AnsiColor, ReplFailure, write_repl_failure, write_repl_outcome, write_styled};
+use crate::repl_copy;
 use crate::repl_inspect::inspect_full;
 
 /// The most submitted inputs `:history` keeps.
@@ -28,7 +29,7 @@ const COMMANDS: [&str; 19] = [
 
 /// Commands the console recognises but does not implement yet. Each is
 /// refused by name; none is silently accepted.
-const UNSUPPORTED: [&str; 7] = ["doc", "source", "open", "plan", "trace", "copy", "display"];
+const UNSUPPORTED: [&str; 6] = ["doc", "source", "open", "plan", "trace", "display"];
 
 /// The code every console refusal carries.
 const COMMAND_CODE: &str = "ORNA-REPL-COMMAND";
@@ -128,11 +129,12 @@ fn execute<'a, W: Write>(
         "history" => history_command(&cmd, console, writer),
         "timing" => Ok(timing_command(&cmd, console)),
         "clear" => clear_command(&cmd, writer, color_enabled),
+        "copy" => repl_copy::run(cmd.arg, session, writer, color_enabled).map(|()| None),
         name if UNSUPPORTED.contains(&name) => Ok(Some(refuse_name(
             &cmd,
             format!("`:{name}` is not available in this console yet"),
             vec![
-                "the console runs :type, :inspect, :members, :table, :history, :timing, and :clear"
+                "the console runs :type, :inspect, :members, :table, :history, :timing, :copy, and :clear"
                     .into(),
                 "enter `:help` to see the supported commands".into(),
             ],
