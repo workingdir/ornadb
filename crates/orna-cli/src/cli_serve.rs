@@ -695,11 +695,11 @@ fn open_served_clone(endpoint: &Endpoint) -> Result<ServedClone, Diagnostic> {
     // Project loading parses the reachable source modules only. In
     // particular, serving a clone never invokes its root `main()`; functions
     // run only after an explicit query or live Eval request reaches a route.
-    let (project, catalogue, app) = match admit_serving_entry(endpoint) {
+    let (identity, initial_digest) = runtime_identity(&repository)?;
+    let (project, catalogue, app) = match admit_serving_entry(endpoint, identity) {
         Some(serving) => (Some(serving.project), serving.catalogue, serving.entry),
         None => (None, orna_check::Catalogue::default(), None),
     };
-    let (identity, initial_digest) = runtime_identity(&repository)?;
     // The served runtime uses this process's owner. A later process takes the
     // lease over with a bumped epoch once it holds the runtime owner lock, so a
     // killed predecessor's token is fenced. Test
@@ -827,7 +827,7 @@ struct AdmittedServing {
 /// Loads and admits the serving entry. A broken `main.orna` is reported on
 /// stderr and leaves the Git transport serving (ORNA-SERVE-007, ORNA-APP-020):
 /// the project and entry are then absent and the catalogue is empty.
-fn admit_serving_entry(endpoint: &Endpoint) -> Option<AdmittedServing> {
+fn admit_serving_entry(endpoint: &Endpoint, identity: RuntimeIdentity) -> Option<AdmittedServing> {
     let project = match load_project(endpoint) {
         Ok(project) => project,
         Err(diagnostic) => {
@@ -853,7 +853,7 @@ fn admit_serving_entry(endpoint: &Endpoint) -> Option<AdmittedServing> {
             });
         }
     };
-    match cli_serve_app::ServeApp::admit(root, &project, &catalogue) {
+    match cli_serve_app::ServeApp::admit(root, &project, &catalogue, identity) {
         Ok(app) => {
             if app.is_none() {
                 // Without a serving entry the Git transport still serves; `/` is absent.

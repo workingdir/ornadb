@@ -1,9 +1,16 @@
-use std.ui.{Button, Cols, Input, Table, Text};
+use std.ui.{Button, Cols, Details, Field, Input, Table, Text};
 
 pub fn serve(): UI = Cols([
     Text("Devtools"),
     Input("query", "Query", null, std.ui.action("devtools.query", as: Text)),
     Button("Run", std.ui.action("devtools.run", as: Text)),
     Table(sys.catalog.tables),
+    Details([
+        Field("Language version", sys.rt.info().language_version),
+        Field("Implementation version", sys.rt.info().implementation_version),
+        Field("Build id", sys.rt.info().build_id),
+        Field("Read only", sys.rt.info().read_only),
+        Field("Serving", sys.rt.info().mode == sys.RuntimeMode.serve)
+    ]),
     Button("Refresh", std.ui.action("devtools.refresh", as: Text))
 ]);

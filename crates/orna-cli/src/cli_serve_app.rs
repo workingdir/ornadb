@@ -20,6 +20,7 @@ use super::{
     evaluate_over_committed_tables, legacy_bare_module_candidates, legacy_bare_module_table,
     runtime_identity, unavailable_response,
 };
+use super::{RuntimeIdentity, RuntimeMode};
 use crate::media_range::{MediaMethod, MediaReply, media_reply, plan_media_response};
 use orna_application::{
     AdmittedApplication, ApplicationAuthority, ApplicationError, StagedActivation,
@@ -77,6 +78,24 @@ impl ServingEntry {
     }
 }
 
+/// The page authority for the serving entry. It carries the same sys host
+/// context and runtime identity as the serve state's authority, so admitted
+/// effects such as `sys.version` resolve on the page as they do for Run.
+fn page_authority(
+    root: &str,
+    project: &orna_project::LoadedProject,
+    catalogue: &orna_check::Catalogue,
+    identity: RuntimeIdentity,
+) -> ApplicationAuthority {
+    let sys_host = crate::sys_host::sys_host_context(
+        std::path::Path::new(root),
+        identity,
+        RuntimeMode::Serve,
+        crate::sys_host::std_snapshot_pin(project),
+    );
+    ApplicationAuthority::new(catalogue.clone(), Limits::default()).with_sys_host_context(sys_host)
+}
+
 impl ServeApp {
     /// Admits the selected entry. Returns `Ok(None)` when the project has no
     /// `main.orna` module or that module declares no `serve` function.
@@ -84,6 +103,7 @@ impl ServeApp {
         root: &str,
         project: &orna_project::LoadedProject,
         catalogue: &orna_check::Catalogue,
+        identity: RuntimeIdentity,
     ) -> Result<Option<Self>, Diagnostic> {
         let Some(index) = project
             .identities()
@@ -96,13 +116,12 @@ impl ServeApp {
         // the project pins must reach the authority through the catalogue's
         // standard declarations; the project's own profile and sources are
         // used, never the host library (ORNA-APP-005, ORNA-APP-007).
-        let mut authority = ApplicationAuthority::new(catalogue.clone(), Limits::default());
+        let base = || page_authority(root, project, catalogue, identity);
+        let mut authority = base();
         if let Some(profile) = project.standard_profile() {
             authority = authority
                 .with_standard_sources(profile, project.standard_sources().iter().cloned())
-                .unwrap_or_else(|_| {
-                    ApplicationAuthority::new(catalogue.clone(), Limits::default())
-                });
+                .unwrap_or_else(|_| base());
         }
         match authority.admit_module(
             SERVE_MODULE_PATH,
