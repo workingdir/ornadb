@@ -488,3 +488,62 @@ fn an_optional_reference_is_stored_when_present_and_checked_when_present() {
         "a dangling optional reference",
     );
 }
+
+/// A table declared in a non-root module, `shop/owners.orna`, read through the
+/// REPL by its qualified name. The root module imports nothing, so the name
+/// resolves through the namespace alone, and the committed read must key the
+/// table by that same qualified name.
+#[test]
+fn a_non_root_module_table_reads_through_the_repl_by_its_qualified_name() {
+    let directory = TempDir::new().expect("create the test directory");
+    let root = directory.path().join("garage");
+    let init = orna(
+        directory.path(),
+        &["init", root.to_str().expect("UTF-8 test path")],
+    );
+    assert_success(&init, "orna init");
+    git(&root, &["config", "user.name", "Orna Test"]);
+    git(
+        &root,
+        &["config", "user.email", "orna-test@example.invalid"],
+    );
+    git(&root, &["config", "commit.gpgsign", "false"]);
+    fs::write(
+        root.join("main.orna"),
+        "use shop.owners;\npub fn main() {}\n",
+    )
+    .expect("write main.orna");
+    fs::create_dir_all(root.join("shop")).expect("create the shop module directory");
+    fs::write(
+        root.join("shop/owners.orna"),
+        "pub table Owner(id: Str) { name: Str, }\npub fn seed() { Owner.insert({ id: \"ada\", name: \"Ada\" }); }\n",
+    )
+    .expect("write shop/owners.orna");
+    git(
+        &root,
+        &[
+            "add",
+            "main.orna",
+            "shop/owners.orna",
+            ".orna/database.orna",
+        ],
+    );
+    let committed = orna(&root, &["commit", "-m", "Declare the shop owners"]);
+    assert_success(&committed, "orna commit of a non-root module table");
+    assert_success(
+        &orna(&root, &["run", "shop.owners.seed"]),
+        "orna run shop.owners.seed",
+    );
+    assert_success(
+        &orna(&root, &["publish", "--message", "Seed the shop owners"]),
+        "orna publish of a non-root module row",
+    );
+
+    let listed = orna_repl(&root, "shop.owners.Owner | map(o => o.name)");
+    assert_success(&listed, "REPL read of a non-root module table");
+    let text = transcript(&listed);
+    assert!(
+        text.contains("\"Ada\""),
+        "the qualified REPL read returns the committed row\n{text}"
+    );
+}

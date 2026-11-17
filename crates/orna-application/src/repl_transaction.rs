@@ -456,8 +456,13 @@ pub(super) fn admitted_project_tables(
 
     let mut tables = BTreeMap::new();
     for module in analysis.modules.values() {
+        let namespace = module.namespace.display();
         for (name, schema) in admitted_table_schemas(module) {
-            if tables.insert(name, schema).is_some() {
+            let qualified = match namespace.as_str() {
+                "" => name,
+                prefix => format!("{prefix}.{name}"),
+            };
+            if tables.insert(qualified, schema).is_some() {
                 return Err(ApplicationError::InvalidTableMetadata);
             }
         }
