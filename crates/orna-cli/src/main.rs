@@ -44,6 +44,7 @@ mod repl_request;
 mod repl_run;
 mod repl_session;
 mod repo_sync;
+mod source_excerpt;
 mod status_run;
 mod sys_host;
 mod ui_render;
@@ -180,6 +181,7 @@ pub(crate) fn cli_output_failed() -> Diagnostic {
         detail: None,
         body: None,
         outcome: None,
+        location: None,
     }
 }
 
@@ -212,6 +214,7 @@ struct Diagnostic {
     detail: Option<String>,
     body: Option<String>,
     outcome: Option<&'static str>,
+    location: Option<String>,
 }
 impl Diagnostic {
     const fn usage(code: &'static str, title: &'static str, help: &'static str) -> Self {
@@ -223,6 +226,7 @@ impl Diagnostic {
             detail: None,
             body: None,
             outcome: None,
+            location: None,
         }
     }
     const fn target(code: &'static str, title: &'static str, help: &'static str) -> Self {
@@ -234,6 +238,7 @@ impl Diagnostic {
             detail: None,
             body: None,
             outcome: None,
+            location: None,
         }
     }
     fn target_with_detail(
@@ -250,6 +255,7 @@ impl Diagnostic {
             detail: Some(detail.into()),
             body: None,
             outcome: None,
+            location: None,
         }
     }
     const fn unavailable(title: &'static str, help: &'static str) -> Self {
@@ -258,6 +264,11 @@ impl Diagnostic {
 
     pub(crate) fn with_outcome(mut self, outcome: &'static str) -> Self {
         self.outcome = Some(outcome);
+        self
+    }
+
+    pub(crate) fn with_location(mut self, location: Option<String>) -> Self {
+        self.location = location;
         self
     }
 }
@@ -343,6 +354,7 @@ fn project_load_diagnostic(error: orna_project::ProjectLoadError) -> Diagnostic 
             detail: None,
             body: None,
             outcome: None,
+            location: None,
         };
     }
     Diagnostic::target(
@@ -366,6 +378,7 @@ fn cancellation_diagnostic(diagnostic: &orna_value::Diagnostic) -> Diagnostic {
             .then(|| format!("cancellation code: {}", diagnostic.code())),
         body: None,
         outcome: None,
+        location: None,
     }
 }
 
@@ -380,6 +393,9 @@ impl fmt::Display for Diagnostic {
         }
         if let Some(detail) = &self.detail {
             write!(f, "\n  {detail}")?;
+        }
+        if let Some(location) = &self.location {
+            write!(f, "\n{location}")?;
         }
         write!(f, "\nhelp: {}", self.help)
     }
@@ -420,6 +436,10 @@ fn write_diagnostic<W: io::Write>(
     {
         writer.write_all(b"\n  ")?;
         write_styled(writer, AnsiColor::Dim, detail.as_bytes(), color_enabled)?;
+    }
+    if let Some(location) = &diagnostic.location {
+        writer.write_all(b"\n")?;
+        writer.write_all(location.as_bytes())?;
     }
     writer.write_all(b"\nhelp: ")?;
     write_styled(

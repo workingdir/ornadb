@@ -4,6 +4,13 @@ pub(super) type TransactionDatabase = DatabaseRuntime<String, TransactionKey, Va
 pub(super) type TransactionActivation<'runtime> =
     DatabaseActivation<'runtime, String, TransactionKey, Value>;
 
+/// A failed admitted execution: the diagnostic, and the source span of the
+/// expression it was raised in when the admitted module is located.
+pub(super) struct ExecutionFailure {
+    pub(super) diagnostic: Box<Diagnostic>,
+    pub(super) source: Option<SourceSpan>,
+}
+
 /// A bounded source executor for the first real table-transaction slice.
 ///
 /// It admits a module through the v1 syntax and semantic analyzer, retains its
@@ -233,15 +240,17 @@ impl TransactionalEvaluator {
     ) -> Result<Vec<TableMutation>, Box<Diagnostic>> {
         self.execute_admitted_with_arguments(admitted, &Environment::new())
             .map(|(mutations, _)| mutations)
+            .map_err(|failure| failure.diagnostic)
     }
 
     /// Runs the admitted entry and returns its table mutations together with
-    /// the value the entry evaluated to.
+    /// the value the entry evaluated to. A failure keeps the source span of the
+    /// expression it was raised in, when the admitted module is located.
     pub(super) fn execute_admitted_with_arguments(
         &mut self,
         admitted: &AdmittedTransaction,
         arguments: &Environment,
-    ) -> Result<(Vec<TableMutation>, Value), Box<Diagnostic>> {
+    ) -> Result<(Vec<TableMutation>, Value), Box<ExecutionFailure>> {
         let AdmittedTransaction {
             functions,
             key_fields,
@@ -300,10 +309,14 @@ impl TransactionalEvaluator {
         });
         match result {
             Ok(value) => Ok((mutations, value)),
-            Err(ActivationError::Operation(error)) => Err(Box::new(error.diagnostic().clone())),
-            Err(ActivationError::Commit(error)) => {
-                Err(Box::new(transaction_error_diagnostic(error)))
-            }
+            Err(ActivationError::Operation(error)) => Err(Box::new(ExecutionFailure {
+                diagnostic: Box::new(error.diagnostic().clone()),
+                source: error.source_span().cloned(),
+            })),
+            Err(ActivationError::Commit(error)) => Err(Box::new(ExecutionFailure {
+                diagnostic: Box::new(transaction_error_diagnostic(error)),
+                source: None,
+            })),
         }
     }
 

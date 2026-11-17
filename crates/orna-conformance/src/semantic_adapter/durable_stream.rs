@@ -293,7 +293,12 @@ impl DurableTransactionalEvaluator {
         }
         let mutations = match evaluator.execute_admitted_with_arguments(&admitted, arguments) {
             Ok((mutations, _)) => mutations,
-            Err(diagnostic) => return Ok(StageOutcome::Failed(*diagnostic)),
+            Err(failure) => {
+                let snapshot = context.capture().snapshot();
+                return Ok(StageOutcome::Failed(located_execution_failure(
+                    *failure, &snapshot,
+                )));
+            }
         };
         if mutations.is_empty() {
             return Ok(StageOutcome::Passed);
@@ -442,13 +447,14 @@ impl DurableTransactionalEvaluator {
                 *result_value = Some(value);
                 mutations
             }
-            Err(diagnostic) => {
+            Err(failure) => {
+                let snapshot = context.capture().snapshot();
                 return terminalize_observed_outcome(
                     state,
                     request,
                     fingerprint,
                     lease,
-                    StageOutcome::Failed(*diagnostic),
+                    StageOutcome::Failed(located_execution_failure(*failure, &snapshot)),
                 )
                 .await;
             }
@@ -781,4 +787,24 @@ pub(super) fn admit_recorded_rows(
         admitted.push(replacement.with_table_object_id(identity));
     }
     Ok(admitted)
+}
+
+/// Attaches the failing expression's source span to an admitted execution
+/// failure as a primary span of the snapshot the run executed against. A span
+/// that cannot be represented on the wire leaves the diagnostic unlocated.
+fn located_execution_failure(
+    failure: ExecutionFailure,
+    snapshot: &CanonicalSnapshot,
+) -> Diagnostic {
+    let ExecutionFailure { diagnostic, source } = failure;
+    let span = source
+        .as_ref()
+        .and_then(|source| Some((source.file()?, source.start, source.end)))
+        .and_then(|(file, start, end)| {
+            DiagnosticSpan::new(snapshot.clone(), file, start.into(), end.into()).ok()
+        });
+    match span {
+        Some(span) => (*diagnostic).with_span(span),
+        None => *diagnostic,
+    }
 }

@@ -74,6 +74,7 @@ pub(crate) fn fetch_failure(error: &orna_repository::FetchError) -> Diagnostic {
         exit,
         detail: Some(error.to_string()),
         body: None,
+        location: None,
         outcome: None,
     }
 }
