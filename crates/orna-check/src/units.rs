@@ -360,12 +360,15 @@ pub(crate) fn stabilize_function_summaries(
         .map(|(_, tree)| tree.items.len())
         .sum::<usize>()
         .saturating_add(1);
+    let order = summary_order::summary_evaluation_order(parsed);
     for _ in 0..pass_limit {
         // Set when a module's symbols or exports, or a dependency summary, change
         // in this pass. A pass with no change is the fixed point. Comparing against
         // a snapshot taken before the pass would copy every module header per pass.
         let mut changed = false;
-        for (namespace, tree) in parsed {
+        for &index in &order {
+            let (namespace, tree) = &parsed[index];
+            summary_order::note_summary_visit();
             let Some(header) = modules.get(namespace).cloned() else {
                 continue;
             };
