@@ -123,3 +123,75 @@ fn an_unlisted_sys_member_stays_unlinked() {
         Err(ExecError::Code("ORNA-EVAL-UNSUPPORTED"))
     );
 }
+
+#[test]
+fn the_catalogue_lists_every_function_of_the_program() {
+    // `helper` and the entry `run`.
+    assert_eq!(
+        run_with_catalog(
+            "pub fn helper(x: Int): Int = x + 1;",
+            "sys.catalog.functions.count()"
+        ),
+        Ok(Value::Int(BigInt::from(2)))
+    );
+}
+
+#[test]
+fn a_function_with_written_parameter_types_is_not_inferred() {
+    assert_eq!(
+        run_with_catalog(
+            "pub fn helper(x: Int): Int = x + 1;",
+            "sys.catalog.functions.filter(function => function.inferred_signature).count()"
+        ),
+        Ok(Value::Int(BigInt::from(0)))
+    );
+}
+
+#[test]
+fn a_function_with_an_omitted_parameter_type_is_inferred() {
+    assert_eq!(
+        run_with_catalog(
+            "pub fn helper(x) = x;",
+            "sys.catalog.functions.filter(function => function.inferred_signature).count()"
+        ),
+        Ok(Value::Int(BigInt::from(1)))
+    );
+}
+
+#[test]
+fn a_program_without_use_declarations_has_no_dependencies() {
+    assert_eq!(
+        run_with_catalog(SOURCE, "sys.catalog.dependencies.count()"),
+        Ok(Value::Int(BigInt::from(0)))
+    );
+}
+
+#[test]
+fn a_use_declaration_is_one_import_dependency() {
+    assert_eq!(
+        run_with_catalog("use core.bits;", "sys.catalog.dependencies.count()"),
+        Ok(Value::Int(BigInt::from(1)))
+    );
+}
+
+#[test]
+fn repeated_use_declarations_of_one_module_are_one_dependency() {
+    assert_eq!(
+        run_with_catalog(
+            "use core.bits;\nuse core.bits;",
+            "sys.catalog.dependencies.count()"
+        ),
+        Ok(Value::Int(BigInt::from(1)))
+    );
+}
+
+#[test]
+fn an_import_dependency_is_exact_and_unconditional() {
+    assert_eq!(
+        run_with_catalog(
+            "use core.bits;",
+            "sys.catalog.dependencies.filter(dependency => dependency.conditional).count()"
+        ),
+        Ok(Value::Int(BigInt::from(0)))
+    );
+}
