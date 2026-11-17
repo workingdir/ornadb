@@ -39,6 +39,7 @@ use sha2::{Digest as _, Sha256};
 use crate::RuntimeState;
 use crate::error::RuntimeError;
 use crate::repository_identity::migration_copy_runtime_identity;
+use crate::run_identity::carried_column;
 
 /// Stream tables whose rows a migration does not carry.
 const NON_CARRIABLE_TABLES: &[&str] = &[
@@ -60,8 +61,8 @@ const INSERT_RESET_AUDIT: &str = "INSERT INTO stream_checkpoint_reset_audit (seq
 /// `sys_run_observation` status codes for a run that has not reached a terminal state.
 const RUN_STATUS_STARTING: i64 = 1;
 const RUN_STATUS_RUNNING: i64 = 2;
-const INSERT_RUN: &str = "INSERT INTO sys_run_observation (run_id, session_id, request_id, consumer_identity, function_name, source_identity, invocation_id, snapshot, generation_digest, runtime_id, runtime_generation, started_ms, ended_ms, observed_ms, status, checkpoint_count, diagnostic_code, diagnostic_class) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)";
-const INSERT_STREAM: &str = "INSERT INTO sys_stream_observation (stream_id, run_id, checkpoint_key_id, producer, consumer_name, consumer_identity, source_identity, partition, status, items_seen, items_committed, items_failed, checkpoint_version, last_failure_identity, last_item_ms, diagnostic_code, diagnostic_class, observed_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)";
+const INSERT_RUN: &str = "INSERT INTO sys_run_observation (run_id, session_id, request_id, consumer_identity, function_name, source_identity, invocation_id, snapshot, generation_digest, runtime_id, runtime_generation, started_ms, ended_ms, observed_ms, status, checkpoint_count, diagnostic_code, diagnostic_class, function_object_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)";
+const INSERT_STREAM: &str = "INSERT INTO sys_stream_observation (stream_id, run_id, checkpoint_key_id, producer, consumer_name, consumer_identity, source_identity, partition, status, items_seen, items_committed, items_failed, checkpoint_version, last_failure_identity, last_item_ms, diagnostic_code, diagnostic_class, observed_ms, producer_object_id, consumer_object_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)";
 
 const INSERT_FAILURE: &str = "INSERT INTO stream_failure (identity_id, key_id, consumer_principal, consumer_root, consumer_function, consumer_binding, source_format, source, partition_format, partition, position_format, delivery_position, successor_position, version, attempts, status, diagnostic_code, diagnostic_class) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)";
 const INSERT_FAILURE_PAYLOAD: &str = "INSERT INTO stream_failure_payload (identity_id, payload, payload_reference, payload_digest, retention) VALUES (?1, ?2, ?3, ?4, ?5)";
@@ -158,6 +159,7 @@ struct RunRow {
     checkpoint_count: i64,
     diagnostic_code: Option<i64>,
     diagnostic_class: Option<i64>,
+    function_object_id: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -180,6 +182,8 @@ struct StreamRow {
     diagnostic_code: Option<i64>,
     diagnostic_class: Option<i64>,
     observed_ms: i64,
+    producer_object_id: Option<Vec<u8>>,
+    consumer_object_id: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -679,7 +683,8 @@ pub async fn import_stream_carry(
                     row.status,
                     row.checkpoint_count,
                     row.diagnostic_code,
-                    row.diagnostic_class
+                    row.diagnostic_class,
+                    row.function_object_id.as_deref()
                 ],
             )
             .await?;
@@ -706,7 +711,9 @@ pub async fn import_stream_carry(
                     row.last_item_ms,
                     row.diagnostic_code,
                     row.diagnostic_class,
-                    row.observed_ms
+                    row.observed_ms,
+                    row.producer_object_id.as_deref(),
+                    row.consumer_object_id.as_deref()
                 ],
             )
             .await?;
@@ -1264,13 +1271,14 @@ async fn read_reset_audits(connection: &Connection) -> Result<Vec<ResetAuditRow>
 /// Reads `sys_run_observation` rows in primary-key order, for a carry and for
 /// the destination comparison.
 async fn read_run_rows(connection: &Connection) -> Result<Vec<RunRow>, RuntimeError> {
+    let function_object_id =
+        carried_column(connection, "sys_run_observation", "function_object_id").await?;
     let mut rows = connection
         .query(
-            "SELECT run_id, session_id, request_id, consumer_identity, function_name, source_identity, invocation_id, snapshot, generation_digest, runtime_id, runtime_generation, started_ms, ended_ms, observed_ms, status, checkpoint_count, diagnostic_code, diagnostic_class FROM sys_run_observation ORDER BY run_id",
+            &format!("SELECT run_id, session_id, request_id, consumer_identity, function_name, source_identity, invocation_id, snapshot, generation_digest, runtime_id, runtime_generation, started_ms, ended_ms, observed_ms, status, checkpoint_count, diagnostic_code, diagnostic_class, {function_object_id} FROM sys_run_observation ORDER BY run_id"),
             (),
         )
-        .await
-        ?;
+        .await?;
     let mut runs = Vec::new();
     while let Some(row) = rows.next().await? {
         runs.push(RunRow {
@@ -1292,6 +1300,7 @@ async fn read_run_rows(connection: &Connection) -> Result<Vec<RunRow>, RuntimeEr
             checkpoint_count: row.get(15).map_err(|_| RuntimeError::RecoveryInvalid)?,
             diagnostic_code: row.get(16).map_err(|_| RuntimeError::RecoveryInvalid)?,
             diagnostic_class: row.get(17).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            function_object_id: row.get(18).map_err(|_| RuntimeError::RecoveryInvalid)?,
         });
     }
     Ok(runs)
@@ -1300,13 +1309,16 @@ async fn read_run_rows(connection: &Connection) -> Result<Vec<RunRow>, RuntimeEr
 /// Reads `sys_stream_observation` rows in primary-key order, for a carry and
 /// for the destination comparison.
 async fn read_stream_rows(connection: &Connection) -> Result<Vec<StreamRow>, RuntimeError> {
+    let producer_object_id =
+        carried_column(connection, "sys_stream_observation", "producer_object_id").await?;
+    let consumer_object_id =
+        carried_column(connection, "sys_stream_observation", "consumer_object_id").await?;
     let mut rows = connection
         .query(
-            "SELECT stream_id, run_id, checkpoint_key_id, producer, consumer_name, consumer_identity, source_identity, partition, status, items_seen, items_committed, items_failed, checkpoint_version, last_failure_identity, last_item_ms, diagnostic_code, diagnostic_class, observed_ms FROM sys_stream_observation ORDER BY stream_id",
+            &format!("SELECT stream_id, run_id, checkpoint_key_id, producer, consumer_name, consumer_identity, source_identity, partition, status, items_seen, items_committed, items_failed, checkpoint_version, last_failure_identity, last_item_ms, diagnostic_code, diagnostic_class, observed_ms, {producer_object_id}, {consumer_object_id} FROM sys_stream_observation ORDER BY stream_id"),
             (),
         )
-        .await
-        ?;
+        .await?;
     let mut streams = Vec::new();
     while let Some(row) = rows.next().await? {
         streams.push(StreamRow {
@@ -1328,6 +1340,8 @@ async fn read_stream_rows(connection: &Connection) -> Result<Vec<StreamRow>, Run
             diagnostic_code: row.get(15).map_err(|_| RuntimeError::RecoveryInvalid)?,
             diagnostic_class: row.get(16).map_err(|_| RuntimeError::RecoveryInvalid)?,
             observed_ms: row.get(17).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            producer_object_id: row.get(18).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            consumer_object_id: row.get(19).map_err(|_| RuntimeError::RecoveryInvalid)?,
         });
     }
     Ok(streams)

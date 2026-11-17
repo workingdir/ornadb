@@ -86,6 +86,8 @@ mod query;
 mod recovery;
 mod repository_identity;
 mod request;
+mod run_identity;
+mod run_rows;
 mod schema;
 mod session;
 mod stream_admin;
@@ -602,6 +604,7 @@ impl RuntimeState {
         state.migrate_catalogue_identity_schema().await?;
         state.migrate_admin_failure_unobservable().await?;
         state.migrate_empty_row_keys().await?;
+        state.migrate_run_stream_object_identity().await?;
         let accepted_pending = state.validate_recovery_with_pin_manifest().await?;
         // This handle holds the owner lock, so every earlier writer process has
         // exited and none of its query or invocation observations can still be
@@ -2367,11 +2370,11 @@ fn validate_request_execution_evidence(
     Ok(())
 }
 
-fn opaque_reference_key(id: [u8; 16]) -> OvbRaw {
+pub(crate) fn opaque_reference_key(id: [u8; 16]) -> OvbRaw {
     OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(id.to_vec())))
 }
 
-fn row_reference_raw(reference: &RowRef) -> OvbRaw {
+pub(crate) fn row_reference_raw(reference: &RowRef) -> OvbRaw {
     OvbRaw::Tag(
         60010,
         Box::new(OvbRaw::Array(vec![
@@ -2606,9 +2609,9 @@ mod tests {
         with_activation_scope, with_terminal_admin_effect,
     };
     use crate::catalogue::{
-        CatalogueAdmission, CatalogueDeclaration, CatalogueFunctionDeclaration,
-        CatalogueModuleDeclaration, CatalogueObjectKind, CatalogueParameterDeclaration,
-        CatalogueTypeDeclaration, CatalogueTypeSpec,
+        CatalogueAdmission, CatalogueAdmissionResult, CatalogueDeclaration,
+        CatalogueFunctionDeclaration, CatalogueModuleDeclaration, CatalogueObjectKind,
+        CatalogueParameterDeclaration, CatalogueTypeDeclaration, CatalogueTypeSpec,
     };
     use crate::checkpoint_snapshot::{
         CHECKPOINT_SNAPSHOT_HEADER, CheckpointSnapshotCodecError,
@@ -4207,6 +4210,60 @@ mod tests {
                 result_type_name: "pkg.Result".into(),
             }],
         }
+    }
+
+    /// Admits a catalogue naming `functions` and `objects` at the current capture, so runs and streams registered
+    /// afterwards store the identities their function, producer and consumer names resolve to in the snapshot they pin.
+    async fn admit_observed_names(
+        state: &RuntimeState,
+        writer: WriterLease,
+        functions: &[&str],
+        objects: &[&str],
+    ) -> CatalogueAdmissionResult {
+        let declare = |position: usize, name: &str, kind| {
+            let position = u8::try_from(position).unwrap();
+            CatalogueDeclaration {
+                qualified_name: name.into(),
+                kind,
+                revision_id: digest(1 + 2 * position),
+                semantic_hash: digest(2 + 2 * position),
+                rename_from: None,
+            }
+        };
+        let named_type = |position: usize, name: &str| CatalogueTypeDeclaration {
+            declaration: declare(position, name, CatalogueObjectKind::Type),
+            form: CatalogueTypeSpec::Named,
+        };
+        let mut types = vec![named_type(0, "pkg.Result")];
+        types.extend(
+            objects
+                .iter()
+                .enumerate()
+                .map(|(index, name)| named_type(1 + index, name)),
+        );
+        let functions = functions
+            .iter()
+            .enumerate()
+            .map(|(index, name)| CatalogueFunctionDeclaration {
+                declaration: declare(
+                    1 + objects.len() + index,
+                    name,
+                    CatalogueObjectKind::Function,
+                ),
+                parameters: Vec::new(),
+                result_type_name: "pkg.Result".into(),
+            })
+            .collect();
+        let capture = state.capture().await.unwrap();
+        let admission = CatalogueAdmission {
+            predecessor_capture: None,
+            types,
+            functions,
+        };
+        state
+            .admit_catalogue_at(writer, &capture, admission)
+            .await
+            .unwrap()
     }
 
     #[tokio::test]
@@ -32246,6 +32303,8 @@ mod tests {
     async fn run_projection_binds_invocation_to_its_admission_capture() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
+        let owner = state.acquire_lease(id(148)).await.unwrap();
+        admit_observed_names(&state, owner, &["pkg.run"], &[]).await;
         let request = request(143, 144);
         let invocation_id = id(145);
         state.reserve_request(request, digest(146)).await.unwrap();
@@ -32507,6 +32566,8 @@ mod tests {
      {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
+        let owner = state.acquire_lease(id(178)).await.unwrap();
+        admit_observed_names(&state, owner, &["pkg.consume"], &["source-object"]).await;
         let key = stream_delivery("one", "two").checkpoint_key();
         let mut runs = Vec::new();
         for (session, request_id, invocation) in [(35, 36, 37), (38, 39, 40)] {
@@ -32702,7 +32763,6 @@ mod tests {
                 .items_seen,
             0
         );
-        let owner = state.acquire_lease(id(178)).await.unwrap();
         let fence = state.runtime_observation_fence(owner).await.unwrap();
         assert_eq!(
             state
@@ -32797,6 +32857,8 @@ mod tests {
     async fn old_generation_run_is_retained_but_not_live() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(52)).await.unwrap();
+        admit_observed_names(&state, lease, &["pkg.main"], &[]).await;
         let request = request(48, 49);
         state.reserve_request(request, digest(50)).await.unwrap();
         let run = state
@@ -32809,7 +32871,6 @@ mod tests {
             })
             .await
             .unwrap();
-        let lease = state.acquire_lease(id(52)).await.unwrap();
         let capture = state.capture().await.unwrap();
         state
             .commit(lease, &capture, &mutation(53), digest(54), &NoFault)
@@ -32833,6 +32894,8 @@ mod tests {
     async fn retained_sys_projection_keeps_historical_parent_relation_and_rejects_orphans() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
+        let owner = state.acquire_lease(id(219)).await.unwrap();
+        admit_observed_names(&state, owner, &["pkg.retained"], &["source-object"]).await;
         let request = request(215, 216);
         let key = stream_delivery("retained", "coherent").checkpoint_key();
         state.reserve_request(request, digest(217)).await.unwrap();
@@ -32855,7 +32918,6 @@ mod tests {
             })
             .await
             .unwrap();
-        let owner = state.acquire_lease(id(219)).await.unwrap();
         let capture = state.capture().await.unwrap();
         state
             .commit(owner, &capture, &mutation(220), digest(221), &NoFault)
@@ -32893,6 +32955,8 @@ mod tests {
     async fn retained_sys_projection_rejects_live_stream_with_historical_parent() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
+        let owner = state.acquire_lease(id(229)).await.unwrap();
+        admit_observed_names(&state, owner, &["pkg.retained-parent"], &["source-object"]).await;
         let request = request(225, 226);
         let key = stream_delivery("retained", "historical-parent").checkpoint_key();
         state.reserve_request(request, digest(227)).await.unwrap();
@@ -32933,6 +32997,8 @@ mod tests {
     async fn current_runtime_view_is_owner_generation_fenced_and_coherent() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
+        let owner = state.acquire_lease(id(205)).await.unwrap();
+        admit_observed_names(&state, owner, &["pkg.current"], &["source-object"]).await;
         let request = request(201, 202);
         let key = stream_delivery("current", "view").checkpoint_key();
         state.reserve_request(request, digest(203)).await.unwrap();
@@ -32955,7 +33021,6 @@ mod tests {
             })
             .await
             .unwrap();
-        let owner = state.acquire_lease(id(205)).await.unwrap();
         let fence = state.runtime_observation_fence(owner).await.unwrap();
         let view = state.current_runtime_observations(&fence).await.unwrap();
         assert_eq!(view.capture, *fence.capture());
@@ -33085,6 +33150,8 @@ mod tests {
     async fn current_runtime_view_excludes_same_generation_rows_with_a_different_capture() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
+        let owner = state.acquire_lease(id(213)).await.unwrap();
+        admit_observed_names(&state, owner, &["pkg.capture-mismatch"], &["source-object"]).await;
         let request = request(209, 210);
         let key = stream_delivery("capture", "mismatch").checkpoint_key();
         state.reserve_request(request, digest(211)).await.unwrap();
@@ -33107,7 +33174,6 @@ mod tests {
             })
             .await
             .unwrap();
-        let owner = state.acquire_lease(id(213)).await.unwrap();
         let fence = state.runtime_observation_fence(owner).await.unwrap();
 
         state
@@ -33133,6 +33199,8 @@ mod tests {
     async fn run_projection_fails_closed_on_persisted_terminal_mismatch() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
+        let owner = state.acquire_lease(id(225)).await.unwrap();
+        admit_observed_names(&state, owner, &["pkg.malformed"], &[]).await;
         let request = request(221, 222);
         state.reserve_request(request, digest(223)).await.unwrap();
         let run = state
@@ -33163,7 +33231,6 @@ mod tests {
             state.retained_sys_observation_projections().await,
             Err(RuntimeError::RecoveryInvalid)
         );
-        let owner = state.acquire_lease(id(225)).await.unwrap();
         let fence = state.runtime_observation_fence(owner).await.unwrap();
         assert_eq!(
             state.current_runtime_sys_projections(&fence).await,
@@ -33200,6 +33267,7 @@ mod tests {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
         let writer = state.acquire_lease(id(234)).await.unwrap();
+        admit_observed_names(&state, writer, &["pkg.ingest"], &["source-object"]).await;
         let request = request(235, 236);
         let fingerprint = digest(237);
         let key = stream_delivery("terminal-parent", "active-child").checkpoint_key();
@@ -34123,6 +34191,13 @@ mod tests {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
         let writer = state.acquire_lease(id(201)).await.unwrap();
+        admit_observed_names(
+            &state,
+            writer,
+            &["pkg.failure-reference"],
+            &["source-object"],
+        )
+        .await;
         let request = request(202, 203);
         state.reserve_request(request, digest(204)).await.unwrap();
         let mut delivery = stream_delivery("failure-reference:one", "failure-reference:two");
@@ -34619,4 +34694,6 @@ mod tests {
         );
         assert_eq!(state.capture().await.unwrap(), before);
     }
+
+    mod run_identity;
 }

@@ -1962,7 +1962,17 @@ impl RuntimeState {
                     CHECK ((diagnostic_code IS NULL) = (diagnostic_class IS NULL))
                 );
                 INSERT INTO sys_stream_observation_reusable_checkpoint
-                    SELECT * FROM sys_stream_observation;
+                    (stream_id, run_id, checkpoint_key_id, producer, consumer_name,
+                     consumer_identity, source_identity, partition, status, items_seen,
+                     items_committed, items_failed, checkpoint_version,
+                     last_failure_identity, last_item_ms, diagnostic_code,
+                     diagnostic_class, observed_ms)
+                    SELECT stream_id, run_id, checkpoint_key_id, producer, consumer_name,
+                           consumer_identity, source_identity, partition, status,
+                           items_seen, items_committed, items_failed, checkpoint_version,
+                           last_failure_identity, last_item_ms, diagnostic_code,
+                           diagnostic_class, observed_ms
+                    FROM sys_stream_observation;
                 DROP TABLE sys_stream_observation;
                 ALTER TABLE sys_stream_observation_reusable_checkpoint
                     RENAME TO sys_stream_observation;

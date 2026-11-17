@@ -2335,7 +2335,7 @@ pub(crate) async fn persist_capture_for_runtime_tx(
         .map_err(map_catalogue_runtime_error)
 }
 
-fn map_catalogue_runtime_error(error: CatalogueError) -> crate::error::RuntimeError {
+pub(crate) fn map_catalogue_runtime_error(error: CatalogueError) -> crate::error::RuntimeError {
     match error {
         CatalogueError::StorageUnavailable => crate::error::RuntimeError::StorageUnavailable,
         CatalogueError::StaleCapture { .. }
@@ -3040,8 +3040,8 @@ async fn allocate_object_id_tx(
     Err(RuntimeError::CatalogueAllocationExhausted)
 }
 
-async fn object_kind_tx(
-    transaction: &Transaction,
+pub(crate) async fn object_kind_tx(
+    transaction: &Connection,
     id: [u8; 16],
 ) -> Result<CatalogueObjectKind, RuntimeError> {
     let mut rows = transaction
@@ -3082,8 +3082,8 @@ async fn lookup_current_object_id(
     Ok(Some(id))
 }
 
-async fn lookup_snapshot_object_id(
-    transaction: &Transaction,
+pub(crate) async fn lookup_snapshot_object_id(
+    transaction: &Connection,
     snapshot: &[u8],
     name: &str,
 ) -> Result<Option<[u8; 16]>, RuntimeError> {
