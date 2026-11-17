@@ -27,6 +27,21 @@ fn lower_typed(source: &str) -> Program {
         path: ModulePath::new([Name::new("main")]),
     }]);
     typeck(&mut program);
+    let diagnostics: Vec<String> = program
+        .modules
+        .iter()
+        .filter(|module| module.path == ModulePath::new([Name::new("main")]))
+        .flat_map(|module| {
+            module
+                .diagnostics
+                .iter()
+                .map(|diagnostic| format!("{diagnostic:?}"))
+        })
+        .collect();
+    assert!(
+        diagnostics.is_empty(),
+        "test source must type-check: {diagnostics:?}"
+    );
     assert_eq!(program.validate(), Ok(()), "lowered program must validate");
     program
 }
@@ -47,7 +62,7 @@ fn run(body: &str) -> Result<Value, ExecError> {
 
 /// `Temperature` nests one `From<Int>` implementation, which builds it from the integer.
 const TEMPERATURE: &str = "pub type Temperature {\n\
-    value: Int,\n\
+    pub value: Int,\n\
     impl From<Int> {\n\
         fn from(value): Temperature { Temperature { value: value } }\n\
     }\n\
@@ -66,7 +81,7 @@ fn explicit_from_runs_the_selected_nested_implementation() {
 #[test]
 fn each_source_runs_its_own_from_implementation() {
     let source = "pub type Temperature {\n\
-        value: Int,\n\
+        pub value: Int,\n\
         impl From<Int> {\n\
             fn from(value): Temperature { Temperature { value: value } }\n\
         }\n\
@@ -81,13 +96,13 @@ fn each_source_runs_its_own_from_implementation() {
 #[test]
 fn a_chained_conversion_runs_each_call_in_turn() {
     let source = "pub type Celsius {\n\
-        value: Int,\n\
+        pub value: Int,\n\
         impl From<Int> {\n\
             fn from(value): Celsius { Celsius { value: value } }\n\
         }\n\
     }\n\
     pub type Kelvin {\n\
-        value: Int,\n\
+        pub value: Int,\n\
         impl From<Celsius> {\n\
             fn from(celsius): Kelvin { Kelvin { value: celsius.value + 273 } }\n\
         }\n\
@@ -100,7 +115,7 @@ fn a_chained_conversion_runs_each_call_in_turn() {
 #[test]
 fn a_generic_target_runs_its_implementation_at_the_substituted_source() {
     let source = "pub type Wrapper<T> {\n\
-        inner: T,\n\
+        pub inner: T,\n\
         impl From<T> {\n\
             fn from(inner): Wrapper<T> { Wrapper { inner: inner } }\n\
         }\n\
@@ -112,13 +127,13 @@ fn a_generic_target_runs_its_implementation_at_the_substituted_source() {
 #[test]
 fn a_conversion_inside_an_implementation_runs_its_own_call() {
     let source = "pub type Email {\n\
-        address: Str,\n\
+        pub address: Str,\n\
         impl From<Str> {\n\
             fn from(text) = Email { address: text };\n\
         }\n\
     }\n\
     pub type Mailbox {\n\
-        email: Email,\n\
+        pub email: Email,\n\
         impl From<Str> {\n\
             fn from(text) = Mailbox { email: Email.from(text) };\n\
         }\n\
@@ -129,7 +144,7 @@ fn a_conversion_inside_an_implementation_runs_its_own_call() {
 
 /// `Reciprocal` nests a `From<Int>` implementation that divides by its source, so a zero source fails the conversion.
 const RECIPROCAL: &str = "pub type Reciprocal {\n\
-    value: Int,\n\
+    pub value: Int,\n\
     impl From<Int> {\n\
         fn from(divisor): Reciprocal { Reciprocal { value: 100 / divisor } }\n\
     }\n\
