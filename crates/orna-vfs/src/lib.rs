@@ -2677,6 +2677,45 @@ mod tests {
     }
 
     #[test]
+    fn text_and_content_siblings_sharing_one_stored_name_are_refused_as_a_document() {
+        // A stored Str `x` and a Blob `x` with a `txt` suffix both project to
+        // `x.txt`, but they are one stored field name: the candidate is refused as
+        // an incomplete document before any host name is compared (VFS-001).
+        assert!(matches!(
+            VfsRowProjection::project(
+                SnapshotPin::capture(Arc::new(11_u64)),
+                &[
+                    VfsStoredField::text("x", 3, true),
+                    VfsStoredField::content("x", "text/plain", None, 3),
+                ],
+            ),
+            Err(VfsPathError::InvalidDocument)
+        ));
+    }
+
+    #[test]
+    fn long_text_field_name_takes_the_digest_alias_within_the_component_bound() {
+        // A Str sibling's `.txt` host name shares the field namespace bound with
+        // Blob siblings, so an over-bound field name takes the `~field-` alias.
+        let field = "t".repeat(200);
+        let row = VfsRowProjection::project(
+            SnapshotPin::capture(Arc::new(12_u64)),
+            &[VfsStoredField::text(field.clone(), 70_000, true)],
+        )
+        .expect("long text field projection");
+        let name = row.files()[0].name().to_owned();
+        assert!(name.len() <= VFS_MAX_COMPONENT_BYTES);
+        assert!(name.starts_with("~field-"));
+        assert!(name.ends_with(".txt"));
+        let digest = field_name_digest(&field)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(name, format!("~field-{digest}.txt"));
+        assert!(row.files()[0].is_text());
+    }
+
+    #[test]
     fn a_saved_row_reuses_the_captured_blob_descriptor_instead_of_re_deriving_it() {
         // A content sibling that a save admitted from the captured field keeps
         // the descriptor the store reported for the row version it came from:

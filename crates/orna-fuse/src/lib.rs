@@ -198,6 +198,9 @@ fn key_directory(builder: &mut FsBuilder, parent: u64, key: &TypedKey) -> Result
 mod tests;
 
 #[cfg(test)]
+mod edge_case_tests;
+
+#[cfg(test)]
 mod hardening_tests;
 
 #[cfg(test)]
