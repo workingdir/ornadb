@@ -37,19 +37,22 @@ use orna_evaluator::{
     invoke_named_with_effects_and_budget, invoke_named_with_effects_nominals_and_budget,
     invoke_named_with_nominals, source_enum_definitions,
 };
-use orna_project::{LoadedProject, ProjectLoader, ResolvedTableSchema, admit_format3_row};
+use orna_project::{
+    LoadedProject, ProjectLoader, ResolvedTableSchema, admit_format3_row,
+    runtime_key_from_evaluator,
+};
 use orna_repository::Repository;
 use orna_runtime::{
     CheckpointResetRequest, FaultInjector, FaultPoint, ListStreamSource, NoFault, RequestIdentity,
     RequestStatus, RunObservationRegistration, RunningTableRequestContinuation, RuntimeError,
-    RuntimeIdentity, RuntimePublicationMetadataRows, RuntimeState, StreamFailurePayload,
-    StreamHandler, StreamHandlerResult, StreamItem, StreamObservationRegistration,
-    StreamRunControl, StreamRunOutcome, StreamSource, StreamSourcePoll, StreamStep,
-    StreamTableCandidateValidator, StreamTableDeliveryError, StreamTableMutationBatch,
-    StreamValidatedTableDeliveryCommit, StreamValidatedTableMutationBatch,
-    TableActivationCandidateValidator, TableActivationError, TableMutation, TableObjectId,
-    TerminalOutcome, ValidatedTableActivationCommit, ValidatedTableRequestActivationCommit,
-    WriterLease,
+    RuntimeIdentity, RuntimePublicationMetadataRows, RuntimeState, RuntimeTableIdentity,
+    RuntimeTableRows, StreamFailurePayload, StreamHandler, StreamHandlerResult, StreamItem,
+    StreamObservationRegistration, StreamRunControl, StreamRunOutcome, StreamSource,
+    StreamSourcePoll, StreamStep, StreamTableCandidateValidator, StreamTableDeliveryError,
+    StreamTableMutationBatch, StreamValidatedTableDeliveryCommit,
+    StreamValidatedTableMutationBatch, TableActivationCandidateValidator, TableActivationError,
+    TableMutation, TableObjectId, TerminalOutcome, ValidatedTableActivationCommit,
+    ValidatedTableRequestActivationCommit, WriterLease,
 };
 use orna_storage::RuntimePublicationCoordinator;
 use orna_stream::{
@@ -81,6 +84,13 @@ use std::{
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
+
+/// The published rows a durable request activates its admitted tables over,
+/// with each table's stored field order from the same committed read. `None`
+/// when those rows cannot be read for the requested identities.
+type CommittedBase<'a> = dyn Fn(&[RuntimeTableIdentity]) -> Option<(RuntimeTableRows, BTreeMap<String, Vec<String>>)>
+    + 'a;
+
 mod adapter;
 mod admission;
 mod assertions;

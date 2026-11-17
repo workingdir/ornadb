@@ -50,32 +50,33 @@ impl ReplTransactions {
     }
 }
 
-/// Reads the committed identity of each named admitted table from `commit`.
-/// Each name must resolve to exactly one live table record; the error names the
-/// table that does not, so the caller fails closed with a reason. The REPL and
-/// one-shot `run` both bind tables through this function, so neither resolves a
-/// table by name alone.
-/// The stored field order of every admitted table at HEAD.
-///
-/// A published row is positional in this order, which is not the declaration
-/// order, so the run path rebuilds seeded records from it (bead ornadb-jm0d).
-pub(crate) fn committed_storage_orders(
-    repository: &orna_repository::Repository,
-    project: &orna_project::LoadedProject,
-) -> Result<std::collections::BTreeMap<String, Vec<String>>, Diagnostic> {
-    let (table_names, schemas) = crate::assertion_gate::admitted_tables_of(project)
-        .map_err(|_| unavailable_table_identity("project tables could not be identified".into()))?;
-    let Ok(Some(head)) = repository.head() else {
-        return Ok(std::collections::BTreeMap::new());
-    };
-    let Ok(tables) = committed_table_identities(repository, &head, table_names) else {
-        return Ok(std::collections::BTreeMap::new());
-    };
-    let Ok((_rows, storage_orders)) = committed_rows_at(repository, &head, &schemas, &tables)
-    else {
-        return Ok(std::collections::BTreeMap::new());
-    };
-    Ok(storage_orders)
+/// The committed rows and stored field orders that [`committed_base_reader`]
+/// returns for one set of requested identities.
+type CommittedBaseRead = (RuntimeTableRows, BTreeMap<String, Vec<String>>);
+
+/// Reads the published rows of the requested admitted identities from one
+/// committed base at HEAD, with each table's stored field order from that same
+/// read. A published row is positional in the stored order, which is not the
+/// declaration order, so the run path rebuilds seeded records from it (bead
+/// ornadb-jm0d). The returned reader yields `None` when an identity names no
+/// admitted table, HEAD is absent, or the committed read fails; the caller then
+/// fails the request closed.
+pub(crate) fn committed_base_reader<'a>(
+    repository: &'a orna_repository::Repository,
+    project: &'a orna_project::LoadedProject,
+) -> impl Fn(&[RuntimeTableIdentity]) -> Option<CommittedBaseRead> + 'a {
+    move |identities: &[RuntimeTableIdentity]| {
+        let (_table_names, mut schemas) =
+            crate::assertion_gate::admitted_tables_of(project).ok()?;
+        let identity_schemas = identities
+            .iter()
+            .map(|identity| schemas.remove_entry(identity.table()))
+            .collect::<Option<BTreeMap<_, _>>>()?;
+        let Ok(Some(head)) = repository.head() else {
+            return None;
+        };
+        committed_rows_at(repository, &head, &identity_schemas, identities).ok()
+    }
 }
 
 pub(crate) fn committed_table_object_ids(
@@ -98,6 +99,11 @@ pub(crate) fn committed_table_object_ids(
         .collect())
 }
 
+/// Reads the committed identity of each named admitted table from `commit`.
+/// Each name must resolve to exactly one live table record; the error names the
+/// table that does not, so the caller fails closed with a reason. The REPL and
+/// one-shot `run` both bind tables through this function, so neither resolves a
+/// table by name alone.
 pub(crate) fn committed_table_identities(
     repository: &orna_repository::Repository,
     commit: &orna_repository::GitCommitRef,

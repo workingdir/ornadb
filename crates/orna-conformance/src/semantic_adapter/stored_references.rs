@@ -116,16 +116,20 @@ pub(super) fn validate_stored_references(
         let Some(schema) = key_fields.get(mutation.table()) else {
             continue;
         };
-        let components = schema
-            .values_from_encoded(mutation.key())
-            .map_err(|_| reference_failure(ReferenceError::State))?;
-        touched.push((
-            mutation.table().to_owned(),
-            components
-                .iter()
-                .map(|component| component.raw().clone())
-                .collect::<Vec<_>>(),
-        ));
+        // A re-key writes its destination row as well as removing the old key,
+        // so both keys are judged over the candidate state (ORNA-MUT-007).
+        for key in std::iter::once(mutation.key()).chain(mutation.rekey_to()) {
+            let components = schema
+                .values_from_encoded(key)
+                .map_err(|_| reference_failure(ReferenceError::State))?;
+            touched.push((
+                mutation.table().to_owned(),
+                components
+                    .iter()
+                    .map(|component| component.raw().clone())
+                    .collect::<Vec<_>>(),
+            ));
+        }
     }
     references
         .validate(

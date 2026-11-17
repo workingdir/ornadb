@@ -54,10 +54,10 @@ use cli_args::{Command, Invocation, Parsed, StatusFormat, parse_cli_reporting};
 use cli_dispatch::execute;
 use committed::{
     CommittedRowsError, PinnedCommittedTables, ReplRuntime, ReplTransactions,
-    admitted_table_schemas, committed_rows_at, committed_storage_orders,
-    committed_table_identities, committed_table_object_ids, evaluate_over_committed_tables,
-    legacy_bare_module_candidates, legacy_bare_module_table, refuse_legacy_bare_module_rows,
-    run_committed_table_invocation, table_identities_from_manifest,
+    admitted_table_schemas, committed_base_reader, committed_rows_at, committed_table_identities,
+    committed_table_object_ids, evaluate_over_committed_tables, legacy_bare_module_candidates,
+    legacy_bare_module_table, refuse_legacy_bare_module_rows, run_committed_table_invocation,
+    table_identities_from_manifest,
 };
 use diagnostic_docs::{diagnostic_documentation, explain_diagnostic};
 use endpoint::{Endpoint, local_project_path, pure_sys_host_context};

@@ -360,7 +360,7 @@ impl DurableTransactionalEvaluator {
         result_value: &mut Option<Value>,
         loaded_project: &LoadedProject,
         table_object_ids: &BTreeMap<String, TableObjectId>,
-        storage_orders: &BTreeMap<String, Vec<String>>,
+        committed_base: &CommittedBase<'_>,
     ) -> Result<StageOutcome<Diagnostic>, RuntimeError> {
         let tables = admitted
             .key_fields
@@ -375,9 +375,23 @@ impl DurableTransactionalEvaluator {
                 })
             })
             .collect::<Option<Vec<_>>>();
-        let activated = match identities {
-            Some(identities) => state.begin_admitted_table_activation(&identities).await,
-            None => state.begin_table_activation(&tables).await,
+        let (activated, storage_orders) = match identities {
+            Some(identities) if !identities.is_empty() => {
+                let Ok(pin) = state.published_pin().await else {
+                    return fail_observed_request_runtime(state, request, fingerprint, lease).await;
+                };
+                let Some((rows, orders)) = committed_base(&identities) else {
+                    return fail_observed_request_runtime(state, request, fingerprint, lease).await;
+                };
+                let Ok(committed) = orna_runtime::PinnedCommittedRows::new(pin, rows) else {
+                    return fail_observed_request_runtime(state, request, fingerprint, lease).await;
+                };
+                let activated = state
+                    .begin_admitted_table_activation_over_committed(&identities, committed)
+                    .await;
+                (activated, orders)
+            }
+            _ => (state.begin_table_activation(&tables).await, BTreeMap::new()),
         };
         let snapshot = match activated {
             Ok(snapshot) => snapshot,
@@ -434,7 +448,7 @@ impl DurableTransactionalEvaluator {
                         key.clone(),
                         row,
                         &admitted.key_fields,
-                        storage_orders,
+                        &storage_orders,
                         &admitted.table_fields,
                     )
                     .is_err()
@@ -460,12 +474,11 @@ impl DurableTransactionalEvaluator {
                 .await;
             }
         };
-        let admitted_tables = admitted.key_fields.keys().cloned().collect::<Vec<String>>();
         let mutations = match admit_recorded_rows(
             repository,
             loaded_project,
             table_object_ids,
-            &admitted_tables,
+            &admitted.key_fields,
             mutations,
         ) {
             Ok(mutations) => mutations,
@@ -625,7 +638,7 @@ pub(super) fn admit_recorded_rows(
     repository: &Repository,
     project: &LoadedProject,
     table_object_ids: &BTreeMap<String, TableObjectId>,
-    admitted_tables: &[String],
+    admitted_keys: &TableKeys,
     mutations: Vec<TableMutation>,
 ) -> Result<Vec<TableMutation>, ()> {
     let Ok(Some(head)) = repository.head() else {
@@ -653,12 +666,12 @@ pub(super) fn admit_recorded_rows(
     // resolved to the admitted one before admission and scope validation
     // (bead ornadb-jm0d).
     let qualified = |table: &str| -> Option<String> {
-        if admitted_tables.iter().any(|name| name == table) {
+        if admitted_keys.contains_key(table) {
             return Some(table.to_owned());
         }
         let suffix = format!(".{table}");
-        let mut matches = admitted_tables
-            .iter()
+        let mut matches = admitted_keys
+            .keys()
             .filter(|candidate| candidate.ends_with(&suffix));
         let first = matches.next()?;
         if matches.next().is_some() {
@@ -669,60 +682,43 @@ pub(super) fn admit_recorded_rows(
     let mut admitted = Vec::with_capacity(mutations.len());
     for mutation in mutations {
         let mutation = match qualified(mutation.table()) {
-            Some(name) if name != mutation.table() => {
-                let Some(value) = mutation.value() else {
-                    admitted.push(mutation);
-                    continue;
-                };
-                let rebuilt = if mutation.is_insert() {
-                    TableMutation::insert(
-                        mutation.id(),
-                        name,
-                        mutation.key().to_vec(),
-                        value.to_vec(),
-                    )
-                } else {
-                    TableMutation::new(
-                        mutation.id(),
-                        name,
-                        mutation.key().to_vec(),
-                        Some(value.to_vec()),
-                    )
-                };
-                let Ok(rebuilt) = rebuilt else {
-                    return Err(());
-                };
-                rebuilt
-            }
+            Some(name) if name != mutation.table() => requalified(&mutation, name)?,
             _ => mutation,
         };
-        let Some((schema, context)) = schemas.get(mutation.table()) else {
-            admitted.push(mutation);
-            continue;
-        };
-        let Some(value) = mutation.value() else {
-            admitted.push(match table_object_ids.get(mutation.table()) {
-                Some(identity) => mutation.with_table_object_id(*identity),
-                None => mutation,
-            });
+        // The evaluator records keys canonically, while the runtime addresses a text
+        // primary key by its raw UTF-8, so each mutation is re-addressed to the runtime
+        // encoding of its admitted table (bead ornadb-9rzyn).
+        let object_id = table_object_ids.get(mutation.table()).copied();
+        let text_key = admitted_keys
+            .get(mutation.table())
+            .is_some_and(|keys| matches!(keys.types.as_slice(), [TransactionKeyType::Str]));
+        let (Some((schema, context)), Some(value)) =
+            (schemas.get(mutation.table()), mutation.value())
+        else {
+            admitted.push(runtime_addressed(mutation, text_key, object_id)?);
             continue;
         };
         let Ok(decoded) = orna_value::Value::decode(value) else {
             return Err(());
         };
+        // A re-key is admitted at its destination key, where its replacement row lives.
+        let rekey = mutation.rekey_to().is_some();
+        let admitted_key = mutation.rekey_to().unwrap_or(mutation.key());
         let Ok(row) = admit_format3_row(
             project,
-            mutation.key(),
+            admitted_key,
             decoded.raw(),
             schema,
             context,
             Vec::new(),
             mutation.id(),
         ) else {
-            admitted.push(match table_object_ids.get(mutation.table()) {
-                Some(identity) => mutation.with_table_object_id(*identity),
-                None => mutation,
-            });
+            // A re-key whose replacement is not admitted has no move to record, so the
+            // request fails closed.
+            if rekey {
+                return Err(());
+            }
+            admitted.push(runtime_addressed(mutation, text_key, object_id)?);
             continue;
         };
         let (admitted_row, _bindings, _schema) = row.into_mutation_and_bindings();
@@ -760,7 +756,7 @@ pub(super) fn admit_recorded_rows(
             Ok(rebuilt.with_table_object_id(identity))
         };
         if mutation.is_insert() {
-            // An insert keeps the admitted row: canonical key, descriptor value
+            // An insert keeps the admitted row: its runtime key, descriptor value
             // and insert-only semantics, which publication projects and the
             // runtime accepts for an absent key.
             let Ok(row) = rename(admitted_row, mutation.table()) else {
@@ -769,12 +765,22 @@ pub(super) fn admit_recorded_rows(
             admitted.push(row);
             continue;
         }
+        // A re-key moves the admitted replacement row to its destination key.
+        if rekey {
+            admitted.push(rekey_admitted(
+                &mutation,
+                &admitted_row,
+                text_key,
+                object_id,
+            )?);
+            continue;
+        }
         // A replacement keeps the admitted key and value so publication still
         // projects them, but records replacement semantics, because the runtime
         // refuses an insert over an occupied key (bead ornadb-jm0d).
         let (Some(identity), Some(value)) = (admitted_row.table_object_id(), admitted_row.value())
         else {
-            admitted.push(mutation);
+            admitted.push(runtime_addressed(mutation, text_key, object_id)?);
             continue;
         };
         let Ok(replacement) = TableMutation::new(
@@ -788,6 +794,78 @@ pub(super) fn admit_recorded_rows(
         admitted.push(replacement.with_table_object_id(identity));
     }
     Ok(admitted)
+}
+
+/// Rebuilds an evaluator-recorded mutation under its admitted qualified table name,
+/// keeping its key, value and re-key destination (bead ornadb-jm0d).
+fn requalified(mutation: &TableMutation, name: String) -> Result<TableMutation, ()> {
+    let rebuilt = match (mutation.value(), mutation.rekey_to()) {
+        (None, _) => TableMutation::new(mutation.id(), name, mutation.key().to_vec(), None),
+        (Some(value), Some(destination)) => TableMutation::rekey(
+            mutation.id(),
+            name,
+            mutation.key().to_vec(),
+            destination.to_vec(),
+            value.to_vec(),
+        ),
+        (Some(value), None) if mutation.is_insert() => {
+            TableMutation::insert(mutation.id(), name, mutation.key().to_vec(), value.to_vec())
+        }
+        (Some(value), None) => TableMutation::new(
+            mutation.id(),
+            name,
+            mutation.key().to_vec(),
+            Some(value.to_vec()),
+        ),
+    };
+    rebuilt.map_err(|_| ())
+}
+
+/// Addresses an evaluator-recorded mutation by the runtime encoding of its key and
+/// re-key destination, carrying the committed table identity when one is known
+/// (bead ornadb-9rzyn).
+fn runtime_addressed(
+    mutation: TableMutation,
+    text_key: bool,
+    object_id: Option<TableObjectId>,
+) -> Result<TableMutation, ()> {
+    let key = runtime_key_from_evaluator(mutation.key(), text_key).map_err(|_| ())?;
+    let rekey_to = mutation
+        .rekey_to()
+        .map(|destination| runtime_key_from_evaluator(destination, text_key))
+        .transpose()
+        .map_err(|_| ())?;
+    let addressed = mutation
+        .with_reencoded_keys(key, rekey_to)
+        .map_err(|_| ())?;
+    Ok(match object_id {
+        Some(object_id) => addressed.with_table_object_id(object_id),
+        None => addressed,
+    })
+}
+
+/// Builds the runtime re-key of an evaluator-recorded move: the source key in its
+/// runtime encoding, the admitted replacement row at its destination, and the
+/// committed table identity (bead ornadb-9rzyn).
+fn rekey_admitted(
+    mutation: &TableMutation,
+    admitted_row: &TableMutation,
+    text_key: bool,
+    object_id: Option<TableObjectId>,
+) -> Result<TableMutation, ()> {
+    let source = runtime_key_from_evaluator(mutation.key(), text_key).map_err(|_| ())?;
+    let (Some(object_id), Some(value)) = (object_id, admitted_row.value()) else {
+        return Err(());
+    };
+    let moved = TableMutation::rekey(
+        admitted_row.id(),
+        mutation.table(),
+        source,
+        admitted_row.key().to_vec(),
+        value.to_vec(),
+    )
+    .map_err(|_| ())?;
+    Ok(moved.with_table_object_id(object_id))
 }
 
 /// Attaches the failing expression's source span to an admitted execution

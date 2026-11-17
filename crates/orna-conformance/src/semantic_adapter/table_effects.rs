@@ -633,14 +633,19 @@ impl TableEffectHandler<'_, '_> {
                     return Err(transaction_error("ORNA-EVAL-TABLE-KEY"));
                 }
                 let row = replace_record_fields(&existing, key_fields, &new_components)?;
+                // The destination row is written like every other row, so its reference
+                // columns are bound to stored references before any write (ORNA-REF-001,
+                // ORNA-EVOL-007). The destination key is then taken from the bound row.
+                let bound = self.bind_stored_references(table, &row)?;
+                let row = bound.unwrap_or(row);
+                let new_key = key_fields.key_from_row(&row).map_err(cursor_error)?;
                 self.activation
                     .delete(table.clone(), old_key.clone())
                     .map_err(|error| transaction_error(table_error_code(error)))?;
-                self.record(table, old_key, None, false)?;
                 self.activation
                     .insert(table.clone(), new_key.clone(), row.clone())
                     .map_err(|error| transaction_error(table_error_code(error)))?;
-                self.record(table, new_key, Some(row.clone()), false)?;
+                self.record_rekey(table, old_key, new_key, row.clone())?;
                 Ok(Some(row))
             }
             _ => Ok(None),
@@ -660,24 +665,7 @@ impl TableEffectHandler<'_, '_> {
             .map(Value::encode)
             .transpose()
             .map_err(|_| transaction_error("ORNA-EVAL-TABLE-ROW"))?;
-        let ordinal = self.next_mutation;
-        self.next_mutation = self.next_mutation.saturating_add(1);
-        let mut digest = Sha256::new();
-        digest.update(b"ORNA-SOURCE-MUTATION\0");
-        digest.update(self.mutation_scope);
-        digest.update(table.as_bytes());
-        digest.update([0]);
-        digest.update(&key);
-        digest.update(ordinal.to_be_bytes());
-        if let Some(bytes) = &encoded {
-            digest.update([1]);
-            digest.update(bytes);
-        } else {
-            digest.update([0]);
-        }
-        let id: [u8; 16] = digest.finalize()[..16]
-            .try_into()
-            .expect("truncated digest has fixed length");
+        let id = self.mutation_id(table, &key, None, encoded.as_deref());
         // An insert is recorded as insert-only so the runtime rejects an
         // occupied key; a replacement is recorded as a generic write, because
         // the runtime refuses an insert over an existing row (bead ornadb-jm0d).
@@ -688,5 +676,61 @@ impl TableEffectHandler<'_, '_> {
         .map_err(|_| transaction_error("ORNA-EVAL-TABLE-ROW"))?;
         self.mutations.push(mutation);
         Ok(())
+    }
+
+    /// Records one explicit primary-key move as a single rekey mutation, so the
+    /// durable ledger and publication carry the old and new keys together
+    /// (ORNA-MUT-010, ORNA-EVOL-007) instead of an unrelated delete and insert.
+    pub(super) fn record_rekey(
+        &mut self,
+        table: &str,
+        old_key: TransactionKey,
+        new_key: TransactionKey,
+        row: Value,
+    ) -> Result<(), EvaluationError> {
+        let old_key = old_key.into_encoded();
+        let new_key = new_key.into_encoded();
+        let encoded = row
+            .encode()
+            .map_err(|_| transaction_error("ORNA-EVAL-TABLE-ROW"))?;
+        let id = self.mutation_id(table, &old_key, Some(&new_key), Some(&encoded));
+        let mutation = TableMutation::rekey(id, table, old_key, new_key, encoded)
+            .map_err(|_| transaction_error("ORNA-EVAL-TABLE-ROW"))?;
+        self.mutations.push(mutation);
+        Ok(())
+    }
+
+    /// The next source-mutation identity: a digest over the mutation scope,
+    /// table, key, ordinal, the re-key destination when there is one, and the
+    /// recorded value.
+    fn mutation_id(
+        &mut self,
+        table: &str,
+        key: &[u8],
+        destination: Option<&[u8]>,
+        value: Option<&[u8]>,
+    ) -> [u8; 16] {
+        let ordinal = self.next_mutation;
+        self.next_mutation = self.next_mutation.saturating_add(1);
+        let mut digest = Sha256::new();
+        digest.update(b"ORNA-SOURCE-MUTATION\0");
+        digest.update(self.mutation_scope);
+        digest.update(table.as_bytes());
+        digest.update([0]);
+        digest.update(key);
+        digest.update(ordinal.to_be_bytes());
+        if let Some(destination) = destination {
+            digest.update([2]);
+            digest.update(destination);
+        }
+        if let Some(bytes) = value {
+            digest.update([1]);
+            digest.update(bytes);
+        } else {
+            digest.update([0]);
+        }
+        digest.finalize()[..16]
+            .try_into()
+            .expect("truncated digest has fixed length")
     }
 }

@@ -158,7 +158,7 @@ impl DurableTransactionalEvaluator {
         result_value: &mut Option<Value>,
         loaded_project: &LoadedProject,
         table_object_ids: &BTreeMap<String, TableObjectId>,
-        storage_orders: &BTreeMap<String, Vec<String>>,
+        committed_base: &CommittedBase<'_>,
     ) -> Result<StageOutcome<Diagnostic>, RuntimeError> {
         let state =
             RuntimeState::open(target.repository, target.identity, target.initial_digest).await?;
@@ -232,7 +232,7 @@ impl DurableTransactionalEvaluator {
             result_value,
             loaded_project,
             table_object_ids,
-            storage_orders,
+            committed_base,
         )
         .await
     }
