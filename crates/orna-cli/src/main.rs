@@ -39,6 +39,7 @@ mod repl_commands;
 mod repl_committed_read;
 mod repl_continuation;
 mod repl_copy;
+mod repl_doc;
 mod repl_hir;
 mod repl_inspect;
 mod repl_request;

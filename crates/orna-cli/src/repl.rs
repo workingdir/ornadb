@@ -13,7 +13,7 @@ use orna_protocol::{Envelope, Limits, Message, PresentNode};
 use orna_value::{CanonicalSnapshot, Raw, canonical_uuid_text};
 
 pub(crate) const MAX_INPUT_BYTES: usize = 65_536;
-const REPL_HELP: &str = "commands: :help [name], :at CWD|HEAD|ref, :watch expression, :unwatch [id], :type expression, :inspect expression, :members expression, :table expression, :history [query], :timing on|off, :clear, :quit";
+const REPL_HELP: &str = "commands: :help [name], :at CWD|HEAD|ref, :watch expression, :unwatch [id], :type expression, :inspect expression, :members expression, :table expression, :doc NAME, :source NAME, :history [query], :timing on|off, :clear, :quit";
 
 type ReplSubmissionHandler<'a> =
     dyn FnMut(&mut AdmittedReplSession, &str) -> Result<ReplOutcome, ReplFailure> + 'a;
