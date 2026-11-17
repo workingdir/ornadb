@@ -38,12 +38,15 @@ use unicode_normalization::UnicodeNormalization;
 
 mod attachments;
 mod committed_store;
+mod declarations;
 mod object_identity;
 mod stored_reference;
 mod table_storage;
 mod typed_row;
 
 pub use committed_store::CommittedTableStore;
+pub use declarations::DeclarationRecord;
+use declarations::declaration_records;
 
 pub use object_identity::{
     OBJECT_IDENTITY_MANIFEST_PATH, ObjectIdentity, ObjectIdentityError, ObjectIdentityManifest,
@@ -315,6 +318,7 @@ pub struct LoadedProject {
     loose_rows: Vec<LooseRowCandidate>,
     standard_profile: Option<StandardDependencyProfile>,
     standard_sources: Vec<(String, String)>,
+    declarations: Vec<DeclarationRecord>,
     standard_runtime_modules: BTreeSet<String>,
     standard_imports: bool,
     standard_modules: BTreeSet<String>,
@@ -393,6 +397,13 @@ impl LoadedProject {
     /// rewritten under the reserved `std/` logical namespace.
     pub fn standard_sources(&self) -> &[(String, String)] {
         &self.standard_sources
+    }
+
+    /// Named declarations of every reachable module and of the attached
+    /// standard closure, with their doc comments and source text.
+    #[must_use]
+    pub fn declarations(&self) -> &[DeclarationRecord] {
+        &self.declarations
     }
 
     /// Pinned standard modules reachable from this program's explicit imports.
@@ -1756,6 +1767,12 @@ impl ProjectLoader {
         project.standard_runtime_modules = standard_runtime_closure(&requested, &sources);
         project.standard_modules = requested;
         project.standard_profile = Some(profile);
+        project.declarations.extend(
+            module_project
+                .declarations()
+                .iter()
+                .map(|declaration| declaration.with_namespace_prefix("std")),
+        );
         project.standard_sources = sources;
         Ok(())
     }
@@ -2015,6 +2032,7 @@ fn load_reachable_project(
     let mut standard_imports = false;
     let mut standard_modules = BTreeSet::new();
     let mut table_paths = BTreeSet::new();
+    let mut declarations = Vec::new();
 
     while let Some(logical_path) = pending.pop_front() {
         if loaded.contains_key(&logical_path) {
@@ -2083,6 +2101,11 @@ fn load_reachable_project(
                 table_paths.insert(table_path.join("/"));
             }
         }
+        declarations.extend(declaration_records(
+            &namespace,
+            &source,
+            &parsed.value.items,
+        ));
         loaded.insert(logical_path, LoadedModule { source, namespace });
     }
 
@@ -2129,6 +2152,7 @@ fn load_reachable_project(
         loose_rows,
         standard_profile,
         standard_sources: Vec::new(),
+        declarations,
         standard_runtime_modules: BTreeSet::new(),
         standard_imports,
         standard_modules,

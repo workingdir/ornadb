@@ -1,5 +1,6 @@
 //! Console commands that read or present the session: `:type`, `:inspect`,
-//! `:members`, `:table`, `:history`, `:timing`, `:copy`, and `:clear`.
+//! `:members`, `:table`, `:history`, `:timing`, `:copy`, `:doc`, `:source`,
+//! and `:clear`.
 //!
 //! `repl.rs` dispatches the session, watch, and help commands itself. Every
 //! other `:name` reaches [`run`], which either runs the command or refuses it
@@ -16,6 +17,7 @@ use orna_project_repl::{AdmittedReplSession, ReplDetail};
 
 use crate::repl::{AnsiColor, ReplFailure, write_repl_failure, write_repl_outcome, write_styled};
 use crate::repl_copy;
+use crate::repl_doc;
 use crate::repl_inspect::inspect_full;
 
 /// The most submitted inputs `:history` keeps.
@@ -29,7 +31,7 @@ const COMMANDS: [&str; 19] = [
 
 /// Commands the console recognises but does not implement yet. Each is
 /// refused by name; none is silently accepted.
-const UNSUPPORTED: [&str; 6] = ["doc", "source", "open", "plan", "trace", "display"];
+const UNSUPPORTED: [&str; 4] = ["open", "plan", "trace", "display"];
 
 /// The code every console refusal carries.
 const COMMAND_CODE: &str = "ORNA-REPL-COMMAND";
@@ -129,12 +131,14 @@ fn execute<'a, W: Write>(
         "history" => history_command(&cmd, console, writer),
         "timing" => Ok(timing_command(&cmd, console)),
         "clear" => clear_command(&cmd, writer, color_enabled),
+        "doc" => doc_command(&cmd, session, writer, color_enabled),
+        "source" => source_command(&cmd, session, writer, color_enabled),
         "copy" => repl_copy::run(cmd.arg, session, writer, color_enabled).map(|()| None),
         name if UNSUPPORTED.contains(&name) => Ok(Some(refuse_name(
             &cmd,
             format!("`:{name}` is not available in this console yet"),
             vec![
-                "the console runs :type, :inspect, :members, :table, :history, :timing, :copy, and :clear"
+                "the console runs :type, :doc, :source, :inspect, :members, :table, :history, :timing, :copy, and :clear"
                     .into(),
                 "enter `:help` to see the supported commands".into(),
             ],
@@ -163,6 +167,49 @@ fn execute<'a, W: Write>(
         ))),
         "quit" => Ok(Some(refuse_name(&cmd, "usage: :quit".into(), Vec::new()))),
         _ => Ok(Some(unknown_command(&cmd))),
+    }
+}
+
+/// `:doc NAME` prints the doc comment lines of a declaration.
+fn doc_command<'a, W: Write>(
+    cmd: &Cmd<'a>,
+    session: &AdmittedReplSession,
+    writer: &mut W,
+    color_enabled: bool,
+) -> Outcome<'a> {
+    declaration_command(cmd, session, repl_doc::Part::Docs, writer, color_enabled)
+}
+
+/// `:source NAME` prints the source text of a declaration.
+fn source_command<'a, W: Write>(
+    cmd: &Cmd<'a>,
+    session: &AdmittedReplSession,
+    writer: &mut W,
+    color_enabled: bool,
+) -> Outcome<'a> {
+    declaration_command(cmd, session, repl_doc::Part::Source, writer, color_enabled)
+}
+
+fn declaration_command<'a, W: Write>(
+    cmd: &Cmd<'a>,
+    session: &AdmittedReplSession,
+    part: repl_doc::Part,
+    writer: &mut W,
+    color_enabled: bool,
+) -> Outcome<'a> {
+    if cmd.arg.is_empty() {
+        return Ok(Some(refuse_name(
+            cmd,
+            format!("usage: :{} NAME", cmd.name),
+            Vec::new(),
+        )));
+    }
+    match repl_doc::find(session.declarations(), cmd.arg) {
+        Ok(declaration) => {
+            repl_doc::write_part(writer, declaration, part, color_enabled)?;
+            Ok(None)
+        }
+        Err(message) => Ok(Some(refuse_arg_message(cmd, message))),
     }
 }
 

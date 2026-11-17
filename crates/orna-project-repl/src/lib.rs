@@ -14,7 +14,7 @@ use orna_check::{
     Analysis, Catalogue, DIAG_AMBIGUOUS, EffectSummary, ModuleInput, ReplAdmission, ReplContext,
     SymbolKind, SystemProviders, Type, analyze_with_providers, unresolved_member, unresolved_name,
 };
-use orna_project::{AttachedDatabaseSession, LoadedProject};
+use orna_project::{AttachedDatabaseSession, DeclarationRecord, LoadedProject};
 use orna_syntax::{
     SyntaxDiagnostic, locate_identifier, parse_module, parse_repl, repl_parse_failure,
 };
@@ -204,6 +204,7 @@ pub struct AdmittedReplSession {
     runtime: ReplSession,
     attached_databases: Option<AttachedDatabaseSession>,
     repository_scope: Option<RepositoryScope>,
+    declarations: Vec<DeclarationRecord>,
 }
 
 /// Database and repository identity that one REPL session is authority-scoped
@@ -263,6 +264,13 @@ impl AdmittedReplSession {
         self.repository_scope
     }
 
+    /// Named declarations of the admitted project and standard closure, with
+    /// the doc comments and source text `:doc` and `:source` report.
+    #[must_use]
+    pub fn declarations(&self) -> &[DeclarationRecord] {
+        &self.declarations
+    }
+
     /// Starts a core-only typed REPL with no project bindings.
     #[must_use]
     pub fn new(limits: Limits) -> Self {
@@ -272,6 +280,7 @@ impl AdmittedReplSession {
             runtime: ReplSession::new(limits),
             attached_databases: None,
             repository_scope: None,
+            declarations: Vec::new(),
         }
     }
 
@@ -302,6 +311,7 @@ impl AdmittedReplSession {
         };
         let mut session = Self::from_catalogue(&modules, catalogue, standard_sources, limits)?;
         session.attached_databases = Some(databases.clone());
+        session.declarations = databases.declarations();
         Ok(session)
     }
 
@@ -358,6 +368,7 @@ impl AdmittedReplSession {
             runtime,
             attached_databases: None,
             repository_scope: None,
+            declarations: Vec::new(),
         })
     }
 
@@ -407,6 +418,7 @@ impl AdmittedReplSession {
             runtime,
             attached_databases: None,
             repository_scope: None,
+            declarations: project.declarations().to_vec(),
         })
     }
 

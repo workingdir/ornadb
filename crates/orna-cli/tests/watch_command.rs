@@ -23,6 +23,10 @@ mod repl_continuation;
 #[allow(clippy::duplicate_mod)]
 #[allow(dead_code)]
 mod repl_copy;
+#[path = "../src/repl_doc.rs"]
+#[allow(clippy::duplicate_mod)]
+#[allow(dead_code)]
+mod repl_doc;
 #[path = "../src/repl_inspect.rs"]
 #[allow(clippy::duplicate_mod)]
 #[allow(dead_code)]

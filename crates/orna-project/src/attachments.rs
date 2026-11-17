@@ -18,7 +18,7 @@ use orna_repository::{CommittedTreeEntryKind, GitCommitRef, Repository, Reposito
 use orna_syntax::{Keyword, TokenKind, lex, parse_module};
 use orna_syntax_ast::Declaration;
 
-use crate::{LoadedProject, LooseRowCandidate, ProjectLoadError, ProjectLoader};
+use crate::{DeclarationRecord, LoadedProject, LooseRowCandidate, ProjectLoadError, ProjectLoader};
 
 /// The committed file containing exact package attachment pins.
 pub const PACKAGE_PIN_MANIFEST_PATH: &str = ".orna/packages";
@@ -540,6 +540,24 @@ impl AttachedDatabaseSession {
         self.attached
             .get("std")
             .map(|database| database.pin.commit())
+    }
+
+    /// Named declarations of the primary database and of every attachment,
+    /// under the same namespaces `module_inputs` and `standard_sources` use:
+    /// each attachment is exposed under its alias, and `std` under `std`.
+    #[must_use]
+    pub fn declarations(&self) -> Vec<DeclarationRecord> {
+        let mut declarations = self.primary.project.declarations().to_vec();
+        for (name, database) in &self.attached {
+            declarations.extend(
+                database
+                    .project
+                    .declarations()
+                    .iter()
+                    .map(|declaration| declaration.with_namespace_prefix(name)),
+            );
+        }
+        declarations
     }
 
     /// Returns every row source for a table path together with the exact
