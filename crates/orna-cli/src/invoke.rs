@@ -222,6 +222,10 @@ pub(crate) fn run_project_invocation_with_arguments(
                 ),
         )
         .map_err(|error| durable_invocation_failed(&error))?;
+    let location = match &outcome {
+        StageOutcome::Failed(diagnostic) => failure_location(&loaded_project, diagnostic),
+        _ => None,
+    };
     report_project_outcome(
         endpoint,
         root_entry,
@@ -231,6 +235,7 @@ pub(crate) fn run_project_invocation_with_arguments(
         result_value.as_ref(),
         static_result_type(&analysis, root_entry).as_deref(),
     )
+    .map_err(|error| error.with_location(location))
 }
 
 /// The production catalogue and analysis of a project that passes semantic analysis.
@@ -286,6 +291,23 @@ pub(crate) fn report_project_outcome(
         )),
     }
 }
+
+/// The `--> file:line:col` locator and excerpt of a failed evaluation's first
+/// source span, or `None` when the span names no admitted module.
+fn failure_location(
+    project: &orna_project::LoadedProject,
+    diagnostic: &orna_value::Diagnostic,
+) -> Option<String> {
+    let span = diagnostic.spans().first()?;
+    let module = project
+        .modules()
+        .iter()
+        .find(|module| module.logical_path == span.file_path)?;
+    let start = span.start_byte.to_string().parse::<usize>().ok()?;
+    let end = span.end_byte.to_string().parse::<usize>().ok()?;
+    super::source_excerpt::render(&module.logical_path, &module.source, start, end)
+}
+
 pub(crate) fn run_project_stream_invocation_with_project(
     endpoint: &Endpoint,
     root_entry: &str,
@@ -357,6 +379,7 @@ pub(crate) fn published_runtime_failure(diagnostic: &orna_value::Diagnostic) -> 
         detail: None,
         body: None,
         outcome: None,
+        location: None,
     })
 }
 

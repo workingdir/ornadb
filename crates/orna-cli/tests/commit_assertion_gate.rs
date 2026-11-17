@@ -246,7 +246,7 @@ fn false_module_assertion_refuses_the_commit_with_its_span() {
     let text = transcript(&refused);
     assert_ne!(refused.status.code(), Some(0), "{text}");
     assert!(text.contains("ORNA-A091-009"), "{text}");
-    assert!(text.contains("assertion at source"), "{text}");
+    assert!(text.contains("assertion at main.orna"), "{text}");
     assert!(!text.contains("table assertion is false"), "{text}");
     assert_eq!(head(&root), before, "{text}");
 }

@@ -60,7 +60,7 @@ use orna_stream::{
 use orna_stream_identity::{
     CheckpointKey, Component, ConsumerIdentity, DeliveryIdentity, Position,
 };
-use orna_syntax::{parse_expression, parse_module};
+use orna_syntax::{parse_expression, parse_module, parse_module_with_file};
 use orna_syntax_ast::{
     Declaration, Expr, Pattern, SourceSpan, Statement, TypeMember, TypeRepresentation,
 };
@@ -70,7 +70,9 @@ use orna_sys::{
 };
 use orna_sys_id::SysRelation;
 use orna_table::{ActivationError, DatabaseActivation, DatabaseRuntime, TableError};
-use orna_value::{Diagnostic, DiagnosticSeverity, OvbRaw, SafeText, Value};
+use orna_value::{
+    CanonicalSnapshot, Diagnostic, DiagnosticSeverity, DiagnosticSpan, OvbRaw, SafeText, Value,
+};
 use sha2::{Digest, Sha256};
 use std::{
     cmp::Ordering,
