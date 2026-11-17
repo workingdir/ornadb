@@ -707,3 +707,130 @@ fn the_lock_holder_does_not_fence_a_live_owner_bound_to_its_own_lock() {
             .expect("the live owner keeps writing");
     });
 }
+
+/// Two owner-capable handles over one repository cannot both commit: the
+/// second handle is a secondary participant, so the live lease holder's
+/// token is not usable through it, and the holder's own commits still land.
+#[test]
+fn a_second_owner_handle_cannot_commit_under_the_live_lease() {
+    let (_directory, repository) = repository();
+    runtime().block_on(async {
+        let holder = RuntimeState::open_with_owner_id(
+            &repository,
+            identity(),
+            INITIAL_DIGEST,
+            process_owner_id(),
+        )
+        .await
+        .expect("open the lock holder");
+        let lease = holder
+            .acquire_lease(process_owner_id())
+            .await
+            .expect("the lock holder creates the lease");
+        let secondary =
+            RuntimeState::open_with_owner_id(&repository, identity(), INITIAL_DIGEST, OTHER_OWNER)
+                .await
+                .expect("open a second owner handle");
+        assert!(!secondary.holds_runtime_owner_lock());
+
+        let context = holder.begin_activation().await.expect("capture");
+        let refused = secondary
+            .commit_table_activation(
+                lease,
+                &context,
+                &[insert([16; 16], DEAD_OWNER_ROW, 7)],
+                [15; 32],
+                &NoFault,
+            )
+            .await;
+        assert_eq!(
+            refused,
+            Err(RuntimeError::LeaseHeld),
+            "a second owner handle must not commit under the live lease"
+        );
+        assert_eq!(
+            holder
+                .committed_table_row("records", DEAD_OWNER_ROW)
+                .await
+                .unwrap(),
+            None,
+            "a refused second-handle write must not land"
+        );
+
+        holder
+            .commit_table_activation(
+                lease,
+                &context,
+                &[insert([17; 16], CHILD_ROW, 8)],
+                [16; 32],
+                &NoFault,
+            )
+            .await
+            .expect("the live lock holder keeps committing");
+    });
+}
+
+/// A handle that presents a departed owner's lease token after the next owner
+/// took the lease over is fenced with `OwnerLost`, and lands nothing. The
+/// replacement's own token still commits.
+#[test]
+fn a_stale_owner_token_presented_after_takeover_lands_nothing() {
+    let (_directory, repository) = repository();
+    runtime().block_on(async {
+        let holder = RuntimeState::open_with_owner_id(
+            &repository,
+            identity(),
+            INITIAL_DIGEST,
+            process_owner_id(),
+        )
+        .await
+        .expect("open the first owner");
+        let stale = holder
+            .acquire_lease(process_owner_id())
+            .await
+            .expect("the first owner acquires the lease");
+        drop(holder);
+
+        let replacement =
+            RuntimeState::open_with_owner_id(&repository, identity(), INITIAL_DIGEST, OTHER_OWNER)
+                .await
+                .expect("open the replacement owner");
+        assert!(replacement.holds_runtime_owner_lock());
+        let fresh = replacement
+            .acquire_lease(OTHER_OWNER)
+            .await
+            .expect("the replacement takes the departed lease over");
+        assert_eq!(fresh.epoch, stale.epoch + 1);
+
+        let context = replacement.begin_activation().await.expect("capture");
+        let rejected = replacement
+            .commit_table_activation(
+                stale,
+                &context,
+                &[insert([18; 16], DEAD_OWNER_ROW, 9)],
+                [17; 32],
+                &NoFault,
+            )
+            .await;
+        assert_eq!(rejected, Err(RuntimeError::OwnerLost));
+        assert_eq!(
+            replacement
+                .committed_table_row("records", DEAD_OWNER_ROW)
+                .await
+                .unwrap(),
+            None,
+            "a stale token's write must not land"
+        );
+
+        replacement
+            .commit_table_activation(
+                fresh,
+                &context,
+                &[insert([19; 16], NEW_OWNER_ROW, 10)],
+                [18; 32],
+                &NoFault,
+            )
+            .await
+            .expect("the replacement's token commits");
+    });
+}

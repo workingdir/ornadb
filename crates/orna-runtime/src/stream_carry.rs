@@ -558,6 +558,12 @@ pub async fn import_stream_carry(
 
     let (identity, digest) = migration_copy_runtime_identity(destination)?;
     let state = RuntimeState::open(destination, identity, digest).await?;
+    // Only the runtime-owner lock holder may write the destination. A
+    // secondary handle (the lock is held by a live owner) must not insert
+    // carried rows beside that owner's fenced writes (ORNA-TURSO-005).
+    if !state.holds_runtime_owner_lock() {
+        return Err(RuntimeError::LeaseHeld);
+    }
     let present = read_carry_target(&state.connection).await?;
     if present == *carry {
         return Ok(());
