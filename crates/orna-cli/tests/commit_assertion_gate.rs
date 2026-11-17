@@ -96,6 +96,28 @@ fn violating_published_row_refuses_the_commit_and_keeps_head() {
     assert_eq!(head(&root), before, "{text}");
 }
 
+/// ORNA-ASSERT-053: the refused table assertion names the offending published
+/// row by its scalar key, so the refusal is presentable and deterministic.
+#[test]
+fn refused_table_assertion_names_the_offending_row_as_its_witness() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let root = initialized_database(&directory, BOOK_TABLE);
+    commit_source(&root, "book table");
+    assert_success(
+        &orna_repl(&root, "main.Book.insert({ id: 1, title: \"Dune\" })"),
+        "admit the row before the assertion exists",
+    );
+    publish(&root, "Dune");
+    let before = head(&root);
+
+    let refused = stage_and_commit(&root, BOOK_REJECTING_DUNE, "assert away the stored row");
+    let text = transcript(&refused);
+    assert_ne!(refused.status.code(), Some(0), "{text}");
+    assert!(text.contains("ORNA-A091-009"), "{text}");
+    assert!(text.contains("table \"Book\" row (id = 1)"), "{text}");
+    assert_eq!(head(&root), before, "{text}");
+}
+
 #[test]
 fn holding_published_row_commits_under_its_assertion() {
     let directory = tempfile::tempdir().expect("temporary directory");
@@ -189,7 +211,7 @@ fn scalar_table_assertion_beside_enum_keyed_table_is_still_evaluated() {
     let text = transcript(&refused);
     assert_ne!(refused.status.code(), Some(0), "{text}");
     assert!(text.contains("ORNA-A091-009"), "{text}");
-    assert!(text.contains("table assertion is false"), "{text}");
+    assert!(text.contains("is false over the staged rows"), "{text}");
     assert!(!text.contains("could not be validated"), "{text}");
     assert_eq!(head(&root), before, "{text}");
 }

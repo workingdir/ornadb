@@ -65,7 +65,7 @@ fn assert_005_includes_insert_update_delete_and_rekey_in_candidate_evidence() {
 fn assert_013_false_table_assertion_blocks_candidate_visibility() {
     let (outcome, runtime) = execute("candidate_failure");
     assert!(
-        matches!(outcome, StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-TABLE-ASSERT")
+        matches!(outcome, StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-A091-009")
     );
     for id in [4, 5] {
         assert!(
@@ -153,7 +153,7 @@ fn assert_023_module_assertion_without_table_dependencies_is_rejected() {
 fn assert_026_changed_dependency_tables_trigger_the_module_assertion() {
     let (outcome, runtime) = execute("module_failure");
     assert!(
-        matches!(outcome, StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-MODULE-ASSERT"),
+        matches!(outcome, StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-A091-009"),
         "{outcome:?}"
     );
     assert_eq!(runtime.committed_row("Book", &Value::int(7.into())), None);
@@ -165,7 +165,7 @@ fn assert_026_changed_dependency_tables_trigger_the_module_assertion() {
 fn assert_027_table_assertions_fail_before_module_assertions() {
     let (outcome, runtime) = execute("table_and_module_failure");
     assert!(
-        matches!(outcome, StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-TABLE-ASSERT"),
+        matches!(outcome, StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-A091-009"),
         "first failure must be the table-owned assertion: {outcome:?}"
     );
     assert_eq!(runtime.committed_row("Book", &Value::int(10.into())), None);
@@ -177,7 +177,7 @@ fn assert_027_table_assertions_fail_before_module_assertions() {
 fn assert_029_false_module_assertion_rolls_back_the_complete_database_candidate() {
     let (outcome, runtime) = execute("module_failure");
     assert!(
-        matches!(outcome, StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-MODULE-ASSERT"),
+        matches!(outcome, StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-A091-009"),
         "{outcome:?}"
     );
     assert_eq!(runtime.committed_row("Book", &Value::int(7.into())), None);

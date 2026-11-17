@@ -303,6 +303,7 @@ impl TransactionalEvaluator {
                     activation,
                     table_assertions,
                     &functions,
+                    key_fields,
                     limits,
                     &mut budget,
                 )?;

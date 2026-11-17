@@ -124,7 +124,7 @@ assert every(row => row.title != \"\");\n}\n";
             matches!(
                 result,
                 Err(RepositoryError::CandidateAssertionRefused(
-                    CandidateAssertionRefusal::AssertionFalse(_)
+                    CandidateAssertionRefusal::AssertionFalse { .. }
                 ))
             ),
             "{result:?}"

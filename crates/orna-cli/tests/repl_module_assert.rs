@@ -382,6 +382,6 @@ fn write_to_a_non_root_module_table_evaluates_the_assertion() {
 
     let output = orna(&root, &["--debug", "run", "main.drop_item"]);
     let text = transcript(&output);
-    assert!(text.contains("ORNA-EVAL-MODULE-ASSERT"), "{text}");
+    assert!(text.contains("ORNA-A091-009"), "{text}");
     assert!(!output.status.success(), "{text}");
 }

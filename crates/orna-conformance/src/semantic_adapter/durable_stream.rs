@@ -333,12 +333,10 @@ impl DurableTransactionalEvaluator {
         {
             Ok(_) => {}
             Err(TableActivationError::Runtime(error)) => return Err(error),
-            Err(TableActivationError::ValidationFailed(_)) => {
-                return Ok(StageOutcome::Failed(
-                    transaction_error("ORNA-EVAL-TABLE-ASSERT")
-                        .diagnostic()
-                        .clone(),
-                ));
+            Err(TableActivationError::ValidationFailed(diagnostic)) => {
+                return Ok(StageOutcome::Failed(validation_failure_diagnostic(
+                    diagnostic, &validator,
+                )));
             }
         }
         Ok(StageOutcome::Passed)
@@ -529,17 +527,13 @@ impl DurableTransactionalEvaluator {
         {
             Ok(_) => Ok(outcome),
             Err(TableActivationError::Runtime(error)) => Err(error),
-            Err(TableActivationError::ValidationFailed(_)) => {
+            Err(TableActivationError::ValidationFailed(diagnostic)) => {
                 fail_observed_request_outcome(
                     state,
                     request,
                     fingerprint,
                     lease,
-                    StageOutcome::Failed(
-                        transaction_error("ORNA-EVAL-TABLE-ASSERT")
-                            .diagnostic()
-                            .clone(),
-                    ),
+                    StageOutcome::Failed(validation_failure_diagnostic(diagnostic, &validator)),
                 )
                 .await
             }

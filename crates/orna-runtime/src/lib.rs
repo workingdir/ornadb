@@ -407,6 +407,16 @@ pub struct ValidatedTableRequestActivationCommit<'a> {
     pub effects: ActivationEffectReport,
 }
 
+/// An assertion that a candidate failed (ORNA-A091-009). `site` names the
+/// owner and source span (ORNA-ASSERT-051); `witness` is the deterministic,
+/// presentable description of the first failing table row when one exists
+/// (ORNA-ASSERT-053). Both are `None` when the validator recorded no failure.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FalseAssertion {
+    pub site: Option<String>,
+    pub witness: Option<String>,
+}
+
 /// Validates the candidate relations produced by an ordinary table
 /// activation. The rows are read from the same transaction that applies the
 /// mutations, and remain private until validation and checkpoint append
@@ -458,10 +468,11 @@ pub trait TableActivationCandidateValidator {
         self.validate(rows)
     }
 
-    /// The owner and span of the first module assertion that the last
-    /// `validate_changed` found false, for the commit gate to name it. Validators
-    /// without module assertions keep the default.
-    fn failed_module_assertion(&self) -> Option<String> {
+    /// The site and, for a table assertion, the deterministic witness of the
+    /// assertion that the last `validate_changed` found false, for the commit
+    /// gate to name it (ORNA-A091-009). Validators without assertions keep the
+    /// default.
+    fn failed_assertion(&self) -> Option<FalseAssertion> {
         None
     }
 

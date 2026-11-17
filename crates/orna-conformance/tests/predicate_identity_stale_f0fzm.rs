@@ -35,7 +35,7 @@ fn paired_depth_continuations_reject_a_stale_parent_identity() {
         matches!(
             &outcome,
             StageOutcome::Failed(diagnostic)
-                if diagnostic.code() == "ORNA-EVAL-MODULE-ASSERT"
+                if diagnostic.code() == "ORNA-A091-009"
         ),
         "pair 2 must reject evidence carrying pair 1's captured value: {outcome:?}"
     );

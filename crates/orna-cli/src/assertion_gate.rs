@@ -263,7 +263,11 @@ fn validate_changed_rows(
         .validate_changed(rows, changed)
         .map_err(|diagnostic| {
             if orna_conformance::is_table_assertion_false(diagnostic) {
-                CandidateAssertionRefusal::AssertionFalse(validator.failed_module_assertion())
+                let (site, witness) = match validator.failed_assertion() {
+                    Some(failed) => (failed.site, failed.witness),
+                    None => (None, None),
+                };
+                CandidateAssertionRefusal::AssertionFalse { site, witness }
             } else {
                 unvalidated(&format!(
                     "an assertion could not be evaluated over the {word} rows: {:?}",
@@ -320,10 +324,13 @@ pub(crate) fn refusal_diagnostic(
 ) -> Diagnostic {
     let word = command.candidate_word();
     let (code, title, help) = match refusal {
-        CandidateAssertionRefusal::AssertionFalse(site) => {
-            let title = match site {
-                Some(site) => format!("{site} is false over the {word} rows"),
-                None => format!("table assertion is false over the {word} rows"),
+        CandidateAssertionRefusal::AssertionFalse { site, witness } => {
+            let title = match (site, witness) {
+                (Some(site), Some(witness)) => {
+                    format!("{site} is false over the {word} rows; witness: {witness}")
+                }
+                (Some(site), None) => format!("{site} is false over the {word} rows"),
+                (None, _) => format!("table assertion is false over the {word} rows"),
             };
             let help = match command {
                 GatedCommand::Commit => {

@@ -1856,7 +1856,7 @@ async fn binary_reference_library_lend_rejects_invalid_and_duplicate_rows_withou
         .expect("CLI process");
     assert!(!missing.status.success());
     let missing_stderr = String::from_utf8_lossy(&missing.stderr);
-    assert!(missing_stderr.contains("error[ORNA-CMD-RUNTIME-UNAVAILABLE]"));
+    assert!(missing_stderr.contains("error[ORNA-A091-009]"));
     assert!(missing_stderr.contains("failed atomically"));
     assert!(!missing_stderr.contains("missing-book"));
     assert!(!missing_stderr.contains("reader-2"));

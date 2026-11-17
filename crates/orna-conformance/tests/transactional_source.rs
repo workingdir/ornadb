@@ -734,7 +734,7 @@ fn table_every_assertion_observes_all_candidate_rows_before_publication() {
 
     assert!(matches!(
         outcome,
-        StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-TABLE-ASSERT"
+        StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-A091-009"
     ));
     assert_eq!(runtime.committed_row("Note", &Value::int(7.into())), None);
     assert_eq!(runtime.committed_row("Note", &Value::int(8.into())), None);
@@ -781,7 +781,7 @@ fn table_all_unique_assertion_rejects_duplicate_candidate_projections() {
 
     assert!(matches!(
         outcome,
-        StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-TABLE-ASSERT"
+        StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-A091-009"
     ));
     assert_eq!(runtime.committed_row("Note", &Value::int(7.into())), None);
     assert_eq!(runtime.committed_row("Note", &Value::int(8.into())), None);
@@ -836,7 +836,7 @@ fn all_unique_factory_rejects_a_second_null_key_and_rolls_back_both_rows() {
 
     assert!(matches!(
         outcome,
-        StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-TABLE-ASSERT"
+        StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-A091-009"
     ));
     assert_eq!(
         duplicate.committed_row("Account", &Value::int(1.into())),
@@ -912,7 +912,7 @@ fn relation_every_rejects_a_paired_value_mismatch_after_an_omission() {
         matches!(
             &outcome,
             StageOutcome::Failed(diagnostic)
-                if diagnostic.code() == "ORNA-EVAL-TABLE-ASSERT"
+                if diagnostic.code() == "ORNA-A091-009"
         ),
         "the mismatch in the present half of the pair must reject the fold: {outcome:?}"
     );
@@ -936,7 +936,7 @@ fn all_unique_rejects_a_second_fully_omitted_pair_key() {
         matches!(
             &outcome,
             StageOutcome::Failed(diagnostic)
-                if diagnostic.code() == "ORNA-EVAL-TABLE-ASSERT"
+                if diagnostic.code() == "ORNA-A091-009"
         ),
         "null equals null in both selected pair positions: {outcome:?}"
     );
@@ -960,7 +960,7 @@ fn all_unique_factory_rejects_equal_nested_record_keys_and_rolls_back_rows() {
         matches!(
             &outcome,
             StageOutcome::Failed(diagnostic)
-                if diagnostic.code() == "ORNA-EVAL-TABLE-ASSERT"
+                if diagnostic.code() == "ORNA-A091-009"
         ),
         "duplicate nested projection did not reject candidate rows: {outcome:?}"
     );
@@ -984,7 +984,7 @@ fn every_factory_short_circuits_on_first_false_canonical_row() {
         matches!(
             &outcome,
             StageOutcome::Failed(diagnostic)
-                if diagnostic.code() == "ORNA-EVAL-TABLE-ASSERT"
+                if diagnostic.code() == "ORNA-A091-009"
         ),
         "later-row divide-by-zero should not run after the first false row: {outcome:?}"
     );
@@ -1026,7 +1026,7 @@ fn table_all_unique_decimal_body_rejects_scale_alias_and_rolls_back_candidates()
         matches!(
             &outcome,
             StageOutcome::Failed(diagnostic)
-                if diagnostic.code() == "ORNA-EVAL-TABLE-ASSERT"
+                if diagnostic.code() == "ORNA-A091-009"
         ),
         "scale-alias Decimal body did not fail all_unique: {outcome:?}"
     );
@@ -1120,7 +1120,7 @@ fn module_every_exists_assertion_rolls_back_cross_table_candidate_writes() {
 
     assert!(matches!(
         outcome,
-        StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-MODULE-ASSERT"
+        StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-A091-009"
     ));
     assert_eq!(runtime.committed_row("Book", &Value::int(7.into())), None);
     assert_eq!(runtime.committed_row("Loan", &Value::int(1.into())), None);
@@ -1197,7 +1197,7 @@ fn deepest_relation_predicate_mismatch_aborts_every_candidate_table() {
     assert!(matches!(
         outcome,
         StageOutcome::Failed(ref diagnostic)
-            if diagnostic.code() == "ORNA-EVAL-MODULE-ASSERT"
+            if diagnostic.code() == "ORNA-A091-009"
     ));
     for (table, id) in [
         ("Org", 1),
@@ -1282,7 +1282,7 @@ fn module_decimal_assertion_rejects_nonmatching_candidate_and_rolls_back_all_wri
         matches!(
             &outcome,
             StageOutcome::Failed(diagnostic)
-                if diagnostic.code() == "ORNA-EVAL-MODULE-ASSERT"
+                if diagnostic.code() == "ORNA-A091-009"
         ),
         "nonmatching Decimal candidate did not fail module assertion: {outcome:?}"
     );
@@ -1326,7 +1326,7 @@ fn table_assertions_precede_module_assertions_and_abort_the_candidate_database()
 
     assert!(matches!(
         outcome,
-        StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-TABLE-ASSERT"
+        StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-A091-009"
     ));
     assert_eq!(runtime.committed_row("Book", &Value::int(7.into())), None);
     assert_eq!(runtime.committed_row("Loan", &Value::int(1.into())), None);

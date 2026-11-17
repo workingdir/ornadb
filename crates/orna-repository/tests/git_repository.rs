@@ -1540,13 +1540,17 @@ fn divergent_checkout_logical_validation_rejection_fences_git_mutation() {
                     observed.expected_head().cloned()
                 );
                 assert_eq!(observed.target().branch_name(), Some("experiment"));
-                Err(orna_repository::CandidateAssertionRefusal::AssertionFalse(
-                    None,
-                ))
+                Err(orna_repository::CandidateAssertionRefusal::AssertionFalse {
+                    site: None,
+                    witness: None,
+                })
             })
         ),
         Err(orna_repository::RepositoryError::CandidateAssertionRefused(
-            orna_repository::CandidateAssertionRefusal::AssertionFalse(None)
+            orna_repository::CandidateAssertionRefusal::AssertionFalse {
+                site: None,
+                witness: None,
+            }
         ))
     ));
     assert_eq!(
@@ -2416,13 +2420,17 @@ fn checkout_discard_set_logical_validation_rejection_fences_force_admission() {
                     observed.expected_head().cloned()
                 );
                 assert_eq!(observed.target().branch_name(), Some("experiment"));
-                Err(orna_repository::CandidateAssertionRefusal::AssertionFalse(
-                    None,
-                ))
+                Err(orna_repository::CandidateAssertionRefusal::AssertionFalse {
+                    site: None,
+                    witness: None,
+                })
             }),
         ),
         Err(orna_repository::RepositoryError::CandidateAssertionRefused(
-            orna_repository::CandidateAssertionRefusal::AssertionFalse(None)
+            orna_repository::CandidateAssertionRefusal::AssertionFalse {
+                site: None,
+                witness: None,
+            }
         ))
     ));
     assert_eq!(
