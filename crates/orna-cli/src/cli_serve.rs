@@ -21,9 +21,9 @@ use crate::media_range::{MediaMethod, media_reply};
 use orna_application::ApplicationLiveAdapter;
 use orna_cli_support::encoding::percent_decode;
 use orna_live::{
-    LiveHost, LiveSessionAuthority, LiveTransport, SessionMetadata, SystemCredentialIssuer,
-    TransportLimits, WebSocketApplicationPreparation, WebSocketOutput, WebSocketState,
-    WebSocketUpgrade, WireRequest, WireResponse, encode_websocket_output,
+    ListenerExposure, LiveHost, LiveSessionAuthority, LiveTransport, SessionMetadata,
+    SystemCredentialIssuer, TransportLimits, WebSocketApplicationPreparation, WebSocketOutput,
+    WebSocketState, WebSocketUpgrade, WireRequest, WireResponse, encode_websocket_output,
 };
 use orna_protocol::{Envelope, Limits as ProtocolLimits, Message, PresentationContext};
 use orna_repository::{GitCommitRef, ManagedPath, Repository, RuntimeGeneration};
@@ -34,7 +34,7 @@ use orna_serving::Serving;
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::{self, BufRead, BufReader, Read, Write},
-    net::{Shutdown, SocketAddr, TcpListener, TcpStream},
+    net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
@@ -224,22 +224,44 @@ impl Silence {
     }
 }
 
-/// The names under which a loopback listener is its own origin: the IPv4 and
-/// IPv6 loopback literals and `localhost`, each with the bound port. Any other
-/// Host is a name that the peer resolved to this listener by itself, for
-/// example through DNS rebinding, and is refused.
+/// The names under which a serving listener is its own origin. A loopback
+/// listener answers to the IPv4 and IPv6 loopback literals and `localhost`; an
+/// exposed listener answers only to its interface literal. Each name carries
+/// the bound port. Any other Host is a name that the peer resolved to this
+/// listener by itself, for example through DNS rebinding, and is refused.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct LoopbackAuthority {
+struct ServingAuthority {
     port: u16,
+    /// The interface an exposed listener is bound to, or `None` for loopback.
+    interface: Option<IpAddr>,
 }
 
-impl LoopbackAuthority {
-    const HOSTS: [&'static str; 3] = ["127.0.0.1", "localhost", "[::1]"];
+impl ServingAuthority {
+    const LOOPBACK_HOSTS: [&'static str; 3] = ["127.0.0.1", "localhost", "[::1]"];
+
+    /// The authority of the listener bound at `address`.
+    fn for_listener(address: SocketAddr) -> Self {
+        Self {
+            port: address.port(),
+            interface: (!address.ip().is_loopback()).then(|| address.ip()),
+        }
+    }
+
+    fn hosts(self) -> Vec<String> {
+        match self.interface {
+            None => Self::LOOPBACK_HOSTS
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            Some(IpAddr::V4(address)) => vec![address.to_string()],
+            Some(IpAddr::V6(address)) => vec![format!("[{address}]")],
+        }
+    }
 
     fn authorities(self) -> impl Iterator<Item = String> {
-        Self::HOSTS.into_iter().flat_map(move |host| {
+        self.hosts().into_iter().flat_map(move |host| {
             // Host and Origin omit the scheme's default port (RFC 9110).
-            let implicit_port = (self.port == 80).then(|| host.to_owned());
+            let implicit_port = (self.port == 80).then(|| host.clone());
             std::iter::once(format!("{host}:{}", self.port)).chain(implicit_port)
         })
     }
@@ -297,7 +319,7 @@ fn is_same_origin(origin: &str, host: &str) -> bool {
 struct ServeState {
     root: PathBuf,
     identity: RuntimeIdentity,
-    loopback: LoopbackAuthority,
+    authority: ServingAuthority,
     options: ServeOptions,
     transport_limits: TransportLimits,
     /// The live transport and its HTTP session adapters, locked for one
@@ -531,19 +553,89 @@ impl Response {
     }
 }
 
-pub(super) fn run(endpoint: &Endpoint, port: u16, allow_push: bool) -> Result<(), Diagnostic> {
+/// Checks the operator's `serve --bind` and `--expose` choice before anything
+/// binds. Binding beyond loopback MUST be explicit (ORNA-SERVE-006), so a
+/// non-loopback address needs `--expose`. A wildcard address is refused: the
+/// Host and Origin allowlist cannot name every interface a wildcard accepts.
+fn check_serve_exposure(bind: IpAddr, expose: bool) -> Result<(), Diagnostic> {
+    if bind.is_unspecified() {
+        return Err(Diagnostic::usage(
+            "ORNA-CMD-ARGUMENT-INVALID",
+            "`serve --bind` names a wildcard address",
+            "name the interface address to expose, for example `serve --bind 192.0.2.10 --expose`",
+        ));
+    }
+    match (bind.is_loopback(), expose) {
+        (true, false) if bind == IpAddr::V4(Ipv4Addr::LOCALHOST) => Ok(()),
+        (true, false) => Err(Diagnostic::usage(
+            "ORNA-CMD-ARGUMENT-INVALID",
+            "`serve --bind` loopback address must be 127.0.0.1",
+            "omit `--bind` for the loopback default",
+        )),
+        (true, true) => Err(Diagnostic::usage(
+            "ORNA-CMD-ARGUMENT-INVALID",
+            "`serve --expose` needs a non-loopback `--bind` address",
+            "omit `--expose` to serve on loopback only",
+        )),
+        (false, false) => Err(Diagnostic::usage(
+            "ORNA-CMD-ARGUMENT-INVALID",
+            "`serve --bind` names a non-loopback address without `--expose`",
+            "add `--expose` to serve on that interface; the transport is plain HTTP, so terminate TLS at a trusted perimeter",
+        )),
+        (false, true) => Ok(()),
+    }
+}
+
+/// The status line `serve` prints once its listener is bound. An exposed
+/// listener names its interface and states that the transport is plain HTTP
+/// (ORNA-SERVE-006).
+fn serving_status(
+    root: &Path,
+    address: SocketAddr,
+    exposure: ListenerExposure,
+    allow_push: bool,
+) -> String {
+    let push = if allow_push { "; Git push enabled" } else { "" };
+    match exposure {
+        ListenerExposure::Loopback | ListenerExposure::Explicit => {
+            format!(
+                "Serving {} at http://{address} (loopback{push})",
+                root.display()
+            )
+        }
+        ListenerExposure::Exposed => format!(
+            "Serving {} at http://{address} (EXPOSED on interface {}; plain HTTP without TLS, so TLS MUST be terminated by a trusted perimeter{push})",
+            root.display(),
+            address.ip()
+        ),
+    }
+}
+
+pub(super) fn run(
+    endpoint: &Endpoint,
+    port: u16,
+    bind: IpAddr,
+    expose: bool,
+    allow_push: bool,
+) -> Result<(), Diagnostic> {
+    check_serve_exposure(bind, expose)?;
     let clone = open_served_clone(endpoint)?;
-    let listener = LiveTransport::bind_default_listener(port).map_err(|_| {
+    let bound = if bind.is_loopback() {
+        LiveTransport::bind_default_listener(port)
+    } else {
+        LiveTransport::bind_exposed_listener(SocketAddr::new(bind, port))
+    };
+    let listener = bound.map_err(|_| {
         Diagnostic::target(
             "ORNA-CMD-REPOSITORY-UNAVAILABLE",
-            "the loopback serving listener could not be bound",
-            "choose a free port with `serve --port PORT`, then retry",
+            "the serving listener could not be bound",
+            "choose a free port with `serve --port PORT` and an interface address this host owns, then retry",
         )
     })?;
-    let address = listener.status().address;
+    let status = listener.status();
     let state = new_serve_state(
         clone,
-        address,
+        status.address,
         ServeOptions {
             allow_push,
             ..ServeOptions::default()
@@ -551,10 +643,8 @@ pub(super) fn run(endpoint: &Endpoint, port: u16, allow_push: bool) -> Result<()
     )?;
     writeln!(
         io::stdout().lock(),
-        "Serving {} at http://{} (loopback{})",
-        state.root.display(),
-        address,
-        if allow_push { "; Git push enabled" } else { "" }
+        "{}",
+        serving_status(&state.root, status.address, status.exposure, allow_push)
     )
     .map_err(|_| {
         Diagnostic::target(
@@ -807,13 +897,11 @@ fn new_serve_state(
         runtime,
         table_candidate_validator,
     } = clone;
-    let loopback = LoopbackAuthority {
-        port: listener_address.port(),
-    };
-    let origins = loopback.origins().map_err(|_| {
+    let authority = ServingAuthority::for_listener(listener_address);
+    let origins = authority.origins().map_err(|_| {
         Diagnostic::target(
             "ORNA-CMD-REPOSITORY-UNAVAILABLE",
-            "the loopback serving origin is invalid",
+            "the serving origin is invalid",
             "retry `serve` with a supported local listener",
         )
     })?;
@@ -879,7 +967,7 @@ fn new_serve_state(
     Ok(ServeState {
         root,
         identity,
-        loopback,
+        authority,
         options,
         transport_limits,
         sessions: Mutex::new(SessionState {
@@ -1149,7 +1237,7 @@ fn serve_connection(stream: TcpStream, state: &ServeState) -> io::Result<()> {
     // foreign or cross-origin request cannot make this host wait for or
     // buffer up to the route's body limit. This runs before the size check so
     // an oversize foreign request is refused as foreign, not sized.
-    if let Some(refusal) = state.loopback.refusal(&request) {
+    if let Some(refusal) = state.authority.refusal(&request) {
         return write_response(reader.get_mut(), refusal, transfer);
     }
     if body_length > request_body_limit(&request.path) {

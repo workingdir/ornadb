@@ -1571,15 +1571,18 @@ fn listener_policy_reports_loopback_rejects_exposure_and_releases_on_drop() {
     assert_eq!(listener.status().exposure, ListenerExposure::Loopback);
     assert!(address.ip().is_loopback());
 
+    // A wildcard is refused before anything binds (ORNA-SERVE-006).
     assert!(matches!(
-        LiveTransport::bind_explicit_listener(([0, 0, 0, 0], address.port()).into()),
-        Err(ListenerBindError::NonLoopback)
+        LiveTransport::bind_exposed_listener(([0, 0, 0, 0], address.port()).into()),
+        Err(ListenerBindError::Unspecified)
     ));
 
     drop(listener);
     let _released = TcpListener::bind(address).unwrap();
 
-    let listener = LiveTransport::bind_explicit_listener(([127, 0, 0, 1], 0).into()).unwrap();
+    // A loopback address passed through the exposed path stays loopback and is
+    // reported as an explicit, not an exposed, listener.
+    let listener = LiveTransport::bind_exposed_listener(([127, 0, 0, 1], 0).into()).unwrap();
     assert_eq!(listener.status().exposure, ListenerExposure::Explicit);
     assert!(listener.status().address.ip().is_loopback());
 }

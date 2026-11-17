@@ -5275,6 +5275,10 @@ pub enum ListenerExposure {
     Loopback,
     /// An address deliberately selected by the operator.
     Explicit,
+    /// A non-loopback interface address the operator explicitly exposed. The
+    /// transport serves plaintext HTTP, so TLS must come from the trusted
+    /// perimeter (ORNA-TRUST-002).
+    Exposed,
 }
 
 /// The address and exposure class that a bound live listener reports to its
@@ -5326,14 +5330,14 @@ impl LiveListener {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ListenerBindError {
     Bind,
-    NonLoopback,
+    Unspecified,
 }
 
 impl core::fmt::Display for ListenerBindError {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter.write_str(match self {
             Self::Bind => "live listener bind failed",
-            Self::NonLoopback => "live listener requires TLS for non-loopback exposure",
+            Self::Unspecified => "live listener requires a specific interface address",
         })
     }
 }
@@ -6080,21 +6084,30 @@ impl LiveTransport {
         )
     }
 
-    /// Binds a loopback listener at an address explicitly selected by the
-    /// operator. Non-loopback addresses fail before binding because this
-    /// transport boundary does not own TLS.
+    /// Binds a listener at a non-loopback interface address that the operator
+    /// explicitly exposed. Loopback addresses bind as [`ListenerExposure::Explicit`].
+    /// Unspecified (wildcard) addresses are refused: a wildcard listener cannot
+    /// bound its Host and Origin allowlist without enumerating interfaces.
+    ///
+    /// The transport serves plaintext HTTP; TLS must be terminated by the trusted
+    /// perimeter before exposure beyond loopback (ORNA-TRUST-002).
     ///
     /// # Errors
     ///
-    /// Returns a redacted bind error when the requested listener is not
-    /// loopback or cannot be created.
-    pub fn bind_explicit_listener(
+    /// Returns a redacted bind error when the address is unspecified or cannot be
+    /// created.
+    pub fn bind_exposed_listener(
         address: SocketAddr,
     ) -> std::result::Result<LiveListener, ListenerBindError> {
-        if !address.ip().is_loopback() {
-            return Err(ListenerBindError::NonLoopback);
+        if address.ip().is_unspecified() {
+            return Err(ListenerBindError::Unspecified);
         }
-        Self::bind_listener(address, ListenerExposure::Explicit)
+        let exposure = if address.ip().is_loopback() {
+            ListenerExposure::Explicit
+        } else {
+            ListenerExposure::Exposed
+        };
+        Self::bind_listener(address, exposure)
     }
 
     fn bind_listener(

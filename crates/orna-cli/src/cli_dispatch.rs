@@ -29,7 +29,12 @@ pub(super) fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
             print_semantic_legend(*format, *limit);
             Ok(())
         }
-        Command::Serve { port, allow_push } => cli_serve::run(endpoint, *port, *allow_push),
+        Command::Serve {
+            port,
+            bind,
+            expose,
+            allow_push,
+        } => cli_serve::run(endpoint, *port, *bind, *expose, *allow_push),
         Command::Mount {
             mountpoint,
             selector,
