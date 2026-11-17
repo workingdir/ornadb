@@ -169,8 +169,16 @@ says so. Only a failure to read that list too is reported as `drafts could not b
 list was read), `drafts_truncated` and `drafts_omitted` (how many drafts the daemon did
 not list), `unresolved_drafts` (an array of `{"path","code","draft","detail"}` for each
 listed unresolved draft of a writable mount; `code` and `draft` are strings or `null`),
-and `draft_error` (a string when drafts could not be listed, else `null`). `read_only`
-is always the negation of `writable`.
+`draft_error` (a string when drafts could not be listed, else `null`),
+`row_diagnostics` (an array of `{"path","code","message"}`, one for each row or table
+whose projection failed to load; `code` is the exact `sys.*` cause or `null`),
+`row_diagnostics_omitted` (how many the daemon did not list) and `row_diagnostic_error`
+(a string when they could not be listed, else `null`). `read_only` is always the
+negation of `writable`.
+
+The human output prints one `  row diagnostic PATH code CODE: MESSAGE` line per entry
+after the draft lines, and `  row diagnostics could not be listed: REASON` when the list
+cannot be read. Each mount serves its row diagnostics, read-only or writable.
 
 ## Boundary
 

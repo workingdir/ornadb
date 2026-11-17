@@ -1,17 +1,20 @@
+use orna_sys::SysFailureCode;
+
 use super::{
     Arc, BTreeMap, BlobCandidate, BlobField, CandidateSnapshot, ContentIdentity, Directory,
     DirectoryEntry, FileAttr, FileType, Format3Context, FsNode, GitHashAlgorithm, GraphError,
     HashMap, HashSet, INodeNo, KeyDirectory, KeyRange, MountWriter, NativeGraphContext, NativeOid,
     NestedDirectory, NestedEntries, NodeKind, OsStr, OsString, ROOT_INODE, ROW_PAGE_LIMIT, Raw,
-    ResolvedTableSchema, RowDirectory, RowLoadError, RowLoadState, RowMapSnapshot, RowSaveContext,
-    RuntimeTableIdentity, SnapshotPin, StoredFieldLayout, TableDirectory, TableObjectId,
-    TableSource, TypedKey, UNIX_EPOCH, VfsComponent, VfsRowProjection, VfsStoredField,
-    admit_accepted_replacement, blob_metadata_from_raw, decode_canonical_storage_value,
-    flatten_key_components, has_nested_children, is_optional_field, key_component,
-    large_text_payload, nested_entries, nested_entry, nested_leaf_text, nested_value_at,
-    project_colliding_table_component, project_component, render_stored_source_value,
-    row_save_context, runtime_table_key_bytes, select_runtime_row_fields, selected_blob_payload,
-    selects_blob, stored_field_layout, stored_value_is_null, unproject_component,
+    ResolvedTableSchema, RowDiagnostics, RowDirectory, RowLoadError, RowLoadState, RowMapSnapshot,
+    RowSaveContext, RuntimeTableIdentity, SnapshotPin, StoredFieldLayout, TableDirectory,
+    TableObjectId, TableSource, TypedKey, UNIX_EPOCH, VfsComponent, VfsRowProjection,
+    VfsStoredField, admit_accepted_replacement, blob_metadata_from_raw,
+    decode_canonical_storage_value, flatten_key_components, has_nested_children, is_optional_field,
+    key_component, large_text_payload, nested_entries, nested_entry, nested_leaf_text,
+    nested_value_at, project_colliding_table_component, project_component,
+    render_stored_source_value, row_save_context, runtime_table_key_bytes,
+    select_runtime_row_fields, selected_blob_payload, selects_blob, stored_field_layout,
+    stored_value_is_null, unproject_component,
 };
 
 pub(crate) struct FsBuilder {
@@ -30,6 +33,8 @@ pub(crate) struct FsBuilder {
     /// Inodes of projected source modules and their directories. A table path
     /// that reaches one of these yields to the source path (profiles/vfs-1.md).
     pub(crate) source_nodes: HashSet<u64>,
+    /// Projections that failed and have not since succeeded (ORNA-VFS-005).
+    pub(crate) row_diagnostics: RowDiagnostics,
 }
 
 impl FsBuilder {
@@ -51,6 +56,7 @@ impl FsBuilder {
             superseded_nodes: HashSet::new(),
             retired_names: HashMap::new(),
             source_nodes: HashSet::new(),
+            row_diagnostics: RowDiagnostics::default(),
         }
     }
 
@@ -676,10 +682,12 @@ impl FsBuilder {
                 {
                     row.state = RowLoadState::Ready;
                 }
+                self.row_diagnostics.clear(inode);
             }
             // A transient failure leaves the row Unloaded, so the next access retries it.
             Err(RowLoadError::Transient(error)) => {
                 eprintln!("FUSE row projection deferred: {error}");
+                self.record_row_failure(inode, error);
             }
             Err(RowLoadError::Fatal(error)) => {
                 if let Some(NodeKind::Row(row)) =
@@ -688,9 +696,24 @@ impl FsBuilder {
                     row.state = RowLoadState::Failed(error.clone());
                 }
                 eprintln!("FUSE row projection failed: {error}");
+                self.record_row_failure(inode, error);
             }
         }
         result
+    }
+
+    /// Records why the projection of the row or table at `inode` failed. The exact
+    /// `sys.*` code is named when the failure message is one.
+    pub(crate) fn record_row_failure(&mut self, inode: u64, error: &str) {
+        let code = SysFailureCode::parse(error).map(SysFailureCode::as_str);
+        let path = self.display_path(inode);
+        self.row_diagnostics.record(inode, path, code, error);
+    }
+
+    /// The recorded projection failures of nodes still in the mount, for `mount status`.
+    pub(crate) fn render_row_diagnostics(&self) -> String {
+        self.row_diagnostics
+            .render(|inode| self.nodes.contains_key(&inode))
     }
 
     pub(crate) fn row_file_specs(

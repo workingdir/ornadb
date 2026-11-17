@@ -147,6 +147,12 @@ pub fn unresolved_draft_fields(mountpoint: &Path) -> Result<String, rustix::io::
     read_draft_xattr(mountpoint, XATTR_UNRESOLVED_DRAFT_FIELDS)
 }
 
+/// The failed row and table projections of a live mount, one `path<TAB>code<TAB>message`
+/// line each, for `mount status` (ORNA-VFS-005).
+pub fn row_diagnostic_list(mountpoint: &Path) -> Result<String, rustix::io::Errno> {
+    read_draft_xattr(mountpoint, XATTR_ROW_DIAGNOSTICS)
+}
+
 /// Why stop-time draft retention did not finish (ORNA-VFS-024).
 pub enum DraftRetentionStop {
     /// Recovery storage could not keep a draft; the mount stays up and the stop retries.

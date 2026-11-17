@@ -249,6 +249,9 @@ impl WorkspaceFilesystem {
                 .collect(),
         );
         let mut runtime_tables = BTreeMap::new();
+        // A runtime layout that cannot be resolved leaves its table without a runtime
+        // projection; the failure is reported on the table's diagnostic (ORNA-VFS-005).
+        let mut runtime_layout_errors = BTreeMap::new();
         if let Some(writer) = &builder.writer {
             // Every committed table is admitted under its pinned declaration name,
             // the name its row mutations address. The HEAD layout only gates the
@@ -262,15 +265,20 @@ impl WorkspaceFilesystem {
                 let runtime_table =
                     RuntimeTableIdentity::new(pinned_schema.qualified_name(), table_id)
                         .map_err(|error| format!("runtime table identity is invalid: {error:?}"))?;
-                let runtime_field_layout = loader
-                    .resolve_committed_source_table_schema(
-                        repository,
-                        &writer.runtime_commit,
-                        table_id,
-                    )
-                    .ok()
-                    .map(|runtime_schema| stored_field_layout(runtime_schema.descriptor()))
-                    .transpose()?;
+                let runtime_field_layout = match loader.resolve_committed_source_table_schema(
+                    repository,
+                    &writer.runtime_commit,
+                    table_id,
+                ) {
+                    Ok(runtime_schema) => Some(stored_field_layout(runtime_schema.descriptor())?),
+                    Err(error) => {
+                        runtime_layout_errors.insert(
+                            *relation_id,
+                            format!("runtime field layout could not be resolved: {error:?}"),
+                        );
+                        None
+                    }
+                };
                 activation_tables.push(runtime_table.clone());
                 runtime_tables.insert(*relation_id, (runtime_table, runtime_field_layout));
             }
@@ -308,6 +316,9 @@ impl WorkspaceFilesystem {
                 schema.binding().module_name().unwrap_or_default(),
                 schema.declaration_name(),
             )?;
+            if let Some(error) = runtime_layout_errors.remove(&relation_id) {
+                builder.record_row_failure(table_directory, &error);
+            }
             let field_names = field_names_for_table(&identities, &qualified_name);
             let rows = context
                 .load_row_map(relation_id)

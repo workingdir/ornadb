@@ -24,6 +24,7 @@ impl Filesystem for WorkspaceFilesystem {
             }
             Some(XATTR_UNRESOLVED_DRAFT_LIST) => self.unresolved_draft_report().into_bytes(),
             Some(XATTR_UNRESOLVED_DRAFT_FIELDS) => self.unresolved_draft_fields().into_bytes(),
+            Some(XATTR_ROW_DIAGNOSTICS) => self.row_diagnostic_report().into_bytes(),
             _ => {
                 reply.error(Errno::ENODATA);
                 return;
