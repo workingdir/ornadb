@@ -523,7 +523,7 @@ async fn durable_function_value_table_assertion_commits_and_rolls_back_candidate
         matches!(
             &invalid_outcome,
             StageOutcome::Failed(diagnostic)
-                if diagnostic.code() == "ORNA-EVAL-TABLE-ASSERT"
+                if diagnostic.code() == "ORNA-A091-009"
         ),
         "invalid candidate must retain the table assertion diagnostic: {invalid_outcome:?}"
     );

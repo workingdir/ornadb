@@ -13,9 +13,10 @@ pub(super) struct TransactionalTableCandidateValidator {
     /// Tables whose primary keys admission could not lower (bead ornadb-gq4g).
     /// A check that reads one of them is refused, never skipped.
     pub(super) unsupported: BTreeSet<String>,
-    /// Owner and span of the module assertion the last `validate_changed` found
-    /// false; the commit gate reads it to name the refusal (ORNA-A091-009).
-    pub(super) refused_module_assertion: Option<String>,
+    /// The site and, for a table assertion, the witness of the assertion the
+    /// last `validate_changed` found false; the commit gate reads it to name the
+    /// refusal (ORNA-A091-009).
+    pub(super) refused_assertion: Option<orna_runtime::FalseAssertion>,
 }
 
 /// Reports whether any committed module declares a table-level or module-level
@@ -239,7 +240,7 @@ impl TransactionalTableCandidateValidator {
             limits,
             tables: tables.into_iter().collect(),
             unsupported: BTreeSet::new(),
-            refused_module_assertion: None,
+            refused_assertion: None,
         }
     }
 }
@@ -261,8 +262,8 @@ impl TableActivationCandidateValidator for TransactionalTableCandidateValidator 
         self.validate_changed(rows, &all)
     }
 
-    fn failed_module_assertion(&self) -> Option<String> {
-        self.refused_module_assertion.clone()
+    fn failed_assertion(&self) -> Option<orna_runtime::FalseAssertion> {
+        self.refused_assertion.clone()
     }
 
     fn validate_changed(
@@ -270,7 +271,7 @@ impl TableActivationCandidateValidator for TransactionalTableCandidateValidator 
         rows: &orna_runtime::RuntimeTableRows,
         changed_tables: &BTreeSet<String>,
     ) -> Result<(), SafeDiagnostic> {
-        self.refused_module_assertion = None;
+        self.refused_assertion = None;
         let mut budget = StepBudget::new(self.limits.max_steps);
         for (table, assertions) in &self.table_assertions {
             if self.unsupported.contains(table) {
@@ -289,6 +290,10 @@ impl TableActivationCandidateValidator for TransactionalTableCandidateValidator 
                     )
                     .map_err(|_| table_evaluation_diagnostic())?;
                     if !matches!(value.raw(), OvbRaw::Bool(true)) {
+                        self.refused_assertion = Some(orna_runtime::FalseAssertion {
+                            site: Some(assertion_site(assertion)),
+                            witness: None,
+                        });
                         return Err(table_assertion_diagnostic());
                     }
                     continue;
@@ -324,12 +329,24 @@ impl TableActivationCandidateValidator for TransactionalTableCandidateValidator 
                     match kind {
                         TableAssertionKind::Every if matches!(value.raw(), OvbRaw::Bool(true)) => {}
                         TableAssertionKind::Every => {
+                            self.refused_assertion = Some(table_assertion_refusal(
+                                assertion,
+                                table,
+                                key,
+                                &self.candidate_key_fields,
+                            ));
                             return Err(table_assertion_diagnostic());
                         }
                         TableAssertionKind::AllUnique => {
                             let projection =
                                 value.encode().map_err(|_| table_evaluation_diagnostic())?;
                             if !projections.insert(projection) {
+                                self.refused_assertion = Some(table_assertion_refusal(
+                                    assertion,
+                                    table,
+                                    key,
+                                    &self.candidate_key_fields,
+                                ));
                                 return Err(table_assertion_diagnostic());
                             }
                         }
@@ -383,7 +400,10 @@ impl TableActivationCandidateValidator for TransactionalTableCandidateValidator 
                 )
                 .map_err(|_| table_evaluation_diagnostic())?;
                 if !matches!(value.raw(), OvbRaw::Bool(true)) {
-                    self.refused_module_assertion = Some(assertion_site(&assertion));
+                    self.refused_assertion = Some(orna_runtime::FalseAssertion {
+                        site: Some(assertion_site(&assertion)),
+                        witness: None,
+                    });
                     return Err(table_assertion_diagnostic());
                 }
             }

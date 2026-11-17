@@ -215,6 +215,80 @@ pub(super) fn candidate_key_components(
     Ok(components)
 }
 
+/// Renders the deterministic witness of a false table assertion (ORNA-ASSERT-053):
+/// the failing row named by its key components. Only `Null`, `Bool`, `Int` and
+/// `Text` key components are presentable (ORNA-ASSERT-054); a key with any other
+/// component, or one that cannot be read, yields no witness rather than a partial
+/// identity. Text is rendered with Rust's escaping so the output is one line.
+pub(super) fn table_assertion_witness(
+    table: &str,
+    key: &[u8],
+    key_fields: &TableFields,
+) -> Option<String> {
+    let key_names = key_fields.get(table)?;
+    let components = candidate_key_components(key, key_names).ok()?;
+    let mut rendered = Vec::with_capacity(components.len());
+    for (name, component) in key_names.iter().zip(&components) {
+        let value = match component {
+            OvbRaw::Null => "null".to_owned(),
+            OvbRaw::Bool(value) => value.to_string(),
+            OvbRaw::Int(value) => value.to_string(),
+            OvbRaw::Text(value) => format!("{value:?}"),
+            _ => return None,
+        };
+        rendered.push(format!("{name} = {value}"));
+    }
+    Some(format!("table {table:?} row ({})", rendered.join(", ")))
+}
+
+/// The refusal record for a table assertion that failed on the row with `key`:
+/// its site and, when presentable, the row's witness (ORNA-A091-009).
+pub(super) fn table_assertion_refusal(
+    assertion: &AdmittedAssertion,
+    table: &str,
+    key: &[u8],
+    key_fields: &TableFields,
+) -> orna_runtime::FalseAssertion {
+    orna_runtime::FalseAssertion {
+        site: Some(assertion_site(assertion)),
+        witness: table_assertion_witness(table, key, key_fields),
+    }
+}
+
+/// The error for a false assertion, coded `ORNA-A091-009` (ORNA-ASSERT-053): its
+/// site, then the witness when one is presentable.
+pub(super) fn assertion_false_error(failed: &orna_runtime::FalseAssertion) -> EvaluationError {
+    let mut message = match &failed.site {
+        Some(site) => format!("{site} is false"),
+        None => "assertion is false".to_owned(),
+    };
+    if let Some(witness) = &failed.witness {
+        message.push_str("; witness: ");
+        message.push_str(witness);
+    }
+    EvaluationError::false_assertion(
+        SafeText::new("ORNA-A091-009").expect("static assertion code"),
+        SafeText::new(message).expect("bounded assertion message"),
+    )
+}
+
+/// The diagnostic for a candidate the validator rejected. A false assertion
+/// reports `ORNA-A091-009` with the site and witness the validator recorded;
+/// any other rejection keeps the transaction code.
+pub(super) fn validation_failure_diagnostic(
+    diagnostic: SafeDiagnostic,
+    validator: &TransactionalTableCandidateValidator,
+) -> Diagnostic {
+    match validator.refused_assertion.as_ref() {
+        Some(failed) if is_table_assertion_false(diagnostic) => {
+            assertion_false_error(failed).diagnostic().clone()
+        }
+        _ => transaction_error("ORNA-EVAL-TABLE-ASSERT")
+            .diagnostic()
+            .clone(),
+    }
+}
+
 /// Rebuilds every candidate row as a named map, key components included, so
 /// module assertions bind fields by name exactly as table assertions do.
 pub(super) fn named_candidate_rows(

@@ -8,9 +8,14 @@ pub(super) fn validate_table_assertions(
     activation: &TransactionActivation<'_>,
     assertions: &TableAssertions,
     functions: &Functions,
+    key_fields: &TableKeys,
     limits: EvaluatorLimits,
     budget: &mut StepBudget,
 ) -> Result<(), EvaluationError> {
+    let key_names: TableFields = key_fields
+        .iter()
+        .map(|(table, key)| (table.clone(), key.fields.clone()))
+        .collect();
     for (table, assertions) in assertions {
         for assertion in assertions {
             if table_assertion_function(&assertion.expression, functions).is_some() {
@@ -24,14 +29,17 @@ pub(super) fn validate_table_assertions(
                     &mut effects,
                 )?;
                 if !matches!(value.raw(), OvbRaw::Bool(true)) {
-                    return Err(transaction_error("ORNA-EVAL-TABLE-ASSERT"));
+                    return Err(assertion_false_error(&orna_runtime::FalseAssertion {
+                        site: Some(assertion_site(assertion)),
+                        witness: None,
+                    }));
                 }
                 continue;
             }
             let (kind, binding, predicate) = table_assertion_predicate(&assertion.expression)?;
             let mut projections = BTreeSet::new();
             let mut candidate_rows = 0usize;
-            for (_, row) in activation
+            for (key, row) in activation
                 .candidate_relation(table)
                 .map_err(|error| transaction_error(table_error_code(error)))?
             {
@@ -54,7 +62,12 @@ pub(super) fn validate_table_assertions(
                     TableAssertionKind::Every => match value.raw() {
                         OvbRaw::Bool(true) => {}
                         OvbRaw::Bool(false) => {
-                            return Err(transaction_error("ORNA-EVAL-TABLE-ASSERT"));
+                            return Err(assertion_false_error(&table_assertion_refusal(
+                                assertion,
+                                table,
+                                key.as_ref(),
+                                &key_names,
+                            )));
                         }
                         _ => return Err(transaction_error("ORNA-EVAL-TABLE-ASSERT")),
                     },
@@ -63,7 +76,12 @@ pub(super) fn validate_table_assertions(
                             .encode()
                             .map_err(|_| transaction_error("ORNA-EVAL-TABLE-ASSERT"))?;
                         if !projections.insert(encoded) {
-                            return Err(transaction_error("ORNA-EVAL-TABLE-ASSERT"));
+                            return Err(assertion_false_error(&table_assertion_refusal(
+                                assertion,
+                                table,
+                                key.as_ref(),
+                                &key_names,
+                            )));
                         }
                     }
                 }
@@ -95,7 +113,10 @@ pub(super) fn validate_module_assertions(
             0,
         )?;
         if !matches!(value.raw(), OvbRaw::Bool(true)) {
-            return Err(transaction_error("ORNA-EVAL-MODULE-ASSERT"));
+            return Err(assertion_false_error(&orna_runtime::FalseAssertion {
+                site: Some(assertion_site(assertion)),
+                witness: None,
+            }));
         }
     }
     Ok(())

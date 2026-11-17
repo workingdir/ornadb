@@ -361,8 +361,8 @@ impl TableActivationCandidateValidator for LiveSchemaCandidateValidator {
         self.inner.validate_changed(rows, changed_tables)
     }
 
-    fn failed_module_assertion(&self) -> Option<String> {
-        self.inner.failed_module_assertion()
+    fn failed_assertion(&self) -> Option<orna_runtime::FalseAssertion> {
+        self.inner.failed_assertion()
     }
 
     fn validate_content_pins(

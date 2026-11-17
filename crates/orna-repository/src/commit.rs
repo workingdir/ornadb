@@ -270,9 +270,16 @@ pub trait CandidateAssertionGate {
 /// Why the assertion gate refused a candidate commit.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CandidateAssertionRefusal {
-    /// A table or module assertion evaluated false over the serialized candidate.
-    /// Carries the module assertion's site; a table assertion carries none.
-    AssertionFalse(Option<String>),
+    /// A table or module assertion evaluated false over the serialized
+    /// candidate. Carries the assertion's site (ORNA-ASSERT-051) and, for a
+    /// table assertion over scalar keys, the presentable witness
+    /// (ORNA-ASSERT-053).
+    AssertionFalse {
+        /// The assertion's site, when it is presentable (ORNA-ASSERT-051).
+        site: Option<String>,
+        /// The offending table row, when its key is presentable (ORNA-ASSERT-053).
+        witness: Option<String>,
+    },
     /// Validation could not complete, so the candidate is refused whole. The
     /// string is the cause, which the E2300 title carries (ORNA-ASSERT-049).
     Unvalidated(String),

@@ -1511,7 +1511,7 @@ fn reference_project_runtime_adapter_reports_exactly_separate_evidence() {
             "invoke": "library.lend",
             "args": ["missing-book", "reader-2"],
             "expect": "cross-table assertion failure; no new loan",
-            "diagnostic_code": "ORNA-EVAL-MODULE-ASSERT"
+            "diagnostic_code": "ORNA-A091-009"
         },
         {
             "invoke": "warehouse.transfer",

@@ -1266,6 +1266,26 @@ impl EvaluationError {
         }
     }
 
+    /// Constructs the error for an assertion that evaluated false. Unlike
+    /// [`EvaluationError::redacted`], the diagnostic keeps `message`, which the
+    /// caller must have composed only from presentable text (the assertion site
+    /// and, when feasible, a deterministic witness; ORNA-ASSERT-053/054).
+    pub fn false_assertion(code: SafeText, message: SafeText) -> Self {
+        let canonical_code = code.as_str().to_owned();
+        Self {
+            diagnostic: Box::new(
+                Diagnostic::new(code, DiagnosticSeverity::Error, message)
+                    .expect("safe diagnostic code"),
+            ),
+            canonical: Some(
+                CanonicalErrorValue::new(canonical_code, "<redacted>", [], BTreeMap::new())
+                    .expect("false assertion error is canonical"),
+            ),
+            deliberate: false,
+            source: None,
+        }
+    }
+
     fn from_canonical(value: CanonicalErrorValue) -> Self {
         let mut diagnostic = Diagnostic::new(
             SafeText::new("ORNA-EVAL-ERROR").expect("static safe code"),

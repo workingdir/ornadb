@@ -90,7 +90,7 @@ fn deepest_nested_predicate_uses_the_current_family_continuation() {
         matches!(
             &outcome,
             StageOutcome::Failed(diagnostic)
-                if diagnostic.code() == "ORNA-EVAL-MODULE-ASSERT"
+                if diagnostic.code() == "ORNA-A091-009"
         ),
         "the blue family must reject an amber deepest proof: {outcome:?}"
     );
@@ -190,7 +190,7 @@ fn reused_named_predicate_continuations_reject_a_stale_family_capture() {
         matches!(
             &outcome,
             StageOutcome::Failed(diagnostic)
-                if diagnostic.code() == "ORNA-EVAL-MODULE-ASSERT"
+                if diagnostic.code() == "ORNA-A091-009"
         ),
         "blue must reject the proof accepted by the amber continuation: {:?}",
         match &outcome {

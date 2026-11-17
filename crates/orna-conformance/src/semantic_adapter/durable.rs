@@ -259,12 +259,10 @@ impl DurableTransactionalEvaluator {
         {
             Ok(_) => {}
             Err(TableActivationError::Runtime(error)) => return Err(error),
-            Err(TableActivationError::ValidationFailed(_)) => {
-                return Ok(StageOutcome::Failed(
-                    transaction_error("ORNA-EVAL-TABLE-ASSERT")
-                        .diagnostic()
-                        .clone(),
-                ));
+            Err(TableActivationError::ValidationFailed(diagnostic)) => {
+                return Ok(StageOutcome::Failed(validation_failure_diagnostic(
+                    diagnostic, &validator,
+                )));
             }
         }
         Ok(StageOutcome::Passed)
@@ -473,12 +471,9 @@ impl DurableTransactionalEvaluator {
         {
             Ok(_) => {}
             Err(TableActivationError::Runtime(error)) => return Err(error),
-            Err(TableActivationError::ValidationFailed(_)) => {
-                let outcome = StageOutcome::Failed(
-                    transaction_error("ORNA-EVAL-TABLE-ASSERT")
-                        .diagnostic()
-                        .clone(),
-                );
+            Err(TableActivationError::ValidationFailed(diagnostic)) => {
+                let outcome =
+                    StageOutcome::Failed(validation_failure_diagnostic(diagnostic, &validator));
                 return fail_observed_request_outcome(&state, request, fingerprint, lease, outcome)
                     .await;
             }
@@ -651,12 +646,9 @@ impl DurableTransactionalEvaluator {
             Err(TableActivationError::Runtime(error)) => {
                 RunningTableRequestDisposition::Fenced(error)
             }
-            Err(TableActivationError::ValidationFailed(_)) => {
-                let outcome = StageOutcome::Failed(
-                    transaction_error("ORNA-EVAL-TABLE-ASSERT")
-                        .diagnostic()
-                        .clone(),
-                );
+            Err(TableActivationError::ValidationFailed(diagnostic)) => {
+                let outcome =
+                    StageOutcome::Failed(validation_failure_diagnostic(diagnostic, &validator));
                 match fail_observed_request_outcome(
                     state,
                     continuation.identity(),
