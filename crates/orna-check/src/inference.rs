@@ -80,9 +80,12 @@ pub(crate) fn infer_field(
         return variant;
     }
     if let Some(path) = qualified_path(expr)
-        && (scope.modules.contains_key(path[0]) || module_member_namespace(&path, scope).is_some())
         && !local.contains_key(path[0])
     {
+        // A table is reached by its qualified name, the key the REPL admits it
+        // under. Any other member needs its root bound by `use` (ORNA-IMPORT-001);
+        // an unimported member falls through to the bare-name diagnostic, which
+        // names the `use` that would bring the module into scope.
         if let Some(table) = table_symbol(expr, scope, local) {
             return Inferred {
                 ty: Type::Relation(Box::new(table.ty.clone())),
@@ -93,7 +96,9 @@ pub(crate) fn infer_field(
                 },
             };
         }
-        return resolve_qualified_module_member(&path, scope, diagnostics);
+        if scope.modules.contains_key(path[0]) {
+            return resolve_qualified_module_member(&path, scope, diagnostics);
+        }
     }
     if let Some(path) = qualified_path(expr)
         && path.first() == Some(&"sys")
