@@ -11,14 +11,16 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use orna_evaluator::{
     ContextValueEffectHandler, ContextValueRelationPage, EffectHandler, EvaluationError,
-    RelationReadScope, StepBudget, invoke_named_with_context_effects,
+    RelationReadScope, StepBudget, SysHostContext, invoke_named_with_context_effects,
 };
 use orna_runtime::RuntimeTableRows;
 use orna_syntax_ast::Expr;
 use orna_value::{CanonicalValue, compare_primary_keys};
 use orna_value::{ContextValue, Format3Context, ValueFormat};
 
-use crate::{AdmittedApplication, ApplicationError, SourceMutationEffectHandler};
+use crate::{
+    AdmittedApplication, ApplicationAuthority, ApplicationError, SourceMutationEffectHandler,
+};
 
 /// Orders decoded primary-key rows and returns one bounded page.
 ///
@@ -222,9 +224,11 @@ impl ContextValueEffectHandler for SourceMutationEffectHandler {
 /// `context_rows` must name exactly the Blob-holding tables, and each of those
 /// tables must carry no canonical rows in `rows`. Only table scans are served:
 /// any other effect is declined, and a read that stages a mutation is refused.
-/// No system host is attached to this read.
-pub fn evaluate_contextual_page_read(
+/// `sys_host` is the authority's host context: `sys.rt.info()` on a page with a
+/// Blob table resolves exactly as it does on the canonical read path.
+fn evaluate_contextual_page_read(
     application: &AdmittedApplication,
+    sys_host: Option<&SysHostContext>,
     arguments: &BTreeMap<String, ContextValue>,
     mut rows: RuntimeTableRows,
     context_rows: BTreeMap<String, Vec<(Vec<u8>, ContextValue)>>,
@@ -290,7 +294,8 @@ pub fn evaluate_contextual_page_read(
         application.table_insert_defaults.clone(),
         application.functions.clone(),
         application.limits,
-    );
+    )
+    .with_sys_host_context(sys_host.cloned());
     handler.context_table_rows = context_table_rows;
     let mut budget = StepBudget::new(application.limits.max_steps);
     let value = invoke_named_with_context_effects(
@@ -306,6 +311,26 @@ pub fn evaluate_contextual_page_read(
         return Err(ApplicationError::ReadStagedMutation);
     }
     Ok(value)
+}
+
+impl ApplicationAuthority {
+    /// Evaluates the admitted entry as a contextual page read with this
+    /// authority's system host attached (see `evaluate_contextual_page_read`).
+    pub fn evaluate_contextual_page_read(
+        &self,
+        application: &AdmittedApplication,
+        arguments: &BTreeMap<String, ContextValue>,
+        rows: RuntimeTableRows,
+        context_rows: BTreeMap<String, Vec<(Vec<u8>, ContextValue)>>,
+    ) -> Result<ContextValue, ApplicationError> {
+        evaluate_contextual_page_read(
+            application,
+            self.sys_host.as_ref(),
+            arguments,
+            rows,
+            context_rows,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -451,6 +476,7 @@ mod tests {
         for (source, expected) in [(TWO_BLOB_SOURCE, 1), (TWO_BLOB_CLIP_SOURCE, 2)] {
             let result = evaluate_contextual_page_read(
                 &admit(source),
+                None,
                 &BTreeMap::new(),
                 RuntimeTableRows::from([
                     ("Media".to_owned(), Vec::new()),
@@ -526,6 +552,7 @@ mod tests {
             .expect("key bytes");
         let result = evaluate_contextual_page_read(
             &admit(BLOB_SOURCE),
+            None,
             &BTreeMap::new(),
             RuntimeTableRows::from([("Media".to_owned(), Vec::new())]),
             BTreeMap::from([(
@@ -561,6 +588,7 @@ mod tests {
     fn blob_table_without_context_rows_is_refused() {
         let result = evaluate_contextual_page_read(
             &admit(BLOB_SOURCE),
+            None,
             &BTreeMap::new(),
             RuntimeTableRows::from([("Media".to_owned(), Vec::new())]),
             BTreeMap::new(),
@@ -574,6 +602,7 @@ mod tests {
     fn context_rows_for_a_non_blob_table_are_refused() {
         let result = evaluate_contextual_page_read(
             &admit(NOTE_SOURCE),
+            None,
             &BTreeMap::new(),
             RuntimeTableRows::from([("Note".to_owned(), Vec::new())]),
             BTreeMap::from([("Note".to_owned(), Vec::new())]),
@@ -613,6 +642,7 @@ mod tests {
         );
         let result = evaluate_contextual_page_read(
             &admitted,
+            None,
             &BTreeMap::new(),
             RuntimeTableRows::from([("Note".to_owned(), Vec::new())]),
             BTreeMap::new(),
@@ -655,9 +685,14 @@ mod tests {
                 None,
             )
             .expect("canonical read");
-        let contextual =
-            evaluate_contextual_page_read(&application, &BTreeMap::new(), rows, BTreeMap::new())
-                .expect("contextual read");
+        let contextual = evaluate_contextual_page_read(
+            &application,
+            None,
+            &BTreeMap::new(),
+            rows,
+            BTreeMap::new(),
+        )
+        .expect("contextual read");
         assert_eq!(contextual.raw(), orna_value::Value::int(1.into()).raw());
         let canonical_bytes =
             orna_value::encode_canonical_storage_value(staged.value().raw()).expect("bytes");

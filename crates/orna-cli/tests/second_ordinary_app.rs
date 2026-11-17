@@ -301,6 +301,35 @@ fn tag_skeleton(fragment: &str) -> String {
     skeleton
 }
 
+/// Removes the runtime `<dl>` the devtools page renders directly after its
+/// table, after checking it holds every runtime label. The build id is a
+/// per-build value, so only the labels are pinned; the rest of the page is
+/// compared exactly by the caller.
+fn without_runtime_section(page: &str) -> String {
+    let table_start = page.find("<table>").expect("the page renders a table node");
+    let rest_start = table_start + table_fragment(&page[table_start..]).len();
+    let rest = &page[rest_start..];
+    assert!(
+        rest.starts_with("<dl>"),
+        "the runtime section follows the table: {rest}"
+    );
+    let end = rest.find("</dl>").expect("the runtime section is closed") + "</dl>".len();
+    let section = &rest[..end];
+    for label in [
+        "Language version",
+        "Implementation version",
+        "Build id",
+        "Read only",
+        "Serving",
+    ] {
+        assert!(
+            section.contains(&format!("<span class=\"label\">{label}</span>")),
+            "the runtime section shows {label}: {section}"
+        );
+    }
+    format!("{}{}", &page[..rest_start], &rest[end..])
+}
+
 /// Asserts `page` is exactly the renderer's fragments around the table node,
 /// and that the table node lists `tables`.
 fn assert_page_is_renderer_output(page: &str, prefix: &str, suffix: &str, tables: &[&str]) {
@@ -374,12 +403,8 @@ fn second_ordinary_app_uses_the_same_renderer_and_routes() {
 
     // Both pages are exactly the fragments `render_value_html` emits for their
     // declared node trees, and each lists only its own admitted tables.
-    assert_page_is_renderer_output(
-        &devtools.page.body,
-        DEVTOOLS_PREFIX,
-        DEVTOOLS_SUFFIX,
-        &["Note"],
-    );
+    let devtools_page = without_runtime_section(&devtools.page.body);
+    assert_page_is_renderer_output(&devtools_page, DEVTOOLS_PREFIX, DEVTOOLS_SUFFIX, &["Note"]);
     assert_page_is_renderer_output(
         &second.page.body,
         SECOND_PREFIX,

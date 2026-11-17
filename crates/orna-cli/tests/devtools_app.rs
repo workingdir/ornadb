@@ -778,6 +778,43 @@ fn devtools_lists_tables_runs_input_and_refreshes() {
 }
 
 #[test]
+// Specified: ORNA-SERVE-009; the default frontend exposes the runtime state after the tables.
+fn devtools_page_exposes_runtime_state() {
+    let snapshot = standard_snapshot();
+    let project = devtools_project(snapshot.path());
+    let (_server, address) = start(project.path());
+
+    let reply = get(&address, "/").expect("read the devtools page");
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let table = reply.body.find("<table").expect("the tables lead the page");
+    let runtime = reply
+        .body
+        .find("<dl>")
+        .expect("the runtime state is a details section");
+    assert!(table < runtime, "the tables lead the runtime section");
+    for label in [
+        "Language version",
+        "Implementation version",
+        "Build id",
+        "Read only",
+        "Serving",
+    ] {
+        assert!(
+            reply
+                .body
+                .contains(&format!("<span class=\"label\">{label}</span>")),
+            "the runtime section shows {label}"
+        );
+    }
+    assert!(
+        reply
+            .body
+            .contains("<span class=\"label\">Serving</span> <span class=\"value\">true</span>"),
+        "the serving runtime reports its own mode"
+    );
+}
+
+#[test]
 // Specified: Gate G / DESIGN S5a; a Run form posts one field and the route refuses other content types.
 fn run_action_requires_a_form_body() {
     let snapshot = standard_snapshot();
