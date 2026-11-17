@@ -4,7 +4,9 @@
 
 use orna_syntax_ast::SourceSpan as SyntaxSpan;
 
-use crate::{DefId, DefKind, Name, Program, Ty, TyKind, Visibility};
+use crate::{
+    Body, DefId, DefKind, ExprId, ExprKind, FieldRef, Name, Program, Ty, TyKind, Visibility,
+};
 
 use super::{BodyCheck, NotYetReason};
 
@@ -14,8 +16,74 @@ pub(super) const PRIVATE_READ_MESSAGE: &str =
 /// The message for a pattern binding a private nominal field outside its type's implementations.
 pub(super) const PRIVATE_PATTERN_MESSAGE: &str =
     "a private nominal field is bound by a pattern outside the implementations of its type";
+/// The message for a read of a refined type's base outside the implementations of that type.
+pub(super) const REFINED_BASE_READ_MESSAGE: &str =
+    "the base of a refined type is read outside the implementations of that type";
+/// The member name that reads a refined type's base value.
+pub(super) const REFINED_BASE_MEMBER: &str = "base";
+/// The message for an assignment to a refined type's base, which is read-only.
+pub(super) const REFINED_BASE_WRITE_MESSAGE: &str =
+    "the base of a refined type is read-only and cannot be assigned";
 
 impl BodyCheck<'_> {
+    /// The declared base of refined type `def`, or `None` when `def` is not a refined type.
+    pub(super) fn declared_refined_base(&self, def: DefId) -> Option<Ty> {
+        self.program
+            .defs
+            .get(def)
+            .and_then(|definition| match &definition.kind {
+                DefKind::Type(definition) => definition.refined_base,
+                _ => None,
+            })
+    }
+
+    /// The type of `.base` read from `resolved`: the declared base of its refined type, instantiated.
+    pub(super) fn refined_base_member_ty(&mut self, resolved: Ty) -> Result<Ty, NotYetReason> {
+        match self.kind_of(resolved) {
+            Some(TyKind::Adt(def, args)) => match self.declared_refined_base(def) {
+                Some(declared) => Ok(self.substitute(declared, &args)),
+                None => Err(NotYetReason::Unsupported(
+                    "the field `base` is not declared by this nominal type on HIR".into(),
+                )),
+            },
+            _ => Err(NotYetReason::Unsupported(
+                "a base read does not name a refined type on HIR".into(),
+            )),
+        }
+    }
+
+    /// Types `.base` read through `owner`, a refined instance of `def`, and rewrites the read to
+    /// [`FieldRef::Base`]. ORNA-NOMINAL-006 limits the read to nested implementations of `def`. A
+    /// refined value is represented by its base value, so the read yields the receiver unchanged.
+    pub(super) fn refined_base_read(
+        &mut self,
+        body: &mut Body,
+        id: ExprId,
+        base: ExprId,
+        owner: Ty,
+        def: DefId,
+        span: SyntaxSpan,
+    ) -> Result<Ty, NotYetReason> {
+        let Some(declared) = self.declared_refined_base(def) else {
+            return Err(NotYetReason::Unsupported(
+                "the field `base` is not declared by this nominal type on HIR".into(),
+            ));
+        };
+        if self.nominal_owners.implementation_owner.get(&self.owner) != Some(&def) {
+            self.reject(crate::diag::PRIVATE_FIELD, REFINED_BASE_READ_MESSAGE, span);
+            return Ok(self.error());
+        }
+        body.exprs[id].kind = ExprKind::Field {
+            base,
+            field: FieldRef::Base,
+        };
+        let resolved = self.resolved(owner);
+        match self.kind_of(resolved) {
+            Some(TyKind::Adt(_, args)) => Ok(self.substitute(declared, &args)),
+            _ => Ok(declared),
+        }
+    }
+
     /// One fresh unsolved variable per declared parameter of a generic type.
     /// Enums, tables and non-generic types take no arguments.
     pub(super) fn fresh_nominal_args(&mut self, def: DefId, span: &SyntaxSpan) -> Box<[Ty]> {

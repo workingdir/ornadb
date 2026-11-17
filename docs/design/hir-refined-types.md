@@ -1,6 +1,6 @@
 # Refined-type base access (P3c)
 
-Status: proposed. Owner decision needed before implementation. This document changes no code and no spec text.
+Status: decided (option i, see Decision below). Implemented in `orna-hir` typeck with `crates/orna-hir/tests/refined_base.rs`. This document changes no spec text.
 
 Source: [kernel-and-library.md](kernel-and-library.md), section P3c (lines 549-558) and gap G5 (line 208).
 
@@ -60,3 +60,17 @@ Acceptance criteria for the implementation PR (not this one):
 
 - Whether the current checker already accepts `self.base`. The G5 probe reference (`C:lib.rs:5224-5230`) was not re-run for this document.
 - Whether any `pub` refined type in the pinned stdlib would need `base` exposed under option iii. Not measured.
+
+## Decision
+
+Option i is adopted: a refined type exposes a read-only `base`, readable only as `self.base` inside the type's nested implementations (ORNA-NOMINAL-006). Reason, from the spec text in `reference/Orna-1.1.0/source/05-types.md` (ORNA-NOMINAL-003, ORNA-REFINE-001..003, and the line "The candidate base value is the assertion owner subject; it is not exposed as a general source variable"):
+
+- It is the conservative choice that keeps conversion explicit. A refined value is never widened into its base implicitly (`let x: Int = s;` is ORNA-INFER-011), and a base value is never narrowed into a refined type without the checked construction path (`let s: Score = n;` and `fn f(n: Int): Score = n;` are ORNA-INFER-011).
+- `base` is not a general source variable. Outside the nested implementations, `s.base` is rejected with ORNA-S021-TYPE, so the representation stays private to the type.
+- Option ii was rejected: `Int.from(p)` would need a checker special case that bypasses ORNA-CONVERT-001, which says the target owns its `From` implementations, and it does not give nested implementations general access.
+- Option iii was rejected: a public `base` on `pub` refined types exposes the representation to other modules and weakens ORNA-NOMINAL-003 and ORNA-NOMINAL-007.
+- Assignment to `base` is rejected with ORNA-S021-TYPE ("read-only"), even in a nested implementation.
+
+Spec changes: none. The `13-presentation.md:74-79` example is still unreconciled and remains a spec question for the owner.
+
+The `self`-subject assertion form (`assert self >= 0;`) keeps the candidate base typed as the base type. It is covered by the same test file.

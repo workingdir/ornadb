@@ -344,6 +344,10 @@ pub enum FieldRef {
     /// [`FieldRef::Index`]; until then it is the only total representation of
     /// `row.field` that keeps the written name.
     Name(crate::Name),
+    /// The base value of a refined type, read as `.base` from one of the
+    /// type's nested implementations. A refined value is represented by its
+    /// base value, so the read yields the receiver unchanged.
+    Base,
 }
 
 /// A place an assignment can write.

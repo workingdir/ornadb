@@ -744,8 +744,11 @@ impl Builder {
                 }
             }
         }
-        self.pending[def.index()].kind =
-            PendingKind::Built(DefKind::Type(TypeDef { params, members }));
+        self.pending[def.index()].kind = PendingKind::Built(DefKind::Type(TypeDef {
+            params,
+            members,
+            refined_base,
+        }));
     }
 
     /// Builds one protocol implementation.
