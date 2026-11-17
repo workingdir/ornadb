@@ -634,6 +634,7 @@ mod tests {
                 RuntimeTableRows::from([("Note".to_owned(), Vec::new())]),
                 None,
                 None,
+                None,
             )
             .expect("the canonical path stages the write");
         assert!(
@@ -681,6 +682,7 @@ mod tests {
                 &application,
                 &Environment::new(),
                 rows.clone(),
+                None,
                 None,
                 None,
             )

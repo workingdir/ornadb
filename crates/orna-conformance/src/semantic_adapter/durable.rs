@@ -20,6 +20,7 @@ pub struct DurableTransactionalEvaluator {
     pub(super) limits: EvaluatorLimits,
     pub(super) sys_host: Option<std::sync::Arc<SysHostAttachment>>,
     pub(super) catalogue: std::sync::Arc<Catalogue>,
+    pub(super) stored_references: Option<std::sync::Arc<orna_project::ReferenceCatalogue>>,
     #[cfg(test)]
     pub(super) activation_time_observer:
         Option<std::sync::Arc<std::sync::Mutex<Option<SystemTime>>>>,
@@ -107,6 +108,7 @@ impl DurableTransactionalEvaluator {
             limits,
             sys_host: None,
             catalogue: std::sync::Arc::new(Catalogue::authoritative_core()),
+            stored_references: None,
             #[cfg(test)]
             activation_time_observer: None,
         }

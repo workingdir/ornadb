@@ -108,6 +108,11 @@ impl ApplicationAuthority {
         let watermarks = automatic_id_watermarks(scope, &tables, &table_ids)?;
         let tables_for_storage = tables.clone();
         let ids_for_storage = table_ids.clone();
+        let references = crate::stored_reference::stored_reference_catalogue(
+            scope.snapshot.context().capture().database_id(),
+            &tables_for_storage,
+            &ids_for_storage,
+        )?;
         let mutations = SourceMutationEffectHandler::with_table_rows_and_table_object_ids(
             tables,
             captured_rows,
@@ -115,7 +120,8 @@ impl ApplicationAuthority {
         )?
         .with_insert_defaults(defaults, functions, self.limits)
         .with_automatic_id_watermarks(&watermarks)
-        .with_optional_publication_rows(scope.publication_rows.clone());
+        .with_optional_publication_rows(scope.publication_rows.clone())
+        .with_stored_references(references);
         let mut effects = ReplTransactionEffectHandler {
             bindings,
             mutations,
@@ -843,6 +849,13 @@ impl EffectHandler for ReplTransactionEffectHandler<'_, '_> {
         budget: &mut StepBudget,
     ) -> Result<Option<RelationPage>, EvaluationError> {
         EffectHandler::scan_relation_page(&mut self.mutations, source, after, limit, budget)
+    }
+
+    fn resolve_table_reference(
+        &mut self,
+        reference: &CanonicalValue,
+    ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        self.mutations.resolve_stored_reference(reference)
     }
 
     fn is_ovb2_binding(&self) -> bool {

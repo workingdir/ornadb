@@ -27,6 +27,7 @@ pub struct TransactionalEvaluator {
     pub(super) sys_host: Option<std::sync::Arc<SysHostAttachment>>,
     pub(super) explain_catalogue: Option<ActivationExplainCatalogue>,
     pub(super) admission: AdmissionCatalogue,
+    pub(super) stored_references: Option<std::sync::Arc<orna_project::ReferenceCatalogue>>,
 }
 
 /// Catalogue that admission checks user modules against. `Production` is the
@@ -64,6 +65,7 @@ impl TransactionalEvaluator {
             mutation_scope: [0; 32],
             sys_host: None,
             explain_catalogue: None,
+            stored_references: None,
         }
     }
 
@@ -278,6 +280,7 @@ impl TransactionalEvaluator {
                 mutation_scope: self.mutation_scope,
                 sys_host: self.sys_host.as_deref(),
                 explain_catalogue: self.explain_catalogue.as_ref(),
+                references: self.stored_references.as_deref(),
             };
             let mut budget = StepBudget::new(limits.max_steps);
             let result = invoke_named_with_effects_nominals_and_budget(
@@ -290,6 +293,12 @@ impl TransactionalEvaluator {
                 &mut budget,
             );
             result.and_then(|value| {
+                validate_stored_references(
+                    activation,
+                    self.stored_references.as_deref(),
+                    key_fields,
+                    &mutations,
+                )?;
                 validate_table_assertions(
                     activation,
                     table_assertions,

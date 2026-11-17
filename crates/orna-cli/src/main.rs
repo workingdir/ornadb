@@ -46,6 +46,7 @@ mod repl_session;
 mod repo_sync;
 mod source_excerpt;
 mod status_run;
+mod stored_references;
 mod sys_host;
 mod ui_render;
 

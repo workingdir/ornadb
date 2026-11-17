@@ -30,6 +30,12 @@ impl ApplicationAuthority {
         .map_err(read_scope_error)?;
         let (captured_rows, _committed) =
             committed_table_rows(scope, &tables).map_err(read_scope_error)?;
+        let references = crate::stored_reference::stored_reference_catalogue(
+            scope.snapshot.context().capture().database_id(),
+            &tables,
+            &table_ids,
+        )
+        .map_err(read_scope_error)?;
         let mutations = SourceMutationEffectHandler::with_table_rows_and_table_object_ids(
             tables,
             captured_rows,
@@ -37,7 +43,8 @@ impl ApplicationAuthority {
         )
         .map_err(read_scope_error)?
         .with_insert_defaults(defaults, functions, self.limits)
-        .with_optional_publication_rows(scope.publication_rows.clone());
+        .with_optional_publication_rows(scope.publication_rows.clone())
+        .with_stored_references(references);
         // A read reaches no sys binding: the registry is empty, so any sys
         // call fails closed.
         let mut bindings = SysHostBindingRegistry::default();
