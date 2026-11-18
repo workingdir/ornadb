@@ -3724,6 +3724,9 @@ enum Value {
     /// A stored table reference (tag 60021): database identity, table and key.
     /// It embeds no row copy or snapshot; equality and ordering are by identity.
     TableReference(CanonicalValue),
+    /// A canonical `Path` (tag 60024): a flavour (`repo`, `posix` or `windows`) and its
+    /// path text.
+    Path(CanonicalValue),
     Instant {
         unix_seconds: i64,
         nanosecond: u32,
@@ -4268,7 +4271,9 @@ impl Value {
             } => Ok(Self::raw_duration(seconds, *nanosecond)),
             Self::AnnotatedBlob(value) => Ok(value.clone()),
             Self::ContextualBlob(value) => Ok(value.raw().clone()),
-            Self::Reference(value) | Self::TableReference(value) => Ok(value.raw().clone()),
+            Self::Reference(value) | Self::TableReference(value) | Self::Path(value) => {
+                Ok(value.raw().clone())
+            }
             Self::Range {
                 lower,
                 upper,
@@ -4560,6 +4565,7 @@ impl Value {
                 .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED")),
             Raw::Tag(60010, _) => Ok(Self::Reference(value.clone())),
             Raw::Tag(60021, _) => Ok(Self::TableReference(value.clone())),
+            Raw::Tag(60024, _) => Ok(Self::Path(value.clone())),
             Raw::Tag(60002, boxed) => Self::instant_from_raw(boxed, context),
             Raw::Tag(60005, boxed) => Self::duration_from_raw(boxed, context),
             Raw::Array(values) => {
@@ -15923,6 +15929,10 @@ mod output_digest_equivalence {
             Value::Digest([4; 32]),
             Value::Reference(CanonicalValue::new(Raw::Int(3.into())).expect("canonical")),
             Value::TableReference(CanonicalValue::new(Raw::Int(4.into())).expect("canonical")),
+            Value::Path(
+                orna_value::path_value(orna_value::PathFlavour::Repo, "src/main.orna")
+                    .expect("canonical"),
+            ),
             Value::Instant {
                 unix_seconds: 1,
                 nanosecond: 0,
