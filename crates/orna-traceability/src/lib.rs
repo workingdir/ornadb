@@ -343,6 +343,7 @@ fn generate_inner(root: &Path, execution: ExecutionEvidence<'_>) -> Result<Repor
     let requirements: Vec<Requirement> = read_json(root, "tests/requirements.json")?;
     let evidence: EvidenceFile = read_json(root, "tests/requirement-evidence.json")?;
     let manifest: Manifest = read_json(root, "tests/conformance-manifest.json")?;
+    orna_conformance::release_profile::load_checked(root).map_err(|error| err(error.0))?;
     if release.version != manifest.version {
         return Err(err(
             "release version disagrees with the conformance manifest",

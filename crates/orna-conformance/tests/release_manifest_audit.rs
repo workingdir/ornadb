@@ -100,7 +100,8 @@ fn frozen_release_inventory_and_provenance_bind_the_complete_bundle() {
     let release: Value =
         serde_json::from_slice(&fs::read(root.join("release.json")).expect("read release record"))
             .expect("parse release record");
-    assert_eq!(release["version"], "1.0.0");
+    assert_eq!(release["version"], "1.1.0");
+    assert_eq!(release["publication_revision"], "final-2026-10-05");
     let normative_digests: BTreeMap<String, String> =
         serde_json::from_value(release["normative_payload_sha256"].clone())
             .expect("normative digest map");
