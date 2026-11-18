@@ -1,17 +1,23 @@
-//! `orna repl` `:open EXPR` needs the file and line of the source it opens,
-//! which a REPL session does not retain, so it refuses with the portable
-//! `sys.source.unavailable` and starts no editor. Each run feeds stdin from a
-//! writer thread so the child never blocks on a full pipe.
+//! `orna repl` `:open NAME` starts the editor that `$EDITOR` names, at the line
+//! the declaration starts on. The session keeps each declaration's file and
+//! byte span, so the line is read from the file as it is now, and a file
+//! changed since the session loaded it is refused. `$VISUAL` is never
+//! consulted. Each run feeds stdin from a writer thread so the child never
+//! blocks on a full pipe.
 
 use std::{
+    ffi::OsStr,
     io::Write,
     os::unix::fs::PermissionsExt,
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Output, Stdio},
+    sync::{Mutex, PoisonError},
 };
 
 use orna_cli_testkit::format3;
 
+/// `double` starts on line 6, after the `Reading` table, a blank line and its
+/// doc comment.
 const REPL_SOURCE: &str = r"pub table Reading(id: Int) {
     temperature: Int,
 }
@@ -20,27 +26,50 @@ const REPL_SOURCE: &str = r"pub table Reading(id: Int) {
 pub fn double(value: Int): Int = value * 2;
 ";
 
-/// Runs the REPL with `$EDITOR` and `$VISUAL` set to a script that records its
-/// arguments in `marker`, so a test can tell whether an editor was started.
-fn repl(directory: &Path, marker: &Path, input: &str) -> Output {
-    let editor = marker.with_extension("sh");
-    std::fs::write(
-        &editor,
-        format!("#!/bin/sh\necho \"$@\" > '{}'\n", marker.display()),
-    )
-    .expect("write fake editor");
-    std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755))
+/// Held while a fake editor is written and while a REPL is spawned. A child
+/// forked while a script is open for writing keeps that descriptor until it
+/// execs, and running the script then fails with `ETXTBSY`.
+static FORKS: Mutex<()> = Mutex::new(());
+
+/// Writes an executable `/bin/sh` script at `scratch/name` whose body is `body`.
+fn fake_editor(scratch: &Path, name: &str, body: &str) -> PathBuf {
+    let path = scratch.join(name);
+    {
+        let _writing = FORKS.lock().unwrap_or_else(PoisonError::into_inner);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write fake editor");
+    }
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
         .expect("make fake editor executable");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_orna"))
+    path
+}
+
+/// The script body that records its arguments, one per line, at `marker`.
+fn recording(marker: &Path) -> String {
+    format!("printf '%s\\n' \"$@\" > '{}'", marker.display())
+}
+
+/// Runs `orna repl` on `directory` with `input`, with `EDITOR` and `VISUAL`
+/// set to `editor` and `visual`, or unset when `None`.
+fn repl(directory: &Path, input: &str, editor: Option<&OsStr>, visual: Option<&OsStr>) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_orna"));
+    command
         .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("EDITOR", &editor)
-        .env("VISUAL", &editor)
         .args(["--db", directory.to_str().expect("UTF-8 path"), "repl"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("the REPL starts");
+        .stderr(Stdio::piped());
+    match editor {
+        Some(value) => command.env("EDITOR", value),
+        None => command.env_remove("EDITOR"),
+    };
+    match visual {
+        Some(value) => command.env("VISUAL", value),
+        None => command.env_remove("VISUAL"),
+    };
+    let mut child = {
+        let _forking = FORKS.lock().unwrap_or_else(PoisonError::into_inner);
+        command.spawn().expect("the REPL starts")
+    };
     let stdin = child.stdin.take().expect("REPL stdin");
     let payload = format!("{input}\n:quit\n");
     let writer = std::thread::spawn(move || {
@@ -64,51 +93,152 @@ fn combined(output: &Output) -> String {
 }
 
 #[test]
-fn open_refuses_with_the_portable_code_and_starts_no_editor() {
+fn open_starts_the_editor_at_the_first_line_of_the_declaration() {
     let (directory, _repository, _) = format3::format3_repository_for_table(REPL_SOURCE, "Reading");
     let scratch = tempfile::tempdir().expect("scratch directory");
     let marker = scratch.path().join("editor-ran");
-    let output = repl(directory.path(), &marker, ":open double");
+    let editor = fake_editor(scratch.path(), "editor", &recording(&marker));
+    let output = repl(
+        directory.path(),
+        ":open double",
+        Some(editor.as_os_str()),
+        Some(editor.as_os_str()),
+    );
     let text = combined(&output);
     assert!(output.status.success(), "{text}");
+    let record = std::fs::read_to_string(&marker).expect("the editor ran");
+    let mut arguments = record.lines();
+    assert_eq!(arguments.next(), Some("+6"), "{record}");
+    let opened = PathBuf::from(arguments.next().expect("the editor was given a path"));
+    assert_eq!(
+        std::fs::canonicalize(&opened).expect("the opened file exists"),
+        std::fs::canonicalize(directory.path().join("main.orna")).expect("main.orna exists"),
+        "{record}"
+    );
+    assert_eq!(arguments.next(), None, "{record}");
+}
+
+#[test]
+fn open_refuses_a_name_the_session_does_not_declare() {
+    let (directory, _repository, _) = format3::format3_repository_for_table(REPL_SOURCE, "Reading");
+    let scratch = tempfile::tempdir().expect("scratch directory");
+    let marker = scratch.path().join("editor-ran");
+    let editor = fake_editor(scratch.path(), "editor", &recording(&marker));
+    let output = repl(
+        directory.path(),
+        ":open nosuch",
+        Some(editor.as_os_str()),
+        Some(editor.as_os_str()),
+    );
+    let text = combined(&output);
     assert!(
-        text.contains(
-            "error[sys.source.unavailable]: `:open` needs the file and line a declaration was \
-             read from, which this session does not retain"
-        ),
+        text.contains("no declaration named `nosuch` in this session"),
         "{text}"
     );
-    assert!(text.contains("1 | :open double\n  | ^^^^^"), "{text}");
-    assert!(
-        text.contains("help: `:source NAME` prints a declaration's source text"),
-        "{text}"
-    );
-    assert!(
-        !text.contains("not available in this console yet"),
-        "the refusal is still the generic one: {text}"
-    );
+    assert!(text.contains("error[ORNA-REPL-COMMAND]"), "{text}");
     assert!(!marker.exists(), "a refused `:open` started the editor");
 }
 
 #[test]
-fn open_refuses_a_name_the_session_does_not_declare_the_same_way() {
+fn open_without_a_name_prints_usage() {
     let (directory, _repository, _) = format3::format3_repository_for_table(REPL_SOURCE, "Reading");
     let scratch = tempfile::tempdir().expect("scratch directory");
     let marker = scratch.path().join("editor-ran");
-    let output = repl(directory.path(), &marker, ":open nosuch");
+    let editor = fake_editor(scratch.path(), "editor", &recording(&marker));
+    let output = repl(
+        directory.path(),
+        ":open",
+        Some(editor.as_os_str()),
+        Some(editor.as_os_str()),
+    );
     let text = combined(&output);
-    assert!(text.contains("error[sys.source.unavailable]"), "{text}");
-    assert!(!marker.exists(), "a refused `:open` started the editor");
-}
-
-#[test]
-fn open_without_an_expression_prints_usage() {
-    let (directory, _repository, _) = format3::format3_repository_for_table(REPL_SOURCE, "Reading");
-    let scratch = tempfile::tempdir().expect("scratch directory");
-    let marker = scratch.path().join("editor-ran");
-    let output = repl(directory.path(), &marker, ":open");
-    let text = combined(&output);
-    assert!(text.contains("usage: :open EXPR"), "{text}");
+    assert!(text.contains("usage: :open NAME"), "{text}");
     assert!(text.contains("error[ORNA-REPL-COMMAND]"), "{text}");
     assert!(!marker.exists(), "`:open` started the editor");
+}
+
+#[test]
+fn open_refuses_when_editor_is_unset_though_visual_is_set() {
+    let (directory, _repository, _) = format3::format3_repository_for_table(REPL_SOURCE, "Reading");
+    let scratch = tempfile::tempdir().expect("scratch directory");
+    let marker = scratch.path().join("editor-ran");
+    let editor = fake_editor(scratch.path(), "editor", &recording(&marker));
+    let output = repl(
+        directory.path(),
+        ":open double",
+        None,
+        Some(editor.as_os_str()),
+    );
+    let text = combined(&output);
+    assert!(text.contains("EDITOR is not set"), "{text}");
+    assert!(
+        !marker.exists(),
+        "`:open` used `$VISUAL` in place of `$EDITOR`"
+    );
+}
+
+#[test]
+fn open_refuses_an_empty_editor() {
+    let (directory, _repository, _) = format3::format3_repository_for_table(REPL_SOURCE, "Reading");
+    let output = repl(directory.path(), ":open double", Some(OsStr::new("")), None);
+    let text = combined(&output);
+    assert!(text.contains("EDITOR is not set"), "{text}");
+}
+
+#[test]
+fn open_reports_an_editor_that_cannot_start() {
+    let (directory, _repository, _) = format3::format3_repository_for_table(REPL_SOURCE, "Reading");
+    let output = repl(
+        directory.path(),
+        ":open double",
+        Some(OsStr::new("/nonexistent/orna-test-editor")),
+        None,
+    );
+    let text = combined(&output);
+    assert!(text.contains("the editor could not be started"), "{text}");
+}
+
+#[test]
+fn open_reports_an_editor_that_fails() {
+    let (directory, _repository, _) = format3::format3_repository_for_table(REPL_SOURCE, "Reading");
+    let scratch = tempfile::tempdir().expect("scratch directory");
+    let marker = scratch.path().join("editor-ran");
+    let body = format!("{}; exit 3", recording(&marker));
+    let editor = fake_editor(scratch.path(), "editor", &body);
+    let output = repl(
+        directory.path(),
+        ":open double",
+        Some(editor.as_os_str()),
+        None,
+    );
+    let text = combined(&output);
+    assert!(marker.exists(), "the failing editor was not started");
+    assert!(
+        text.contains("the editor did not finish successfully"),
+        "{text}"
+    );
+}
+
+#[test]
+fn open_refuses_a_declaration_whose_file_changed_since_the_session_loaded_it() {
+    let (directory, _repository, _) = format3::format3_repository_for_table(REPL_SOURCE, "Reading");
+    let scratch = tempfile::tempdir().expect("scratch directory");
+    // Prepends a line, so the byte span the session kept no longer holds the
+    // declaration. The first `:open` edits the file; the second is refused.
+    let editor = fake_editor(
+        scratch.path(),
+        "editor",
+        r#"{ printf '// edited\n'; cat "$2"; } > "$2.new" && mv "$2.new" "$2""#,
+    );
+    let output = repl(
+        directory.path(),
+        ":open double\n:open double",
+        Some(editor.as_os_str()),
+        Some(editor.as_os_str()),
+    );
+    let text = combined(&output);
+    assert!(
+        text.contains("changed after this session loaded it; restart the REPL to open `double`"),
+        "{text}"
+    );
 }

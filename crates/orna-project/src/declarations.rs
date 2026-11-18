@@ -1,8 +1,34 @@
 //! Named declarations of a loaded project, with their doc comments and source
-//! text. The REPL's `:doc` and `:source` read these records; they are taken
-//! from the same parse that admits each module, so no module is parsed twice.
+//! text. The REPL's `:doc` and `:source` read these records, and `:open` reads
+//! the file and span a record was parsed from; they are taken from the same
+//! parse that admits each module, so no module is parsed twice.
+
+use std::ops::Range;
+use std::path::{Path, PathBuf};
 
 use orna_syntax_ast::{Declaration, Item};
+
+/// Where one declaration was read from: the file its module came from, and the
+/// byte span of the declaration within that file.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeclarationLocation {
+    path: PathBuf,
+    span: Range<usize>,
+}
+
+impl DeclarationLocation {
+    /// The file the declaring module was read from.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The declaration's byte range within that file.
+    #[must_use]
+    pub fn span(&self) -> &Range<usize> {
+        &self.span
+    }
+}
 
 /// One named top-level declaration of an admitted module.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -17,6 +43,11 @@ pub struct DeclarationRecord {
     /// The declaration's exact source text, from its first keyword through its
     /// last byte, as written in the declaring module.
     source: String,
+    /// The file and byte span the declaration was read from, when its module
+    /// came from a file of the working tree. A module read from an in-memory
+    /// overlay, a committed snapshot, an attached database or the standard
+    /// library has none.
+    location: Option<DeclarationLocation>,
 }
 
 impl DeclarationRecord {
@@ -52,8 +83,16 @@ impl DeclarationRecord {
         &self.source
     }
 
+    /// The file and byte span the declaration was read from, when its module
+    /// came from a file of the working tree.
+    #[must_use]
+    pub fn location(&self) -> Option<&DeclarationLocation> {
+        self.location.as_ref()
+    }
+
     /// Re-homes this declaration under `prefix` namespace components, as an
-    /// attached database is exposed under its alias.
+    /// attached database is exposed under its alias. The result has no
+    /// location: its module is not a file of this working tree.
     #[must_use]
     pub fn with_namespace_prefix(&self, prefix: &str) -> Self {
         let mut namespace = vec![prefix.to_owned()];
@@ -63,17 +102,20 @@ impl DeclarationRecord {
             name: self.name.clone(),
             docs: self.docs.clone(),
             source: self.source.clone(),
+            location: None,
         }
     }
 }
 
 /// The named declarations in `items`, which were parsed from `source` and
-/// declared in `namespace`. Declarations that bind no name (`use`, `let`,
+/// declared in `namespace`. `file` is the file `source` was read from, when it
+/// was read from one. Declarations that bind no name (`use`, `let`,
 /// assertions) have nothing to document and are omitted.
 pub(crate) fn declaration_records(
     namespace: &[String],
     source: &str,
     items: &[Item],
+    file: Option<&Path>,
 ) -> Vec<DeclarationRecord> {
     items
         .iter()
@@ -84,6 +126,10 @@ pub(crate) fn declaration_records(
                 name: name.to_owned(),
                 docs: item.docs.clone(),
                 source: source[item.span.start..item.span.end].to_owned(),
+                location: file.map(|path| DeclarationLocation {
+                    path: path.to_owned(),
+                    span: item.span.start..item.span.end,
+                }),
             })
         })
         .collect()
