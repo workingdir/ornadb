@@ -192,8 +192,7 @@ fn is_unsupported_value(value: &Value) -> bool {
             | Value::Money { .. }
             | Value::Closure(_)
             | Value::RowRef(_)
-            | Value::FunctionRef(_)
-            | Value::ObjectRef(_)
+            | Value::SysRef(_)
             | Value::Error(_)
             | Value::Enum { .. }
     )

@@ -763,7 +763,7 @@ fn validate_catalogue_reference<Kind>(
     Ok(TypedRowRef::from_row_ref(reference))
 }
 
-fn snapshot_id(snapshot: &CanonicalSnapshot) -> Result<[u8; 32], SystemReferenceError> {
+pub(crate) fn snapshot_id(snapshot: &CanonicalSnapshot) -> Result<[u8; 32], SystemReferenceError> {
     match snapshot {
         CanonicalSnapshot::Cwd {
             database,
@@ -835,7 +835,7 @@ fn validate_coordinates(
     Ok(())
 }
 
-fn ensure_snapshot_database(
+pub(crate) fn ensure_snapshot_database(
     database_id: [u8; 16],
     snapshot: &CanonicalSnapshot,
 ) -> Result<(), SystemReferenceError> {
@@ -863,6 +863,10 @@ pub enum SystemReferenceError {
     InvalidStreamKey,
     InvalidCheckpointKey,
     InvalidFailureKey,
+    /// The reference's physical relation identity names no canonical `sys` relation.
+    UnknownRelation,
+    /// The reference's key is not a natural key of the relation it addresses.
+    InvalidRelationKey,
 }
 impl fmt::Display for SystemReferenceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -882,6 +886,12 @@ impl fmt::Display for SystemReferenceError {
             Self::InvalidStreamKey => f.write_str("invalid sys.Stream natural key"),
             Self::InvalidCheckpointKey => f.write_str("invalid sys.Checkpoint natural key"),
             Self::InvalidFailureKey => f.write_str("invalid sys.Failure natural key"),
+            Self::UnknownRelation => {
+                f.write_str("system reference relation identity names no canonical relation")
+            }
+            Self::InvalidRelationKey => {
+                f.write_str("invalid natural key for the relation of the system reference")
+            }
         }
     }
 }
@@ -1785,10 +1795,10 @@ impl fmt::Display for ContractError {
 }
 impl std::error::Error for ContractError {}
 
-fn uuid(value: [u8; 16]) -> OvbRaw {
+pub(crate) fn uuid(value: [u8; 16]) -> OvbRaw {
     OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(value.to_vec())))
 }
-fn row_ref_from_raw(raw: &OvbRaw) -> Result<RowRef, ContractError> {
+pub(crate) fn row_ref_from_raw(raw: &OvbRaw) -> Result<RowRef, ContractError> {
     let OvbRaw::Tag(60010, body) = raw else {
         return Err(ContractError::InvalidSystemReferenceEncoding);
     };
@@ -1803,7 +1813,7 @@ fn row_ref_from_raw(raw: &OvbRaw) -> Result<RowRef, ContractError> {
         Snapshot::decode(snapshot).map_err(ContractError::Value)?,
     )
 }
-fn row_ref_raw(reference: &RowRef) -> OvbRaw {
+pub(crate) fn row_ref_raw(reference: &RowRef) -> OvbRaw {
     OvbRaw::Tag(
         60010,
         Box::new(OvbRaw::Array(vec![

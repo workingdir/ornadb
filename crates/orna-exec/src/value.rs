@@ -12,8 +12,8 @@ use std::rc::Rc;
 use num_bigint::BigInt;
 use orna_hir::{BodyId, DefId, Name, Ty};
 use orna_value::{
-    CanonicalValue, DIGEST_TAG, DURATION_TAG, FunctionRef, INSTANT_TAG, MONEY_TAG, OPTION_TAG,
-    ObjectRef, Raw, Snapshot, TUPLE_TAG, UNIT_TAG, UUID_TAG,
+    CanonicalValue, DIGEST_TAG, DURATION_TAG, INSTANT_TAG, MONEY_TAG, OPTION_TAG, Raw, Snapshot,
+    SysRef, TUPLE_TAG, UNIT_TAG, UUID_TAG,
 };
 
 use crate::calendar;
@@ -101,15 +101,15 @@ pub enum Value {
         /// The payload fields, in name order.
         payload: Option<Rc<[(Name, Value)]>>,
     },
-    /// A pinned row reference (a `RunRef`, `SnapshotRef` and the like), held as its canonical
-    /// `PINNED_ROW_REFERENCE_TAG` form and carried unchanged. The codecs refuse it; no operation reads its fields.
+    /// A pinned row reference that is not a checked `sys.XRef` of a canonical relation (its relation is unknown, or its
+    /// natural key is not that relation's), held as its canonical `PINNED_ROW_REFERENCE_TAG` form and carried unchanged.
+    /// The codecs refuse it; no operation reads its fields.
     RowRef(Raw),
-    /// A checked `sys.FunctionRef`: the function relation's typed reference. Its canonical form is the
-    /// `PINNED_ROW_REFERENCE_TAG` form of the row it names. Built by [`Value::function_ref`].
-    FunctionRef(Rc<FunctionRef>),
-    /// A checked `sys.ObjectRef`: the object relation's typed reference, with the same canonical form as
-    /// [`Value::FunctionRef`]. Built by [`Value::object_ref`].
-    ObjectRef(Rc<ObjectRef>),
+    /// A checked `sys.XRef` of a canonical relation (a `sys.FunctionRef`, `sys.BranchRef`, `sys.CommitRef` and the
+    /// like): a row reference whose relation identity and natural key the registry of `orna_value::relations`
+    /// checked. Its canonical form is the `PINNED_ROW_REFERENCE_TAG` form of the row it names. Built by
+    /// [`Value::sys_ref`].
+    SysRef(Rc<SysRef>),
 }
 
 impl From<i64> for Value {
@@ -212,8 +212,7 @@ impl Value {
             Self::List(values) => array(values),
             Self::Record(fields) => record_raw(fields),
             Self::RowRef(raw) => Ok(raw.clone()),
-            Self::FunctionRef(reference) => refs::typed_row_raw(reference.as_row_ref()),
-            Self::ObjectRef(reference) => refs::typed_row_raw(reference.as_row_ref()),
+            Self::SysRef(reference) => refs::typed_row_raw(reference.as_row_ref()),
             Self::Closure(_) | Self::Rel(_) | Self::Enum { .. } => Err("ORNA-EVAL-UNSUPPORTED"),
             Self::Error(code) => Err(code),
         }

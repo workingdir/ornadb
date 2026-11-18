@@ -61,6 +61,9 @@ mod validation;
 mod contract;
 pub use contract::*;
 pub mod object_reference;
+mod relation_reference;
+pub use relation_reference::*;
+pub mod relations;
 pub use raw::Raw as OvbRaw;
 
 // The inline test modules exercise the seams directly, so they need the std
