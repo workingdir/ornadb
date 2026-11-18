@@ -8,6 +8,7 @@
 //! id names the database each reference belongs to.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use orna_application::AdmittedApplication;
 use orna_check::catalogue_identities::{CatalogueIdentities, TableIdentity};
@@ -125,6 +126,35 @@ pub(crate) fn bind_committed_catalogue(
     }
 }
 
+/// The commit one `orna serve` request is served at, and what is committed in it.
+pub(crate) struct RequestCommit {
+    /// The raw Git object id of the commit `HEAD` names, the pin of the
+    /// `sys.git.*` rows. `None` when the clone has no readable commit.
+    pub(crate) head: Option<Vec<u8>>,
+    /// The identities committed at `head`. `None` when there is no commit or
+    /// its inventory cannot be read.
+    pub(crate) identities: Option<CatalogueIdentities>,
+}
+
+/// The commit the clone at `root` has now. A server outlives every commit it
+/// serves, so each request reads `HEAD` afresh and binds what it reads to that
+/// one request (ORNA-SERVE-003, ORNA-SYS-011). A clone with no readable commit
+/// yields neither, and the rows that need them fail closed with
+/// `sys.snapshot.incomplete`.
+pub(crate) fn request_commit(root: &Path, database_id: [u8; 16]) -> RequestCommit {
+    let repository = Repository::discover(root).ok();
+    let head = repository
+        .as_ref()
+        .and_then(|repository| repository.head().ok().flatten());
+    let identities = repository
+        .as_ref()
+        .and_then(|repository| head_catalogue_identities(repository, head.as_ref(), database_id));
+    RequestCommit {
+        head: head.as_ref().and_then(crate::sys_host::commit_object_id),
+        identities,
+    }
+}
+
 /// The commit pin every reference of the catalogue carries.
 fn commit_snapshot(
     commit: &GitCommitRef,
@@ -143,4 +173,99 @@ fn commit_snapshot(
         algorithm: hash,
         oid: oid.as_bytes().to_vec(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::process::Command;
+
+    use super::request_commit;
+
+    const DATABASE: [u8; 16] = [7; 16];
+
+    /// Runs `git` in `root` under a fixed identity and returns its trimmed
+    /// standard output.
+    fn git(root: &Path, arguments: &[&str]) -> String {
+        let output = Command::new("git")
+            .args([
+                "-c",
+                "user.name=orna-test",
+                "-c",
+                "user.email=orna-test@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(arguments)
+            .current_dir(root)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .expect("git starts");
+        assert!(
+            output.status.success(),
+            "git {arguments:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .expect("git prints UTF-8")
+            .trim()
+            .to_owned()
+    }
+
+    /// The raw bytes of a hex object id.
+    fn object_id(hex: &str) -> Vec<u8> {
+        (0..hex.len())
+            .step_by(2)
+            .map(|start| u8::from_str_radix(&hex[start..start + 2], 16).expect("hex object id"))
+            .collect()
+    }
+
+    fn repository_with_a_commit() -> tempfile::TempDir {
+        let directory = tempfile::tempdir().expect("temporary repository");
+        git(directory.path(), &["init", "-q"]);
+        git(
+            directory.path(),
+            &["commit", "-q", "--allow-empty", "-m", "first"],
+        );
+        directory
+    }
+
+    #[test]
+    fn a_request_is_pinned_to_the_commit_head_names() {
+        let directory = repository_with_a_commit();
+        let commit = request_commit(directory.path(), DATABASE);
+        assert_eq!(
+            commit.head,
+            Some(object_id(&git(directory.path(), &["rev-parse", "HEAD"])))
+        );
+        // The pin is the commit `HEAD` names, not the identity inventory: a commit
+        // that records none still pins the Git state, and only the catalogue fails.
+        assert!(commit.identities.is_none());
+    }
+
+    #[test]
+    fn each_request_reads_head_when_it_runs() {
+        let directory = repository_with_a_commit();
+        let first = request_commit(directory.path(), DATABASE).head;
+        git(
+            directory.path(),
+            &["commit", "-q", "--allow-empty", "-m", "second"],
+        );
+        let second = request_commit(directory.path(), DATABASE).head;
+        assert!(first.is_some() && second.is_some());
+        assert_ne!(first, second, "a request does not reuse an earlier pin");
+        assert_eq!(
+            second,
+            Some(object_id(&git(directory.path(), &["rev-parse", "HEAD"])))
+        );
+    }
+
+    #[test]
+    fn a_clone_whose_head_names_no_commit_has_no_pin() {
+        let directory = tempfile::tempdir().expect("temporary repository");
+        git(directory.path(), &["init", "-q"]);
+        let commit = request_commit(directory.path(), DATABASE);
+        assert!(commit.head.is_none());
+        assert!(commit.identities.is_none());
+    }
 }

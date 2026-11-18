@@ -36,7 +36,11 @@ use orna_serving::media_preview::{
 };
 use orna_value::ContextValue;
 use std::collections::BTreeMap;
-use std::sync::{PoisonError, TryLockError};
+use std::sync::PoisonError;
+
+#[path = "cli_serve_console.rs"]
+mod console;
+use console::{ConsoleReads, console_tables, submit_console};
 
 /// Repository-relative module that hosts the serving entry.
 pub(super) const SERVE_MODULE_PATH: &str = "main.orna";
@@ -57,6 +61,11 @@ pub(super) struct ServeApp {
     authority: ApplicationAuthority,
     /// Project root whose committed `HEAD` supplies the module and rows.
     root: String,
+    /// The database the served runtime belongs to.
+    database_id: [u8; 16],
+    /// The admitted tables of the project the console session was admitted
+    /// from: the tables its `sys.catalog.*` rows list.
+    tables: BTreeMap<String, TableSchema>,
 }
 
 /// The admitted serving entry. The page's authority and the console session
@@ -67,11 +76,14 @@ pub(super) struct ServingEntry {
     /// The console session. Its admission failure is kept as the stable code
     /// every action answers with.
     console: Mutex<Result<AdmittedReplSession, String>>,
+    /// What the console's inputs that read system relations are served from.
+    reads: ConsoleReads,
 }
 
 impl ServingEntry {
     pub(super) fn new(app: ServeApp, console: Result<AdmittedReplSession, String>) -> Self {
         Self {
+            reads: ConsoleReads::of(&app),
             app: Mutex::new(app),
             console: Mutex::new(console),
         }
@@ -87,8 +99,9 @@ fn page_authority(
     catalogue: &orna_check::Catalogue,
     identity: RuntimeIdentity,
 ) -> ApplicationAuthority {
-    // A server outlives the commit it started at and pins no `HEAD` of its own,
-    // so the Git-state rows (`sys.git.branches`) fail closed here.
+    // A server outlives every commit it serves, so this authority carries no
+    // `HEAD` pin of its own: each request pins its own copy to the commit it
+    // observed (`ServeApp::stage_at_head`).
     let sys_host = crate::sys_host::sys_host_context(
         std::path::Path::new(root),
         identity,
@@ -134,6 +147,8 @@ impl ServeApp {
             Ok(_) if serve_is_public(&project.modules()[index].source) => Ok(Some(Self {
                 authority,
                 root: root.to_owned(),
+                database_id: identity.database_id,
+                tables: console_tables(project, catalogue),
             })),
             // A private `serve` is not the serving entry (ORNA-APP-001 explicit root `pub fn serve()`).
             Ok(_) | Err(ApplicationError::MissingEntry(_)) => Ok(None),
@@ -230,6 +245,13 @@ impl ServeApp {
             .map_err(|_| "serve.table_rows_unavailable")?;
         // Step 2: every committed read below uses this one captured commit.
         let commit = Self::head_commit(&repository)?;
+        // The Git-state rows (`sys.git.branches`) are read at that same commit,
+        // so one activation observes one commit and never a later `HEAD`
+        // (ORNA-SERVE-003, ORNA-SYS-011).
+        let authority = self
+            .authority
+            .clone()
+            .with_head_commit(crate::sys_host::commit_object_id(&commit));
         let bytes = repository
             .read_committed_file(
                 &commit,
@@ -241,14 +263,12 @@ impl ServeApp {
         if !serve_is_public(&source) {
             return Err("serve.entry_unavailable");
         }
-        let base = self
-            .authority
+        let base = authority
             .admit_module(SERVE_MODULE_PATH, source.clone(), SERVE_ENTRY)
             .map_err(|_| "serve.entry_unavailable")?;
         let names = base.table_schemas().keys().cloned().collect::<Vec<_>>();
         if names.is_empty() {
-            return self
-                .authority
+            return authority
                 .evaluate_staged(&base, &Environment::new())
                 .map(|staged| (ServedValue::Canonical(staged), commit))
                 .map_err(|_| "serve.evaluation_failed");
@@ -278,8 +298,7 @@ impl ServeApp {
         let committed = tables
             .iter()
             .map(|table| CommittedTableIdentity::new(table.table(), table.object_id()));
-        let admitted = self
-            .authority
+        let admitted = authority
             .admit_module_with_committed_table_metadata(
                 SERVE_MODULE_PATH,
                 &source,
@@ -320,14 +339,7 @@ impl ServeApp {
                 storage_orders,
             };
             return evaluate_contextual_serve(
-                &self.authority,
-                &format,
-                &runtime,
-                &state,
-                &admitted,
-                &tables,
-                committed,
-                &rows,
+                &authority, &format, &runtime, &state, &admitted, &tables, committed, &rows,
             )
             .map(|value| (ServedValue::Contextual(value), commit));
         }
@@ -337,13 +349,7 @@ impl ServeApp {
             storage_orders,
         };
         let (_snapshot, staged) = evaluate_over_committed_tables(
-            &runtime,
-            &state,
-            &self.authority,
-            &admitted,
-            &tables,
-            committed,
-            None,
+            &runtime, &state, &authority, &admitted, &tables, committed, None,
         )
         .map_err(|_| "serve.evaluation_failed")?;
         Ok((ServedValue::Canonical(staged), commit))
@@ -1030,7 +1036,7 @@ fn action_route(entry: &ServingEntry, request: &Request, action_id: &str) -> Res
         Ok(source) => source,
         Err((status, code)) => return action_error(status, code),
     };
-    submit_console(&entry.console, &source)
+    submit_console(&entry.console, &entry.reads, &source)
 }
 
 /// True when the page answered by `GET /` offers `action_id` as a Run control.
@@ -1040,19 +1046,6 @@ fn action_route(entry: &ServingEntry, request: &Request, action_id: &str) -> Res
 fn page_offers_action(entry: &ServingEntry, action_id: &str) -> bool {
     let (response, actions) = respond_recovering(&entry.app);
     response.status == 200 && actions.iter().any(|offered| offered == action_id)
-}
-
-/// Evaluates one console input under the session lock. A session another
-/// request holds is refused visibly instead of queueing the input behind an
-/// evaluation that is still running. The evaluation carries no wall-clock
-/// deadline: its bound is the evaluator's default step limit and the
-/// 16 KiB input cap, and the session lock is held until that bound is reached.
-fn submit_console(console: &Mutex<Result<AdmittedReplSession, String>>, source: &str) -> Response {
-    match console.try_lock() {
-        Ok(mut session) => console_submit(&mut session, source),
-        Err(TryLockError::WouldBlock) => action_error(409, "serve.session_busy"),
-        Err(TryLockError::Poisoned(_)) => unavailable_response(),
-    }
 }
 
 /// An action identifier is a short run of ASCII letters, digits, `.`, `_` or
@@ -1098,44 +1091,6 @@ fn action_error(status: u16, code: &str) -> Response {
         "text/html; charset=utf-8",
         format!("<p class=\"diagnostic\">{code}</p>").into_bytes(),
     )
-}
-
-/// Evaluates one console input and renders its value. The session is pure:
-/// `submit` refuses an effectful input before it runs, and that refusal is
-/// rendered like any other diagnostic. A session that failed to admit answers
-/// with its stable code.
-fn console_submit(console: &mut Result<AdmittedReplSession, String>, source: &str) -> Response {
-    contained(|| {
-        let session = match console {
-            Ok(session) => session,
-            Err(code) => return action_error(503, code),
-        };
-        match session.submit(source) {
-            Ok(Some(value)) => {
-                let html =
-                    crate::ui_render::render_value_html(value.raw(), None).unwrap_or_else(|| {
-                        let mut text = String::from("<pre><code>");
-                        crate::ui_render::push_escaped(
-                            &crate::repl_inspect::inspect(&value),
-                            &mut text,
-                        );
-                        text.push_str("</code></pre>");
-                        text
-                    });
-                Response::new(200, "text/html; charset=utf-8", html.into_bytes())
-            }
-            Ok(None) => Response::new(200, "text/html; charset=utf-8", b"<p>no value</p>".to_vec()),
-            Err(error) => action_error(422, error.code()),
-        }
-    })
-}
-
-/// Runs one evaluation so that a panic inside it answers 500 and returns
-/// without poisoning the console lock. The session stays available to the next
-/// input.
-fn contained(evaluate: impl FnOnce() -> Response) -> Response {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(evaluate))
-        .unwrap_or_else(|_| action_error(500, "serve.evaluation_failed"))
 }
 
 #[cfg(test)]
@@ -1204,6 +1159,7 @@ mod tests {
 
 #[cfg(test)]
 mod serving_entry_tests {
+    use super::console::contained;
     use super::*;
     use std::sync::mpsc;
     use std::time::Duration;
@@ -1215,6 +1171,8 @@ mod serving_entry_tests {
                 Limits::default(),
             ),
             root: String::new(),
+            database_id: [0; 16],
+            tables: BTreeMap::new(),
         };
         ServingEntry::new(app, console)
     }
@@ -1254,7 +1212,7 @@ mod serving_entry_tests {
         let (sender, receiver) = mpsc::channel();
         std::thread::scope(|scope| {
             scope.spawn(|| {
-                let _ = sender.send(submit_console(&entry.console, "1 + 1"));
+                let _ = sender.send(submit_console(&entry.console, &entry.reads, "1 + 1"));
             });
             // A lock-waiting submit (mutation) blocks here and is reported by the timeout.
             let answered = receiver.recv_timeout(Duration::from_secs(30));
@@ -1289,7 +1247,7 @@ mod serving_entry_tests {
     #[test]
     fn an_unadmitted_console_answers_its_stable_code() {
         let entry = entry(Err("serve.session_unavailable".into()));
-        let response = submit_console(&entry.console, "1");
+        let response = submit_console(&entry.console, &entry.reads, "1");
         assert_eq!(response.status, 503);
         assert!(
             String::from_utf8_lossy(&response.body).contains("serve.session_unavailable"),
