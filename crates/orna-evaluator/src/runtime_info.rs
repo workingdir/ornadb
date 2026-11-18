@@ -11,9 +11,9 @@ use orna_sys::{
     SysFailureCode, SysHostContext,
 };
 use orna_value::{CanonicalSnapshot, CanonicalValue, GitHash, snapshot_reference};
-use orna_value::{OVB2_VERSION, Raw};
+use orna_value::{OVB2_VERSION, enum_type_id, enum_variant_id};
 
-use crate::{EvaluationError, TIMEZONE_DATASET_VERSION, Value, error};
+use crate::{EvaluationError, TIMEZONE_DATASET_VERSION, Value, error, object_id_raw};
 
 /// The host context one activation is attached with, together with the
 /// `sys.RuntimeInfo` record it determines. The record is computed once, when
@@ -87,8 +87,11 @@ pub(crate) fn runtime_info(context: &SysHostContext) -> Result<Value, Evaluation
         (
             "mode",
             Value::Enum {
-                type_id: Raw::Text(SysEnum::RuntimeMode.name().to_owned()),
-                variant_id: Raw::Text(context.mode.label().to_owned()),
+                type_id: object_id_raw(enum_type_id(SysEnum::RuntimeMode.name())),
+                variant_id: object_id_raw(enum_variant_id(
+                    SysEnum::RuntimeMode.name(),
+                    context.mode.label(),
+                )),
                 payload: None,
             },
         ),

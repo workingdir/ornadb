@@ -29,6 +29,7 @@ use orna_value::{
     float_min, float_ordinary_eq, float_total_cmp, ovb2_blob_fingerprint,
 };
 use orna_value::{CanonicalValue, Diagnostic, DiagnosticSeverity, GitObjectId, SafeText};
+use orna_value::{enum_type_id, enum_variant_id};
 use serde::{
     Deserialize,
     de::{self, MapAccess, Visitor},
@@ -6457,8 +6458,8 @@ impl Context<'_, '_> {
     ) -> Result<Value, EvaluationError> {
         if let Some((enum_name, variant)) = system_enum_constant(expression, scope) {
             return Ok(Value::Enum {
-                type_id: Raw::Text(enum_name),
-                variant_id: Raw::Text(variant),
+                type_id: object_id_raw(enum_type_id(&enum_name)),
+                variant_id: object_id_raw(enum_variant_id(&enum_name, &variant)),
                 payload: None,
             });
         }
