@@ -133,6 +133,24 @@ fn assert_refused_without_changes(output: &Output, root: &Path, source: &[u8], i
     assert!(!root.join(".orna/object-identities.cbor").exists());
 }
 
+/// `main` names the root namespace, so a qualified root name renames the same
+/// table as its bare spelling.
+#[test]
+fn mv_accepts_the_root_namespace_spelled_main() {
+    let (_directory, root, initial) = committed_project(SOURCE);
+
+    let output = run_cli(&root, &["mv", "main.Media", "main.Archive"]);
+    assert_cli_success(&output, "orna mv main.Media main.Archive");
+
+    assert_eq!(fs::read_to_string(root.join("main.orna")).unwrap(), RENAMED);
+    let renamed = staged_identities(&root);
+    assert_eq!(
+        renamed.id(ObjectKind::Table, "Archive"),
+        initial.id(ObjectKind::Table, "Media")
+    );
+    assert_eq!(renamed.id(ObjectKind::Table, "Media"), None);
+}
+
 /// ORNA-CLI-001: `orna mv` preserves table and child-field identities at the
 /// production binary boundary.
 #[test]
