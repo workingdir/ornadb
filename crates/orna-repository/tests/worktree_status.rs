@@ -98,7 +98,11 @@ fn a_staged_rename_is_one_entry_at_its_new_path() {
     let (directory, repository) = repository();
     git_ok(directory.path(), &["mv", "main.orna", "renamed.orna"]);
     let entries = listed(&repository);
-    assert_eq!(entries.len(), 1, "the origin of a rename is not a second entry");
+    assert_eq!(
+        entries.len(),
+        1,
+        "the origin of a rename is not a second entry"
+    );
     let renamed = entry(&entries, "renamed.orna");
     assert_eq!(renamed.index_status(), Some(StatusChange::Rename));
     assert_eq!(renamed.worktree_status(), None);
@@ -193,6 +197,9 @@ fn a_linked_worktree_reports_its_own_administrative_directory() {
     let facts = linked_repository
         .git_repository_facts()
         .expect("repository facts");
-    assert_eq!(facts.git_dir(), root.join(".git/worktrees/linked").as_path());
+    assert_eq!(
+        facts.git_dir(),
+        root.join(".git/worktrees/linked").as_path()
+    );
     assert_eq!(facts.worktree(), Some(linked_root.as_path()));
 }

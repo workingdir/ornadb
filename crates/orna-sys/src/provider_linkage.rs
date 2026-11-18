@@ -283,8 +283,10 @@ mod tests {
             SystemSurfaceMember::GroupedHandle(SysGroupedHandle::GitCommits),
             SystemSurfaceMember::GroupedHandle(SysGroupedHandle::GitRefs),
             SystemSurfaceMember::GroupedHandle(SysGroupedHandle::GitRemotes),
+            SystemSurfaceMember::GroupedHandle(SysGroupedHandle::GitRepositories),
             SystemSurfaceMember::GroupedHandle(SysGroupedHandle::GitStashes),
             SystemSurfaceMember::GroupedHandle(SysGroupedHandle::GitTags),
+            SystemSurfaceMember::GroupedHandle(SysGroupedHandle::GitWorktree),
         ] {
             assert!(linkage.is_linked(member), "{member:?}");
         }

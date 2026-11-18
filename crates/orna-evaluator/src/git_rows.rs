@@ -25,8 +25,8 @@ use orna_value::{
 };
 
 use crate::{
-    EvaluationError, Value, error, git_branches, git_commits, git_refs, git_remotes, git_stashes,
-    git_tags,
+    EvaluationError, Value, error, git_branches, git_commits, git_refs, git_remotes,
+    git_repositories, git_stashes, git_tags, git_worktree,
 };
 
 /// Rows one page serves, unless the activation's collection limit is lower.
@@ -59,7 +59,7 @@ struct Member {
 /// The members the evaluator serves from the repository. A handle linked in the
 /// `orna-sys-id` generator (`LINKED_GROUPED_HANDLES`) with no entry here would be
 /// admitted and then unserved, so the two lists name the same members.
-const MEMBERS: [Member; 6] = [
+const MEMBERS: [Member; 8] = [
     Member {
         handle: SysGroupedHandle::GitBranches,
         page: git_branches::branches_page,
@@ -77,12 +77,20 @@ const MEMBERS: [Member; 6] = [
         page: git_remotes::remotes_page,
     },
     Member {
+        handle: SysGroupedHandle::GitRepositories,
+        page: git_repositories::repositories_page,
+    },
+    Member {
         handle: SysGroupedHandle::GitStashes,
         page: git_stashes::stashes_page,
     },
     Member {
         handle: SysGroupedHandle::GitTags,
         page: git_tags::tags_page,
+    },
+    Member {
+        handle: SysGroupedHandle::GitWorktree,
+        page: git_worktree::worktree_page,
     },
 ];
 
@@ -551,8 +559,10 @@ mod tests {
             "sys.git.commits",
             "sys.git.refs",
             "sys.git.remotes",
+            "sys.git.repositories",
             "sys.git.stashes",
             "sys.git.tags",
+            "sys.git.worktree",
         ] {
             assert_eq!(super::served_source(served), Some(served));
             assert!(

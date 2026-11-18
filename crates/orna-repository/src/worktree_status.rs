@@ -248,7 +248,10 @@ fn parse_status_record(record: &str) -> Result<(WorktreeStatusEntry, bool), Repo
             WorktreeStatusEntry::new(rest, None, Some(StatusChange::Add), false, true)?,
             false,
         )),
-        "!" => Ok((WorktreeStatusEntry::new(rest, None, None, true, false)?, false)),
+        "!" => Ok((
+            WorktreeStatusEntry::new(rest, None, None, true, false)?,
+            false,
+        )),
         _ => Err(RepositoryError::GitOperationFailed),
     }
 }
@@ -349,7 +352,12 @@ mod tests {
         );
         assert_eq!(
             facts(find(&entries, "added.txt")),
-            (Some(StatusChange::Add), Some(StatusChange::Modify), false, false)
+            (
+                Some(StatusChange::Add),
+                Some(StatusChange::Modify),
+                false,
+                false
+            )
         );
         assert_eq!(
             facts(find(&entries, "gone.txt")),
@@ -415,9 +423,18 @@ mod tests {
                     "2 R. N... 100644 100644 100644 {ZERO} {ZERO} R100 new.txt"
                 )]),
             ),
-            ("an unknown status letter", listing(&[changed("C.", "a.txt")])),
-            ("a change on neither side", listing(&[changed("..", "a.txt")])),
-            ("a short ordinary record", listing(&["1 .M N... 100644 a.txt"])),
+            (
+                "an unknown status letter",
+                listing(&[changed("C.", "a.txt")]),
+            ),
+            (
+                "a change on neither side",
+                listing(&[changed("..", "a.txt")]),
+            ),
+            (
+                "a short ordinary record",
+                listing(&["1 .M N... 100644 a.txt"]),
+            ),
             ("a path that is not text", b"? \xff\0".to_vec()),
             (
                 "a path reported twice",
@@ -453,7 +470,10 @@ mod tests {
             "\nfalse\n",
         ] {
             assert!(
-                matches!(parse_location(refused), Err(RepositoryError::GitOperationFailed)),
+                matches!(
+                    parse_location(refused),
+                    Err(RepositoryError::GitOperationFailed)
+                ),
                 "{refused:?}"
             );
         }
