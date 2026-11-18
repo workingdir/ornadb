@@ -86,9 +86,11 @@ the committed inventory does not hold for builtin types, keys or storage.
 
 ## The branch rows
 
-`sys.git.branches` is the first relation served from the repository's Git state. The evaluator
-(`orna-evaluator/src/git_branches.rs`) reads the local branches of the repository the host attached
-(`SysHostContext::root`, `Repository::local_branches`) and pins every reference to the commit the host attached at
+`sys.git.branches` is the first relation served from the repository's Git state; `sys.git.tags` and `sys.git.remotes`
+follow it, below. The evaluator reads the repository the host attached itself (`SysHostContext::root`) and
+`orna-evaluator/src/git_rows.rs` holds what the three members share: the pin, the failure when the repository or the
+pin is unavailable, and the name-ordered pages. `orna-evaluator/src/git_branches.rs` reads the local branches
+(`Repository::local_branches`) and pins every reference to the commit the host attached at
 (`SysHostContext::head_commit`): the commit `HEAD` named when `orna run` or the REPL session bound its catalogue
 identities, so one activation carries one pin. A `sys.Branch` row exposes `reference` (`sys.BranchRef`, keyed by the
 branch name), `name`, `commit` (`sys.CommitRef` over the branch tip), `current` (the branch `HEAD` is attached to; a
@@ -101,3 +103,46 @@ commit to pin to, a repository that has branches fails the read with `sys.snapsh
 branch (an unborn `HEAD`) serves an empty relation. Remote-tracking branches are refs, not rows of this relation;
 `sys.Ref.remote` and `sys.git.refs` carry them. `orna serve` pins no `HEAD` of its own, so the relation is not served
 there yet and fails closed with `sys.snapshot.incomplete`.
+
+## The tag rows
+
+`sys.git.tags` serves one `sys.Tag` row per tag of `refs/tags`, in name order (`orna-evaluator/src/git_tags.rs`,
+`Repository::local_tags`: one `for-each-ref` run, so the tags and the tag objects behind them are one observation). It
+reads and pins exactly as the branch rows do. `reference` is the `sys.TagRef` keyed by the tag name (the ref name
+without `refs/tags/`) and `name` is that name. `object` is the `sys.GitObjectRef` of the object the tag names: for an
+annotated tag, the `object` header of its tag object, one level and not peeled (a tag of a tag names the inner tag
+object, not the commit it finally peels to); for a lightweight tag, the object its ref names (a commit, or a tree or
+blob, which Git permits). `annotated` says whether the ref names a tag object. `message` and `tagger` are the tag
+object's, so a lightweight tag has neither (null). An annotated tag has a message (possibly empty), Git's
+`%(contents)`: everything after the headers, a signed tag's signature block included, with the leading blank lines Git
+skips dropped. It has a tagger (`sys.PersonIdentity`: `name` and `email`) unless its tag object has no `tagger`
+header, as Git's earliest tag objects have none; `email` is null for an identity line whose address is empty
+(`Name <>`). Nothing is guessed: a tag whose object cannot be read, a name that is not a ref name, an object id of the
+wrong width, text that is not UTF-8, more than 10,000 tags, or a listing past the 4 MiB bound of a Git listing fails the
+read with `sys.snapshot.incomplete`.
+
+## The remote rows
+
+`sys.git.remotes` serves one `sys.Remote` row per remote the repository configures, in name order
+(`orna-evaluator/src/git_remotes.rs`, `Repository::configured_remotes`: one `git config --null --get-regexp` run over
+`remote.<name>.*` and `extensions.partialClone`, so the URLs and the promisor flag of every remote are one observation
+of the configuration). It reads and pins exactly as the branch rows do. A remote is every name some
+`remote.<name>.<variable>` entry carries, as `git remote` lists them; one with only `fetch` refspecs has no URL and
+empty URL lists. `reference` is the `sys.RemoteRef` keyed by the name. `fetch_urls` are the `url` values in
+configuration order. `push_urls` are the `pushurl` values, or the `url` values when none is configured: the URLs a push
+goes to, as `git remote get-url --push --all` reports them. An empty `url` or `pushurl` clears the earlier ones, as it
+does for Git. The configuration is read as written: `url.<base>.insteadOf` rewrites are not applied and nothing
+contacts a remote. `promisor` is true when `remote.<name>.promisor` is true or `extensions.partialClone` names the
+remote, which is how Git treats both. `last_error` is null: this runtime retains no remote failure to report, so
+there is no error to read back.
+
+The type is "Git remote without plaintext credentials", and ORNA-SYS-099 and ORNA-SYS-100 require redaction at the value
+boundary with an explicit marker, never plausible text. The repository reader redacts as it reads
+(`redact_remote_url` in `orna-repository/src/remotes.rs`), so no caller ever holds the configured text of a URL. The user information of a
+`scheme://` URL, the user name included (a token is often the user name), is replaced by `<redacted>`
+(`https://account:secret@host/p.git` reads `https://<redacted>@host/p.git`), and the whole address of an `ext::` remote
+helper, which is an arbitrary command line, is replaced (`ext::<redacted>`). A `user@host:path` URL and a local path
+have no credential syntax and are kept as configured; a local path is a host path, shown as configured on the
+developer-run default paths (`orna serve` pins no `HEAD`, so it serves no Git member yet). Configuration the reader does
+not understand (a `url` with no value, a `promisor` that is not a boolean, an empty remote name) fails the read with
+`sys.snapshot.incomplete`, as does more than 1,000 remotes.
