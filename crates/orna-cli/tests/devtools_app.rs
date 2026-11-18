@@ -1039,3 +1039,147 @@ fn explicit_refresh_shows_a_row_inserted_through_the_repl() {
         "the refresh reflects the change"
     );
 }
+
+/// A devtools-style page that lists the local branches of the clone it serves.
+const BRANCHES_PAGE_SOURCE: &str = "use std.ui.{Cols, Table, Text};\n\npub table Note(id: Int) {\n    body: Str,\n}\n\npub fn serve(): UI = Cols([\n    Text(\"Branches\"),\n    Table(sys.git.branches)\n]);\n";
+
+#[test]
+// Specified: ORNA-SERVE-003, ORNA-SERVE-009; the page lists the branches of its
+// clone through the production `sys.git.branches` relation, each request at the
+// commit HEAD names when it runs, and marks the branch HEAD is attached to.
+fn devtools_page_lists_the_local_branches_of_the_clone() {
+    let snapshot = standard_snapshot();
+    let project = project_with_source(snapshot.path(), BRANCHES_PAGE_SOURCE);
+    let current = git_output_at(project.path(), &["symbolic-ref", "--short", "HEAD"]);
+    let (_server, address) = start(project.path());
+
+    let reply = get(&address, "/").expect("read the page");
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(
+        served_table_names(&reply.body).as_slice(),
+        std::slice::from_ref(&current)
+    );
+    assert!(
+        reply
+            .body
+            .contains(&format!("<td>{current}</td><td>true</td>")),
+        "the branch HEAD is attached to is marked current\n{}",
+        reply.body
+    );
+
+    git_output_at(project.path(), &["branch", "topic"]);
+    let refreshed = get(&address, "/").expect("refresh the page");
+    assert_eq!(refreshed.status, 200, "{}", refreshed.body);
+    let mut names = served_table_names(&refreshed.body);
+    names.sort();
+    let mut expected = [current, "topic".to_owned()];
+    expected.sort();
+    assert_eq!(
+        names, expected,
+        "a branch created while the server runs is listed by the next request\n{}",
+        refreshed.body
+    );
+    assert!(
+        refreshed.body.contains("<td>topic</td><td>false</td>"),
+        "the other branch is not current\n{}",
+        refreshed.body
+    );
+}
+
+/// Encodes one console input as the value of the form's urlencoded field.
+fn form_value(text: &str) -> String {
+    text.bytes()
+        .map(|byte| match byte {
+            byte if byte.is_ascii_alphanumeric() => char::from(byte).to_string(),
+            b' ' => "+".to_owned(),
+            byte => format!("%{byte:02X}"),
+        })
+        .collect()
+}
+
+/// Posts `input` to the Run control as one console input.
+fn run_console(address: &str, input: &str) -> Reply {
+    let origin = format!("http://{address}");
+    post_form(
+        address,
+        "/action/devtools.run",
+        Some(&origin),
+        &format!("query={}", form_value(input)),
+    )
+}
+
+/// Asserts that the Run control served `input` as the typed result `value`.
+fn assert_run_served(address: &str, input: &str, value: &str) {
+    let reply = run_console(address, input);
+    assert_eq!(reply.status, 200, "{input}: {}", reply.body);
+    assert!(
+        reply
+            .body
+            .contains(&format!("<pre><code>{value}</code></pre>")),
+        "{input} is served as {value}: {}",
+        reply.body
+    );
+}
+
+#[test]
+// Specified: ORNA-APP-002, ORNA-SERVE-003; the Run control reads the Git state
+// of the clone through the real evaluator, each Run at the commit HEAD names
+// when it runs, so a branch created while the server runs is counted at once.
+fn run_action_reads_the_local_branches_of_the_clone() {
+    let snapshot = standard_snapshot();
+    let project = devtools_project(snapshot.path());
+    let (_server, address) = start(project.path());
+
+    assert_run_served(&address, "sys.git.branches | count()", "1 : Int");
+    git_output_at(project.path(), &["branch", "topic"]);
+    assert_run_served(&address, "sys.git.branches | count()", "2 : Int");
+}
+
+#[test]
+// Specified: ORNA-SYS-111, ORNA-SYS-112; the Run control reads the catalogue of
+// the project over the identities committed at the request's commit.
+fn run_action_reads_the_catalogue_of_the_project() {
+    let snapshot = standard_snapshot();
+    let project = devtools_project(snapshot.path());
+    let (_server, address) = start(project.path());
+
+    assert_run_served(&address, "sys.catalog.tables | count()", "1 : Int");
+    assert_run_served(&address, "sys.catalog.columns | count()", "2 : Int");
+    assert_run_served(
+        &address,
+        "sys.catalog.columns | flat_map(c => sys.catalog.tables | filter(t => t.reference == c.table) | map(t => c.name)) | count()",
+        "2 : Int",
+    );
+}
+
+#[test]
+// Specified: ORNA-SYS-029; the Run control reads the facts of the serving
+// runtime, which a page reads the same way.
+fn run_action_reads_the_runtime_facts() {
+    let snapshot = standard_snapshot();
+    let project = devtools_project(snapshot.path());
+    let (_server, address) = start(project.path());
+
+    assert_run_served(
+        &address,
+        "sys.rt.info().mode == sys.RuntimeMode.serve",
+        "true : Bool",
+    );
+}
+
+#[test]
+// Specified: ORNA-SYS-012; the console binds no rows to an application table,
+// so a read of one is refused rather than served as an empty relation.
+fn run_action_refuses_an_application_table_read() {
+    let snapshot = standard_snapshot();
+    let project = devtools_project(snapshot.path());
+    let (_server, address) = start(project.path());
+
+    let reply = run_console(&address, "main.Note | count()");
+    assert_eq!(reply.status, 422, "{}", reply.body);
+    assert!(
+        reply.body.contains("ORNA-EVAL-NAME") && !reply.body.contains("<pre>"),
+        "the read is refused and carries no value: {}",
+        reply.body
+    );
+}

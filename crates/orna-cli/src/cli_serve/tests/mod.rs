@@ -1,6 +1,8 @@
 use super::*;
 use std::process::Command;
 
+mod head_pin;
+
 #[test]
 fn websocket_failures_close_with_size_or_protocol_code() {
     assert_eq!(
@@ -2337,14 +2339,10 @@ fn uuid_bytes(text: &str) -> [u8; 16] {
     bytes
 }
 
-/// Sends one client request over `stream` and returns the host's answer.
-/// An Eval carries its request fingerprint, as a conforming client sends
-/// it; other requests need not.
-fn request_over_socket(
-    stream: &mut TcpStream,
-    session: &LiveSession,
-    mut envelope: Envelope,
-) -> Envelope {
+/// Sends one client request over `stream` without waiting for the answer. An
+/// Eval carries its request fingerprint, as a conforming client sends it;
+/// other requests need not.
+fn send_request_over_socket(stream: &mut TcpStream, session: &LiveSession, mut envelope: Envelope) {
     let limits = ProtocolLimits::default();
     let fingerprint =
         orna_protocol::canonical_request_fingerprint(uuid_bytes(&session.id), &envelope, limits)
@@ -2360,6 +2358,16 @@ fn request_over_socket(
         2,
         &envelope.encode(limits).expect("canonical request"),
     );
+}
+
+/// Sends one client request over `stream` and returns the host's answer.
+fn request_over_socket(
+    stream: &mut TcpStream,
+    session: &LiveSession,
+    envelope: Envelope,
+) -> Envelope {
+    send_request_over_socket(stream, session, envelope);
+    let limits = ProtocolLimits::default();
     loop {
         let (opcode, payload) = read_frame(stream).expect("answer before the client timeout");
         // A conforming client answers keepalive pings while it waits.
@@ -2392,27 +2400,27 @@ fn terminal_presentation() -> PresentationContext {
     }
 }
 
+fn eval_envelope(session: &LiveSession, request: [u8; 16], source: &str) -> Envelope {
+    Envelope {
+        request: Some(request),
+        watch: None,
+        message: Message::Eval {
+            source: source.to_owned(),
+            database: session_database(session),
+            presentation: terminal_presentation(),
+            fingerprint: [0; 32],
+        },
+        extensions: BTreeMap::new(),
+    }
+}
+
 fn eval_over_socket(
     stream: &mut TcpStream,
     session: &LiveSession,
     request: [u8; 16],
     source: &str,
 ) -> Envelope {
-    request_over_socket(
-        stream,
-        session,
-        Envelope {
-            request: Some(request),
-            watch: None,
-            message: Message::Eval {
-                source: source.to_owned(),
-                database: session_database(session),
-                presentation: terminal_presentation(),
-                fingerprint: [0; 32],
-            },
-            extensions: BTreeMap::new(),
-        },
-    )
+    request_over_socket(stream, session, eval_envelope(session, request, source))
 }
 
 fn watch_over_socket(
