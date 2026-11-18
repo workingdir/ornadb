@@ -43,6 +43,7 @@ mod repl_copy;
 mod repl_doc;
 mod repl_hir;
 mod repl_inspect;
+mod repl_plan;
 mod repl_request;
 mod repl_run;
 mod repl_session;

@@ -1,6 +1,6 @@
 //! Console commands that read or present the session: `:type`, `:inspect`,
-//! `:members`, `:table`, `:history`, `:timing`, `:copy`, `:doc`, `:source`,
-//! and `:clear`.
+//! `:members`, `:table`, `:plan`, `:history`, `:timing`, `:copy`, `:doc`,
+//! `:source`, and `:clear`.
 //!
 //! `repl.rs` dispatches the session, watch, and help commands itself. Every
 //! other `:name` reaches [`run`], which either runs the command or refuses it
@@ -15,10 +15,14 @@ use orna_check::Type;
 use orna_evaluator::{RelationDisplay, ReplValue};
 use orna_project_repl::{AdmittedReplSession, ReplDetail};
 
-use crate::repl::{AnsiColor, ReplFailure, write_repl_failure, write_repl_outcome, write_styled};
+use crate::repl::{
+    AnsiColor, ReplFailure, ReplSubmissionHandler, write_repl_failure, write_repl_outcome,
+    write_styled,
+};
 use crate::repl_copy;
 use crate::repl_doc;
 use crate::repl_inspect::inspect_full;
+use crate::repl_plan::{self, PlanRefusal};
 
 /// The most submitted inputs `:history` keeps.
 const MAX_HISTORY: usize = 256;
@@ -31,7 +35,7 @@ const COMMANDS: [&str; 19] = [
 
 /// Commands the console recognises but does not implement yet. Each is
 /// refused by name; none is silently accepted.
-const UNSUPPORTED: [&str; 4] = ["open", "plan", "trace", "display"];
+const UNSUPPORTED: [&str; 3] = ["open", "trace", "display"];
 
 /// The code every console refusal carries.
 const COMMAND_CODE: &str = "ORNA-REPL-COMMAND";
@@ -93,10 +97,11 @@ pub(crate) fn run<W: Write>(
     source: &str,
     session: &AdmittedReplSession,
     console: &mut ConsoleState,
+    evaluate: &mut ReplSubmissionHandler<'_>,
     writer: &mut W,
     color_enabled: bool,
 ) -> io::Result<()> {
-    match execute(source, session, console, writer, color_enabled)? {
+    match execute(source, session, console, evaluate, writer, color_enabled)? {
         None => Ok(()),
         Some(refusal) => {
             write_repl_failure(writer, &refusal.failure, refusal.source, color_enabled)
@@ -108,6 +113,7 @@ fn execute<'a, W: Write>(
     source: &'a str,
     session: &AdmittedReplSession,
     console: &mut ConsoleState,
+    evaluate: &mut ReplSubmissionHandler<'_>,
     writer: &mut W,
     color_enabled: bool,
 ) -> Outcome<'a> {
@@ -128,6 +134,7 @@ fn execute<'a, W: Write>(
         "inspect" => inspect_command(&cmd, session, writer, color_enabled),
         "members" => members_command(&cmd, session, writer, color_enabled),
         "table" => table_command(&cmd, session, writer, color_enabled),
+        "plan" => plan_command(&cmd, session, evaluate, writer, color_enabled),
         "history" => history_command(&cmd, console, writer),
         "timing" => Ok(timing_command(&cmd, console)),
         "clear" => clear_command(&cmd, writer, color_enabled),
@@ -138,7 +145,7 @@ fn execute<'a, W: Write>(
             &cmd,
             format!("`:{name}` is not available in this console yet"),
             vec![
-                "the console runs :type, :doc, :source, :inspect, :members, :table, :history, :timing, :copy, and :clear"
+                "the console runs :type, :doc, :source, :inspect, :members, :table, :plan, :history, :timing, :copy, and :clear"
                     .into(),
                 "enter `:help` to see the supported commands".into(),
             ],
@@ -352,6 +359,32 @@ fn table_command<'a, W: Write>(
     Ok(None)
 }
 
+/// `:plan EXPR` prints the structured plan the planner derives for a query,
+/// without running the query.
+fn plan_command<'a, W: Write>(
+    cmd: &Cmd<'a>,
+    session: &AdmittedReplSession,
+    evaluate: &mut ReplSubmissionHandler<'_>,
+    writer: &mut W,
+    color_enabled: bool,
+) -> Outcome<'a> {
+    if cmd.arg.is_empty() {
+        return Ok(Some(refuse_name(
+            cmd,
+            "usage: :plan EXPR".into(),
+            Vec::new(),
+        )));
+    }
+    match repl_plan::explain(cmd.arg, session, evaluate) {
+        Ok(plan) => {
+            repl_plan::write_plan(writer, &plan, cmd.arg, color_enabled)?;
+            Ok(None)
+        }
+        Err(PlanRefusal::Expression(message)) => Ok(Some(refuse_arg_message(cmd, message))),
+        Err(PlanRefusal::Failure(failure)) => Ok(Some(refuse_arg(cmd, failure))),
+    }
+}
+
 /// Prints each retained input with its submission number. An argument
 /// filters to inputs containing it.
 fn history_command<'a, W: Write>(
@@ -461,10 +494,28 @@ mod tests {
     use super::*;
     use orna_evaluator::Limits;
 
+    /// Evaluates in the session alone, as a console with no host submitter does.
+    fn evaluate_in_session(
+        session: &mut AdmittedReplSession,
+        source: &str,
+    ) -> Result<orna_project_repl::ReplOutcome, ReplFailure> {
+        session
+            .submit_outcome(source, RelationDisplay::Window)
+            .map_err(ReplFailure::from)
+    }
+
     fn run_source(source: &str, console: &mut ConsoleState) -> String {
         let session = AdmittedReplSession::new(Limits::default());
         let mut out = Vec::new();
-        run(source, &session, console, &mut out, false).expect("in-memory write");
+        run(
+            source,
+            &session,
+            console,
+            &mut evaluate_in_session,
+            &mut out,
+            false,
+        )
+        .expect("in-memory write");
         String::from_utf8(out).expect("utf8 output")
     }
 
@@ -577,10 +628,27 @@ mod tests {
         let session = AdmittedReplSession::new(Limits::default());
         let mut console = ConsoleState::default();
         let mut plain = Vec::new();
-        run(":clear", &session, &mut console, &mut plain, false).expect("write");
+        let mut evaluate = evaluate_in_session;
+        run(
+            ":clear",
+            &session,
+            &mut console,
+            &mut evaluate,
+            &mut plain,
+            false,
+        )
+        .expect("write");
         assert!(plain.is_empty());
         let mut coloured = Vec::new();
-        run(":clear", &session, &mut console, &mut coloured, true).expect("write");
+        run(
+            ":clear",
+            &session,
+            &mut console,
+            &mut evaluate,
+            &mut coloured,
+            true,
+        )
+        .expect("write");
         assert_eq!(coloured, b"\x1b[2J\x1b[H");
     }
 
