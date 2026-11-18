@@ -199,9 +199,9 @@ fn write_cli_line(text: &[u8], color: AnsiColor, color_enabled: bool) -> Result<
 }
 
 /// The process exit status of a failed command, as the `--help` exit status
-/// table lists it. Status 0 (success) is the absence of a diagnostic and
-/// status 4 (authorisation) belongs to remote transports this build does not
-/// have, so neither is a status a `Diagnostic` can carry.
+/// table lists it. Status 0 (success) is the absence of a diagnostic, so no
+/// `Diagnostic` carries it, and status 4 (authorisation) is not produced by
+/// this build.
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Exit {
     Target = 1,

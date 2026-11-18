@@ -65,7 +65,7 @@ pub(super) const HELP_LINES: &[&str] = &[
     "  semantic-legend exit codes: 0 legend printed; 2 unsupported option or invalid --limit value",
     "Exit status:",
     "  0 success            1 target             2 usage              3 connection",
-    "  4 authorisation      5 presentation       6 cancelled          7 protocol",
+    "  5 presentation       6 cancelled          7 protocol",
     "History commands:",
     "  history RELATION KEY [--at SELECTOR] [--limit N] [--since COMMIT] [--format human|json] [--reverse] [--author TEXT] [--count]",
     "  history RELATION --diff FROM TO    what changed between two pinned snapshots, payload-free",
