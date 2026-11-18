@@ -165,6 +165,7 @@ fn is_unsupported_value(value: &Value) -> bool {
             | Value::Period(_)
             | Value::Uuid(_)
             | Value::Digest(_)
+            | Value::GitOid(_)
             | Value::Money { .. }
             | Value::Closure(_)
             | Value::RowRef(_)

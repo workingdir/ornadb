@@ -8,8 +8,8 @@ use std::fmt::Write as _;
 
 use orna_sys_id::SysType;
 use orna_value::{
-    CanonicalValue, ContextValue, OVB2_BLOB_TAG, ROV3_BLOB_TAG, ROV3_OVERFLOW_TAG, Raw,
-    SOV3_BLOB_TAG, canonical_uuid_text,
+    CanonicalValue, ContextValue, GIT_OID_TYPE_NAME, GitObjectId, OVB2_BLOB_TAG, ROV3_BLOB_TAG,
+    ROV3_OVERFLOW_TAG, Raw, SOV3_BLOB_TAG, canonical_uuid_text,
 };
 
 /// How much of a value the console renders.
@@ -62,6 +62,11 @@ fn inspect_text(raw: &Raw, bounds: Bounds) -> String {
 pub(crate) fn render(raw: &Raw, depth: usize, bounds: Bounds) -> (String, &'static str) {
     if depth >= bounds.depth {
         return ("…".into(), "Value");
+    }
+    // A `sys.GitOid` shows the lowercase hexadecimal id Git prints and its type name: the id's width says which
+    // hash algorithm names it, and the type name keeps it apart from a digest or a `Str`.
+    if let Some(oid) = GitObjectId::from_opaque_raw(raw) {
+        return (oid.to_hex(), GIT_OID_TYPE_NAME);
     }
     match raw {
         Raw::Null => ("null".into(), "Null"),
@@ -639,5 +644,33 @@ mod tests {
         assert_eq!(inspect_text(&overflow, DISPLAY), "<object> : Overflow");
         let malformed = Raw::Tag(ROV3_BLOB_TAG, Box::new(Raw::Null));
         assert_eq!(inspect_text(&malformed, DISPLAY), "Blob(<invalid>) : Blob");
+    }
+
+    // Specified: ORNA-SYS-016, ORNA-PRES-003; Orna-1.1.0 29-formats.md, tag 60023 and `sys.GitOid`.
+    #[test]
+    fn a_git_oid_shows_the_hexadecimal_id_git_prints_under_its_type_name() {
+        let sha1 =
+            GitObjectId::from_hex("3f786850e387550fdab836ed7e6dc881de23001b").expect("a SHA-1 id");
+        let sha256 = GitObjectId::from_hex(&"ab".repeat(32)).expect("a SHA-256 id");
+        for (oid, text) in [
+            (sha1, "3f786850e387550fdab836ed7e6dc881de23001b".to_owned()),
+            (sha256, "ab".repeat(32)),
+        ] {
+            let value = oid.to_canonical().expect("a canonical sys.GitOid");
+            assert_eq!(inspect(&value), format!("{text} : sys.GitOid"));
+            // The display is bounded like every other leaf, and nests inside a collection.
+            let nested = Raw::Array(vec![oid.to_opaque_raw()]);
+            assert_eq!(render(&nested, 0, DISPLAY).0, format!("[{text}]"));
+        }
+        // Another opaque identifier is not a Git object id and keeps its structural fallback.
+        let revision = Raw::Tag(
+            60023,
+            Box::new(Raw::Array(vec![
+                Raw::Text("sys.RevisionId".to_owned()),
+                Raw::Bytes(vec![7; 32]),
+            ])),
+        );
+        let (_, ty) = render(&revision, 0, DISPLAY);
+        assert_eq!(ty, "SystemId");
     }
 }

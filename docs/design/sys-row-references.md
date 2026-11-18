@@ -156,6 +156,43 @@ every path that serves the member, `orna serve` included (see above). Configurat
 not understand (a `url` with no value, a `promisor` that is not a boolean, an empty remote name) fails the read with
 `sys.snapshot.incomplete`, as does more than 1,000 remotes.
 
+## The `sys.GitOid` value
+
+`sys.Commit.oid`, `sys.GitObject.oid`, `sys.Storage.root`, `sys.CheckoutPlan.base_head`, `sys.CommitReview.head` and
+`index_tree`, and the `sys.GitOid` parameters of `sys.snapshot`, `sys.admin.checkout`, `sys.admin.create_branch` and
+`sys.admin.plan_checkout` need a value of the opaque identifier
+`sys.GitOid`, which is not a `sys.*Ref` (a reference states coordinates and a snapshot pin; an id states only the
+object). `source/29-formats.md` gives it the OVB tag-60023 value `[qualified_type_name, representation]` with the
+representation `["sha1", bytes20]` or `["sha256", bytes32]`: `["sys.GitOid", ["sha1", 20 bytes]]`. The registry in
+`orna-value` already rejected a width that disagrees with its algorithm; what was missing was a typed value that
+holds one.
+
+- `orna_value::GitObjectId` is that value. It adds `from_hex`/`to_hex`/`Display` (Git's lowercase spelling: 40 or
+  64 digits, nothing else names an id), `to_opaque_raw`/`to_canonical` (the tag-60023 value) and `from_opaque_raw`
+  (the inverse, which reads only `sys.GitOid` with an agreeing algorithm and width: a `sys.RevisionId` is tag 60023
+  as well and is not an id). The bare `[algorithm, bytes]` form stays the natural-key component of a `sys.CommitRef`
+  or `sys.GitObjectRef` (`KeyPartKind::GitOid`), so the references of the earlier slices keep their bytes.
+- Equality is the identity named (ORNA-SYS-016): two ids are equal when algorithm and bytes are, an id is never
+  equal to the `Str` spelling of itself, to a `Digest` or a `Uuid` of the same bytes, and the same bytes under
+  another algorithm are another object. Ids order by algorithm (`sha1` before `sha256`) and then by bytes, which for
+  one algorithm is the order of the lowercase hexadecimal spellings; `GitObjectId` derives `Ord` and `Hash` for it.
+- `orna_evaluator` holds an id as `Value::GitOid`: `raw()` is the tag-60023 value, `from_canonical` and `from_raw`
+  read it back wherever it nests, and `==`, `!=`, `<`, `<=`, `>`, `>=`, `sort_by` and `group_by` accept it
+  (comparing an id with another type is the existing `ORNA-EVAL-TYPE` failure). The REPL keeps `$_` and every `let`
+  as a canonical value that each later input decodes again, so before this value existed a `sys.GitOid` result made
+  the next input fail with `ORNA-EVAL-UNSUPPORTED`; it now reads back as the same id. Another opaque identifier
+  (`sys.RunId`, `sys.RevisionId`, ...) is not read back yet and still fails the same way, because no typed value
+  holds it.
+- `orna_exec::Value::GitOid` is the executor's counterpart (`value/oid.rs`): `Value::git_oid(oid)` and
+  `Value::as_git_oid()`, and a stored tag-60023 `sys.GitOid` reads back as the same value instead of the opaque
+  `Value::RowRef`. The executor's JSON and Orna text codecs refuse it as they refuse a `Digest`.
+- Display (ORNA-PRES-003, "friendly human text, may be lossy"): the REPL shows an id as the hexadecimal Git prints
+  under the type name `sys.GitOid`, `3f786850e387550fdab836ed7e6dc881de23001b : sys.GitOid` (the full 40 or 64
+  digits), where it used to read `SystemId(["sys.GitOid", [...]])`; inside a list, record or table cell it is the
+  hexadecimal alone. The `std.encoding.orna` encoder writes the quoted lowercase hexadecimal under its explicit type
+  witness, as for a `Digest`; the evaluator's JSON encoder refuses it, as it refuses a `Digest`. Neither is the
+  canonical form, which stays tag 60023.
+
 ## The ref rows
 
 `sys.git.refs` serves one `sys.Ref` row per ref under `refs/`, in name order (`orna-evaluator/src/git_refs.rs`,
