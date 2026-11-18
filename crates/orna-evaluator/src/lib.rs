@@ -52,6 +52,8 @@ mod git_refs;
 #[cfg(feature = "system-host-bindings")]
 mod git_remotes;
 #[cfg(feature = "system-host-bindings")]
+mod git_repositories;
+#[cfg(feature = "system-host-bindings")]
 mod git_rows;
 #[cfg(feature = "system-host-bindings")]
 mod git_stashes;
@@ -59,6 +61,8 @@ mod git_stashes;
 mod git_tags;
 #[cfg(feature = "system-host-bindings")]
 mod git_tree_entries;
+#[cfg(feature = "system-host-bindings")]
+mod git_worktree;
 mod intrinsics;
 use crate::intrinsics::codecs::{json_node_to_value, parse_json_node};
 use crate::intrinsics::money::money_amount;
@@ -3212,6 +3216,8 @@ mod non_host_names {
     pub(super) const GIT_TAGS: &str = "sys.git.tags";
     pub(super) const GIT_COMMITS: &str = "sys.git.commits";
     pub(super) const GIT_TREE_ENTRIES: &str = "sys.git.tree_entries";
+    pub(super) const GIT_REPOSITORIES: &str = "sys.git.repositories";
+    pub(super) const GIT_WORKTREE: &str = "sys.git.worktree";
     pub(super) const BLOB_UNAVAILABLE: &str = "sys.blob.unavailable";
     pub(super) const BLOB_CORRUPT: &str = "sys.blob.corrupt";
     pub(super) const BLOB_REFERENCE_CONTEXT: &str = "sys.blob.reference_context";
@@ -8950,9 +8956,10 @@ impl Context<'_, '_> {
         }
         // The Git members the evaluator serves from the repository the host
         // attached (`git_rows::MEMBERS`: `sys.git.branches`, `sys.git.commits`,
-        // `sys.git.refs`, `sys.git.remotes`, `sys.git.stashes`, `sys.git.tags`,
-        // `sys.git.tree_entries`) and a commit's `parents` relation; an activation with
-        // no host context leaves the source to its handler.
+        // `sys.git.refs`, `sys.git.remotes`, `sys.git.repositories`, `sys.git.stashes`,
+        // `sys.git.tags`, `sys.git.tree_entries`, `sys.git.worktree`) and a commit's
+        // `parents` relation; an activation with no host context leaves the source to
+        // its handler.
         #[cfg(feature = "system-host-bindings")]
         if let Some(attachment) = self
             .effects
@@ -11988,6 +11995,8 @@ fn system_relation_source(expression: &Expr) -> Option<&'static str> {
         name if name == non_host_names::GIT_TAGS => Some(non_host_names::GIT_TAGS),
         name if name == non_host_names::GIT_COMMITS => Some(non_host_names::GIT_COMMITS),
         name if name == non_host_names::GIT_TREE_ENTRIES => Some(non_host_names::GIT_TREE_ENTRIES),
+        name if name == non_host_names::GIT_REPOSITORIES => Some(non_host_names::GIT_REPOSITORIES),
+        name if name == non_host_names::GIT_WORKTREE => Some(non_host_names::GIT_WORKTREE),
         _ => None,
     }
 }
