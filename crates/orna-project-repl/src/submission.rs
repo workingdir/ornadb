@@ -23,6 +23,22 @@ impl AdmittedReplSession {
         self.submit_outcome_with(source, RelationDisplay::Window, Some(effects))
     }
 
+    /// As [`Self::submit`], with the table reads of the input served by
+    /// `effects`, and so the system relations it reads. An input with any other
+    /// effect is refused before evaluation, and an input with no effect
+    /// evaluates as [`Self::submit`] does. A relation result is an error, as it
+    /// is for [`Self::submit`].
+    pub fn submit_with_effects(
+        &mut self,
+        source: &str,
+        effects: &mut dyn EffectHandler,
+    ) -> Result<Option<CanonicalValue>, ReplError> {
+        self.submit_outcome_with(source, RelationDisplay::Reject, Some(effects))?
+            .value
+            .map(|value| value.into_canonical().map_err(ReplError::runtime))
+            .transpose()
+    }
+
     /// Admits one input and executes it. Table reads are served by `effects`
     /// when given. Any other effect is refused before evaluation.
     pub(super) fn submit_outcome_with(

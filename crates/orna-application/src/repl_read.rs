@@ -59,6 +59,26 @@ impl ApplicationAuthority {
         };
         session.submit_read_outcome(source, &mut effects)
     }
+
+    /// Evaluates one console input that only reads system relations, at the
+    /// commit this authority is pinned to ([`Self::with_head_commit`]): the
+    /// Git state of the host (`sys.git.*`), the host's own facts
+    /// (`sys.rt.info()`) and the catalogue of `tables` over the identities
+    /// committed at that commit (`sys.catalog.*`). The session refuses any
+    /// other effect before evaluation. No table has rows bound, so a read of an
+    /// application table fails instead of serving an empty relation.
+    pub fn submit_system_read(
+        &self,
+        session: &mut AdmittedReplSession,
+        source: &str,
+        tables: BTreeMap<String, TableSchema>,
+        identities: Option<&CatalogueIdentities>,
+    ) -> Result<Option<CanonicalValue>, ReplError> {
+        let mut handler = SourceMutationEffectHandler::new(tables)
+            .with_sys_host_context(self.sys_host.clone())
+            .with_catalogue_identities(identities);
+        session.submit_with_effects(source, &mut handler)
+    }
 }
 
 fn read_scope_error<E>(_: E) -> ReplError {

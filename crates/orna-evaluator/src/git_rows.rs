@@ -11,9 +11,10 @@
 //! object id that is not a Git object id each fail the read with
 //! `sys.snapshot.incomplete` (required snapshot objects are unavailable).
 //!
-//! Rows are ordered by name, and the cursor of a page is the name of the last row
-//! it served, so a row created or deleted between two pages of one read never
-//! repeats or skips a row that persists.
+//! Rows are ordered by a key the member names (a name, or the index of a stash)
+//! and the cursor of a page is the key of the last row it served, so a row
+//! created or deleted between two pages of one read never repeats or skips a row
+//! that persists.
 
 use std::collections::BTreeMap;
 
@@ -21,7 +22,9 @@ use orna_repository::{GitHashAlgorithm, NativeOid, Repository};
 use orna_sys::{SysFailureCode, SysGroupedHandle, SysHostContext};
 use orna_value::{CanonicalSnapshot, GitHash, GitObjectId, SysRef, SystemReferenceError};
 
-use crate::{EvaluationError, Value, error, git_branches, git_remotes, git_tags};
+use crate::{
+    EvaluationError, Value, error, git_branches, git_refs, git_remotes, git_stashes, git_tags,
+};
 
 /// Rows one page serves, unless the activation's collection limit is lower.
 ///
@@ -53,14 +56,22 @@ struct Member {
 /// The members the evaluator serves from the repository. A handle linked in the
 /// `orna-sys-id` generator (`LINKED_GROUPED_HANDLES`) with no entry here would be
 /// admitted and then unserved, so the two lists name the same members.
-const MEMBERS: [Member; 3] = [
+const MEMBERS: [Member; 5] = [
     Member {
         handle: SysGroupedHandle::GitBranches,
         page: git_branches::branches_page,
     },
     Member {
+        handle: SysGroupedHandle::GitRefs,
+        page: git_refs::refs_page,
+    },
+    Member {
         handle: SysGroupedHandle::GitRemotes,
         page: git_remotes::remotes_page,
+    },
+    Member {
+        handle: SysGroupedHandle::GitStashes,
+        page: git_stashes::stashes_page,
     },
     Member {
         handle: SysGroupedHandle::GitTags,
@@ -182,8 +193,31 @@ pub(crate) fn page_rows<T>(
     limit: usize,
     row: impl Fn(&RowPin, &T) -> Result<Value, EvaluationError>,
 ) -> Result<GitPage, EvaluationError> {
+    page_ordered(
+        context,
+        rows,
+        |candidate| name(candidate).as_bytes().to_vec(),
+        after,
+        limit,
+        row,
+    )
+}
+
+/// Builds the page of `rows` (ordered by `key`, byte-wise) that follows the row
+/// whose key is `after`, building each row served with `row`. A cursor is the key
+/// of the last row of the page before it, so a key that is no longer there (its
+/// row was deleted) resumes at the next key. The pin is read only when the page
+/// holds a row to pin.
+pub(crate) fn page_ordered<T>(
+    context: &SysHostContext,
+    rows: &[T],
+    key: impl Fn(&T) -> Vec<u8>,
+    after: Option<&[u8]>,
+    limit: usize,
+    row: impl Fn(&RowPin, &T) -> Result<Value, EvaluationError>,
+) -> Result<GitPage, EvaluationError> {
     let start = after.map_or(0, |cursor| {
-        rows.partition_point(|candidate| name(candidate).as_bytes() <= cursor)
+        rows.partition_point(|candidate| key(candidate).as_slice() <= cursor)
     });
     let remaining = &rows[start..];
     let served = &remaining[..limit.min(remaining.len())];
@@ -195,7 +229,7 @@ pub(crate) fn page_rows<T>(
         .iter()
         .map(|served| row(&pin, served))
         .collect::<Result<Vec<_>, _>>()?;
-    let next = (served.len() < remaining.len()).then(|| name(last).as_bytes().to_vec());
+    let next = (served.len() < remaining.len()).then(|| key(last));
     Ok((values, next))
 }
 
@@ -281,7 +315,7 @@ pub(crate) mod testing {
 #[cfg(test)]
 mod tests {
     use super::testing::{context, pin, pinned, row_pin};
-    use super::{RowPin, object_id, page_rows};
+    use super::{RowPin, object_id, page_ordered, page_rows};
     use crate::Value;
     use orna_value::{CanonicalSnapshot, GitHash};
 
@@ -390,6 +424,53 @@ mod tests {
         assert_eq!(failure.code(), "sys.snapshot.incomplete");
     }
 
+    fn index(row: &u64) -> Vec<u8> {
+        row.to_be_bytes().to_vec()
+    }
+
+    fn number(_: &RowPin, index: &u64) -> Result<Value, crate::EvaluationError> {
+        Ok(Value::Int((*index).into()))
+    }
+
+    fn numbers(rows: &[Value]) -> Vec<u64> {
+        rows.iter()
+            .map(|row| match row {
+                Value::Int(number) => u64::try_from(number).expect("a small index"),
+                other => panic!("a row is an index, not {other:?}"),
+            })
+            .collect()
+    }
+
+    // A stash index orders by its value, not by the spelling of the number: `10`
+    // follows `9`, which a text order would not do.
+    #[test]
+    fn numeric_keys_page_in_numeric_order() {
+        let rows = [0_u64, 1, 2, 9, 10, 11, 255, 256];
+        let context = pinned();
+
+        let (page, next) =
+            page_ordered(&context, &rows, index, None, 4, number).expect("first page");
+        assert_eq!(numbers(&page), [0, 1, 2, 9]);
+        assert_eq!(next.as_deref(), Some(9_u64.to_be_bytes().as_slice()));
+
+        let (page, next) =
+            page_ordered(&context, &rows, index, next.as_deref(), 4, number).expect("second page");
+        assert_eq!(numbers(&page), [10, 11, 255, 256]);
+        assert_eq!(next, None, "the last page names no continuation");
+
+        // A cursor between two keys resumes at the next key, as the names do.
+        let (page, _) = page_ordered(
+            &context,
+            &rows,
+            index,
+            Some(&12_u64.to_be_bytes()),
+            8,
+            number,
+        )
+        .expect("after a gap");
+        assert_eq!(numbers(&page), [255, 256]);
+    }
+
     #[test]
     fn a_reference_is_built_over_the_pin_or_refused() {
         let pin = row_pin();
@@ -431,14 +512,26 @@ mod tests {
 
     #[test]
     fn only_the_served_members_are_served() {
-        for served in ["sys.git.branches", "sys.git.remotes", "sys.git.tags"] {
+        for served in [
+            "sys.git.branches",
+            "sys.git.refs",
+            "sys.git.remotes",
+            "sys.git.stashes",
+            "sys.git.tags",
+        ] {
             assert_eq!(super::served_source(served), Some(served));
             assert!(
                 super::served_page(served, &context(None), None, 8, 256).is_some(),
                 "{served}"
             );
         }
-        for other in ["sys.git.refs", "sys.catalog.tables", "Music", ""] {
+        for other in [
+            "sys.git.commits",
+            "sys.git.objects",
+            "sys.catalog.tables",
+            "Music",
+            "",
+        ] {
             assert_eq!(super::served_source(other), None, "{other:?}");
             assert!(
                 super::served_page(other, &context(None), None, 8, 256).is_none(),

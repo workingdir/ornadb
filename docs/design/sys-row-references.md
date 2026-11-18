@@ -86,10 +86,11 @@ the committed inventory does not hold for builtin types, keys or storage.
 
 ## The branch rows
 
-`sys.git.branches` is the first relation served from the repository's Git state; `sys.git.tags` and `sys.git.remotes`
-follow it, below. The evaluator reads the repository the host attached itself (`SysHostContext::root`) and
-`orna-evaluator/src/git_rows.rs` holds what the three members share: the pin, the failure when the repository or the
-pin is unavailable, and the name-ordered pages. `orna-evaluator/src/git_branches.rs` reads the local branches
+`sys.git.branches` is the first relation served from the repository's Git state; `sys.git.tags`, `sys.git.remotes`,
+`sys.git.refs` and `sys.git.stashes` follow it, below. The evaluator reads the repository the host attached itself
+(`SysHostContext::root`) and `orna-evaluator/src/git_rows.rs` holds what the five members share: the pin, the failure
+when the repository or the pin is unavailable, and the pages (ordered by a key the member names: a name, or the index
+of a stash). `orna-evaluator/src/git_branches.rs` reads the local branches
 (`Repository::local_branches`) and pins every reference to the commit the host attached at
 (`SysHostContext::head_commit`): the commit `HEAD` named when `orna run` or the REPL session bound its catalogue
 identities, so one activation carries one pin. A `sys.Branch` row exposes `reference` (`sys.BranchRef`, keyed by the
@@ -101,8 +102,16 @@ including `0` counts for a branch level with its upstream. An upstream configure
 commit unreadable) has no ref to name and nothing to count against, so it reads as no upstream. With no readable
 commit to pin to, a repository that has branches fails the read with `sys.snapshot.incomplete`; a repository with no
 branch (an unborn `HEAD`) serves an empty relation. Remote-tracking branches are refs, not rows of this relation;
-`sys.Ref.remote` and `sys.git.refs` carry them. `orna serve` pins no `HEAD` of its own, so the relation is not served
-there yet and fails closed with `sys.snapshot.incomplete`.
+`sys.Ref.remote` and `sys.git.refs` carry them.
+
+`orna serve` outlives every commit it serves, so it pins each request, not the process. A served page, a console Run
+and a live Eval read `HEAD` when they run: the object id is the `SysHostContext::head_commit` of that request
+(`ApplicationAuthority::with_head_commit` for a page and a Run, `ApplicationLiveAdapter::bind_commit` for an Eval),
+and the identities committed there bind the `sys.catalog.*` rows it reads, so one request carries one pin. A Run is a
+pure console session, so an input that only reads tables is evaluated by `ApplicationAuthority::submit_system_read`:
+it serves `sys.git.*`, `sys.catalog.*` and `sys.rt.info()` and no application table, whose read fails because the
+handler holds no rows for it. A clone with no readable commit has no pin, so the read fails with
+`sys.snapshot.incomplete`; a page is refused as `serve.entry_unavailable` before it reads anything.
 
 ## The tag rows
 
@@ -142,8 +151,8 @@ boundary with an explicit marker, never plausible text. The repository reader re
 `scheme://` URL, the user name included (a token is often the user name), is replaced by `<redacted>`
 (`https://account:secret@host/p.git` reads `https://<redacted>@host/p.git`), and the whole address of an `ext::` remote
 helper, which is an arbitrary command line, is replaced (`ext::<redacted>`). A `user@host:path` URL and a local path
-have no credential syntax and are kept as configured; a local path is a host path, shown as configured on the
-developer-run default paths (`orna serve` pins no `HEAD`, so it serves no Git member yet). Configuration the reader does
+have no credential syntax and are kept as configured; a local path is a host path, shown as configured on
+every path that serves the member, `orna serve` included (see above). Configuration the reader does
 not understand (a `url` with no value, a `promisor` that is not a boolean, an empty remote name) fails the read with
 `sys.snapshot.incomplete`, as does more than 1,000 remotes.
 
@@ -183,3 +192,52 @@ holds one.
   hexadecimal alone. The `std.encoding.orna` encoder writes the quoted lowercase hexadecimal under its explicit type
   witness, as for a `Digest`; the evaluator's JSON encoder refuses it, as it refuses a `Digest`. Neither is the
   canonical form, which stays tag 60023.
+
+## The ref rows
+
+`sys.git.refs` serves one `sys.Ref` row per ref under `refs/`, in name order (`orna-evaluator/src/git_refs.rs`,
+`Repository::committed_refs`: one `for-each-ref` run, so the refs and the objects they name are one observation). It
+reads and pins exactly as the branch rows do. `name` is the full ref name (`refs/heads/main`, `refs/remotes/origin/main`,
+`refs/tags/v1`, `refs/stash`), the key of the `sys.RefRef` that `reference` holds; it is the key `sys.Branch.upstream`
+already names a tracked ref by, so the upstream of a branch is the `reference` of one row here. `target` is the
+`sys.GitObjectRef` of the object the ref names, never null: for a symbolic ref the object the ref it points at names, for
+an annotated tag its tag object (not the commit the tag object tags: that is `sys.Tag.object`'s business), and for the
+refs Git permits to name a tree or a blob, that object. `symbolic_target` is the full name of the ref a symbolic ref
+points at (`refs/remotes/origin/HEAD` reads `refs/remotes/origin/main`) and null for every ref that names an object
+directly. `hidden` is true for the refs under `refs/orna/` (allocator watermarks, checkpoints, pins and the private
+publication candidates) and false for every other ref: they are ordinary, valid Git refs that no branch or tag listing
+shows, and ORNA-SYS-050 makes them visible here in explicit developer inspection. `remote` is the `sys.RemoteRef` of the
+configured remote a remote-tracking ref (`refs/remotes/<remote>/...`) belongs to, and null for every other ref. A remote
+name may hold slashes, so the longest configured name the ref lives under wins (`refs/remotes/a/b/c` belongs to `a/b`
+when both `a` and `a/b` are configured). A remote-tracking ref of a remote that is not configured (one since removed)
+has no `sys.Remote` row for a reference to name, so its `remote` is null. The remote configuration is read, by
+`Repository::configured_remotes`, only when some ref lives under `refs/remotes/`.
+
+`HEAD` and the pseudo-refs (`ORIG_HEAD`, `FETCH_HEAD`, ...) are not under `refs/` and are not rows: `sys.Branch.current`
+reports what `HEAD` attaches to. A symbolic ref whose target ref does not exist names no object and Git lists none, so
+no row is served for it (`target` is not nullable and nothing is invented to fill it). Nothing else is guessed: a ref
+whose object is missing (the listing asks Git for the object type of every ref so it must read the object), a name that
+is not a ref name, an object id of the wrong width, text that is not UTF-8, more than 10,000 refs, a listing past the
+4 MiB bound of a Git listing, or, for a remote-tracking ref, remote configuration the reader does not understand, fails
+the read with `sys.snapshot.incomplete`.
+
+## The stash rows
+
+`sys.git.stashes` serves one `sys.Stash` row per entry of the stash list, newest first
+(`orna-evaluator/src/git_stashes.rs`, `Repository::committed_stashes`: one `git stash list` run over the reflog of
+`refs/stash`, so the entries are one observation; `git reflog show refs/stash` fails in a repository that has no stash,
+where `git stash list` lists none). It reads and pins exactly as the branch rows do. `index` is the `N` of `stash@{N}`
+and the key of the `sys.StashRef` that `reference` holds: `0` is the newest entry. It is the position in the list, which
+is what the selector counts, and the reflog selector itself is not read (it prints a date instead of the number when
+`log.date` is configured), so dropping an entry renumbers the entries after it and a `sys.StashRef` held across the drop
+names the entry that now has the index, as `stash@{N}` does. `commit` is the `sys.CommitRef` of the stash commit,
+`message` the reflog subject Git lists the entry with (`WIP on main: 1a2b3c4 subject`, or `On main: message` for a
+stash made with a message; a message of several lines reads as Git flattened it into the one-line reflog) and `created`
+the committer date of the stash commit as an `Instant` of whole seconds. `created` is present for every entry served: a
+stash commit whose date Git cannot print refuses the listing instead of reading as null.
+
+The pages of the relation are keyed by the index, which is the cursor (eight big-endian bytes, so the entries order by
+index and not by the spelling of the number). A repository with no stash serves an empty relation and needs no pin.
+A record that does not have the shape Git writes, an object id of the wrong width, a time that is not a number, text
+that is not UTF-8, a stash commit Git cannot read, more than 10,000 entries or a listing past the 4 MiB bound of a Git
+listing fails the read with `sys.snapshot.incomplete`; so does the absence of the commit pin the references need.

@@ -509,4 +509,7 @@ mod repl_git_branch_tests;
 mod repl_git_harness;
 
 #[cfg(test)]
+mod repl_git_ref_stash_tests;
+
+#[cfg(test)]
 mod repl_git_tag_remote_tests;

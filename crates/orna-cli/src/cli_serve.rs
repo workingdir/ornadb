@@ -378,6 +378,19 @@ impl ServeState {
         }
         Ok((result, cancelled))
     }
+
+    /// Binds `application` to the commit one Eval is served at: the `HEAD` this
+    /// clone has now and the table and column identities committed there, so
+    /// the `sys.git.*` and `sys.catalog.*` rows the Eval reads are pinned to
+    /// that one commit (ORNA-SERVE-003, ORNA-SYS-011). The server outlives every
+    /// commit it serves, so the binding is made per request while the caller
+    /// holds the application lock. A clone with no readable commit binds none,
+    /// and those rows fail closed.
+    fn bind_request_commit(&self, application: &mut ApplicationLiveAdapter) {
+        let commit =
+            crate::catalogue_identities::request_commit(&self.root, self.identity.database_id);
+        application.bind_commit(commit.head, commit.identities);
+    }
 }
 
 /// Socket workers that own attached or attaching `WebSockets`, keyed by
@@ -952,8 +965,9 @@ fn new_serve_state(
     let std_snapshot = project
         .as_ref()
         .map_or(StdSnapshotPin::Unpinned, sys_host::std_snapshot_pin);
-    // A server outlives the commit it started at and pins no `HEAD` of its own,
-    // so the Git-state rows (`sys.git.branches`) fail closed here.
+    // A server outlives every commit it serves, so this context carries no
+    // `HEAD` pin of its own: each Eval binds the commit it observes
+    // (`ServeState::bind_request_commit`).
     let sys_host_context =
         sys_host::sys_host_context(&root, identity, RuntimeMode::Serve, std_snapshot, None);
     // Every Eval is one input to its session's REPL (30-protocol); the host
@@ -1554,6 +1568,11 @@ impl WebSocketWorker<'_> {
                     // sockets and session requests proceed meanwhile.
                     let completion = match self.state.application.lock() {
                         Ok(mut application) => {
+                            // Each Eval is served at the commit `HEAD` names when it
+                            // runs, bound under the lock that serializes evaluation.
+                            if matches!(ticket.message(), Message::Eval { .. }) {
+                                self.state.bind_request_commit(&mut application);
+                            }
                             self.executor.block_on(ticket.execute(&mut *application))
                         }
                         Err(_) => ticket.reject(orna_live::Error::RuntimeUnavailable),

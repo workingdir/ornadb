@@ -46,9 +46,13 @@ mod explain_bindings;
 #[cfg(feature = "system-host-bindings")]
 mod git_branches;
 #[cfg(feature = "system-host-bindings")]
+mod git_refs;
+#[cfg(feature = "system-host-bindings")]
 mod git_remotes;
 #[cfg(feature = "system-host-bindings")]
 mod git_rows;
+#[cfg(feature = "system-host-bindings")]
+mod git_stashes;
 #[cfg(feature = "system-host-bindings")]
 mod git_tags;
 mod intrinsics;
@@ -3198,7 +3202,9 @@ mod non_host_names {
     pub(super) const CATALOG_TABLES: &str = "sys.catalog.tables";
     pub(super) const CATALOG_COLUMNS: &str = "sys.catalog.columns";
     pub(super) const GIT_BRANCHES: &str = "sys.git.branches";
+    pub(super) const GIT_REFS: &str = "sys.git.refs";
     pub(super) const GIT_REMOTES: &str = "sys.git.remotes";
+    pub(super) const GIT_STASHES: &str = "sys.git.stashes";
     pub(super) const GIT_TAGS: &str = "sys.git.tags";
     pub(super) const BLOB_UNAVAILABLE: &str = "sys.blob.unavailable";
     pub(super) const BLOB_CORRUPT: &str = "sys.blob.corrupt";
@@ -8854,8 +8860,9 @@ impl Context<'_, '_> {
             return self.materialization_page(after, page_limit);
         }
         // The Git members the evaluator serves from the repository the host
-        // attached (`sys.git.branches`, `sys.git.remotes`, `sys.git.tags`); an
-        // activation with no host context leaves the source to its handler.
+        // attached (`git_rows::MEMBERS`: `sys.git.branches`, `sys.git.refs`,
+        // `sys.git.remotes`, `sys.git.stashes`, `sys.git.tags`); an activation
+        // with no host context leaves the source to its handler.
         #[cfg(feature = "system-host-bindings")]
         if let Some(attachment) = self
             .effects
@@ -11885,7 +11892,9 @@ fn system_relation_source(expression: &Expr) -> Option<&'static str> {
         name if name == non_host_names::CATALOG_TABLES => Some(non_host_names::CATALOG_TABLES),
         name if name == non_host_names::CATALOG_COLUMNS => Some(non_host_names::CATALOG_COLUMNS),
         name if name == non_host_names::GIT_BRANCHES => Some(non_host_names::GIT_BRANCHES),
+        name if name == non_host_names::GIT_REFS => Some(non_host_names::GIT_REFS),
         name if name == non_host_names::GIT_REMOTES => Some(non_host_names::GIT_REMOTES),
+        name if name == non_host_names::GIT_STASHES => Some(non_host_names::GIT_STASHES),
         name if name == non_host_names::GIT_TAGS => Some(non_host_names::GIT_TAGS),
         _ => None,
     }
