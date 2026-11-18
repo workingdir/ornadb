@@ -1,0 +1,71 @@
+{
+  "version": "1.1.0",
+  "scope": "Reference-model known answers; not implementation conformance",
+  "gear_words_first_four": [
+    "c8a51d9f15ebf22b",
+    "ea314bd8b517b2a1",
+    "e139f5852bdab047",
+    "ed19acaad83a0180"
+  ],
+  "vectors": [
+    {
+      "name": "empty",
+      "input": "",
+      "length": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "ogb_root_sha1": "2ce674aa03af854161bdf9d0d91c4c58e1d3f6ba",
+      "meta_hex": "84015820e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85500545743782fe339c4c4d0ad3731ce24f5d26f86e6d4",
+      "chunks": [],
+      "stored_reference_cbor": "d9eac4825820e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85500"
+    },
+    {
+      "name": "abc",
+      "input": "616263",
+      "length": 3,
+      "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      "ogb_root_sha1": "b97382604549ac3129d5ec206f773ed8b3192c77",
+      "meta_hex": "84015820ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad0354612fe2d4f33263663186d795776272dc2ba2a7a6",
+      "chunks": [
+        {
+          "git_oid": "f2ba8f84ab5c1bce84a7b441cb1959cfc7093b7f",
+          "length": 3
+        }
+      ],
+      "stored_reference_cbor": "d9eac4825820ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad03"
+    },
+    {
+      "name": "octets",
+      "input": "007fff",
+      "length": 3,
+      "sha256": "4234f1064f32788dc9487507f9eeecd0cdf7df6bd010fd1dad8026226e222813",
+      "ogb_root_sha1": "517856afaf759300169298a6e009e3acbde38a5b",
+      "meta_hex": "840158204234f1064f32788dc9487507f9eeecd0cdf7df6bd010fd1dad8026226e2228130354a98d022f1b087ece42f2a53bf61b4e17a10b0462",
+      "chunks": [
+        {
+          "git_oid": "abc2b893793486b04bbb84356e8d80fe6af21ba5",
+          "length": 3
+        }
+      ],
+      "stored_reference_cbor": "d9eac48258204234f1064f32788dc9487507f9eeecd0cdf7df6bd010fd1dad8026226e22281303"
+    },
+    {
+      "name": "counter-300k",
+      "input": "deterministic_bytes(300000)",
+      "length": 300000,
+      "sha256": "fd27231cc9897b21084f4f87ab19976a69e77179aab9d180feb2125b491a091e",
+      "ogb_root_sha1": "52b38898b3df7631339a4caae7d62ba145f25ed2",
+      "meta_hex": "84015820fd27231cc9897b21084f4f87ab19976a69e77179aab9d180feb2125b491a091e1a000493e05421aa4b01ea43979f522849080305a749eb9767fd",
+      "chunks": [
+        {
+          "git_oid": "3e9159feba806fdd5cad299501743e304a63cae7",
+          "length": 187485
+        },
+        {
+          "git_oid": "40c4ceb1baddfdd64cc316a02d4f41c65ff3a8c3",
+          "length": 112515
+        }
+      ],
+      "stored_reference_cbor": "d9eac4825820fd27231cc9897b21084f4f87ab19976a69e77179aab9d180feb2125b491a091e1a000493e0"
+    }
+  ]
+}
