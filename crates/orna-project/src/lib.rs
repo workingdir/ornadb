@@ -45,8 +45,8 @@ mod table_storage;
 mod typed_row;
 
 pub use committed_store::CommittedTableStore;
-pub use declarations::DeclarationRecord;
 use declarations::declaration_records;
+pub use declarations::{DeclarationLocation, DeclarationRecord};
 
 pub use object_identity::{
     OBJECT_IDENTITY_MANIFEST_PATH, ObjectIdentity, ObjectIdentityError, ObjectIdentityManifest,
@@ -1325,7 +1325,9 @@ impl ProjectLoader {
             vec![String::from("main.orna")],
             false,
             |logical_path, total_bytes| match overlays.get(logical_path) {
-                Some(source) => read_overlay(source, total_bytes, self.limits),
+                Some(source) => {
+                    read_overlay(source, total_bytes, self.limits).map(|source| (source, None))
+                }
                 None => read_module(&root, logical_path, total_bytes, self.limits),
             },
             |importer, segments| {
@@ -1437,6 +1439,7 @@ impl ProjectLoader {
                     total_bytes,
                     self.limits,
                 )
+                .map(|source| (source, None))
             },
             |importer, segments| {
                 if std_snapshot {
@@ -1581,6 +1584,7 @@ impl ProjectLoader {
                     total_bytes,
                     self.limits,
                 )
+                .map(|source| (source, None))
             },
             |_, segments| resolve_committed_import(&snapshot.source_paths, segments),
             |tables, modules, total_bytes| {
@@ -2015,7 +2019,7 @@ fn load_reachable_project(
     standard_profile: Option<StandardDependencyProfile>,
     roots: Vec<String>,
     std_snapshot: bool,
-    mut read_module: impl FnMut(&str, &mut usize) -> Result<String, ProjectLoadError>,
+    mut read_module: impl FnMut(&str, &mut usize) -> Result<(String, Option<PathBuf>), ProjectLoadError>,
     mut resolve_import: impl FnMut(&str, &[&str]) -> Result<String, ProjectLoadError>,
     mut discover_rows: impl FnMut(
         &BTreeSet<String>,
@@ -2039,7 +2043,7 @@ fn load_reachable_project(
         if loaded.len() == limits.max_modules {
             return Err(ProjectLoadError::ModuleLimit);
         }
-        let source = read_module(&logical_path, &mut total_bytes)?;
+        let (source, file) = read_module(&logical_path, &mut total_bytes)?;
         let parsed = parse_module(&source);
         if !parsed.is_ok() {
             // Re-parse with the logical path so the reported spans carry the
@@ -2103,6 +2107,7 @@ fn load_reachable_project(
             &namespace,
             &source,
             &parsed.value.items,
+            file.as_deref(),
         ));
         loaded.insert(logical_path, LoadedModule { source, namespace });
     }
@@ -2867,7 +2872,7 @@ fn discover_worktree_rows(
         .map(|logical_path| {
             let (table_path, key_path) = table_owner_and_key(&logical_path, table_paths)
                 .ok_or(ProjectLoadError::UnsafePath)?;
-            let source = read_module(root, &logical_path, total_bytes, limits)?;
+            let (source, _) = read_module(root, &logical_path, total_bytes, limits)?;
             Ok(LooseRowCandidate {
                 logical_path,
                 table_path,
@@ -3025,7 +3030,7 @@ fn read_module(
     logical_path: &str,
     total_bytes: &mut usize,
     limits: ProjectLimits,
-) -> Result<String, ProjectLoadError> {
+) -> Result<(String, Option<PathBuf>), ProjectLoadError> {
     let path = root.join(logical_path);
     ensure_no_symlink_ancestors(root, &path)?;
     let metadata = fs::symlink_metadata(&path).map_err(|_| ProjectLoadError::SourceUnavailable)?;
@@ -3041,7 +3046,7 @@ fn read_module(
     }
     let maximum = limits.max_source_bytes.saturating_sub(*total_bytes);
     let mut source = String::new();
-    fs::File::open(path)
+    fs::File::open(&path)
         .map_err(|_| ProjectLoadError::SourceUnavailable)?
         .take(maximum.saturating_add(1) as u64)
         .read_to_string(&mut source)
@@ -3050,7 +3055,7 @@ fn read_module(
         return Err(ProjectLoadError::SourceTooLarge);
     }
     *total_bytes += source.len();
-    Ok(source)
+    Ok((source, Some(path)))
 }
 
 /// Admits one in-memory module under the same source budget as a worktree read.
