@@ -46,14 +46,36 @@ fn nothing_to_commit() -> Diagnostic {
     )
 }
 
+/// The commit message from `-m MESSAGE`, `--message MESSAGE` or
+/// `--message=MESSAGE`, the spellings Git accepts (ORNA-CLI-001). Any other
+/// flag is named, so the refusal does not read as a missing message.
 fn message(arguments: &[String]) -> Result<&str, Diagnostic> {
-    if arguments.len() != 2
-        || !matches!(arguments[0].as_str(), "-m" | "--message")
-        || arguments[1].is_empty()
-    {
-        return Err(usage());
+    let mut message = None;
+    let mut words = arguments.iter();
+    while let Some(argument) = words.next() {
+        let value = match argument.as_str() {
+            "-m" | "--message" => words.next().map(String::as_str),
+            flag if flag.starts_with("--message=") => flag.strip_prefix("--message="),
+            flag if flag.starts_with('-') => {
+                return Err(Diagnostic {
+                    code: "ORNA-CMD-ARGUMENT-INVALID",
+                    title: Cow::Owned(format!("commit does not accept `{flag}`")),
+                    help: "use `orna commit -m MESSAGE` or `orna commit --message=MESSAGE`",
+                    exit: Exit::Usage,
+                    detail: None,
+                    body: None,
+                    location: None,
+                    outcome: None,
+                });
+            }
+            _ => return Err(usage()),
+        };
+        match value {
+            Some(value) if !value.is_empty() && message.is_none() => message = Some(value),
+            _ => return Err(usage()),
+        }
     }
-    Ok(&arguments[1])
+    message.ok_or_else(usage)
 }
 
 fn staging_error(title: &'static str, detail: String) -> Diagnostic {
@@ -584,4 +606,42 @@ fn admit_staged_store(
         CommittedRelationChanges::PendingRuntimeRows
     };
     stage_store(repository, changes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::message;
+
+    fn words(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn accepts_the_message_spellings_git_accepts() {
+        assert_eq!(message(&words(&["-m", "x"])).unwrap(), "x");
+        assert_eq!(message(&words(&["--message", "x"])).unwrap(), "x");
+        assert_eq!(message(&words(&["--message=x"])).unwrap(), "x");
+    }
+
+    #[test]
+    fn names_an_unsupported_flag_instead_of_reporting_a_missing_message() {
+        for arguments in [words(&["-a", "-m", "x"]), words(&["-m", "x", "-a"])] {
+            let error = message(&arguments).expect_err("the flag is refused");
+            assert_eq!(error.title, "commit does not accept `-a`");
+        }
+    }
+
+    #[test]
+    fn refuses_a_missing_or_repeated_message() {
+        for arguments in [
+            words(&[]),
+            words(&["-m"]),
+            words(&["-m", ""]),
+            words(&["--message="]),
+            words(&["-m", "x", "--message=y"]),
+        ] {
+            let error = message(&arguments).expect_err("no single message");
+            assert_eq!(error.title, "commit requires a message");
+        }
+    }
 }

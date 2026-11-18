@@ -104,21 +104,13 @@ fn parse_rename_names<'a>(old: &'a str, new: &'a str) -> Result<RenameNames<'a>,
     let Some((new_namespace, new_leaf)) = split_qualified_name(new) else {
         return Err(mv_usage());
     };
-    let old_qualified = if old_namespace.is_empty() {
-        old_leaf.to_owned()
-    } else {
-        format!("{old_namespace}.{old_leaf}")
-    };
-    let new_qualified = if new.contains('.') {
-        if new_namespace != old_namespace {
-            return Err(mv_usage());
-        }
-        new.to_owned()
-    } else if old_namespace.is_empty() {
-        new_leaf.to_owned()
-    } else {
-        format!("{old_namespace}.{new_leaf}")
-    };
+    let old_namespace = root_relative_namespace(old_namespace);
+    let new_namespace = root_relative_namespace(new_namespace);
+    if new.contains('.') && new_namespace != old_namespace {
+        return Err(mv_usage());
+    }
+    let old_qualified = qualified_name(old_namespace, old_leaf);
+    let new_qualified = qualified_name(old_namespace, new_leaf);
     if old_qualified == new_qualified {
         return Err(mv_usage());
     }
@@ -128,6 +120,21 @@ fn parse_rename_names<'a>(old: &'a str, new: &'a str) -> Result<RenameNames<'a>,
         old_leaf,
         new_leaf,
     })
+}
+
+/// `leaf` inside `namespace`; the root namespace leaves it unqualified.
+fn qualified_name(namespace: &str, leaf: &str) -> String {
+    if namespace.is_empty() {
+        leaf.to_owned()
+    } else {
+        format!("{namespace}.{leaf}")
+    }
+}
+
+/// The namespace a name spells once the root module `main` is read as the
+/// empty root namespace, as `invoke` reads it.
+fn root_relative_namespace(namespace: &str) -> &str {
+    if namespace == "main" { "" } else { namespace }
 }
 
 /// The repository, when its staged candidate already records a format-3 store.

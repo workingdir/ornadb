@@ -8,7 +8,7 @@ mod serve;
 use std::net::IpAddr;
 use std::path::PathBuf;
 
-use super::{ColorMode, Diagnostic, Endpoint};
+use super::{ColorMode, Cow, Diagnostic, Endpoint, Exit};
 use serve::parse_serve;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -512,10 +512,7 @@ fn parse_command(words: &mut Words<'_>, globals: &GlobalOptions) -> Result<Comma
             let (format, limit) = parse_legend_args(&rest)?;
             Ok(Command::SemanticLegend { format, limit })
         }
-        "fetch" => Ok(Command::Fetch {
-            remote: words.next().unwrap_or("origin").to_owned(),
-            branch: words.next().unwrap_or("main").to_owned(),
-        }),
+        "fetch" => parse_fetch(words),
         "push" => parse_push(words),
         "mv" => parse_mv(words),
         "edit" => parse_edit(words),
@@ -674,13 +671,49 @@ fn parse_status(words: &mut Words<'_>, globals: &GlobalOptions) -> Result<Comman
     })
 }
 
+const FETCH_USAGE: &str = "use `fetch`, `fetch REMOTE` or `fetch REMOTE BRANCH`";
+const PUSH_USAGE: &str = "use `push`, `push REMOTE` or `push REMOTE BRANCH`";
+
+/// A remote or branch word. A leading `-` is a Git option this command does
+/// not implement (`fetch --all`, `push -u`), so it is named rather than read
+/// as a remote or branch name.
+fn operand<'a>(
+    word: Option<&'a str>,
+    command: &str,
+    help: &'static str,
+) -> Result<Option<&'a str>, Diagnostic> {
+    match word {
+        Some(word) if word.starts_with('-') => Err(Diagnostic {
+            code: "ORNA-CMD-ARGUMENT-INVALID",
+            title: Cow::Owned(format!("`{command}` does not accept `{word}`")),
+            help,
+            exit: Exit::Usage,
+            detail: None,
+            body: None,
+            location: None,
+            outcome: None,
+        }),
+        other => Ok(other),
+    }
+}
+
+fn parse_fetch(words: &mut Words<'_>) -> Result<Command, Diagnostic> {
+    let remote = operand(words.next(), "fetch", FETCH_USAGE)?
+        .unwrap_or("origin")
+        .to_owned();
+    let branch = operand(words.next(), "fetch", FETCH_USAGE)?
+        .unwrap_or("main")
+        .to_owned();
+    words.reject_trailing("unsupported `fetch` argument", FETCH_USAGE)?;
+    Ok(Command::Fetch { remote, branch })
+}
+
 fn parse_push(words: &mut Words<'_>) -> Result<Command, Diagnostic> {
-    let remote = words.next().unwrap_or("origin").to_owned();
-    let branch = words.next().map(str::to_owned);
-    words.reject_trailing(
-        "unsupported `push` argument",
-        "use `push`, `push REMOTE` or `push REMOTE BRANCH`",
-    )?;
+    let remote = operand(words.next(), "push", PUSH_USAGE)?
+        .unwrap_or("origin")
+        .to_owned();
+    let branch = operand(words.next(), "push", PUSH_USAGE)?.map(str::to_owned);
+    words.reject_trailing("unsupported `push` argument", PUSH_USAGE)?;
     Ok(Command::Push { remote, branch })
 }
 
@@ -999,6 +1032,12 @@ mod tests {
                 branch: "main".into(),
             }
         );
+        for rejected in [
+            args(&["fetch", "--all"]),
+            args(&["push", "-u", "origin", "master"]),
+        ] {
+            assert!(parse_cli(&rejected).is_err(), "{rejected:?} is refused");
+        }
         assert_eq!(
             parse_cli(&args(&["status", "--porcelain"]))
                 .unwrap()

@@ -186,13 +186,7 @@ fn run_status_short_with_runtime_summary(
         "{}",
         short_runtime_summary(unpublished_count)
     )
-    .map_err(|_| {
-        Diagnostic::target(
-            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
-            "local Git worktree status could not be written",
-            "retry `status --short`",
-        )
-    })?;
+    .map_err(|error| crate::status_run::status_output_failed(&error, "retry `status --short`"))?;
     Ok(())
 }
 
