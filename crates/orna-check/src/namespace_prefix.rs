@@ -13,7 +13,7 @@ use crate::Namespace;
 
 /// Yields the entries whose namespace starts with `prefix`, in ascending
 /// namespace order.
-pub(super) fn entries_under_prefix<'a, V>(
+pub(crate) fn entries_under_prefix<'a, V>(
     modules: &'a BTreeMap<Namespace, V>,
     prefix: Namespace,
 ) -> impl Iterator<Item = (&'a Namespace, &'a V)> + 'a {

@@ -99,12 +99,12 @@ pub fn entries() -> Vec<Entry> {
         Entry::gap(
             "PRES-001",
             "ornadb-5il1.142",
-            "the REPL has no `:display` override command",
+            "`:display` refuses: its override lives in `sys.repl.presentation_overrides`, which has no linked provider",
             |db| {
                 repl_refuses(
                     db,
                     &[":display Duration std.time.duration.clock"],
-                    "ORNA-REPL-COMMAND",
+                    "sys.version.incompatible",
                 )
             },
         ),

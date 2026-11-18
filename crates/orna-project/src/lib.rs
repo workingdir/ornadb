@@ -1315,6 +1315,10 @@ impl ProjectLoader {
         let pins = worktree_opaque_pins(repository)?;
         let pin_paths = pins.iter().map(|pin| pin.path.clone()).collect::<Vec<_>>();
         validate_repository_paths(&root, self.limits, &pin_paths)?;
+        // The worktree does not change during one load, and where an import
+        // resolves depends on its path alone, so a path is checked against the
+        // filesystem once however many modules import it.
+        let mut resolved_imports = BTreeMap::<Vec<String>, String>::new();
         let mut project = load_reachable_project(
             self.limits,
             standard_profile,
@@ -1326,7 +1330,16 @@ impl ProjectLoader {
             },
             |importer, segments| {
                 reject_opaque_gitlink_import(&pin_paths, importer, segments)?;
-                resolve_import(&root, segments, overlays)
+                let import = segments
+                    .iter()
+                    .map(|segment| (*segment).to_owned())
+                    .collect::<Vec<String>>();
+                if let Some(resolved) = resolved_imports.get(&import) {
+                    return Ok(resolved.clone());
+                }
+                let resolved = resolve_import(&root, segments, overlays)?;
+                resolved_imports.insert(import, resolved.clone());
+                Ok(resolved)
             },
             |tables, _, total_bytes| {
                 discover_worktree_rows(&root, tables, total_bytes, self.limits, &pin_paths)

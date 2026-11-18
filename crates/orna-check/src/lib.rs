@@ -69,6 +69,7 @@ mod units;
 pub use units::*;
 mod canonical_scan;
 mod imports;
+mod namespace_prefix;
 mod summary_order;
 pub(crate) use imports::*;
 mod item_checks;
@@ -5915,3 +5916,6 @@ pub(crate) fn reset_module_header_copies() {
 
 #[cfg(test)]
 mod module_map_sharing_tests;
+
+#[cfg(test)]
+mod enum_bindings_tests;

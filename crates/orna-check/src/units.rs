@@ -15,8 +15,6 @@ use unicode_normalization::{UnicodeNormalization, is_nfc};
 use super::*;
 use crate::canonical_scan::module_needs_canonicalization;
 
-mod namespace_prefix;
-
 /// Resolves dimension and unit declarations to their reduced dimension bases
 /// and unit metadata. Declarations that cannot be reduced are omitted, so
 /// every use of them stays unresolved instead of guessing from a spelling.

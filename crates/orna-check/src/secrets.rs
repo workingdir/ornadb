@@ -319,6 +319,11 @@ pub(crate) fn imported_enum_bindings(
     bindings
 }
 
+/// Binds every exported source enum of `target` and of the modules below it
+/// under `binding`, as `binding.Enum` and `binding.sub.Enum`. The modules form
+/// one run in namespace order, so a range scan visits only them: scanning every
+/// module of the project once per `use` made an import of every module cost
+/// the square of the module count for each importer.
 pub(crate) fn add_qualified_enum_bindings(
     bindings: &mut BTreeMap<String, EnumVariantRows>,
     binding: &str,
@@ -326,10 +331,8 @@ pub(crate) fn add_qualified_enum_bindings(
     source_enums: &BTreeMap<Namespace, BTreeMap<String, EnumVariantRows>>,
     modules: &BTreeMap<Namespace, ModuleHeader>,
 ) {
-    for (namespace, enums) in source_enums {
-        if namespace.0.len() < target.0.len() || namespace.0[..target.0.len()] != target.0[..] {
-            continue;
-        }
+    for (namespace, enums) in namespace_prefix::entries_under_prefix(source_enums, target.clone()) {
+        note_enum_scan_visit();
         let Some(module) = modules.get(namespace) else {
             continue;
         };
@@ -343,6 +346,34 @@ pub(crate) fn add_qualified_enum_bindings(
             }
         }
     }
+}
+
+// Source-enum entries visited while binding imported enums. An import visits
+// only the modules under its target, so the count is imports times the modules
+// each one names; a scan of the whole project per import would multiply it by
+// the module count.
+#[cfg(test)]
+thread_local! {
+    static ENUM_SCAN_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn note_enum_scan_visit() {
+    ENUM_SCAN_VISITS.with(|visits| visits.set(visits.get() + 1));
+}
+
+#[cfg(not(test))]
+#[inline]
+fn note_enum_scan_visit() {}
+
+#[cfg(test)]
+pub(crate) fn enum_scan_visits() -> usize {
+    ENUM_SCAN_VISITS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_enum_scan_visits() {
+    ENUM_SCAN_VISITS.with(|visits| visits.set(0));
 }
 
 pub(crate) fn is_exported_enum(module: &ModuleHeader, name: &str) -> bool {

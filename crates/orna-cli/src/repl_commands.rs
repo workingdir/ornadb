@@ -1,11 +1,13 @@
 //! Console commands that read or present the session: `:type`, `:inspect`,
-//! `:members`, `:table`, `:history`, `:timing`, `:copy`, `:doc`, `:source`,
-//! and `:clear`.
+//! `:members`, `:table`, `:plan`, `:history`, `:timing`, `:copy`, `:doc`,
+//! `:source`, and `:clear`.
 //!
 //! `repl.rs` dispatches the session, watch, and help commands itself. Every
 //! other `:name` reaches [`run`], which either runs the command or refuses it
 //! with a located error that names the command. A command this console does
-//! not implement yet is refused by name, never silently ignored.
+//! not implement yet is refused by name, never silently ignored. A command
+//! that needs a `sys` coordinate this implementation does not provide, such
+//! as `:trace`, is refused with the portable failure code for it.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::io::{self, Write};
@@ -15,10 +17,14 @@ use orna_check::Type;
 use orna_evaluator::{RelationDisplay, ReplValue};
 use orna_project_repl::{AdmittedReplSession, ReplDetail};
 
-use crate::repl::{AnsiColor, ReplFailure, write_repl_failure, write_repl_outcome, write_styled};
+use crate::repl::{
+    AnsiColor, ReplFailure, ReplSubmissionHandler, write_repl_failure, write_repl_outcome,
+    write_styled,
+};
 use crate::repl_copy;
 use crate::repl_doc;
 use crate::repl_inspect::inspect_full;
+use crate::repl_plan::{self, PlanRefusal};
 
 /// The most submitted inputs `:history` keeps.
 const MAX_HISTORY: usize = 256;
@@ -28,10 +34,6 @@ const COMMANDS: [&str; 19] = [
     "help", "at", "watch", "unwatch", "quit", "type", "inspect", "members", "table", "history",
     "timing", "clear", "doc", "source", "open", "plan", "trace", "copy", "display",
 ];
-
-/// Commands the console recognises but does not implement yet. Each is
-/// refused by name; none is silently accepted.
-const UNSUPPORTED: [&str; 4] = ["open", "plan", "trace", "display"];
 
 /// The code every console refusal carries.
 const COMMAND_CODE: &str = "ORNA-REPL-COMMAND";
@@ -93,10 +95,11 @@ pub(crate) fn run<W: Write>(
     source: &str,
     session: &AdmittedReplSession,
     console: &mut ConsoleState,
+    evaluate: &mut ReplSubmissionHandler<'_>,
     writer: &mut W,
     color_enabled: bool,
 ) -> io::Result<()> {
-    match execute(source, session, console, writer, color_enabled)? {
+    match execute(source, session, console, evaluate, writer, color_enabled)? {
         None => Ok(()),
         Some(refusal) => {
             write_repl_failure(writer, &refusal.failure, refusal.source, color_enabled)
@@ -108,6 +111,7 @@ fn execute<'a, W: Write>(
     source: &'a str,
     session: &AdmittedReplSession,
     console: &mut ConsoleState,
+    evaluate: &mut ReplSubmissionHandler<'_>,
     writer: &mut W,
     color_enabled: bool,
 ) -> Outcome<'a> {
@@ -128,21 +132,16 @@ fn execute<'a, W: Write>(
         "inspect" => inspect_command(&cmd, session, writer, color_enabled),
         "members" => members_command(&cmd, session, writer, color_enabled),
         "table" => table_command(&cmd, session, writer, color_enabled),
+        "plan" => plan_command(&cmd, session, evaluate, writer, color_enabled),
+        "trace" => Ok(Some(trace_command(&cmd))),
+        "open" => Ok(Some(open_command(&cmd))),
         "history" => history_command(&cmd, console, writer),
         "timing" => Ok(timing_command(&cmd, console)),
         "clear" => clear_command(&cmd, writer, color_enabled),
         "doc" => doc_command(&cmd, session, writer, color_enabled),
         "source" => source_command(&cmd, session, writer, color_enabled),
         "copy" => repl_copy::run(cmd.arg, session, writer, color_enabled).map(|()| None),
-        name if UNSUPPORTED.contains(&name) => Ok(Some(refuse_name(
-            &cmd,
-            format!("`:{name}` is not available in this console yet"),
-            vec![
-                "the console runs :type, :doc, :source, :inspect, :members, :table, :history, :timing, :copy, and :clear"
-                    .into(),
-                "enter `:help` to see the supported commands".into(),
-            ],
-        ))),
+        "display" => Ok(Some(display_command(&cmd))),
         // These are dispatched by `repl.rs` before a submission reaches the
         // console; the arms keep a usage error if that routing ever changes.
         "help" => Ok(Some(refuse_name(
@@ -352,6 +351,97 @@ fn table_command<'a, W: Write>(
     Ok(None)
 }
 
+/// `:plan EXPR` prints the structured plan the planner derives for a query,
+/// without running the query.
+fn plan_command<'a, W: Write>(
+    cmd: &Cmd<'a>,
+    session: &AdmittedReplSession,
+    evaluate: &mut ReplSubmissionHandler<'_>,
+    writer: &mut W,
+    color_enabled: bool,
+) -> Outcome<'a> {
+    if cmd.arg.is_empty() {
+        return Ok(Some(refuse_name(
+            cmd,
+            "usage: :plan EXPR".into(),
+            Vec::new(),
+        )));
+    }
+    match repl_plan::explain(cmd.arg, session, evaluate) {
+        Ok(plan) => {
+            repl_plan::write_plan(writer, &plan, cmd.arg, color_enabled)?;
+            Ok(None)
+        }
+        Err(PlanRefusal::Expression(message)) => Ok(Some(refuse_arg_message(cmd, message))),
+        Err(PlanRefusal::Failure(failure)) => Ok(Some(refuse_arg(cmd, failure))),
+    }
+}
+
+/// `:trace EXPR` would run the expression and print the trace of its
+/// activation. This implementation records and serves no trace: the
+/// `sys.rt.traces` relation has no provider linked. The command refuses with
+/// the portable code for an unavailable coordinate, and does so before it
+/// evaluates anything, so a refused `:trace` never changes the database.
+fn trace_command<'a>(cmd: &Cmd<'a>) -> Refusal<'a> {
+    if cmd.arg.is_empty() {
+        return refuse_name(cmd, "usage: :trace EXPR".into(), Vec::new());
+    }
+    refuse_unavailable(
+        cmd,
+        "sys.version.incompatible",
+        "`:trace` needs the activation trace, `sys.rt.traces`, which has no provider linked in \
+         this implementation"
+            .into(),
+        vec![
+            "run the expression without `:trace`".into(),
+            "`:plan EXPR` explains a query without running it".into(),
+        ],
+    )
+}
+
+/// `:open EXPR` would open the source the expression names in the user's
+/// editor. A declaration's file and line are what an editor needs, and the
+/// project load keeps only a declaration's name, doc comment and text, so this
+/// session cannot say where the source lives. The command refuses with the
+/// portable code for source that is not retained, and starts no editor.
+fn open_command<'a>(cmd: &Cmd<'a>) -> Refusal<'a> {
+    if cmd.arg.is_empty() {
+        return refuse_name(cmd, "usage: :open EXPR".into(), Vec::new());
+    }
+    refuse_unavailable(
+        cmd,
+        "sys.source.unavailable",
+        "`:open` needs the file and line a declaration was read from, which this session does \
+         not retain"
+            .into(),
+        vec!["`:source NAME` prints a declaration's source text".into()],
+    )
+}
+
+/// `:display Type formatter|default` would record a session presentation
+/// override. The specification keeps session overrides in
+/// `sys.repl.presentation_overrides`, and this implementation links no
+/// provider for `sys.repl`, so there is nowhere to record one and none could
+/// be applied. The command refuses with the portable code for an unavailable
+/// coordinate, and every rendering stays as it was.
+fn display_command<'a>(cmd: &Cmd<'a>) -> Refusal<'a> {
+    if cmd.arg.split_whitespace().count() < 2 {
+        return refuse_name(
+            cmd,
+            "usage: :display Type formatter|default".into(),
+            Vec::new(),
+        );
+    }
+    refuse_unavailable(
+        cmd,
+        "sys.version.incompatible",
+        "`:display` records the override in `sys.repl.presentation_overrides`, which has no \
+         provider linked in this implementation"
+            .into(),
+        vec!["results keep their default rendering in this session".into()],
+    )
+}
+
 /// Prints each retained input with its submission number. An argument
 /// filters to inputs containing it.
 fn history_command<'a, W: Write>(
@@ -426,11 +516,31 @@ fn refuse_arg_message<'a>(cmd: &Cmd<'a>, message: String) -> Refusal<'a> {
     refuse_arg(cmd, located(0..cmd.arg.len(), message, Vec::new()))
 }
 
+/// Refuses the command name with a portable `sys` failure code, for a command
+/// that needs a coordinate this implementation does not provide. A consumer of
+/// an unavailable coordinate fails before it does anything (ORNA-SYS-008), so
+/// the command's expression is never evaluated.
+fn refuse_unavailable<'a>(
+    cmd: &Cmd<'a>,
+    code: &str,
+    message: String,
+    help: Vec<String>,
+) -> Refusal<'a> {
+    Refusal {
+        failure: located_with(code, cmd.name_span.clone(), message, help),
+        source: cmd.source,
+    }
+}
+
 fn located(span: Range<usize>, message: String, help: Vec<String>) -> ReplFailure {
+    located_with(COMMAND_CODE, span, message, help)
+}
+
+fn located_with(code: &str, span: Range<usize>, message: String, help: Vec<String>) -> ReplFailure {
     ReplFailure {
-        code: COMMAND_CODE.into(),
+        code: code.into(),
         detail: Some(ReplDetail {
-            code: COMMAND_CODE.into(),
+            code: code.into(),
             message,
             span: Some(span),
             notes: Vec::new(),
@@ -461,10 +571,28 @@ mod tests {
     use super::*;
     use orna_evaluator::Limits;
 
+    /// Evaluates in the session alone, as a console with no host submitter does.
+    fn evaluate_in_session(
+        session: &mut AdmittedReplSession,
+        source: &str,
+    ) -> Result<orna_project_repl::ReplOutcome, ReplFailure> {
+        session
+            .submit_outcome(source, RelationDisplay::Window)
+            .map_err(ReplFailure::from)
+    }
+
     fn run_source(source: &str, console: &mut ConsoleState) -> String {
         let session = AdmittedReplSession::new(Limits::default());
         let mut out = Vec::new();
-        run(source, &session, console, &mut out, false).expect("in-memory write");
+        run(
+            source,
+            &session,
+            console,
+            &mut evaluate_in_session,
+            &mut out,
+            false,
+        )
+        .expect("in-memory write");
         String::from_utf8(out).expect("utf8 output")
     }
 
@@ -486,15 +614,27 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_command_is_refused_by_name_not_ignored() {
+    fn trace_refuses_with_the_portable_unavailable_code() {
         let mut console = ConsoleState::default();
-        for name in UNSUPPORTED {
-            let text = run_source(&format!(":{name}"), &mut console);
-            assert!(
-                text.contains(&format!("`:{name}` is not available in this console yet")),
-                "{text}"
-            );
-        }
+        let text = run_source(":trace 1 + 1", &mut console);
+        assert!(
+            text.contains(
+                "error[sys.version.incompatible]: `:trace` needs the activation trace, \
+                 `sys.rt.traces`, which has no provider linked in this implementation"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("help: `:plan EXPR` explains a query without running it"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("not available in this console yet"),
+            "{text}"
+        );
+        assert!(!text.contains("ORNA-REPL-COMMAND"), "{text}");
+        let usage = run_source(":trace", &mut console);
+        assert!(usage.contains("usage: :trace EXPR"), "{usage}");
     }
 
     #[test]
@@ -577,10 +717,27 @@ mod tests {
         let session = AdmittedReplSession::new(Limits::default());
         let mut console = ConsoleState::default();
         let mut plain = Vec::new();
-        run(":clear", &session, &mut console, &mut plain, false).expect("write");
+        let mut evaluate = evaluate_in_session;
+        run(
+            ":clear",
+            &session,
+            &mut console,
+            &mut evaluate,
+            &mut plain,
+            false,
+        )
+        .expect("write");
         assert!(plain.is_empty());
         let mut coloured = Vec::new();
-        run(":clear", &session, &mut console, &mut coloured, true).expect("write");
+        run(
+            ":clear",
+            &session,
+            &mut console,
+            &mut evaluate,
+            &mut coloured,
+            true,
+        )
+        .expect("write");
         assert_eq!(coloured, b"\x1b[2J\x1b[H");
     }
 

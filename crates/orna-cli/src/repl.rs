@@ -13,9 +13,9 @@ use orna_protocol::{Envelope, Limits, Message, PresentNode};
 use orna_value::{CanonicalSnapshot, Raw, canonical_uuid_text};
 
 pub(crate) const MAX_INPUT_BYTES: usize = 65_536;
-const REPL_HELP: &str = "commands: :help [name], :at CWD|HEAD|ref, :watch expression, :unwatch [id], :type expression, :inspect expression, :members expression, :table expression, :doc NAME, :source NAME, :history [query], :timing on|off, :clear, :quit";
+const REPL_HELP: &str = "commands: :help [name], :at CWD|HEAD|ref, :watch expression, :unwatch [id], :type expression, :inspect expression, :members expression, :table expression, :plan expression, :doc NAME, :source NAME, :history [query], :timing on|off, :clear, :quit";
 
-type ReplSubmissionHandler<'a> =
+pub(crate) type ReplSubmissionHandler<'a> =
     dyn FnMut(&mut AdmittedReplSession, &str) -> Result<ReplOutcome, ReplFailure> + 'a;
 
 #[derive(Clone, Copy)]
@@ -961,15 +961,20 @@ fn run_loop<
                 } else if let Some(rest) = parse_unwatch_command(command) {
                     dispatch_unwatch(rest, &mut watch, writer, color_enabled)?;
                 } else if source.trim_start().starts_with(':') {
-                    run_console_command(&source, session, &mut console, writer, color_enabled)?;
+                    let mut evaluate = |scratch: &mut AdmittedReplSession, text: &str| {
+                        evaluate_submission(submitter.as_deref_mut(), scratch, text)
+                    };
+                    run_console_command(
+                        &source,
+                        session,
+                        &mut console,
+                        &mut evaluate,
+                        writer,
+                        color_enabled,
+                    )?;
                 } else {
                     let started = console.timing().then(Instant::now);
-                    let result = match submitter.as_deref_mut() {
-                        Some(submit) => submit(session, &source),
-                        None => session
-                            .submit_outcome(&source, RelationDisplay::Window)
-                            .map_err(ReplFailure::from),
-                    };
+                    let result = evaluate_submission(submitter.as_deref_mut(), session, &source);
                     match result {
                         Ok(outcome) => {
                             write_repl_outcome(writer, &outcome, &source, color_enabled)?;
@@ -987,6 +992,24 @@ fn run_loop<
         }
     }
 }
+
+/// Evaluates `source` in `session` as the host submits input: through the
+/// host's submitter when it has one, else in the session alone. A console
+/// command that evaluates source passes a copy of the session to keep the
+/// result out of the session's bindings and `$_`.
+fn evaluate_submission(
+    submitter: Option<&mut ReplSubmissionHandler<'_>>,
+    session: &mut AdmittedReplSession,
+    source: &str,
+) -> Result<ReplOutcome, ReplFailure> {
+    match submitter {
+        Some(submit) => submit(session, source),
+        None => session
+            .submit_outcome(source, RelationDisplay::Window)
+            .map_err(ReplFailure::from),
+    }
+}
+
 /// Starts (or rebinds) the host watch, then drains available frames.
 fn dispatch_watch<W: Write, S: WatchFrameSource + ?Sized>(
     source: &str,
