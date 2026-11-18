@@ -1,6 +1,6 @@
 //! Console commands that read or present the session: `:type`, `:inspect`,
 //! `:members`, `:table`, `:plan`, `:history`, `:timing`, `:copy`, `:doc`,
-//! `:source`, and `:clear`.
+//! `:source`, `:open`, and `:clear`.
 //!
 //! `repl.rs` dispatches the session, watch, and help commands itself. Every
 //! other `:name` reaches [`run`], which either runs the command or refuses it
@@ -12,6 +12,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::io::{self, Write};
 use std::ops::Range;
+use std::process::Command;
 
 use orna_check::Type;
 use orna_evaluator::{RelationDisplay, ReplValue};
@@ -134,7 +135,7 @@ fn execute<'a, W: Write>(
         "table" => table_command(&cmd, session, writer, color_enabled),
         "plan" => plan_command(&cmd, session, evaluate, writer, color_enabled),
         "trace" => Ok(Some(trace_command(&cmd))),
-        "open" => Ok(Some(open_command(&cmd))),
+        "open" => Ok(open_command(&cmd, session)),
         "history" => history_command(&cmd, console, writer),
         "timing" => Ok(timing_command(&cmd, console)),
         "clear" => clear_command(&cmd, writer, color_enabled),
@@ -399,23 +400,81 @@ fn trace_command<'a>(cmd: &Cmd<'a>) -> Refusal<'a> {
     )
 }
 
-/// `:open EXPR` would open the source the expression names in the user's
-/// editor. A declaration's file and line are what an editor needs, and the
-/// project load keeps only a declaration's name, doc comment and text, so this
-/// session cannot say where the source lives. The command refuses with the
-/// portable code for source that is not retained, and starts no editor.
-fn open_command<'a>(cmd: &Cmd<'a>) -> Refusal<'a> {
+/// `:open NAME` opens the file that declares `NAME` in the editor `$EDITOR`
+/// names, at the line the declaration starts on. The session keeps each
+/// declaration's file and byte span, so the line is read from the file as it
+/// is now. A file changed since the session loaded it is refused: its span no
+/// longer holds the declaration. `$EDITOR` names a program, not a command line,
+/// and `$VISUAL` is never consulted, as the `orna` draft editor does.
+fn open_command<'a>(cmd: &Cmd<'a>, session: &AdmittedReplSession) -> Option<Refusal<'a>> {
     if cmd.arg.is_empty() {
-        return refuse_name(cmd, "usage: :open EXPR".into(), Vec::new());
+        return Some(refuse_name(cmd, "usage: :open NAME".into(), Vec::new()));
     }
-    refuse_unavailable(
-        cmd,
-        "sys.source.unavailable",
-        "`:open` needs the file and line a declaration was read from, which this session does \
-         not retain"
-            .into(),
-        vec!["`:source NAME` prints a declaration's source text".into()],
-    )
+    let declaration = match repl_doc::find(session.declarations(), cmd.arg) {
+        Ok(declaration) => declaration,
+        Err(message) => return Some(refuse_arg_message(cmd, message)),
+    };
+    let Some(location) = declaration.location() else {
+        return Some(refuse_unavailable(
+            cmd,
+            "sys.source.unavailable",
+            format!(
+                "`{}` was not read from a file of the working tree, so its file \
+                 and line are not known",
+                declaration.qualified_name()
+            ),
+            vec!["`:source NAME` prints a declaration's source text".into()],
+        ));
+    };
+    let configured = std::env::var_os("EDITOR");
+    let Some(editor) = configured.filter(|program| !program.is_empty()) else {
+        return Some(refuse_name(
+            cmd,
+            "EDITOR is not set; `:open` starts the editor program it names".into(),
+            Vec::new(),
+        ));
+    };
+    let path = location.path();
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) => {
+            return Some(refuse_name(
+                cmd,
+                format!("{} could not be read: {error}", path.display()),
+                Vec::new(),
+            ));
+        }
+    };
+    let span = location.span();
+    if text.get(span.clone()) != Some(declaration.source()) {
+        return Some(refuse_name(
+            cmd,
+            format!(
+                "{} changed after this session loaded it; restart the REPL to open `{}`",
+                path.display(),
+                declaration.qualified_name()
+            ),
+            Vec::new(),
+        ));
+    }
+    let line = 1 + text[..span.start].matches('\n').count();
+    let status = Command::new(&editor)
+        .arg(format!("+{line}"))
+        .arg(path)
+        .status();
+    match status {
+        Ok(status) if status.success() => None,
+        Ok(_) => Some(refuse_name(
+            cmd,
+            "the editor did not finish successfully".into(),
+            Vec::new(),
+        )),
+        Err(error) => Some(refuse_name(
+            cmd,
+            format!("the editor could not be started: {error}"),
+            Vec::new(),
+        )),
+    }
 }
 
 /// `:display Type formatter|default` would record a session presentation
