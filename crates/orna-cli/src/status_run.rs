@@ -18,6 +18,18 @@ pub(crate) fn discover_worktree(
     })
 }
 
+/// The write-failure diagnostic for status output. A closed stdout ends the
+/// process quietly instead (see `stdout_closed`).
+pub(crate) fn status_output_failed(error: &io::Error, retry: &'static str) -> Diagnostic {
+    stdout_closed::stdout_write_failed(error, || {
+        Diagnostic::target(
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
+            "local Git worktree status could not be written",
+            retry,
+        )
+    })
+}
+
 pub(crate) fn run_status(endpoint: &Endpoint) -> Result<(), Diagnostic> {
     let repository = discover_worktree(endpoint, DISCOVER_WORKTREE_HELP)?;
     let output = cli_status::git_output(
@@ -29,13 +41,9 @@ pub(crate) fn run_status(endpoint: &Endpoint) -> Result<(), Diagnostic> {
         ]),
         "check that Git can read the local worktree, then retry `status --porcelain`",
     )?;
-    io::stdout().write_all(&output.stdout).map_err(|_| {
-        Diagnostic::target(
-            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
-            "local Git worktree status could not be written",
-            "retry `status --porcelain`",
-        )
-    })?;
+    io::stdout()
+        .write_all(&output.stdout)
+        .map_err(|error| status_output_failed(&error, "retry `status --porcelain`"))?;
     Ok(())
 }
 
@@ -78,13 +86,10 @@ pub(crate) fn run_status_json(endpoint: &Endpoint) -> Result<(), Diagnostic> {
             "retry `status --format json`",
         )
     })?;
-    io::stdout().lock().write_all(&json).map_err(|_| {
-        Diagnostic::target(
-            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
-            "local Git worktree status could not be written",
-            "retry `status --format json`",
-        )
-    })?;
+    io::stdout()
+        .lock()
+        .write_all(&json)
+        .map_err(|error| status_output_failed(&error, "retry `status --format json`"))?;
     Ok(())
 }
 
@@ -564,20 +569,9 @@ pub(crate) fn run_status_human(endpoint: &Endpoint, color_enabled: bool) -> Resu
         color_enabled,
         link_root.as_deref(),
     )
-    .map_err(|_| {
-        Diagnostic::target(
-            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
-            "local Git worktree status could not be written",
-            "retry `status`",
-        )
-    })?;
-    write_unpublished_summary(&mut stdout, unpublished_count).map_err(|_| {
-        Diagnostic::target(
-            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
-            "local Git worktree status could not be written",
-            "retry `status`",
-        )
-    })?;
+    .map_err(|error| status_output_failed(&error, "retry `status`"))?;
+    write_unpublished_summary(&mut stdout, unpublished_count)
+        .map_err(|error| status_output_failed(&error, "retry `status`"))?;
     Ok(())
 }
 
@@ -611,12 +605,7 @@ pub(crate) fn run_status_short(endpoint: &Endpoint, color_enabled: bool) -> Resu
         RETRY,
     )?;
     let mut stdout = io::stdout().lock();
-    write_short_status(&output.stdout, &mut stdout, color_enabled).map_err(|_| {
-        Diagnostic::target(
-            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
-            "local Git worktree status could not be written",
-            "retry `status --short`",
-        )
-    })?;
+    write_short_status(&output.stdout, &mut stdout, color_enabled)
+        .map_err(|error| status_output_failed(&error, "retry `status --short`"))?;
     Ok(())
 }

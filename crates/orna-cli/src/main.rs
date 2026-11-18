@@ -48,6 +48,7 @@ mod repl_session;
 mod repo_sync;
 mod source_excerpt;
 mod status_run;
+mod stdout_closed;
 mod stored_references;
 mod sys_host;
 mod ui_render;
@@ -192,7 +193,7 @@ fn write_cli_line(text: &[u8], color: AnsiColor, color_enabled: bool) -> Result<
     let mut stdout = io::stdout().lock();
     write_styled(&mut stdout, color, text, color_enabled)
         .and_then(|()| stdout.write_all(b"\n"))
-        .map_err(|_| cli_output_failed())
+        .map_err(|error| stdout_closed::stdout_write_failed(&error, cli_output_failed))
 }
 
 /// The process exit status of a failed command, as the `--help` exit status
@@ -459,6 +460,7 @@ fn write_success_line(message: &str, color_enabled: bool) -> Result<(), Diagnost
 }
 
 fn main() -> ExitCode {
+    stdout_closed::install_panic_hook();
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     let cli_args::ParseReport {
         modes,

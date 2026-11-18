@@ -8,7 +8,7 @@ use super::{
     execution_project, load_project, local_project_path, project_load_diagnostic,
     pure_execution_project, pure_sys_host_context, refuse_legacy_bare_module_rows, request_nonce,
     run_committed_table_invocation, runtime_identity, runtime_publication_metadata_rows,
-    semantic_catalogue, sys_host, write_success_line,
+    semantic_catalogue, stdout_closed, sys_host, write_success_line,
 };
 use orna_value::CanonicalValue;
 
@@ -790,5 +790,5 @@ pub(crate) fn write_invocation_result(
         static_type.unwrap_or(runtime),
         color_enabled,
     )
-    .map_err(|_| cli_output_failed())
+    .map_err(|error| stdout_closed::stdout_write_failed(&error, cli_output_failed))
 }
