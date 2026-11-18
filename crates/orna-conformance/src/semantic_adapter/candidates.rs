@@ -278,7 +278,7 @@ impl TableActivationCandidateValidator for TransactionalTableCandidateValidator 
                 return Err(table_evaluation_diagnostic());
             }
             for assertion in assertions {
-                if table_assertion_function(&assertion.expression, &self.functions).is_some() {
+                if table_assertion_is_function(&assertion.expression, &self.functions) {
                     let mut effects = CandidateRelationEffectHandler { rows };
                     let value = evaluate_function_assertion(
                         table,
@@ -474,7 +474,7 @@ impl ListTableCandidateValidator {
         rows: &orna_runtime::RuntimeTableRows,
         budget: &mut StepBudget,
     ) -> Result<(), SafeDiagnostic> {
-        if table_assertion_function(&assertion.expression, &self.functions).is_some() {
+        if table_assertion_is_function(&assertion.expression, &self.functions) {
             let mut effects = CandidateRelationEffectHandler { rows };
             let value = evaluate_function_assertion(
                 &self.table,
