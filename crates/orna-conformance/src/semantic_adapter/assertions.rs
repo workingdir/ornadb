@@ -18,7 +18,7 @@ pub(super) fn validate_table_assertions(
         .collect();
     for (table, assertions) in assertions {
         for assertion in assertions {
-            if table_assertion_function(&assertion.expression, functions).is_some() {
+            if table_assertion_is_function(&assertion.expression, functions) {
                 let mut effects = ActivationRelationEffectHandler { activation };
                 let value = evaluate_function_assertion(
                     table,

@@ -3088,6 +3088,7 @@ fn annotation_type_name_is_declared(
                     | "Relation"
                     | "Query"
                     | "Stream"
+                    | "Predicate"
                     | "Money"
                     | "Quantity"
                     | "Locale"
