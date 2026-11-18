@@ -33,7 +33,7 @@ scratch probe over the named cases (first at `30ef8fbe8`, the per-case table of 
 | Relation pipeline | `Source::{Table(DefId), Rows(list)}`; stages `Filter/Map/Take/Drop`; terminals `count/first/one/every/exists`; other `RelOp` is `NotYet (H7)` | `relation/pipeline.rs` |
 | `TableOp::AsOf` | `Stop::NotYet("as_of needs the activation snapshot (H5)")` | `table.rs:68` |
 | `SysAdmission` (lowering-time view of linked `sys` members) | merged in PR #9918: `orna-hir/src/lower/admission.rs`; `CatalogueAdmission` in `orna-check` reads `orna_sys::system_provider_linkage()` | PR #9918 |
-| Production provider linkage | 15 callables, 3 relations, 8 grouped handles linked; everything else `None` | `orna-sys-id/build/generator.rs:4476-4515`, `orna-sys/src/provider_linkage.rs` |
+| Production provider linkage | 15 callables, 3 relations, 9 grouped handles linked; everything else `None` | `orna-sys-id/build/generator.rs:4476-4516`, `orna-sys/src/provider_linkage.rs` |
 | `Value::Money { amount, currency }` | decode and encode only; no construction, no arithmetic | `orna-exec/src/value.rs:62`, `raw_value.rs:130` |
 | `Money`, `Currency`, `Rate` declarations | **none** in `crates/orna-hir/interface` | `core/` has `temperature.orna`, `units.orna`, `range.orna`, `display.orna`, `ops.orna` |
 
@@ -41,7 +41,7 @@ The linked set is: callables `sys.blob.{length,digest,verify,read,to_bytes,from_
 same_content}` (Evaluator), `sys.blob.capture_file` (HostOperationRegistry), `sys.explain(Query)`, `sys.rt.info`
 (Evaluator), `sys.admin.{pause,resume}_stream` (LiveAdministration); relations `sys.Materialization` (Evaluator),
 `sys.MaintenanceJob`, `sys.Storage` (PublicationMetadata); handles `sys.catalog.{columns,tables}` and
-`sys.git.{branches,commits,refs,remotes,stashes,tags}` (Evaluator).
+`sys.git.{branches,commits,refs,remotes,stashes,tags,tree_entries}` (Evaluator).
 `sys.rt.runs`, `sys.rt.checkpoints`, `sys.catalog.objects`, `sys.storage.objects` and every
 `as_of` view are **catalogued but unlinked** in production.
 

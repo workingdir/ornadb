@@ -8,7 +8,7 @@
 use orna_syntax_ast::{Declaration, Item};
 use orna_value::{enum_type_id, enum_variant_id, qualified_name};
 
-use crate::{NominalDefinition, NominalDefinitions, NominalVariant};
+use crate::{NominalDefinition, NominalDefinitions, NominalVariant, Value};
 
 /// Builds the construction plans of the enums declared by one module.
 ///
@@ -56,6 +56,17 @@ pub fn source_enum_definitions(namespace: Option<&str>, items: &[Item]) -> Nomin
         definitions.insert(identity, definition);
     }
     definitions
+}
+
+/// The value of the `sys` enum variant `variant` of the qualified enum `enum_name`
+/// (`sys.RuntimeMode`). Its identities are the ones the executor derives for the same
+/// variant, so a system enum value is equal wherever the host builds it.
+pub(crate) fn system_enum_value(enum_name: &str, variant: &str) -> Value {
+    Value::Enum {
+        type_id: crate::object_id_raw(enum_type_id(enum_name)),
+        variant_id: crate::object_id_raw(enum_variant_id(enum_name, variant)),
+        payload: None,
+    }
 }
 
 #[cfg(test)]
