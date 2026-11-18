@@ -60,6 +60,7 @@ pub mod migration_copy;
 mod mount;
 mod native_graph;
 mod object_reader;
+mod objects;
 pub mod offline_copy;
 mod orp;
 mod overflow;
@@ -183,6 +184,7 @@ pub use native_graph::{
     ProtectedContentTransfer, RangeVerification, RepositoryCaptureCapability, RepositoryReadScope,
     RowIndexMutation, VerifiedBlobRange,
 };
+pub use objects::CommittedGitObject;
 pub use orna_value::BlobMetadata;
 pub use paths::{
     GitDeclaredObjectSetState, GitObjectKind, GitObjectState, GitRepositoryCapabilities,

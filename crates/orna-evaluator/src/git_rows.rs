@@ -25,7 +25,7 @@ use orna_value::{
 };
 
 use crate::{
-    EvaluationError, Value, error, git_branches, git_commits, git_refs, git_remotes,
+    EvaluationError, Value, error, git_branches, git_commits, git_objects, git_refs, git_remotes,
     git_repositories, git_stashes, git_tags, git_tree_entries, git_worktree,
 };
 
@@ -59,7 +59,7 @@ struct Member {
 /// The members the evaluator serves from the repository. A handle linked in the
 /// `orna-sys-id` generator (`LINKED_GROUPED_HANDLES`) with no entry here would be
 /// admitted and then unserved, so the two lists name the same members.
-const MEMBERS: [Member; 9] = [
+const MEMBERS: [Member; 10] = [
     Member {
         handle: SysGroupedHandle::GitBranches,
         page: git_branches::branches_page,
@@ -67,6 +67,10 @@ const MEMBERS: [Member; 9] = [
     Member {
         handle: SysGroupedHandle::GitCommits,
         page: git_commits::commits_page,
+    },
+    Member {
+        handle: SysGroupedHandle::GitObjects,
+        page: git_objects::objects_page,
     },
     Member {
         handle: SysGroupedHandle::GitRefs,
@@ -561,6 +565,7 @@ mod tests {
         for served in [
             "sys.git.branches",
             "sys.git.commits",
+            "sys.git.objects",
             "sys.git.refs",
             "sys.git.remotes",
             "sys.git.repositories",
@@ -575,7 +580,7 @@ mod tests {
                 "{served}"
             );
         }
-        for other in ["sys.git.objects", "sys.catalog.tables", "Music", ""] {
+        for other in ["sys.catalog.tables", "Music", ""] {
             assert_eq!(super::served_source(other), None, "{other:?}");
             assert!(
                 super::served_page(other, &context(None), None, 8, 256).is_none(),

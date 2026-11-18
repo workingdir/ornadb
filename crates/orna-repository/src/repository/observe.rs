@@ -273,12 +273,8 @@ impl Repository {
         if fields.len() != 3 || fields[0] != object_id {
             return Ok(GitObjectState::Malformed);
         }
-        let kind = match fields[1] {
-            "commit" => GitObjectKind::Commit,
-            "tree" => GitObjectKind::Tree,
-            "blob" => GitObjectKind::Blob,
-            "tag" => GitObjectKind::Tag,
-            _ => return Ok(GitObjectState::Malformed),
+        let Some(kind) = GitObjectKind::from_cat_file_name(fields[1]) else {
+            return Ok(GitObjectState::Malformed);
         };
         let Ok(size) = fields[2].parse::<u64>() else {
             return Ok(GitObjectState::Malformed);

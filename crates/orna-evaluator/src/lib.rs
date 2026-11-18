@@ -48,6 +48,8 @@ mod git_branches;
 #[cfg(feature = "system-host-bindings")]
 mod git_commits;
 #[cfg(feature = "system-host-bindings")]
+mod git_objects;
+#[cfg(feature = "system-host-bindings")]
 mod git_refs;
 #[cfg(feature = "system-host-bindings")]
 mod git_remotes;
@@ -3215,6 +3217,7 @@ mod non_host_names {
     pub(super) const GIT_STASHES: &str = "sys.git.stashes";
     pub(super) const GIT_TAGS: &str = "sys.git.tags";
     pub(super) const GIT_COMMITS: &str = "sys.git.commits";
+    pub(super) const GIT_OBJECTS: &str = "sys.git.objects";
     pub(super) const GIT_TREE_ENTRIES: &str = "sys.git.tree_entries";
     pub(super) const GIT_REPOSITORIES: &str = "sys.git.repositories";
     pub(super) const GIT_WORKTREE: &str = "sys.git.worktree";
@@ -8956,10 +8959,11 @@ impl Context<'_, '_> {
         }
         // The Git members the evaluator serves from the repository the host
         // attached (`git_rows::MEMBERS`: `sys.git.branches`, `sys.git.commits`,
-        // `sys.git.refs`, `sys.git.remotes`, `sys.git.repositories`, `sys.git.stashes`,
-        // `sys.git.tags`, `sys.git.tree_entries`, `sys.git.worktree`) and a commit's
-        // `parents` relation; an activation with no host context leaves the source to
-        // its handler.
+        // `sys.git.objects`, `sys.git.refs`, `sys.git.remotes`,
+        // `sys.git.repositories`, `sys.git.stashes`, `sys.git.tags`,
+        // `sys.git.tree_entries`, `sys.git.worktree`) and a commit's `parents`
+        // relation; an activation with no host context leaves the source to its
+        // handler.
         #[cfg(feature = "system-host-bindings")]
         if let Some(attachment) = self
             .effects
@@ -11994,6 +11998,7 @@ fn system_relation_source(expression: &Expr) -> Option<&'static str> {
         name if name == non_host_names::GIT_STASHES => Some(non_host_names::GIT_STASHES),
         name if name == non_host_names::GIT_TAGS => Some(non_host_names::GIT_TAGS),
         name if name == non_host_names::GIT_COMMITS => Some(non_host_names::GIT_COMMITS),
+        name if name == non_host_names::GIT_OBJECTS => Some(non_host_names::GIT_OBJECTS),
         name if name == non_host_names::GIT_TREE_ENTRIES => Some(non_host_names::GIT_TREE_ENTRIES),
         name if name == non_host_names::GIT_REPOSITORIES => Some(non_host_names::GIT_REPOSITORIES),
         name if name == non_host_names::GIT_WORKTREE => Some(non_host_names::GIT_WORKTREE),

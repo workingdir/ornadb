@@ -162,6 +162,20 @@ pub enum GitObjectKind {
     Tag,
 }
 
+impl GitObjectKind {
+    /// The kind `git cat-file` prints for an object, or `None` for any other
+    /// word.
+    pub(crate) fn from_cat_file_name(name: &str) -> Option<Self> {
+        match name {
+            "commit" => Some(Self::Commit),
+            "tree" => Some(Self::Tree),
+            "blob" => Some(Self::Blob),
+            "tag" => Some(Self::Tag),
+            _ => None,
+        }
+    }
+}
+
 /// Safe local availability information for one complete native Git object ID.
 /// A promised object is known only when a local promisor walk proves that the
 /// missing ID is reachable; no fetch or lazy hydration is attempted.
