@@ -41,7 +41,7 @@ pub(crate) fn sys_host_context(
 }
 
 /// The raw Git object id of `commit`, or `None` when its text is not one.
-fn commit_object_id(commit: &GitCommitRef) -> Option<Vec<u8>> {
+pub(crate) fn commit_object_id(commit: &GitCommitRef) -> Option<Vec<u8>> {
     let algorithm = match commit.as_str().len() {
         40 => GitHashAlgorithm::Sha1,
         64 => GitHashAlgorithm::Sha256,

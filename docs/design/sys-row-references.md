@@ -99,5 +99,13 @@ including `0` counts for a branch level with its upstream. An upstream configure
 commit unreadable) has no ref to name and nothing to count against, so it reads as no upstream. With no readable
 commit to pin to, a repository that has branches fails the read with `sys.snapshot.incomplete`; a repository with no
 branch (an unborn `HEAD`) serves an empty relation. Remote-tracking branches are refs, not rows of this relation;
-`sys.Ref.remote` and `sys.git.refs` carry them. `orna serve` pins no `HEAD` of its own, so the relation is not served
-there yet and fails closed with `sys.snapshot.incomplete`.
+`sys.Ref.remote` and `sys.git.refs` carry them.
+
+`orna serve` outlives every commit it serves, so it pins each request, not the process. A served page, a console Run
+and a live Eval read `HEAD` when they run: the object id is the `SysHostContext::head_commit` of that request
+(`ApplicationAuthority::with_head_commit` for a page and a Run, `ApplicationLiveAdapter::bind_commit` for an Eval),
+and the identities committed there bind the `sys.catalog.*` rows it reads, so one request carries one pin. A Run is a
+pure console session, so an input that only reads tables is evaluated by `ApplicationAuthority::submit_system_read`:
+it serves `sys.git.*`, `sys.catalog.*` and `sys.rt.info()` and no application table, whose read fails because the
+handler holds no rows for it. A clone with no readable commit has no pin, so the read fails with
+`sys.snapshot.incomplete`; a page is refused as `serve.entry_unavailable` before it reads anything.

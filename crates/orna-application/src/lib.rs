@@ -267,20 +267,24 @@ impl AdmittedPageModule {
 /// A source-backed application authority. The catalogue and evaluator limits
 /// are captured once so every admission in this authority uses the same
 /// resolver and bounded execution policy.
+///
+/// The catalogue and the standard-library sets are shared between clones, so a
+/// host that serves a long-lived authority can pin one request's copy to the
+/// commit it observed ([`Self::with_head_commit`]) without copying them.
 #[derive(Clone, Debug)]
 pub struct ApplicationAuthority {
-    catalogue: Catalogue,
+    catalogue: Arc<Catalogue>,
     limits: Limits,
     sys_host: Option<SysHostContext>,
     standard_functions: Arc<StandardLayer>,
     /// Qualified keys (`std.<module>.<name>`) of standard functions declared `pub`.
     /// Only these may be bound by `use std.<module>.{…}`, `*`, or `as _` (ORNA-IMPORT-004).
-    standard_public: BTreeSet<String>,
+    standard_public: Arc<BTreeSet<String>>,
     /// Prelude names each pinned standard module records for `as _` (ORNA-IMPORT-005).
-    standard_preludes: BTreeMap<String, BTreeSet<String>>,
+    standard_preludes: Arc<BTreeMap<String, BTreeSet<String>>>,
     /// Qualified keys of public non-function standard declarations. These are
     /// recognised so that importing them fails with a specific diagnostic.
-    standard_non_function: BTreeSet<String>,
+    standard_non_function: Arc<BTreeSet<String>>,
 }
 
 impl ApplicationAuthority {
@@ -288,13 +292,13 @@ impl ApplicationAuthority {
     #[must_use]
     pub fn new(catalogue: Catalogue, limits: Limits) -> Self {
         Self {
-            catalogue,
+            catalogue: Arc::new(catalogue),
             limits,
             sys_host: None,
             standard_functions: Arc::default(),
-            standard_public: BTreeSet::new(),
-            standard_preludes: BTreeMap::new(),
-            standard_non_function: BTreeSet::new(),
+            standard_public: Arc::default(),
+            standard_preludes: Arc::default(),
+            standard_non_function: Arc::default(),
         }
     }
 
@@ -310,9 +314,9 @@ impl ApplicationAuthority {
     ) -> Result<Self, StandardCatalogueError> {
         let mut sources = sources.into_iter().collect::<Vec<_>>();
         sources.sort_by(|left, right| left.0.cmp(&right.0));
-        self.catalogue = self
-            .catalogue
-            .with_standard_sources(profile, sources.clone())?;
+        self.catalogue = Arc::new(
+            Arc::unwrap_or_clone(self.catalogue).with_standard_sources(profile, sources.clone())?,
+        );
         let mut functions = BTreeMap::<String, PureFunction>::new();
         let mut intrinsics = BTreeMap::<String, orna_intrinsics::IntrinsicId>::new();
         let mut public = BTreeSet::new();
@@ -395,9 +399,9 @@ impl ApplicationAuthority {
             }
         }
         self.standard_functions = Arc::new(StandardLayer::new(functions, aliases, intrinsics));
-        self.standard_public = public;
-        self.standard_non_function = non_function;
-        self.standard_preludes = preludes;
+        self.standard_public = Arc::new(public);
+        self.standard_non_function = Arc::new(non_function);
+        self.standard_preludes = Arc::new(preludes);
         Ok(self)
     }
 
@@ -469,6 +473,28 @@ impl ApplicationAuthority {
     pub fn with_sys_host_context(mut self, sys_host: SysHostContext) -> Self {
         self.sys_host = Some(sys_host);
         self
+    }
+
+    /// Pins the repository commit every `sys.git.*` row this authority serves is
+    /// read at. `head` is the raw Git object id (20 bytes for SHA-1, 32 for
+    /// SHA-256) of the `HEAD` commit a request observed: the commit its
+    /// committed rows and catalogue identities are read from, so one activation
+    /// observes one commit and never a later `HEAD` (ORNA-SERVE-003,
+    /// ORNA-SYS-011). A host that outlives commits pins a clone of its authority
+    /// to each request. `None` (an unborn or unreadable `HEAD`) leaves nothing
+    /// to pin those rows to, so a read of them fails closed with
+    /// `sys.snapshot.incomplete`. An authority with no host context has no
+    /// repository and is returned unchanged.
+    #[must_use]
+    pub fn with_head_commit(mut self, head: Option<Vec<u8>>) -> Self {
+        self.set_head_commit(head);
+        self
+    }
+
+    fn set_head_commit(&mut self, head: Option<Vec<u8>>) {
+        if let Some(sys_host) = &mut self.sys_host {
+            sys_host.head_commit = head;
+        }
     }
 
     /// Admits one source module through parser, resolver and type/effect checks.
@@ -3245,6 +3271,10 @@ pub struct ApplicationLiveAdapter {
     page: Arc<Mutex<Option<AdmittedPageModule>>>,
     runtime_identity: Option<([u8; 16], [u8; 16])>,
     repository_capture: Option<RepositoryCaptureCapability>,
+    /// The table and column identities committed at the commit the next Eval is
+    /// served at, bound by [`Self::bind_commit`]. Without them a `sys.catalog.*`
+    /// read of a project with tables fails closed.
+    catalogue_identities: Option<Arc<CatalogueIdentities>>,
 }
 
 /// The complete application module a trusted host selected for Eval
@@ -3305,6 +3335,7 @@ impl ApplicationLiveAdapter {
             page: Arc::new(Mutex::new(None)),
             runtime_identity: None,
             repository_capture: None,
+            catalogue_identities: None,
         }
     }
 
@@ -3331,6 +3362,19 @@ impl ApplicationLiveAdapter {
     pub fn with_repository_capture(mut self, capability: RepositoryCaptureCapability) -> Self {
         self.repository_capture = Some(capability);
         self
+    }
+
+    /// Binds the commit the following Evals are served at, as a host that
+    /// outlives commits does before each request. `head` is the raw Git object
+    /// id of the `HEAD` it observed and `identities` the table and column
+    /// identities committed there, so the `sys.git.*` and `sys.catalog.*` rows
+    /// one Eval reads are pinned to that one commit (ORNA-SERVE-003,
+    /// ORNA-SYS-011). With `None` (an unborn or unreadable `HEAD`) there is no
+    /// commit to pin to, and a read that needs one fails closed with
+    /// `sys.snapshot.incomplete`.
+    pub fn bind_commit(&mut self, head: Option<Vec<u8>>, identities: Option<CatalogueIdentities>) {
+        self.authority.set_head_commit(head);
+        self.catalogue_identities = identities.map(Arc::new);
     }
 
     /// Submits one REPL input. When the host installed a repository capture
@@ -3420,10 +3464,7 @@ impl ApplicationLiveAdapter {
             .map_err(|_| LiveError::ApplicationRejected);
         }
         let sources = reference_standard_sources().into_iter().collect::<Vec<_>>();
-        let catalogue = self
-            .authority
-            .catalogue
-            .clone()
+        let catalogue = Catalogue::clone(&self.authority.catalogue)
             .with_standard_sources(&reference_standard_profile(), sources.clone())
             .map_err(|_| LiveError::ApplicationRejected)?;
         AdmittedReplSession::from_catalogue(&[], catalogue, sources, self.authority.limits)
@@ -3611,8 +3652,13 @@ impl ApplicationLiveAdapter {
                 return Err(self.fail_repl_input(session, repl, source, diagnostic));
             }
         };
+        // The handler serves the system relations the input reads at the commit
+        // this Eval is bound to (`Self::bind_commit`): the host's Git state and
+        // the catalogue over that commit's identities.
         let mut handler =
-            SourceMutationEffectHandler::new(self.repl_table_schemas().map_err(LiveError::from)?);
+            SourceMutationEffectHandler::new(self.repl_table_schemas().map_err(LiveError::from)?)
+                .with_sys_host_context(self.authority.sys_host.clone())
+                .with_catalogue_identities(self.catalogue_identities.as_deref());
         // The REPL serves `sys.explain` from the activation's pinned CWD
         // snapshot (ORNA-SYS-008), as the module activation does. A pure
         // evaluation has no activation context, so no catalogue is pinned
