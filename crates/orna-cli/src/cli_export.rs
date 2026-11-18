@@ -182,7 +182,7 @@ fn run_export(
     })?;
     let selectors: Vec<&str> = selectors.iter().map(String::as_str).collect();
     let manifest = export_complete_copy_of(&repository, &selectors, destination, dependencies)
-        .map_err(|error| describe_export_failure(&error))?;
+        .map_err(|error| describe_export_failure(&error, IoScope::ArchiveWritten))?;
     let (objects, dependencies) = manifest.counts();
     println!(
         "exported {} ({} snapshots): {objects} objects, {dependencies} pinned dependencies",
@@ -205,7 +205,7 @@ fn run_restore(
         Some(commit) => restore_complete_copy_at(archive, destination, commit),
         None => restore_complete_copy(archive, destination),
     }
-    .map_err(|error| describe_export_failure(&error))?;
+    .map_err(|error| describe_export_failure(&error, IoScope::ArchiveRead))?;
     let (objects, dependencies) = manifest.counts();
     println!(
         "restored {} ({} snapshots): {objects} objects, {dependencies} pinned dependencies verified",
@@ -214,7 +214,7 @@ fn run_restore(
     );
     if worktree {
         materialize_complete_copy(destination, &manifest)
-            .map_err(|error| describe_export_failure(&error))?;
+            .map_err(|error| describe_export_failure(&error, IoScope::Materialised))?;
         println!("materialised the pinned snapshot and its dependencies");
     }
     report_members(&manifest);
@@ -230,12 +230,12 @@ fn run_restore(
 /// read alone reports a truncated archive as a complete copy: every recorded
 /// object still appears in the manifest while the bundle no longer holds them.
 fn report_archive(archive: &Path) -> Result<(), Diagnostic> {
-    let manifest =
-        read_complete_copy_manifest(archive).map_err(|error| describe_export_failure(&error))?;
+    let manifest = read_complete_copy_manifest(archive)
+        .map_err(|error| describe_export_failure(&error, IoScope::ArchiveRead))?;
     let scratch = tempfile::TempDir::new()
-        .map_err(|error| describe_export_failure(&CompleteCopyError::Io(error)))?;
+        .map_err(|error| describe_export_failure(&CompleteCopyError::Io(error), IoScope::Scratch))?;
     restore_complete_copy(archive, scratch.path())
-        .map_err(|error| describe_export_failure(&error))?;
+        .map_err(|error| describe_export_failure(&error, IoScope::ArchiveRead))?;
     let (objects, dependencies) = manifest.counts();
     println!(
         "complete copy of {} ({} snapshots): {objects} objects, {dependencies} pinned dependencies",
@@ -265,8 +265,22 @@ fn report_dependencies(manifest: &CompleteCopyManifest) {
     }
 }
 
+/// Which archive or destination an I/O failure touched, so that the title names
+/// the operation that failed rather than a fixed direction.
+#[derive(Clone, Copy)]
+enum IoScope {
+    /// `export` writes the new archive.
+    ArchiveWritten,
+    /// `--check` and `--restore` read an existing archive.
+    ArchiveRead,
+    /// `--restore` materialises the pinned snapshot into the restored copy.
+    Materialised,
+    /// `--check` verifies the archive in a scratch directory it creates first.
+    Scratch,
+}
+
 /// ORNA-GIT-012: name the unavailable scope and keep the remedy actionable.
-fn describe_export_failure(error: &CompleteCopyError) -> Diagnostic {
+fn describe_export_failure(error: &CompleteCopyError, scope: IoScope) -> Diagnostic {
     let title: &'static str = match error {
         CompleteCopyError::TargetNotEmpty => "Destination is not empty",
         CompleteCopyError::UnresolvedSnapshot => "--at did not resolve to a commit",
@@ -282,7 +296,12 @@ fn describe_export_failure(error: &CompleteCopyError) -> Diagnostic {
         CompleteCopyError::IntegrityMismatch { .. } => "A recorded object failed verification",
         CompleteCopyError::GitUnavailable => "Git is unavailable or refused the export",
         CompleteCopyError::InvalidArchive(_) => "Archive is not a complete copy",
-        CompleteCopyError::Io(_) => "Archive could not be written",
+        CompleteCopyError::Io(_) => match scope {
+            IoScope::ArchiveWritten => "Archive could not be written",
+            IoScope::ArchiveRead => "Archive could not be read",
+            IoScope::Materialised => "Snapshot could not be materialised",
+            IoScope::Scratch => "Scratch directory could not be created",
+        },
     };
     Diagnostic::target_with_detail(
         "ORNA-CMD-TARGET-UNAVAILABLE",
