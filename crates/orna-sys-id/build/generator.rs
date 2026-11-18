@@ -4498,12 +4498,15 @@ const LINKED_RELATIONS: [(&str, &str); 3] = [
     ("sys.Storage", "PublicationMetadata"),
 ];
 
-/// Grouped handles bound by a production host. `sys.git.branches` is read from
-/// the attached repository by the evaluator (`sys.Branch` rows).
-const LINKED_GROUPED_HANDLES: [(&str, &str); 3] = [
+/// Grouped handles bound by a production host. `sys.git.branches`,
+/// `sys.git.remotes` and `sys.git.tags` are read from the attached repository
+/// by the evaluator (`sys.Branch`, `sys.Remote` and `sys.Tag` rows).
+const LINKED_GROUPED_HANDLES: [(&str, &str); 5] = [
     ("sys.catalog.columns", "Evaluator"),
     ("sys.catalog.tables", "Evaluator"),
     ("sys.git.branches", "Evaluator"),
+    ("sys.git.remotes", "Evaluator"),
+    ("sys.git.tags", "Evaluator"),
 ];
 
 fn render_provider_links(catalogue: &Catalogue) -> Result<String> {

@@ -45,6 +45,12 @@ mod effect_evidence;
 mod explain_bindings;
 #[cfg(feature = "system-host-bindings")]
 mod git_branches;
+#[cfg(feature = "system-host-bindings")]
+mod git_remotes;
+#[cfg(feature = "system-host-bindings")]
+mod git_rows;
+#[cfg(feature = "system-host-bindings")]
+mod git_tags;
 mod intrinsics;
 use crate::intrinsics::codecs::{json_node_to_value, parse_json_node};
 use crate::intrinsics::money::money_amount;
@@ -3192,6 +3198,8 @@ mod non_host_names {
     pub(super) const CATALOG_TABLES: &str = "sys.catalog.tables";
     pub(super) const CATALOG_COLUMNS: &str = "sys.catalog.columns";
     pub(super) const GIT_BRANCHES: &str = "sys.git.branches";
+    pub(super) const GIT_REMOTES: &str = "sys.git.remotes";
+    pub(super) const GIT_TAGS: &str = "sys.git.tags";
     pub(super) const BLOB_UNAVAILABLE: &str = "sys.blob.unavailable";
     pub(super) const BLOB_CORRUPT: &str = "sys.blob.corrupt";
     pub(super) const BLOB_REFERENCE_CONTEXT: &str = "sys.blob.reference_context";
@@ -8833,22 +8841,24 @@ impl Context<'_, '_> {
         if source == SYS_MATERIALIZATION_SOURCE {
             return self.materialization_page(after, page_limit);
         }
-        // `sys.git.branches` is read from the repository the host attached; an
+        // The Git members the evaluator serves from the repository the host
+        // attached (`sys.git.branches`, `sys.git.remotes`, `sys.git.tags`); an
         // activation with no host context leaves the source to its handler.
         #[cfg(feature = "system-host-bindings")]
-        if source == SYS_GIT_BRANCHES_SOURCE
-            && let Some(attachment) = self
-                .effects
-                .as_deref()
-                .and_then(|handler| handler.sys_host_context())
-                .or(self.sys_host)
-        {
-            return git_branches::branches_page(
+        if let Some(attachment) = self
+            .effects
+            .as_deref()
+            .and_then(|handler| handler.sys_host_context())
+            .or(self.sys_host)
+            && let Some(page) = git_rows::served_page(
+                source,
                 attachment.context(),
                 after,
                 page_limit,
                 self.limits.max_collection_items,
-            );
+            )
+        {
+            return page;
         }
         enum SourcePage {
             Canonical(RelationPage),
@@ -11848,10 +11858,7 @@ fn system_relation_source(expression: &Expr) -> Option<&'static str> {
         name if name == SysGroupedHandle::CatalogColumns.name() => {
             Some(SysGroupedHandle::CatalogColumns.name())
         }
-        name if name == SysGroupedHandle::GitBranches.name() => {
-            Some(SysGroupedHandle::GitBranches.name())
-        }
-        _ => None,
+        name => git_rows::served_source(name),
     }
 }
 
@@ -11866,6 +11873,8 @@ fn system_relation_source(expression: &Expr) -> Option<&'static str> {
         name if name == non_host_names::CATALOG_TABLES => Some(non_host_names::CATALOG_TABLES),
         name if name == non_host_names::CATALOG_COLUMNS => Some(non_host_names::CATALOG_COLUMNS),
         name if name == non_host_names::GIT_BRANCHES => Some(non_host_names::GIT_BRANCHES),
+        name if name == non_host_names::GIT_REMOTES => Some(non_host_names::GIT_REMOTES),
+        name if name == non_host_names::GIT_TAGS => Some(non_host_names::GIT_TAGS),
         _ => None,
     }
 }
@@ -11874,10 +11883,6 @@ fn system_relation_source(expression: &Expr) -> Option<&'static str> {
 const SYS_MATERIALIZATION_SOURCE: &str = SysRelation::Materialization.name();
 #[cfg(not(feature = "system-host-bindings"))]
 const SYS_MATERIALIZATION_SOURCE: &str = non_host_names::MATERIALIZATION;
-
-/// The grouped handle the evaluator serves from the repository the host attached.
-#[cfg(feature = "system-host-bindings")]
-const SYS_GIT_BRANCHES_SOURCE: &str = SysGroupedHandle::GitBranches.name();
 
 fn sha256_parts(domain: &str, parts: &[&[u8]]) -> [u8; 32] {
     let mut hash = Sha256::new();
