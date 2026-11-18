@@ -846,23 +846,30 @@ pub(crate) fn infer_block(
                 value,
                 ..
             } => {
+                let mut annotated = None;
                 let x = if let Some(annotation) = annotation {
                     validate_type_annotation(annotation, scope, &BTreeSet::new(), diagnostics);
                     let expected = resolved_type_of(annotation, scope);
                     let x = infer_contextual(value, &expected, scope, &locals, diagnostics);
                     require_same(&expected, &x.ty, diagnostics);
+                    annotated = Some(expected);
                     x
                 } else {
                     infer(value, scope, &locals, diagnostics)
                 };
                 effects.join(&x.effects);
-                // A local alias of a typed pin keeps the source
-                // parameter identity for later rebinding and capture.
-                let ty = specialize_snapshot_ref_parameter(value, &x.ty, &locals);
-                if ty == Type::Bottom {
-                    final_control = Some(Inferred::pure(ty));
+                if x.ty == Type::Bottom {
+                    final_control = Some(Inferred::pure(Type::Bottom));
                     break;
                 }
+                // An annotated binding has the annotated type, not the
+                // initialiser's (e.g. `Null` for `let x: Int? = null`).
+                // A local alias of a typed pin keeps the source
+                // parameter identity for later rebinding and capture.
+                let ty = match annotated {
+                    Some(expected) => expected,
+                    None => specialize_snapshot_ref_parameter(value, &x.ty, &locals),
+                };
                 bind_pattern(pattern, ty, scope, &mut locals, diagnostics);
             }
             Statement::Assert { value, .. } => {
@@ -2720,8 +2727,12 @@ pub(crate) fn infer_case_arm_body(
     effects.join(&body.effects);
     // ORNA-CASE-004 joins reachable bodies with the same rule as `if` branches
     // (ORNA-CFLOW-003), so `Int` with `Int?` in either order unifies to `Int?`.
+    // A diverging arm (`return`, `break`, ...) produces no value, so it does
+    // not participate in the join; only if every arm diverges does the case.
     match result.as_ref() {
         None => *result = Some(body.ty),
+        Some(Type::Bottom) => *result = Some(body.ty),
+        Some(_) if body.ty == Type::Bottom => {}
         Some(joined) => match join_conditional_branches(joined, &body.ty) {
             Some(next) => *result = Some(next),
             // A failed join reports once, naming the arm that does not fit.

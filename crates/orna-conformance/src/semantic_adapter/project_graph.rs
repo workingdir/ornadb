@@ -226,13 +226,36 @@ impl<'a> ModuleReferences<'a> {
             }
             self.expression(&mut function.body, &shadowed);
         }
+        // A bare name that is not an import denotes a function declared in this
+        // module, keyed under the module's own function prefix. The same holds
+        // for the callee of a factory call (`assert at_least(0);`).
+        let own_prefix = self
+            .graph
+            .modules
+            .get(&self.namespace)
+            .map(|module| module.function_prefix.clone());
         for assertion in admitted
             .table_assertions
             .values_mut()
             .flatten()
             .chain(admitted.module_assertions.iter_mut())
         {
-            self.expression(&mut assertion.expression, &BTreeSet::new());
+            match &mut assertion.expression {
+                Expr::Name { .. } => self.callee(&mut assertion.expression, &BTreeSet::new()),
+                _ => self.expression(&mut assertion.expression, &BTreeSet::new()),
+            }
+            let head = match &mut assertion.expression {
+                Expr::Call { callee, .. } => callee.as_mut(),
+                other => other,
+            };
+            if let (Expr::Name { text, .. }, Some(prefix)) = (head, &own_prefix)
+                && !self.functions.contains_key(text.as_str())
+            {
+                let qualified = format!("{prefix}.{text}");
+                if admitted.functions.contains_key(&qualified) {
+                    *text = qualified;
+                }
+            }
         }
     }
 

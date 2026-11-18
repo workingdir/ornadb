@@ -111,13 +111,19 @@ pub(super) fn relation_cursor_start(after: Option<&[u8]>) -> Result<usize, Evalu
         .map_err(|_| transaction_error("ORNA-EVAL-TABLE-ASSERT"))
 }
 
-pub(super) fn table_assertion_function<'a>(
-    assertion: &'a Expr,
-    functions: &Functions,
-) -> Option<&'a str> {
+/// Whether a table assertion is a function-valued predicate: a retained
+/// function named directly (`assert positive;`), or a factory call that yields
+/// one (`assert at_least(0);`). `every` and `all_unique` are table-local
+/// predicate constructors and are lowered by `table_assertion_predicate`.
+pub(super) fn table_assertion_is_function(assertion: &Expr, functions: &Functions) -> bool {
     match assertion {
-        Expr::Name { text, .. } if functions.contains_key(text) => Some(text),
-        _ => None,
+        Expr::Name { text, .. } => functions.contains_key(text),
+        Expr::Call { callee, .. } => matches!(
+            callee.as_ref(),
+            Expr::Name { text, .. }
+                if functions.contains_key(text) && !matches!(text.as_str(), "every" | "all_unique")
+        ),
+        _ => false,
     }
 }
 
