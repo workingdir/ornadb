@@ -12,15 +12,17 @@ use std::rc::Rc;
 use num_bigint::BigInt;
 use orna_hir::{BodyId, DefId, Name, Ty};
 use orna_value::{
-    CanonicalValue, DIGEST_TAG, DURATION_TAG, INSTANT_TAG, MONEY_TAG, OPTION_TAG, Raw, Snapshot,
-    SysRef, TUPLE_TAG, UNIT_TAG, UUID_TAG,
+    CanonicalValue, DIGEST_TAG, DURATION_TAG, GitObjectId, INSTANT_TAG, MONEY_TAG, OPTION_TAG, Raw,
+    Snapshot, SysRef, TUPLE_TAG, UNIT_TAG, UUID_TAG,
 };
 
 use crate::calendar;
 use crate::decimal::Decimal;
 use crate::host::SysSlot;
 
+mod oid;
 mod refs;
+pub(crate) use oid::git_oid_from_raw;
 pub(crate) use refs::typed_reference_from_raw;
 
 /// One runtime value.
@@ -110,6 +112,9 @@ pub enum Value {
     /// checked. Its canonical form is the `PINNED_ROW_REFERENCE_TAG` form of the row it names. Built by
     /// [`Value::sys_ref`].
     SysRef(Rc<SysRef>),
+    /// A `sys.GitOid`: a Git object id with its hash algorithm, held as the checked [`GitObjectId`]. Its canonical
+    /// form is the tag-60023 value `["sys.GitOid", [algorithm, bytes]]`. Built by [`Value::git_oid`].
+    GitOid(Rc<GitObjectId>),
 }
 
 impl From<i64> for Value {
@@ -213,6 +218,7 @@ impl Value {
             Self::Record(fields) => record_raw(fields),
             Self::RowRef(raw) => Ok(raw.clone()),
             Self::SysRef(reference) => refs::typed_row_raw(reference.as_row_ref()),
+            Self::GitOid(oid) => Ok(oid.to_opaque_raw()),
             Self::Closure(_) | Self::Rel(_) | Self::Enum { .. } => Err("ORNA-EVAL-UNSUPPORTED"),
             Self::Error(code) => Err(code),
         }
