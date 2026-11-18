@@ -83,6 +83,39 @@ impl Repository {
         }
     }
 
+    /// Every gitlink (submodule) entry in the index, with the commit it pins,
+    /// in index order. A conflicted gitlink (any stage other than 0) is an
+    /// error, so no pin is guessed from an unmerged index.
+    pub fn index_submodule_commits(&self) -> Result<Vec<(String, GitCommitRef)>, RepositoryError> {
+        let mut command = self.command();
+        command.args(["ls-files", "--stage", "-z"]);
+        let output = self.run(command)?.stdout;
+        let object_length = self.native_object_id_length()?;
+        let mut pins = Vec::new();
+        for record in output.split(|byte| *byte == 0) {
+            if record.is_empty() {
+                continue;
+            }
+            let record = GitListRecord::parse(record).ok_or(RepositoryError::GitOperationFailed)?;
+            if record.field(0) != Some(b"160000") {
+                continue;
+            }
+            if record.field(2) != Some(b"0") {
+                return Err(RepositoryError::GitOperationFailed);
+            }
+            let object = record.field(1).ok_or(RepositoryError::GitOperationFailed)?;
+            let object = String::from_utf8(object.to_vec())
+                .map_err(|_| RepositoryError::GitOperationFailed)?;
+            let path = String::from_utf8(record.name().to_vec())
+                .map_err(|_| RepositoryError::GitOperationFailed)?;
+            pins.push((
+                path,
+                GitCommitRef::from_verified_commit(object, object_length)?,
+            ));
+        }
+        Ok(pins)
+    }
+
     /// The content of `path` in `HEAD`, or `None` when `HEAD` has no such path
     /// or the repository has no commit yet.
     pub fn head_file_bytes(&self, path: &str) -> Result<Option<Vec<u8>>, RepositoryError> {
