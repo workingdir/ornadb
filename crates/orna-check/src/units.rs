@@ -781,6 +781,16 @@ pub(crate) fn type_of(ty: &TypeExpr) -> Type {
         } if path.as_slice() == ["Range"] && arguments.len() == 1 => {
             Type::Range(Box::new(type_of(&arguments[0])))
         }
+        // Predicate<S> is the structural callable type `fn(S): Bool`
+        // (standard library, Predicate<S>).
+        TypeExpr::Name {
+            path, arguments, ..
+        } if path.as_slice() == ["Predicate"] && arguments.len() == 1 => Type::Function {
+            parameters: vec![type_of(&arguments[0])],
+            parameter_names: None,
+            default_parameters: BTreeSet::new(),
+            result: Box::new(Type::Bool),
+        },
         TypeExpr::Name {
             path, arguments, ..
         } => Type::Applied {

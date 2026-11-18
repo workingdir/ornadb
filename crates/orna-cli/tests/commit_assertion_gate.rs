@@ -118,6 +118,109 @@ fn refused_table_assertion_names_the_offending_row_as_its_witness() {
     assert_eq!(head(&root), before, "{text}");
 }
 
+/// A table assertion that names a predicate declared in the same module
+/// (`assert positive;`) is evaluated by that predicate.
+fn named_predicate_library(verdict: &str) -> String {
+    format!(
+        "pub fn positive(rows: Relation<Book>): Bool = {verdict};\n\
+pub table Book(id: Int) {{\n    title: Str,\n    assert positive;\n}}\n"
+    )
+}
+
+/// A factory call (`assert at_least(0);`) whose callee returns a
+/// `Predicate<Relation<Book>>` is evaluated through the returned predicate.
+fn factory_predicate_library(verdict: &str) -> String {
+    format!(
+        "pub fn positive(rows: Relation<Book>): Bool = {verdict};\n\
+pub fn at_least(min: Int): Predicate<Relation<Book>> = rows => positive(rows);\n\
+pub table Book(id: Int) {{\n    title: Str,\n    assert at_least(0);\n}}\n"
+    )
+}
+
+#[test]
+fn named_predicate_assertion_commits_when_it_holds() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let root = initialized_database(&directory, BOOK_TABLE);
+    commit_source(&root, "book table");
+    assert_success(
+        &orna_repl(&root, "main.Book.insert({ id: 1, title: \"Dune\" })"),
+        "admit the row",
+    );
+    publish(&root, "Dune");
+    let before = head(&root);
+
+    let committed = stage_and_commit(&root, &named_predicate_library("true"), "named predicate");
+    assert_success(&committed, "commit under a holding named predicate");
+    assert_ne!(head(&root), before);
+}
+
+#[test]
+fn named_predicate_assertion_refuses_the_commit_when_it_fails() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let root = initialized_database(&directory, BOOK_TABLE);
+    commit_source(&root, "book table");
+    assert_success(
+        &orna_repl(&root, "main.Book.insert({ id: 1, title: \"Dune\" })"),
+        "admit the row",
+    );
+    publish(&root, "Dune");
+    let before = head(&root);
+
+    let refused = stage_and_commit(
+        &root,
+        &named_predicate_library("false"),
+        "failing predicate",
+    );
+    let text = transcript(&refused);
+    assert_ne!(refused.status.code(), Some(0), "{text}");
+    assert!(text.contains("ORNA-A091-009"), "{text}");
+    assert_eq!(head(&root), before, "{text}");
+}
+
+#[test]
+fn factory_predicate_assertion_commits_when_it_holds() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let root = initialized_database(&directory, BOOK_TABLE);
+    commit_source(&root, "book table");
+    assert_success(
+        &orna_repl(&root, "main.Book.insert({ id: 1, title: \"Dune\" })"),
+        "admit the row",
+    );
+    publish(&root, "Dune");
+    let before = head(&root);
+
+    let committed = stage_and_commit(
+        &root,
+        &factory_predicate_library("true"),
+        "factory predicate",
+    );
+    assert_success(&committed, "commit under a holding factory predicate");
+    assert_ne!(head(&root), before);
+}
+
+#[test]
+fn factory_predicate_assertion_refuses_the_commit_when_it_fails() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let root = initialized_database(&directory, BOOK_TABLE);
+    commit_source(&root, "book table");
+    assert_success(
+        &orna_repl(&root, "main.Book.insert({ id: 1, title: \"Dune\" })"),
+        "admit the row",
+    );
+    publish(&root, "Dune");
+    let before = head(&root);
+
+    let refused = stage_and_commit(
+        &root,
+        &factory_predicate_library("false"),
+        "failing factory",
+    );
+    let text = transcript(&refused);
+    assert_ne!(refused.status.code(), Some(0), "{text}");
+    assert!(text.contains("ORNA-A091-009"), "{text}");
+    assert_eq!(head(&root), before, "{text}");
+}
+
 #[test]
 fn holding_published_row_commits_under_its_assertion() {
     let directory = tempfile::tempdir().expect("temporary directory");
