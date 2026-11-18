@@ -8,7 +8,7 @@ use orna_evaluator::ReplValue;
 use orna_repository::Repository;
 use orna_value::{
     CanonicalSnapshot, GitHash, GitObjectId, OvbRaw, SysRef, branch_reference, commit_reference,
-    git_object_reference, remote_reference, tag_reference,
+    git_object_reference, git_ref_reference, remote_reference, stash_reference, tag_reference,
 };
 use tempfile::TempDir;
 
@@ -112,6 +112,20 @@ impl Recorded {
     pub(super) fn remote(&self, name: &str) -> OvbRaw {
         let reference =
             remote_reference(self.database, self.pin.clone(), name).expect("a remote reference");
+        Self::raw(&reference)
+    }
+
+    /// The `sys.RefRef` of the ref named in full (`refs/heads/main`).
+    pub(super) fn git_ref(&self, name: &str) -> OvbRaw {
+        let reference =
+            git_ref_reference(self.database, self.pin.clone(), name).expect("a ref reference");
+        Self::raw(&reference)
+    }
+
+    /// The `sys.StashRef` of the stash entry `index`.
+    pub(super) fn stash(&self, index: u64) -> OvbRaw {
+        let reference =
+            stash_reference(self.database, self.pin.clone(), index).expect("a stash reference");
         Self::raw(&reference)
     }
 }

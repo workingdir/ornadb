@@ -21,8 +21,10 @@ use crate::git_rows::{GitPage, RowPin, incomplete, page_rows, repository};
 use crate::{EvaluationError, Value};
 
 /// Most remotes one read lists. A repository with more is refused with
-/// `sys.snapshot.incomplete` rather than served truncated.
-const MAX_REMOTES: usize = 1_000;
+/// `sys.snapshot.incomplete` rather than served truncated. `sys.git.refs` names
+/// the remote of a remote-tracking ref from the same listing, so it shares the
+/// bound.
+pub(crate) const MAX_REMOTES: usize = 1_000;
 
 /// Serves the page of `sys.git.remotes` that follows the remote named by
 /// `after`, from the repository `context` attached.
