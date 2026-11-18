@@ -20,6 +20,12 @@ pub struct GitPerson {
 }
 
 impl GitPerson {
+    /// A person from the identity fields Git prints: the name, and the address
+    /// when the identity records one.
+    pub(crate) fn new(name: String, email: Option<String>) -> Self {
+        Self { name, email }
+    }
+
     /// The name the identity line records. It may be empty: Git accepts
     /// `<email>` with no name before it.
     pub fn name(&self) -> &str {
