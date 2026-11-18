@@ -1,6 +1,9 @@
 // The binary's `repl` module is included by path, and it loads `table_schema`
 // from `src` itself; the test's own copy and the module's copy never interact.
 #![allow(clippy::duplicate_mod)]
+// The included modules return the binary's `ReplFailure`, whose `Err` size the
+// binary allows crate-wide (`src/main.rs`).
+#![allow(clippy::result_large_err)]
 
 // `repl` is the binary's own module, included here so the watch command can be
 // driven without a terminal; it loads `table_schema` from `src` itself.
@@ -31,6 +34,10 @@ mod repl_doc;
 #[allow(clippy::duplicate_mod)]
 #[allow(dead_code)]
 mod repl_inspect;
+#[path = "../src/repl_plan.rs"]
+#[allow(clippy::duplicate_mod)]
+#[allow(dead_code)]
+mod repl_plan;
 
 use std::collections::VecDeque;
 
