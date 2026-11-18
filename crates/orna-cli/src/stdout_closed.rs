@@ -1,17 +1,14 @@
 //! Quiet end when the reader of stdout has gone (`orna status | head -0`).
 //!
 //! Rust ignores SIGPIPE, so a write to a closed pipe fails with `EPIPE`:
-//! `print!` panics on it, and explicit writes map it to a diagnostic. A Unix
-//! tool killed by SIGPIPE prints nothing and exits with status 141
-//! (128 + 13); this module ends the process the same way, without `unsafe`.
+//! `print!` panics on it, and explicit writes map it to a diagnostic. The
+//! reader having gone is not a command failure, so this module ends the
+//! process with status 0 and no diagnostic, without `unsafe`.
 
 use std::any::Any;
 use std::io;
 
 use crate::Diagnostic;
-
-/// The shell status of a process terminated by SIGPIPE (128 + 13).
-const SIGPIPE_EXIT_STATUS: i32 = 141;
 
 /// Maps a failed stdout write to `failure`, unless stdout is closed: then the
 /// process ends quietly, with no diagnostic.
@@ -47,8 +44,9 @@ fn is_closed_stdout_panic(payload: &(dyn Any + Send)) -> bool {
     })
 }
 
+/// Ends the process with status 0: a closed stdout is not a command failure.
 fn end_quietly() -> ! {
-    std::process::exit(SIGPIPE_EXIT_STATUS)
+    std::process::exit(0)
 }
 
 #[cfg(test)]
