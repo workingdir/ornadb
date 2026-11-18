@@ -66,9 +66,11 @@ mod paths;
 pub mod publication_describe;
 mod publication_transaction;
 pub mod relation_admission;
+mod remotes;
 mod repository;
 mod row_store;
 pub mod schema_evolution;
+mod tags;
 #[cfg(test)]
 pub(crate) mod test_support;
 mod transport;
@@ -128,11 +130,12 @@ pub use format_context::{
 };
 pub(crate) use git_command::{
     ConfigValue, GitListRecord, GitTreeRecord, PromisorReachability, git_command,
-    git_command_at_root, git_command_in, git_stderr_indicates_malformed_object,
+    git_command_at_root, git_command_in, git_stderr_indicates_malformed_object, listing_text,
     parse_committed_branch, parse_committed_tree_entry, parse_git_bool, parse_remote_orna_refs,
-    remote_ref_records, require_native_object_id, run_bounded_listing, run_command,
-    run_command_with_input, scrub_git_routing_environment, trim_output, valid_branch_name,
-    valid_native_object_id, valid_orna_internal_ref, valid_remote_name,
+    remote_ref_records, require_native_object_id, run_bounded_listing,
+    run_bounded_listing_accepting, run_command, run_command_with_input,
+    scrub_git_routing_environment, trim_output, valid_branch_name, valid_native_object_id,
+    valid_orna_internal_ref, valid_remote_name,
 };
 #[cfg(test)]
 pub(crate) use git_command::{bind_git_ceiling_above, bind_git_discovery_to_worktree};
@@ -183,10 +186,12 @@ pub use paths::{
 pub use publication_transaction::{
     ProtectedBlobRowInsert, PublicationTransactionError, commit_protected_blob_row,
 };
+pub use remotes::{ConfiguredRemote, REDACTED_CREDENTIALS};
 pub use row_store::{
     AdmittedRow, KeyRange, KeyValue, RepositoryVfsFieldIdentity, RepositoryVfsRowIdentity,
     RowDependency, RowMapSnapshot, RowMapVersion, RowValue, SchemaGeneration, TypedKey,
 };
+pub use tags::{CommittedTag, GitPerson, TagAnnotation};
 pub use transport::{FetchError, FetchReport, FetchRequest, FetchedRef, PushRequest, RequestedRef};
 
 /// A normal Git repository and its selected worktree.

@@ -5,12 +5,10 @@
 //! when it has none (ORNA-SYS-111, ORNA-SYS-112). Rows are never served without
 //! the commit pin their references need.
 
-use std::{
-    io::Write,
-    path::Path,
-    process::{Command, Output, Stdio},
-};
+#[path = "support/git_project.rs"]
+mod git_project;
 
+use git_project::{combined, committed_project, git, orna, repl, run, uncommitted_project};
 use tempfile::TempDir;
 
 const SOURCE: &str = r#"pub table Item(id: Str) {
@@ -42,79 +40,11 @@ pub fn pairs_sharing_a_reference(): Int {
 }
 "#;
 
-fn orna(directory: &Path, arguments: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_orna"))
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .args(["--db", directory.to_str().expect("UTF-8 path")])
-        .args(arguments)
-        .output()
-        .expect("CLI process")
-}
-
-/// Runs `git` in `directory` under a fixed identity and returns its trimmed
-/// standard output.
-fn git(directory: &Path, arguments: &[&str]) -> String {
-    let output = Command::new("git")
-        .current_dir(directory)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .args([
-            "-c",
-            "user.name=orna-test",
-            "-c",
-            "user.email=orna-test@example.invalid",
-            "-c",
-            "commit.gpgsign=false",
-        ])
-        .args(arguments)
-        .output()
-        .expect("git process");
-    assert!(
-        output.status.success(),
-        "git {arguments:?}: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout)
-        .expect("git output is UTF-8")
-        .trim()
-        .to_owned()
-}
-
-/// An initialised project with `SOURCE` staged and no commit.
-fn uncommitted_project() -> TempDir {
-    let directory = tempfile::tempdir().expect("project directory");
-    let init = Command::new(env!("CARGO_BIN_EXE_orna"))
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .args(["init", directory.path().to_str().expect("UTF-8 path")])
-        .output()
-        .expect("CLI initialization");
-    assert!(init.status.success(), "init: {init:?}");
-    std::fs::write(directory.path().join("main.orna"), SOURCE).expect("project source");
-    git(directory.path(), &["init", "-q"]);
-    git(directory.path(), &["config", "user.name", "Orna Test"]);
-    git(
-        directory.path(),
-        &["config", "user.email", "orna-test@example.invalid"],
-    );
-    git(directory.path(), &["add", "-A"]);
-    directory
-}
-
-/// A project published with `orna commit` on a branch named `main`.
-fn committed_project() -> TempDir {
-    let directory = uncommitted_project();
-    let committed = orna(directory.path(), &["commit", "-m", "publish branches"]);
-    assert!(committed.status.success(), "commit: {committed:?}");
-    if git(directory.path(), &["symbolic-ref", "--short", "HEAD"]) != "main" {
-        git(directory.path(), &["branch", "-m", "main"]);
-    }
-    directory
-}
-
 /// A committed project whose `topic` branch tracks `main` and has diverged
 /// from it: `topic` is one commit ahead and two behind, and `main` tracks
 /// nothing. `HEAD` stays attached to `main`, and the work tree is unchanged.
 fn diverged_project() -> TempDir {
-    let directory = committed_project();
+    let directory = committed_project(SOURCE);
     let root = directory.path();
     let base = git(root, &["rev-parse", "HEAD"]);
     git(root, &["branch", "topic"]);
@@ -130,44 +60,10 @@ fn diverged_project() -> TempDir {
     directory
 }
 
-fn repl(directory: &Path, input: &str) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_orna"))
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .args(["--db", directory.to_str().expect("UTF-8 path"), "repl"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("the REPL starts");
-    child
-        .stdin
-        .take()
-        .expect("REPL stdin")
-        .write_all(format!("{input}\n:quit\n").as_bytes())
-        .expect("write REPL input");
-    child.wait_with_output().expect("the REPL exits")
-}
-
-fn combined(output: &Output) -> String {
-    format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    )
-}
-
-/// Runs `main.FUNCTION` and returns what it printed.
-fn run(directory: &Path, function: &str) -> String {
-    let output = orna(directory, &["run", &format!("main.{function}")]);
-    let text = combined(&output);
-    assert!(output.status.success(), "{function}: {text}");
-    String::from_utf8_lossy(&output.stdout).into_owned()
-}
-
 #[test]
 // Specified: 34-system-reference.md `sys.Branch`; one row per local branch.
 fn orna_run_counts_the_local_branches() {
-    let project = committed_project();
+    let project = committed_project(SOURCE);
     assert_eq!(run(project.path(), "branch_count"), "1 : Int\n");
     git(project.path(), &["branch", "topic"]);
     assert_eq!(run(project.path(), "branch_count"), "2 : Int\n");
@@ -228,7 +124,7 @@ fn orna_run_gives_branches_at_distinct_commits_distinct_commit_references() {
 #[test]
 // Specified: ORNA-SYS-111. A repository with no commit has no branch.
 fn orna_run_of_a_project_with_no_commit_has_no_branches() {
-    let project = uncommitted_project();
+    let project = uncommitted_project(SOURCE);
     assert_eq!(run(project.path(), "branch_count"), "0 : Int\n");
 }
 
@@ -237,7 +133,7 @@ fn orna_run_of_a_project_with_no_commit_has_no_branches() {
 // for their references, so the read fails closed with `sys.snapshot.incomplete`
 // instead of serving rows with null or invented references.
 fn orna_run_refuses_branches_it_cannot_pin() {
-    let project = committed_project();
+    let project = committed_project(SOURCE);
     git(project.path(), &["checkout", "-q", "--orphan", "fresh"]);
     let output = orna(project.path(), &["run", "main.branch_count"]);
     let text = combined(&output);

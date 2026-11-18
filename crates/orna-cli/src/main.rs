@@ -504,3 +504,9 @@ mod repl_catalogue_tests;
 
 #[cfg(test)]
 mod repl_git_branch_tests;
+
+#[cfg(test)]
+mod repl_git_harness;
+
+#[cfg(test)]
+mod repl_git_tag_remote_tests;

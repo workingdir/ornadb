@@ -78,13 +78,24 @@ impl<'a> GitTreeRecord<'a> {
     }
 }
 
-/// Most output a bounded Git listing (history, branches) may produce.
+/// Most output a bounded Git listing (history, branches, tags, remotes) may
+/// produce.
 pub(crate) const MAX_LISTING_BYTES: usize = 4 * 1024 * 1024;
 
 /// Runs `command` and returns its stdout, refusing anything past
 /// `MAX_LISTING_BYTES`. The child is killed once the bound is crossed, so a
 /// runaway listing cannot make this process buffer without limit.
-pub(crate) fn run_bounded_listing(mut command: Command) -> Result<Vec<u8>, RepositoryError> {
+pub(crate) fn run_bounded_listing(command: Command) -> Result<Vec<u8>, RepositoryError> {
+    run_bounded_listing_accepting(command, &[])
+}
+
+/// As [`run_bounded_listing`], with each exit code of `also_accepted` counted as
+/// success too: `git config --get-regexp` exits 1 when no entry matches, which
+/// is an empty listing and not a failure.
+pub(crate) fn run_bounded_listing_accepting(
+    mut command: Command,
+    also_accepted: &[i32],
+) -> Result<Vec<u8>, RepositoryError> {
     command.stdout(Stdio::piped());
     let mut child = command
         .spawn()
@@ -107,7 +118,11 @@ pub(crate) fn run_bounded_listing(mut command: Command) -> Result<Vec<u8>, Repos
     let status = child
         .wait()
         .map_err(|_| RepositoryError::GitOperationFailed)?;
-    if !status.success() {
+    if !status.success()
+        && !status
+            .code()
+            .is_some_and(|code| also_accepted.contains(&code))
+    {
         return Err(RepositoryError::GitOperationFailed);
     }
     Ok(output)
@@ -518,7 +533,7 @@ pub(crate) fn parse_committed_branch(
 
 /// One field of a `for-each-ref` listing as text; a listing that holds anything
 /// else is not one Git wrote.
-fn listing_text(bytes: &[u8]) -> Result<&str, RepositoryError> {
+pub(crate) fn listing_text(bytes: &[u8]) -> Result<&str, RepositoryError> {
     std::str::from_utf8(bytes).map_err(|_| RepositoryError::GitOperationFailed)
 }
 
