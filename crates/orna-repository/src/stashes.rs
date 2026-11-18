@@ -11,8 +11,8 @@
 //! stash commit Git cannot read refuses the whole listing.
 
 use crate::{
-    NativeObjectId, Repository, RepositoryError, listing_text, require_native_object_id,
-    run_bounded_listing,
+    NativeObjectId, Repository, RepositoryError, listing_text, parse_unix_seconds,
+    require_native_object_id, run_bounded_listing,
 };
 
 /// One entry of the stash list.
@@ -136,17 +136,6 @@ fn parse_committed_stash(
         message: listing_text(message)?.to_owned(),
         created: parse_unix_seconds(listing_text(created)?)?,
     })
-}
-
-/// A Unix timestamp as Git prints it: decimal digits with an optional minus
-/// sign, nothing else (no plus sign, no spaces, no empty text).
-fn parse_unix_seconds(text: &str) -> Result<i64, RepositoryError> {
-    let digits = text.strip_prefix('-').unwrap_or(text);
-    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err(RepositoryError::GitOperationFailed);
-    }
-    text.parse()
-        .map_err(|_| RepositoryError::GitOperationFailed)
 }
 
 #[cfg(test)]

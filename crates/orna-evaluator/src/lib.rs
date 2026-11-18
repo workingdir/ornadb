@@ -46,6 +46,8 @@ mod explain_bindings;
 #[cfg(feature = "system-host-bindings")]
 mod git_branches;
 #[cfg(feature = "system-host-bindings")]
+mod git_commits;
+#[cfg(feature = "system-host-bindings")]
 mod git_refs;
 #[cfg(feature = "system-host-bindings")]
 mod git_remotes;
@@ -3206,6 +3208,7 @@ mod non_host_names {
     pub(super) const GIT_REMOTES: &str = "sys.git.remotes";
     pub(super) const GIT_STASHES: &str = "sys.git.stashes";
     pub(super) const GIT_TAGS: &str = "sys.git.tags";
+    pub(super) const GIT_COMMITS: &str = "sys.git.commits";
     pub(super) const BLOB_UNAVAILABLE: &str = "sys.blob.unavailable";
     pub(super) const BLOB_CORRUPT: &str = "sys.blob.corrupt";
     pub(super) const BLOB_REFERENCE_CONTEXT: &str = "sys.blob.reference_context";
@@ -3964,32 +3967,62 @@ impl DecimalValue {
     }
 }
 
+/// What the canonical codec does with a relation nested in a container.
+///
+/// The codec is strict: a relation has no complete canonical form without an
+/// unbounded read, so [`Value::raw`] refuses it. Presentation summarises a
+/// nested relation instead, reading nothing.
+#[derive(Clone, Copy)]
+enum NestedRelations {
+    Refuse,
+    Summarise,
+}
+
 impl Value {
+    /// The summary of a relation nested in a container, read without
+    /// enumerating it. `rows` is present only when the plan knows its exact
+    /// count, so the summary never claims emptiness.
+    fn relation_summary(plan: &RelationPlan) -> Self {
+        let mut fields = BTreeMap::new();
+        fields.insert("type".to_owned(), Self::String("Relation".to_owned()));
+        if let Some(rows) = plan.exact_rows() {
+            fields.insert("rows".to_owned(), Self::Int(BigInt::from(rows)));
+        }
+        Self::Record(fields)
+    }
+
     fn list(values: Vec<Value>) -> Self {
         Self::List(List::from(values))
     }
-    fn contains_callable(&self) -> bool {
+    /// Whether this value holds a callable anywhere inside it. `relation`
+    /// decides what a nested relation contributes: equality passes a predicate
+    /// that treats every relation as opaque, while a row passes
+    /// `RelationPlan::holds_callable`, so a lazy relation field counts only
+    /// when its own pending stages hold a callable.
+    fn contains_callable(&self, relation: fn(&RelationPlan) -> bool) -> bool {
         match self {
             Self::Function { .. } | Self::Closure(_) => true,
-            Self::List(values) => values.iter().any(Self::contains_callable),
-            Self::Tuple(values) => values.iter().any(Self::contains_callable),
+            Self::List(values) => values.iter().any(|value| value.contains_callable(relation)),
+            Self::Tuple(values) => values.iter().any(|value| value.contains_callable(relation)),
             Self::Stream {
                 values, provider, ..
             } => {
-                values.iter().any(Self::contains_callable)
+                values.iter().any(|value| value.contains_callable(relation))
                     || provider
                         .as_ref()
                         .and_then(|provider| provider.recover.as_deref())
-                        .is_some_and(Self::contains_callable)
+                        .is_some_and(|value| value.contains_callable(relation))
             }
-            Self::Record(values) => values.values().any(Self::contains_callable),
-            Self::NominalRecord { fields, .. } => {
-                fields.iter().any(|(_, value)| value.contains_callable())
-            }
+            Self::Record(values) => values
+                .values()
+                .any(|value| value.contains_callable(relation)),
+            Self::NominalRecord { fields, .. } => fields
+                .iter()
+                .any(|(_, value)| value.contains_callable(relation)),
             Self::Enum { payload, .. } | Self::Option(payload) => payload
                 .as_ref()
-                .is_some_and(|value| value.contains_callable()),
-            Self::Relation(_) => true,
+                .is_some_and(|value| value.contains_callable(relation)),
+            Self::Relation(plan) => relation(plan),
             _ => false,
         }
     }
@@ -4171,19 +4204,38 @@ impl Value {
     /// REPL result boundary; see [`Value::canonical`]. A format-3 Blob is
     /// presented as its payload-free summary, so the result stays canonical
     /// without copying the reference's bytes or descriptor across the boundary.
+    /// A relation nested in a container is summarised as `{ type: "Relation",
+    /// rows: N }`, reading nothing; a relation at the top stays refused.
     fn canonical_repl_result(self) -> Result<CanonicalValue, EvaluationError> {
-        CanonicalValue::new(summarise_rov3_blobs(self.raw()?)?)
+        let nested = if matches!(self, Self::Relation(_)) {
+            NestedRelations::Refuse
+        } else {
+            NestedRelations::Summarise
+        };
+        CanonicalValue::new(summarise_rov3_blobs(self.raw_with(nested)?)?)
             .map_err(|_| error("ORNA-EVAL-VALUE"))
     }
     /// Canonical raw form of this value. It borrows the value, so the digest
     /// fold can encode each relation row without first deep-copying it; only
     /// the leaves and containers that the owned raw form needs are allocated.
     fn raw(&self) -> Result<Raw, EvaluationError> {
+        self.raw_with(NestedRelations::Refuse)
+    }
+
+    /// Canonical raw form with `nested` deciding what a relation inside a
+    /// container becomes. A relation at the top is refused either way.
+    fn raw_with(&self, nested: NestedRelations) -> Result<Raw, EvaluationError> {
         match self {
-            // Callables, relations and calendar periods have no canonical form.
-            Self::Function { .. } | Self::Closure(_) | Self::Relation(_) | Self::Period { .. } => {
+            // Callables and calendar periods have no canonical form.
+            Self::Function { .. } | Self::Closure(_) | Self::Period { .. } => {
                 Err(error("ORNA-EVAL-UNSUPPORTED"))
             }
+            // A relation has no complete canonical form. The codec refuses it;
+            // presentation may summarise one nested in a container.
+            Self::Relation(plan) => match nested {
+                NestedRelations::Refuse => Err(error("ORNA-EVAL-UNSUPPORTED")),
+                NestedRelations::Summarise => Self::relation_summary(plan).raw_with(nested),
+            },
             // Error values are only available to the handling side of `|?`.
             // They must not cross the successful canonical-value boundary,
             // but a containing value must preserve the original failure while
@@ -4222,19 +4274,21 @@ impl Value {
                 upper,
                 upper_inclusive,
             } => Self::raw_range(lower.as_deref(), upper.as_deref(), *upper_inclusive),
-            Self::List(values) => Self::raw_list(values.as_slice()),
-            Self::Tuple(values) => Self::raw_tuple(values),
+            Self::List(values) => Self::raw_list(values.as_slice(), nested),
+            Self::Tuple(values) => Self::raw_tuple(values, nested),
             Self::Stream {
                 values, position, ..
-            } => Self::raw_stream(values, *position),
-            Self::Record(values) => Self::raw_record(values),
-            Self::NominalRecord { type_id, fields } => Self::raw_nominal_record(type_id, fields),
+            } => Self::raw_stream(values, *position, nested),
+            Self::Record(values) => Self::raw_record(values, nested),
+            Self::NominalRecord { type_id, fields } => {
+                Self::raw_nominal_record(type_id, fields, nested)
+            }
             Self::Enum {
                 type_id,
                 variant_id,
                 payload,
-            } => Self::raw_enum(type_id, variant_id, payload.as_deref()),
-            Self::Option(value) => Self::raw_option(value.as_deref()),
+            } => Self::raw_enum(type_id, variant_id, payload.as_deref(), nested),
+            Self::Option(value) => Self::raw_option(value.as_deref(), nested),
         }
     }
 
@@ -4311,21 +4365,27 @@ impl Value {
         ))
     }
 
-    fn raw_list(values: &[Value]) -> Result<Raw, EvaluationError> {
+    fn raw_list(values: &[Value], nested: NestedRelations) -> Result<Raw, EvaluationError> {
         Ok(Raw::Array(
-            values.iter().map(Value::raw).collect::<Result<_, _>>()?,
+            values
+                .iter()
+                .map(|value| value.raw_with(nested))
+                .collect::<Result<_, _>>()?,
         ))
     }
 
     /// Tuples use the empty tuple's dedicated unit tag only when empty.
-    fn raw_tuple(values: &[Value]) -> Result<Raw, EvaluationError> {
+    fn raw_tuple(values: &[Value], nested: NestedRelations) -> Result<Raw, EvaluationError> {
         if values.is_empty() {
             return Ok(Raw::Tag(60014, Box::new(Raw::Array(Vec::new()))));
         }
         Ok(Raw::Tag(
             60015,
             Box::new(Raw::Array(
-                values.iter().map(Value::raw).collect::<Result<_, _>>()?,
+                values
+                    .iter()
+                    .map(|value| value.raw_with(nested))
+                    .collect::<Result<_, _>>()?,
             )),
         ))
     }
@@ -4333,17 +4393,24 @@ impl Value {
     /// The finite stream's source identity and digest remain in the live
     /// evaluator value; the canonical boundary exposes its real item sequence
     /// rather than substituting a placeholder result.
-    fn raw_stream(values: &[Value], position: usize) -> Result<Raw, EvaluationError> {
+    fn raw_stream(
+        values: &[Value],
+        position: usize,
+        nested: NestedRelations,
+    ) -> Result<Raw, EvaluationError> {
         Ok(Raw::Array(
             values
                 .iter()
                 .skip(position)
-                .map(Value::raw)
+                .map(|value| value.raw_with(nested))
                 .collect::<Result<_, _>>()?,
         ))
     }
 
-    fn raw_record(values: &BTreeMap<String, Value>) -> Result<Raw, EvaluationError> {
+    fn raw_record(
+        values: &BTreeMap<String, Value>,
+        nested: NestedRelations,
+    ) -> Result<Raw, EvaluationError> {
         // OVB orders map keys by complete deterministic encodings. Keep the
         // comparator tied to that rule, including CBOR head length transitions
         // and multi-byte Unicode field names.
@@ -4364,12 +4431,20 @@ impl Value {
         Ok(Raw::Map(
             fields
                 .into_iter()
-                .map(|(_, key, value)| value.raw().map(|value| (Raw::Text(key.clone()), value)))
+                .map(|(_, key, value)| {
+                    value
+                        .raw_with(nested)
+                        .map(|value| (Raw::Text(key.clone()), value))
+                })
                 .collect::<Result<_, _>>()?,
         ))
     }
 
-    fn raw_nominal_record(type_id: &Raw, fields: &[(Raw, Value)]) -> Result<Raw, EvaluationError> {
+    fn raw_nominal_record(
+        type_id: &Raw,
+        fields: &[(Raw, Value)],
+        nested: NestedRelations,
+    ) -> Result<Raw, EvaluationError> {
         // The runtime value preserves declaration order. OVB requires
         // canonical field-key order only at the serialization edge.
         let mut encoded = fields
@@ -4392,7 +4467,7 @@ impl Value {
                         .into_iter()
                         .map(|(_, key, value)| {
                             value
-                                .raw()
+                                .raw_with(nested)
                                 .map(|value| Raw::Array(vec![key.clone(), value]))
                         })
                         .collect::<Result<_, _>>()?,
@@ -4405,22 +4480,26 @@ impl Value {
         type_id: &Raw,
         variant_id: &Raw,
         payload: Option<&Value>,
+        nested: NestedRelations,
     ) -> Result<Raw, EvaluationError> {
         Ok(Raw::Tag(
             60008,
             Box::new(Raw::Array(vec![
                 type_id.clone(),
                 variant_id.clone(),
-                payload.map(Value::raw).transpose()?.unwrap_or(Raw::Null),
+                payload
+                    .map(|value| value.raw_with(nested))
+                    .transpose()?
+                    .unwrap_or(Raw::Null),
             ])),
         ))
     }
 
-    fn raw_option(value: Option<&Value>) -> Result<Raw, EvaluationError> {
+    fn raw_option(value: Option<&Value>, nested: NestedRelations) -> Result<Raw, EvaluationError> {
         Ok(Raw::Tag(
             60013,
             Box::new(match value {
-                Some(value) => Raw::Array(vec![Raw::Int(1.into()), value.raw()?]),
+                Some(value) => Raw::Array(vec![Raw::Int(1.into()), value.raw_with(nested)?]),
                 None => Raw::Array(vec![Raw::Int(0.into())]),
             }),
         ))
@@ -6381,6 +6460,7 @@ impl Context<'_, '_> {
                     return Ok(Value::Relation(RelationPlan {
                         source: source.to_owned(),
                         source_identity: RelationReadScope(0),
+                        known_rows: None,
                         source_union: None,
                         shared_filter_group: None,
                         source_values: None,
@@ -7108,7 +7188,8 @@ impl Context<'_, '_> {
     }
     fn apply_binary(&self, op: &str, left: Value, right: Value) -> Result<Value, EvaluationError> {
         if matches!(op, "==" | "!=") {
-            if left.contains_callable() || right.contains_callable() {
+            // A relation is lazy and cannot be compared, so equality refuses it.
+            if left.contains_callable(|_| true) || right.contains_callable(|_| true) {
                 return Err(error("ORNA-EVAL-UNSUPPORTED"));
             }
             let equal = match (&left, &right) {
@@ -8160,6 +8241,7 @@ impl Context<'_, '_> {
         let prefix = RelationPlan {
             source: plan.source.clone(),
             source_identity: plan.source_identity,
+            known_rows: plan.known_rows,
             source_union: plan.source_union.clone(),
             shared_filter_group: plan.shared_filter_group,
             source_values: plan.source_values.clone(),
@@ -8176,6 +8258,7 @@ impl Context<'_, '_> {
             let group_plan = RelationPlan {
                 source: plan.source.clone(),
                 source_identity: plan.source_identity,
+                known_rows: plan.known_rows,
                 source_union: plan.source_union.clone(),
                 shared_filter_group: plan.shared_filter_group,
                 source_values: plan.source_values.clone(),
@@ -8657,7 +8740,7 @@ impl Context<'_, '_> {
             Value::List(inner) => {
                 self.items(inner.len())?;
                 for inner_value in inner {
-                    if inner_value.contains_callable() {
+                    if inner_value.contains_callable(RelationPlan::holds_callable) {
                         return Err(error("ORNA-EVAL-UNSUPPORTED"));
                     }
                     self.step()?;
@@ -8681,7 +8764,7 @@ impl Context<'_, '_> {
                 // callbacks implicit. Treat a returned relation as a lateral
                 // child: finish its scoped scan before advancing the outer row.
                 self.for_each_relation_value(&plan, depth + 1, |context, inner_value| {
-                    if inner_value.contains_callable() {
+                    if inner_value.contains_callable(RelationPlan::holds_callable) {
                         return Err(error("ORNA-EVAL-UNSUPPORTED"));
                     }
                     let inner_rows = context.apply_relation_stages(
@@ -8731,6 +8814,7 @@ impl Context<'_, '_> {
         let prefix = RelationPlan {
             source: plan.source.clone(),
             source_identity: plan.source_identity,
+            known_rows: plan.known_rows,
             source_union: plan.source_union.clone(),
             shared_filter_group: plan.shared_filter_group,
             source_values: plan.source_values.clone(),
@@ -8860,9 +8944,10 @@ impl Context<'_, '_> {
             return self.materialization_page(after, page_limit);
         }
         // The Git members the evaluator serves from the repository the host
-        // attached (`git_rows::MEMBERS`: `sys.git.branches`, `sys.git.refs`,
-        // `sys.git.remotes`, `sys.git.stashes`, `sys.git.tags`); an activation
-        // with no host context leaves the source to its handler.
+        // attached (`git_rows::MEMBERS`: `sys.git.branches`, `sys.git.commits`,
+        // `sys.git.refs`, `sys.git.remotes`, `sys.git.stashes`, `sys.git.tags`) and a
+        // commit's `parents` relation; an activation with no host context leaves the
+        // source to its handler.
         #[cfg(feature = "system-host-bindings")]
         if let Some(attachment) = self
             .effects
@@ -11896,6 +11981,7 @@ fn system_relation_source(expression: &Expr) -> Option<&'static str> {
         name if name == non_host_names::GIT_REMOTES => Some(non_host_names::GIT_REMOTES),
         name if name == non_host_names::GIT_STASHES => Some(non_host_names::GIT_STASHES),
         name if name == non_host_names::GIT_TAGS => Some(non_host_names::GIT_TAGS),
+        name if name == non_host_names::GIT_COMMITS => Some(non_host_names::GIT_COMMITS),
         _ => None,
     }
 }
@@ -15811,6 +15897,7 @@ mod output_digest_equivalence {
         let relation = RelationPlan {
             source: "rows".to_owned(),
             source_identity: RelationReadScope(0),
+            known_rows: None,
             shared_filter_group: None,
             source_union: None,
             source_values: None,

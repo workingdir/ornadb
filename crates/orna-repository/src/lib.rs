@@ -42,6 +42,7 @@ mod blob_store;
 mod cbor;
 mod checkout;
 mod commit;
+mod commits;
 mod compact;
 pub mod complete_copy;
 mod crash_barrier;
@@ -108,6 +109,7 @@ pub(crate) use commit::{
     MAX_COMMITTED_REVISION_WALK, commit_gate_refusal, reviewed_candidate_runtime_intent_id,
     reviewed_candidate_token, split_committed_revision_record,
 };
+pub use commits::CommittedCommit;
 pub use compact::{
     COMPACT_MANIFEST_SHARD_LIMIT, COMPACT_MAX_UNCOMPRESSED_PAGE_BYTES, CompactCommittedRow,
     CompactCommittedSegmentProjection, CompactManifest, CompactManifestEntry,
@@ -134,7 +136,7 @@ pub(crate) use git_command::{
     ConfigValue, GitListRecord, GitTreeRecord, PromisorReachability, git_command,
     git_command_at_root, git_command_in, git_stderr_indicates_malformed_object, listing_text,
     parse_committed_branch, parse_committed_tree_entry, parse_git_bool, parse_remote_orna_refs,
-    remote_ref_records, require_native_object_id, run_bounded_listing,
+    parse_unix_seconds, remote_ref_records, require_native_object_id, run_bounded_listing,
     run_bounded_listing_accepting, run_command, run_command_with_input,
     scrub_git_routing_environment, trim_output, valid_branch_name, valid_native_object_id,
     valid_orna_internal_ref, valid_remote_name,

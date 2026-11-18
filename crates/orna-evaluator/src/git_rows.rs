@@ -20,10 +20,13 @@ use std::collections::BTreeMap;
 
 use orna_repository::{GitHashAlgorithm, NativeOid, Repository};
 use orna_sys::{SysFailureCode, SysGroupedHandle, SysHostContext};
-use orna_value::{CanonicalSnapshot, GitHash, GitObjectId, SysRef, SystemReferenceError};
+use orna_value::{
+    CanonicalSnapshot, GitHash, GitObjectId, SysRef, SystemReferenceError, snapshot_reference,
+};
 
 use crate::{
-    EvaluationError, Value, error, git_branches, git_refs, git_remotes, git_stashes, git_tags,
+    EvaluationError, Value, error, git_branches, git_commits, git_refs, git_remotes, git_stashes,
+    git_tags,
 };
 
 /// Rows one page serves, unless the activation's collection limit is lower.
@@ -56,10 +59,14 @@ struct Member {
 /// The members the evaluator serves from the repository. A handle linked in the
 /// `orna-sys-id` generator (`LINKED_GROUPED_HANDLES`) with no entry here would be
 /// admitted and then unserved, so the two lists name the same members.
-const MEMBERS: [Member; 5] = [
+const MEMBERS: [Member; 6] = [
     Member {
         handle: SysGroupedHandle::GitBranches,
         page: git_branches::branches_page,
+    },
+    Member {
+        handle: SysGroupedHandle::GitCommits,
+        page: git_commits::commits_page,
     },
     Member {
         handle: SysGroupedHandle::GitRefs,
@@ -89,10 +96,9 @@ pub(crate) fn served_source(name: &str) -> Option<&'static str> {
 }
 
 /// Serves the page of the grouped handle `source` that follows the row named by
-/// `after`, from the repository `context` attached; `None` when `source` is not
-/// a member the evaluator serves from the repository. The page holds at least
-/// `limit` rows when that many remain, and at most `max_items` unless `limit`
-/// asks for more.
+/// `after`, from the repository `context` attached, or of a commit's `parents`
+/// relation; `None` when `source` is neither. The page holds at least `limit` rows
+/// when that many remain, and at most `max_items` unless `limit` asks for more.
 pub(crate) fn served_page(
     source: &str,
     context: &SysHostContext,
@@ -100,20 +106,36 @@ pub(crate) fn served_page(
     limit: usize,
     max_items: usize,
 ) -> Option<Result<GitPage, EvaluationError>> {
+    let rows = limit.max(PAGE_ROWS.min(max_items));
+    if source == git_commits::UNAVAILABLE {
+        return Some(Err(incomplete()));
+    }
+    if let Some(hex) = source.strip_prefix(git_commits::PARENTS_PREFIX) {
+        return Some(git_commits::parents_page(context, hex, after, rows));
+    }
     let member = MEMBERS
         .iter()
         .find(|member| member.handle.name() == source)?;
-    Some((member.page)(
-        context,
-        after,
-        limit.max(PAGE_ROWS.min(max_items)),
-    ))
+    Some((member.page)(context, after, rows))
 }
 
 /// The repository the host attached, or `sys.snapshot.incomplete` when its root
 /// is not one.
 pub(crate) fn repository(context: &SysHostContext) -> Result<Repository, EvaluationError> {
     Repository::discover(&context.root).map_err(|_| incomplete())
+}
+
+/// The commit the host attached at, as the Git object id every pin and reference of
+/// the read names. `sys.snapshot.incomplete` when the host attached at no readable
+/// commit, or at an id that is not a Git object id.
+pub(crate) fn pinned_commit(context: &SysHostContext) -> Result<GitObjectId, EvaluationError> {
+    let oid = context.head_commit.as_deref().ok_or_else(incomplete)?;
+    let algorithm = match oid.len() {
+        20 => GitHash::Sha1,
+        32 => GitHash::Sha256,
+        _ => return Err(incomplete()),
+    };
+    GitObjectId::new(algorithm, oid.to_vec()).map_err(|_| incomplete())
 }
 
 /// The coordinates every reference of one read carries: the attached database
@@ -125,22 +147,17 @@ pub(crate) struct RowPin {
 }
 
 impl RowPin {
-    /// The pin of `context`: the commit `HEAD` named when the host attached. A
-    /// host attached at no readable commit has none, and no row is pinned to a
-    /// commit the activation does not read.
+    /// The pin of `context`: the commit the host attached at. A host attached at no
+    /// readable commit has none, and no row is pinned to a commit the activation
+    /// does not read.
     pub(crate) fn of(context: &SysHostContext) -> Result<Self, EvaluationError> {
-        let oid = context.head_commit.as_deref().ok_or_else(incomplete)?;
-        let algorithm = match oid.len() {
-            20 => GitHash::Sha1,
-            32 => GitHash::Sha256,
-            _ => return Err(incomplete()),
-        };
+        let oid = pinned_commit(context)?;
         Ok(Self {
             database: context.database_id,
             snapshot: CanonicalSnapshot::Commit {
                 database: context.database_id,
-                algorithm,
-                oid: oid.to_vec(),
+                algorithm: oid.algorithm(),
+                oid: oid.as_bytes().to_vec(),
             },
         })
     }
@@ -155,6 +172,23 @@ impl RowPin {
             .and_then(|reference| reference.to_canonical().ok())
             .map(Value::Reference)
             .ok_or_else(incomplete)
+    }
+
+    /// The `snapshot` of a commit's row: the reference to the Orna snapshot of the
+    /// commit `oid` in the attached database.
+    pub(crate) fn commit_snapshot(&self, oid: &GitObjectId) -> Result<Value, EvaluationError> {
+        snapshot_reference(
+            self.database,
+            CanonicalSnapshot::Commit {
+                database: self.database,
+                algorithm: oid.algorithm(),
+                oid: oid.as_bytes().to_vec(),
+            },
+        )
+        .ok()
+        .and_then(|reference| reference.into_row_ref().to_canonical().ok())
+        .map(Value::Reference)
+        .ok_or_else(incomplete)
     }
 }
 
@@ -514,6 +548,7 @@ mod tests {
     fn only_the_served_members_are_served() {
         for served in [
             "sys.git.branches",
+            "sys.git.commits",
             "sys.git.refs",
             "sys.git.remotes",
             "sys.git.stashes",
@@ -525,13 +560,7 @@ mod tests {
                 "{served}"
             );
         }
-        for other in [
-            "sys.git.commits",
-            "sys.git.objects",
-            "sys.catalog.tables",
-            "Music",
-            "",
-        ] {
+        for other in ["sys.git.objects", "sys.catalog.tables", "Music", ""] {
             assert_eq!(super::served_source(other), None, "{other:?}");
             assert!(
                 super::served_page(other, &context(None), None, 8, 256).is_none(),
