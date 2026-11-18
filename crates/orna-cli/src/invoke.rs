@@ -170,6 +170,8 @@ pub(crate) fn run_project_invocation_with_arguments(
     })?;
     let std_snapshot = sys_host::std_snapshot_pin(&project);
     let table_object_ids = committed_table_object_ids(&repository, &project)?;
+    let catalogue_identities =
+        crate::catalogue_identities::head_catalogue_identities(&repository, identity.database_id);
     let committed_base = committed_base_reader(&repository, &project);
     // Admission is bound to the committed snapshot when there is one; a
     // repository with no commit yet runs from the worktree project, which is
@@ -208,6 +210,7 @@ pub(crate) fn run_project_invocation_with_arguments(
                     std_snapshot,
                 ))
                 .with_stored_references(references)
+                .with_catalogue_identities(catalogue_identities)
                 .execute_project_request_with_arguments(
                     orna_conformance::RuntimeTarget {
                         repository: &repository,

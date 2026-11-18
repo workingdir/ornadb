@@ -47,7 +47,7 @@ mod intrinsics;
 use crate::intrinsics::codecs::{json_node_to_value, parse_json_node};
 use crate::intrinsics::money::money_amount;
 mod catalogue_page;
-pub use catalogue_page::page_precomputed_rows;
+pub use catalogue_page::page_catalogue_rows;
 mod list;
 mod regex_lite;
 mod relation;

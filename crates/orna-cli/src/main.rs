@@ -4,6 +4,7 @@
 #![allow(clippy::result_large_err)]
 
 mod assertion_gate;
+mod catalogue_identities;
 mod checkout_assertion_gate;
 mod cli_annotate;
 mod cli_args;
@@ -497,3 +498,6 @@ mod tests;
 
 #[cfg(test)]
 mod repl_request_effect_tests;
+
+#[cfg(test)]
+mod repl_catalogue_tests;

@@ -68,3 +68,18 @@ registered.
 A reference is coordinates only. The provider that serves a relation checks that the row exists, is retained
 and is visible, and serves the rows with their `reference` fields built here, never `null` and never a bare
 identifier.
+
+## The catalogue rows
+
+`sys.catalog.tables` and `sys.catalog.columns` are the first relations served with these references
+(`orna_check::catalogue_rows`). The host reads the object identity inventory committed at one commit and hands the
+ids of its live `ObjectKind::Table` and `ObjectKind::Field` (`Table.column`) records, the database id and that commit
+as the snapshot pin to `orna_check::catalogue_identities::CatalogueIdentities`. Over them a `sys.Table` row exposes
+`reference` (`sys.TableRef`), `object` (`sys.ObjectRef`) and `definition` (`sys.DefinitionRef`, whose id is the table
+identity: the only rename-stable per-table UUID), and a `sys.Column` row exposes `reference` (`sys.ColumnRef`),
+`object` and `table` (`sys.TableRef`). A table or column with no committed identity has no spec-correct reference, so
+`CatalogueRows::build` fails and a read of the relation fails with `sys.snapshot.incomplete` (the required snapshot
+objects are unavailable); only a project of no tables serves an empty catalogue without identities.
+`sys.Column.type`, `sys.Table.key`, `storage`, `references` and `assertions` stay in their earlier form: their targets
+(`sys.Type`, `sys.Key`, `sys.Storage`, `sys.Reference`, `sys.Assertion`) are keyed by catalogue object identities that
+the committed inventory does not hold for builtin types, keys or storage.

@@ -94,6 +94,7 @@ pub(crate) fn repl_transactions(
         .object_id()
         .bytes();
     let (identity, initial_digest) = committed_store_identity(repository, &format_context)?;
+    let catalogue_identities = repl_catalogue_identities(&identities, &commit, identity)?;
     let runtime = repl_tokio_runtime()?;
     Ok(ReplTransactions {
         project,
@@ -114,12 +115,29 @@ pub(crate) fn repl_transactions(
         identities,
         table_object_ids,
         table_schemas,
+        catalogue_identities,
         capture_relation_id,
         session_id,
         host_bindings: Rc::new(RefCell::new(None)),
         faults: Arc::new(NoFault),
         writer: None,
     })
+}
+
+/// The committed identities of every table and column at `commit`, which the
+/// session's `sys.catalog.*` rows carry as typed references (ORNA-SYS-111).
+fn repl_catalogue_identities(
+    identities: &orna_project::ObjectIdentityManifest,
+    commit: &orna_repository::GitCommitRef,
+    identity: RuntimeIdentity,
+) -> Result<orna_check::catalogue_identities::CatalogueIdentities, repl::ReplFailure> {
+    crate::catalogue_identities::catalogue_identities(identities, commit, identity.database_id)
+        .map_err(|_| {
+            transactions_unavailable(
+                "committed table and column identities are unavailable",
+                STORE_COMMIT_REMEDY,
+            )
+        })
 }
 
 /// Refuses the REPL unless the pinned format accepts writes and its final

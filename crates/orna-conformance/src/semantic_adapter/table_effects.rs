@@ -18,8 +18,10 @@ pub(super) struct TableEffectHandler<'activation, 'runtime> {
     pub(super) sys_host: Option<&'activation SysHostAttachment>,
     pub(super) explain_catalogue: Option<&'activation ActivationExplainCatalogue>,
     pub(super) references: Option<&'activation orna_project::ReferenceCatalogue>,
-    pub(super) catalogue_tables: &'activation [CanonicalValue],
-    pub(super) catalogue_columns: &'activation [CanonicalValue],
+    /// The `sys.Table` and `sys.Column` rows of the activation, or `None` when
+    /// it holds no committed identity for its tables: a catalogue read then
+    /// fails closed with `sys.snapshot.incomplete` (ORNA-SYS-111).
+    pub(super) catalogue: Option<&'activation CatalogueRows>,
 }
 
 impl EffectHandler for TableEffectHandler<'_, '_> {
@@ -40,12 +42,17 @@ impl EffectHandler for TableEffectHandler<'_, '_> {
                 next: None,
             }));
         }
-        if let Some(rows) = match source {
-            name if name == SysGroupedHandle::CatalogTables.name() => Some(self.catalogue_tables),
-            name if name == SysGroupedHandle::CatalogColumns.name() => Some(self.catalogue_columns),
+        let catalogue_rows = match source {
+            name if name == SysGroupedHandle::CatalogTables.name() => {
+                Some(self.catalogue.map(CatalogueRows::tables))
+            }
+            name if name == SysGroupedHandle::CatalogColumns.name() => {
+                Some(self.catalogue.map(CatalogueRows::columns))
+            }
             _ => None,
-        } {
-            return page_precomputed_rows(rows, after, max_rows, budget).map(Some);
+        };
+        if let Some(rows) = catalogue_rows {
+            return page_catalogue_rows(rows, after, max_rows, budget).map(Some);
         }
         if let Some(row) = match (source, self.publication_rows.as_ref()) {
             (name, Some(rows)) if name == SysRelation::Storage.name() => Some(&rows.sys_storage),

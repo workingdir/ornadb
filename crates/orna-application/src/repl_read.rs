@@ -44,6 +44,7 @@ impl ApplicationAuthority {
         .map_err(read_scope_error)?
         .with_insert_defaults(defaults, functions, self.limits)
         .with_optional_publication_rows(scope.publication_rows.clone())
+        .with_catalogue_identities(scope.catalogue_identities)
         .with_stored_references(references);
         // A read reaches no sys binding: the registry is empty, so any sys
         // call fails closed.

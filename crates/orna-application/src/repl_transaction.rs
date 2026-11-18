@@ -21,6 +21,8 @@ pub struct ReplTransactionScope<'a> {
     /// Durable `sys.Storage` and `sys.MaintenanceJob` rows at the session's
     /// pinned publication state. `None` when the input names neither relation.
     pub publication_rows: Option<RuntimePublicationMetadataRows>,
+    /// The committed identities of the commit the session reads, when bound.
+    pub catalogue_identities: Option<&'a CatalogueIdentities>,
     #[cfg(feature = "test-support")]
     dispatch_observer: Option<&'a dyn Fn()>,
 }
@@ -44,6 +46,7 @@ impl<'a> ReplTransactionScope<'a> {
             committed_storage_orders,
             request,
             publication_rows,
+            catalogue_identities: None,
             #[cfg(feature = "test-support")]
             dispatch_observer: None,
         }
@@ -54,6 +57,16 @@ impl<'a> ReplTransactionScope<'a> {
     #[must_use]
     pub fn with_dispatch_observer(mut self, observer: &'a dyn Fn()) -> Self {
         self.dispatch_observer = Some(observer);
+        self
+    }
+
+    /// Binds the committed identities of the commit this session reads, so the
+    /// `sys.catalog.*` rows carry typed references (ORNA-SYS-111). Without them
+    /// a catalogue read of a project with tables fails with
+    /// `sys.snapshot.incomplete`.
+    #[must_use]
+    pub fn with_catalogue_identities(mut self, identities: &'a CatalogueIdentities) -> Self {
+        self.catalogue_identities = Some(identities);
         self
     }
 }
@@ -121,6 +134,7 @@ impl ApplicationAuthority {
         .with_insert_defaults(defaults, functions, self.limits)
         .with_automatic_id_watermarks(&watermarks)
         .with_optional_publication_rows(scope.publication_rows.clone())
+        .with_catalogue_identities(scope.catalogue_identities)
         .with_stored_references(references);
         let mut effects = ReplTransactionEffectHandler {
             bindings,
