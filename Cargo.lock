@@ -1874,6 +1874,7 @@ dependencies = [
 name = "orna-repl"
 version = "1.0.0"
 dependencies = [
+ "orna-check",
  "orna-exec",
  "orna-hir",
  "orna-standard-sources",

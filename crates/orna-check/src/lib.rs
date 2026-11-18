@@ -150,12 +150,18 @@ impl StandardDependencyProfile {
             if !is_standard_module_path(&logical_path) {
                 return Err(StandardProfileError::InvalidModulePath);
             }
+            let prelude_exports = (logical_path == STANDARD_PRELUDE_PATH)
+                .then(|| standard_prelude_exports(&source))
+                .transpose()?;
             if profile
                 .module_digests
-                .insert(logical_path, digest_source(&source))
+                .insert(logical_path.clone(), digest_source(&source))
                 .is_some()
             {
                 return Err(StandardProfileError::DuplicateModule);
+            }
+            if let Some(names) = prelude_exports.filter(|names| !names.is_empty()) {
+                profile.module_prelude_exports.insert(logical_path, names);
             }
         }
         Ok(profile)
@@ -243,6 +249,36 @@ impl StandardDependencyProfile {
         Ok(())
     }
 }
+/// The logical path of the pinned standard prelude module. Its public declarations
+/// are the names `use std.prelude as _;` imports (ORNA-IMPORT-005).
+pub const STANDARD_PRELUDE_PATH: &str = "std/prelude.orna";
+
+/// Reads the `use std.prelude as _;` exports from the captured prelude source: its
+/// public declarations. A root intrinsic name is withheld so that the prelude never
+/// shadows it (spec 09, Resolution and versioning); the declaration itself remains
+/// in the module and is reachable through `std.prelude.<name>`.
+pub fn standard_prelude_exports(source: &str) -> Result<BTreeSet<String>, StandardProfileError> {
+    let parsed = parse_module_with_file(source, STANDARD_PRELUDE_PATH);
+    if !parsed.is_ok() {
+        return Err(StandardProfileError::InvalidSource);
+    }
+    let namespace = Namespace(vec!["std".into(), "prelude".into()]);
+    let mut diagnostics = Vec::new();
+    let header = units::collect_header(
+        &namespace,
+        &parsed.value,
+        &BTreeSet::new(),
+        &mut diagnostics,
+    );
+    if !diagnostics.is_empty() {
+        return Err(StandardProfileError::InvalidSource);
+    }
+    Ok(header
+        .exports
+        .into_keys()
+        .filter(|name| orna_intrinsics::root_intrinsic(name).is_none())
+        .collect())
+}
 
 /// Source-free, stable failures for standard dependency admission.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -253,6 +289,7 @@ pub enum StandardProfileError {
     MissingModule,
     DigestMismatch,
     InvalidPreludeExport,
+    InvalidSource,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -25,11 +25,16 @@ use orna_hir::{ModulePath, Name, PreludeExports};
 
 /// The prelude exports of the reference standard library, as lowering binds them.
 pub(crate) fn reference_prelude() -> PreludeExports {
+    let prelude_text = orna_standard_sources::reference_standard_sources_v1()
+        .into_iter()
+        .find(|(path, _)| path == orna_check::STANDARD_PRELUDE_PATH)
+        .map(|(_, text)| text)
+        .expect("the reference standard library includes std.prelude");
+    let exports = orna_check::standard_prelude_exports(&prelude_text)
+        .expect("the reference std.prelude parses as a module");
     PreludeExports::default().with_module(
         ModulePath::new([Name::new("std"), Name::new("prelude")]),
-        orna_standard_sources::REFERENCE_STANDARD_PRELUDE_EXPORTS_V1
-            .iter()
-            .copied(),
+        exports.iter().map(String::as_str),
     )
 }
 

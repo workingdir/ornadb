@@ -11,18 +11,8 @@
 use std::collections::BTreeMap;
 
 use orna_check::hir_check;
-use orna_check::{
-    Catalogue, DiagnosticOrigin, StandardDependencyProfile, analyze_with_catalogue_located,
-};
-use orna_hir::PreludeExports;
+use orna_check::{Catalogue, DiagnosticOrigin, analyze_with_catalogue_located};
 use orna_project::LoadedProject;
-use orna_standard_sources::{
-    REFERENCE_STANDARD_PRELUDE_EXPORTS_V1, REFERENCE_STANDARD_PRELUDE_PATH_V1,
-};
-
-/// The snapshot name of the reference standard library, as
-/// `orna_evaluator::reference_standard_profile` names it.
-const REFERENCE_STANDARD_SNAPSHOT: &str = "orna.std/v1-reference-library";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Backend {
@@ -91,7 +81,7 @@ fn hir_findings(loaded: &LoadedProject) -> Vec<Finding> {
     let checked = hir_check::check(
         loaded.modules(),
         loaded.standard_sources(),
-        &reference_prelude(),
+        &crate::standard::reference_prelude(),
     );
     let (diagnostics, origins) =
         hir_check::checker_located_diagnostics(&checked.findings, loaded.modules());
@@ -104,19 +94,6 @@ fn hir_findings(loaded: &LoadedProject) -> Vec<Finding> {
             origin,
         })
         .collect()
-}
-
-/// The `as _` exports of the reference standard library, the prelude `orna check`
-/// gives HIR. Only the prelude exports of a profile are read, so the profile is
-/// built without hashing the standard sources.
-fn reference_prelude() -> PreludeExports {
-    let profile = StandardDependencyProfile::empty(REFERENCE_STANDARD_SNAPSHOT)
-        .expect("the reference standard snapshot name is not empty")
-        .with_module_prelude_exports(
-            REFERENCE_STANDARD_PRELUDE_PATH_V1,
-            REFERENCE_STANDARD_PRELUDE_EXPORTS_V1.iter().copied(),
-        );
-    hir_check::prelude_of_profile(&profile)
 }
 
 /// Writes the diagnostics on which the two checkers differ to stderr, one line

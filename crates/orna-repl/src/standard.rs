@@ -5,8 +5,9 @@
 
 use std::sync::LazyLock;
 
+use orna_check::{STANDARD_PRELUDE_PATH, standard_prelude_exports};
 use orna_hir::{Lowering, ModulePath, Name, PreludeExports, SourceId, SourceUnit};
-use orna_standard_sources::{REFERENCE_STANDARD_PRELUDE_EXPORTS_V1, reference_standard_sources_v1};
+use orna_standard_sources::reference_standard_sources_v1;
 use orna_syntax::parse_module_with_file;
 use orna_syntax_ast::SyntaxTree;
 
@@ -43,9 +44,16 @@ fn module_path_of(logical: &str) -> ModulePath {
 /// The standard library lowered once per process, and the source index the session module lowers under: the first
 /// index after the standard units.
 static LOWERED: LazyLock<(Lowering, u32)> = LazyLock::new(|| {
+    let prelude_text = reference_standard_sources_v1()
+        .into_iter()
+        .find(|(path, _)| path == STANDARD_PRELUDE_PATH)
+        .map(|(_, text)| text)
+        .expect("the pinned standard library includes std.prelude");
+    let exports =
+        standard_prelude_exports(&prelude_text).expect("the pinned std.prelude parses as a module");
     let prelude = PreludeExports::default().with_module(
         ModulePath::new([Name::new("std"), Name::new("prelude")]),
-        REFERENCE_STANDARD_PRELUDE_EXPORTS_V1.iter().copied(),
+        exports.iter().map(String::as_str),
     );
     let units: Vec<SourceUnit<'_>> = MODULES
         .iter()

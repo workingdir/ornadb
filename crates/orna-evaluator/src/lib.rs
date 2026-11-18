@@ -128,12 +128,6 @@ pub fn reference_standard_profile() -> StandardDependencyProfile {
         orna_standard_sources::reference_standard_sources_v1(),
     )
     .expect("the bundled Orna 1.0.0 standard module path is valid")
-    .with_module_prelude_exports(
-        orna_standard_sources::REFERENCE_STANDARD_PRELUDE_PATH_V1,
-        orna_standard_sources::REFERENCE_STANDARD_PRELUDE_EXPORTS_V1
-            .iter()
-            .copied(),
-    )
 }
 
 const DEFAULT_SOURCE_BYTES: usize = 65_536;
