@@ -59,6 +59,11 @@ fn committed_project(source: &str) -> TempDir {
     assert!(init.status.success(), "init: {init:?}");
     std::fs::write(directory.path().join("main.orna"), source).expect("project source");
     git(directory.path(), &["init", "-q"]);
+    git(directory.path(), &["config", "user.name", "Orna Test"]);
+    git(
+        directory.path(),
+        &["config", "user.email", "orna-test@example.invalid"],
+    );
     git(directory.path(), &["add", "-A"]);
     let committed = orna(directory.path(), &["commit", "-m", "publish catalogue"]);
     assert!(committed.status.success(), "commit: {committed:?}");
