@@ -11,6 +11,8 @@ mod git_members;
 
 use std::path::Path;
 
+use orna_evaluator::{Limits, ReplSession};
+
 use git_members::{
     DATABASE, attached, context, evaluate, git, git_with_environment, git_with_input, int, pin,
     reference, some, text, value,
@@ -358,5 +360,44 @@ fn a_commit_row_carries_its_identities_message_tree_and_times() {
     assert_eq!(
         some(value("sys.git.commits | map(c => c.tree) | first()", &host)),
         object_ref(&id, &tree)
+    );
+}
+
+// Specified: 34-system-reference.md `sys.Commit`, `parents`; the REPL result boundary. A
+// `parents` relation nested in a result is summarised as `{ type: "Relation", rows: N }` when
+// its count is known: a merge commit's two parents are, so its summary carries `rows: 2`.
+#[test]
+fn a_nested_parents_relation_is_summarised_with_its_known_row_count() {
+    let directory = empty_repository();
+    let root = directory.path();
+    let base = commit(root, &[], ("base", ADDRESS), "base\n");
+    let left = commit(root, &[&base], ("left", ADDRESS), "left\n");
+    let right = commit(root, &[&base], ("right", ADDRESS), "right\n");
+    let merge = commit(root, &[&left, &right], ("merge", ADDRESS), "merge\n");
+    git(root, &["update-ref", "refs/heads/main", &merge]);
+    let host = attached(root);
+
+    let mut session = ReplSession::new(Limits::default()).with_sys_host_context(host);
+    let result = session
+        .submit(
+            "sys.git.commits | filter(c => c.author.name == \"merge\") | map(c => c.parents) | first()",
+        )
+        .expect("a result holding the merge's parents relation")
+        .expect("a value");
+
+    let summary = some(result.raw().clone());
+    let OvbRaw::Map(entries) = &summary else {
+        panic!("a nested relation is summarised as a record: {summary:?}");
+    };
+    assert!(
+        entries.contains(&(
+            OvbRaw::Text("type".to_owned()),
+            OvbRaw::Text("Relation".to_owned())
+        )),
+        "the summary names its kind: {entries:?}"
+    );
+    assert!(
+        entries.contains(&(OvbRaw::Text("rows".to_owned()), int(2))),
+        "a merge's two parents are a known count: {entries:?}"
     );
 }
