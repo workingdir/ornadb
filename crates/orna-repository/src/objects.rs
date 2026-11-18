@@ -186,7 +186,6 @@ mod tests {
             format!("{FIRST} blob 7 extra\n"),
             format!("{FIRST} blob +7\n"),
             format!("{FIRST} missing\n"),
-            format!("{short_id} blob 7\n"),
             format!("{FIRST} blob 7\n\n"),
         ] {
             assert!(
@@ -194,5 +193,11 @@ mod tests {
                 "{listing:?}"
             );
         }
+        // A short id fails the object-id width check every listing shares, so it is
+        // refused as InvalidObjectId.
+        assert!(matches!(
+            parse(&format!("{short_id} blob 7\n")),
+            Err(RepositoryError::InvalidObjectId)
+        ));
     }
 }
