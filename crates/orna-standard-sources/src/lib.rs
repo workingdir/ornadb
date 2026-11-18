@@ -104,18 +104,6 @@ reference_standard_modules! {
     REFERENCE_STANDARD_TEXT_SLICING_PATH_V1 = "std/text/slicing.orna";
 }
 
-pub const REFERENCE_STANDARD_PRELUDE_EXPORTS_V1: &[&str] = &[
-    "api_version",
-    "count",
-    "first",
-    "is_none",
-    "is_some",
-    "split",
-    "trim",
-    "unique",
-    "version",
-];
-
 /// Source units for the Orna 1.0.0 reference standard dependency.
 ///
 /// This is the current source-backed standard boundary.

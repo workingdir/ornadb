@@ -878,6 +878,59 @@ fn attached_std_module_resolves_sibling_and_absolute_imports_at_snapshot() {
 }
 
 #[test]
+fn attached_std_prelude_import_binds_the_source_prelude_on_the_project_path() {
+    let (_directory, repository) = repository(&[(
+        "main.orna",
+        "use std.prelude as _;\npub fn answer(): Str = trim(\"  a \");\n",
+    )]);
+    let module_path = repository.worktree().join("stdlib/std");
+    fs::create_dir_all(&module_path).unwrap();
+    orna_repository::initialize_repository(&module_path).unwrap();
+    fs::write(
+        module_path.join("prelude.orna"),
+        "pub fn trim(value: Str): Str = value;\n",
+    )
+    .unwrap();
+    commit_directory(&module_path, "standard");
+    let module_commit = git_output_at(&module_path, &["rev-parse", "HEAD"]);
+
+    fs::write(
+        repository.worktree().join(".gitmodules"),
+        "[submodule \"std\"]\n\tpath = stdlib/std\n\turl = https://example.invalid/ornadb-std.git\n",
+    )
+    .unwrap();
+    git_output_at(
+        repository.worktree(),
+        &["config", "user.email", "kieran@drewett.dev"],
+    );
+    git_output_at(
+        repository.worktree(),
+        &["config", "user.name", "kierandrewett"],
+    );
+    git_output_at(repository.worktree(), &["add", "main.orna", ".gitmodules"]);
+    let link = format!("160000,{module_commit},stdlib/std");
+    git_output_at(
+        repository.worktree(),
+        &["update-index", "--add", "--cacheinfo", &link],
+    );
+    git_output_at(
+        repository.worktree(),
+        &["commit", "--quiet", "-m", "capture std"],
+    );
+    let parent_commit = repository.head().unwrap().unwrap();
+
+    let project = ProjectLoader::default()
+        .load_committed_snapshot(&repository, &parent_commit)
+        .unwrap();
+    let profile = project.standard_profile().expect("attached std profile");
+    let catalogue = Catalogue::authoritative_core()
+        .with_standard_sources(profile, project.standard_sources().iter().cloned())
+        .unwrap();
+    let analysis = analyze_with_catalogue(project.modules(), &catalogue);
+    assert!(analysis.is_ok(), "{:#?}", analysis.diagnostics);
+}
+
+#[test]
 fn unchanged_reference_bundle_loads_and_reaches_v1_semantic_analysis() {
     let directory = tempfile::tempdir().unwrap();
     for (name, source) in [

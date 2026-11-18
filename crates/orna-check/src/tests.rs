@@ -1,5 +1,7 @@
 use super::*;
 
+mod standard_prelude;
+
 /// Builds the catalogue and checks the bodies of one synthetic pinned
 /// standard bundle.
 fn check_bundle(sources: Vec<(String, String)>) -> StandardSourceCheck {

@@ -3,11 +3,23 @@ use orna_evaluator::Limits;
 use orna_project_repl::AdmittedReplSession;
 use orna_standard_sources::{
     REFERENCE_STANDARD_COLLECTION_PATH_V1, REFERENCE_STANDARD_OPTION_PATH_V1,
-    REFERENCE_STANDARD_PRELUDE_EXPORTS_V1, REFERENCE_STANDARD_PRELUDE_PATH_V1,
-    REFERENCE_STANDARD_TEXT_PATH_V1, reference_standard_sources_v1,
+    REFERENCE_STANDARD_PRELUDE_PATH_V1, REFERENCE_STANDARD_TEXT_PATH_V1,
+    reference_standard_sources_v1,
 };
 use orna_value::CanonicalValue;
 use orna_value::Raw;
+
+/// The bare names `std.prelude` exports. `count` and `first` are root intrinsics
+/// and are withheld from the prelude so they never shadow the intrinsic.
+const PINNED_PRELUDE_EXPORTS: &[&str] = &[
+    "api_version",
+    "is_none",
+    "is_some",
+    "split",
+    "trim",
+    "unique",
+    "version",
+];
 
 fn bool_value(value: bool) -> CanonicalValue {
     CanonicalValue::new(Raw::Bool(value)).unwrap()
@@ -33,11 +45,7 @@ fn pinned_prelude_session() -> AdmittedReplSession {
     let sources = prelude_sources();
     let profile =
         StandardDependencyProfile::from_sources("orna.std/9npab-prelude-proof", sources.clone())
-            .expect("the selected facade sources form a captured dependency snapshot")
-            .with_module_prelude_exports(
-                REFERENCE_STANDARD_PRELUDE_PATH_V1,
-                REFERENCE_STANDARD_PRELUDE_EXPORTS_V1.iter().copied(),
-            );
+            .expect("the selected facade sources form a captured dependency snapshot");
     let catalogue = Catalogue::authoritative_core()
         .with_standard_sources(&profile, sources.clone())
         .expect("the selected prelude and dependencies resolve from their captured sources");
@@ -94,11 +102,7 @@ fn prelude_names_and_bytes_are_bound_to_the_selected_snapshot() {
     let sources = prelude_sources();
     let profile =
         StandardDependencyProfile::from_sources("orna.std/9npab-prelude-proof", sources.clone())
-            .expect("the selected facade sources form a captured dependency snapshot")
-            .with_module_prelude_exports(
-                REFERENCE_STANDARD_PRELUDE_PATH_V1,
-                REFERENCE_STANDARD_PRELUDE_EXPORTS_V1.iter().copied(),
-            );
+            .expect("the selected facade sources form a captured dependency snapshot");
     let (path, contents) = sources
         .iter()
         .find(|(path, _)| path == REFERENCE_STANDARD_PRELUDE_PATH_V1)
@@ -114,7 +118,7 @@ fn prelude_names_and_bytes_are_bound_to_the_selected_snapshot() {
             .iter()
             .map(String::as_str)
             .collect::<Vec<_>>(),
-        REFERENCE_STANDARD_PRELUDE_EXPORTS_V1
+        PINNED_PRELUDE_EXPORTS
     );
 }
 
