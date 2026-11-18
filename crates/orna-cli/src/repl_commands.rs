@@ -37,7 +37,7 @@ const COMMANDS: [&str; 19] = [
 
 /// Commands the console recognises but does not implement yet. Each is
 /// refused by name; none is silently accepted.
-const UNSUPPORTED: [&str; 2] = ["open", "display"];
+const UNSUPPORTED: [&str; 1] = ["display"];
 
 /// The code every console refusal carries.
 const COMMAND_CODE: &str = "ORNA-REPL-COMMAND";
@@ -138,6 +138,7 @@ fn execute<'a, W: Write>(
         "table" => table_command(&cmd, session, writer, color_enabled),
         "plan" => plan_command(&cmd, session, evaluate, writer, color_enabled),
         "trace" => Ok(Some(trace_command(&cmd))),
+        "open" => Ok(Some(open_command(&cmd))),
         "history" => history_command(&cmd, console, writer),
         "timing" => Ok(timing_command(&cmd, console)),
         "clear" => clear_command(&cmd, writer, color_enabled),
@@ -407,6 +408,25 @@ fn trace_command<'a>(cmd: &Cmd<'a>) -> Refusal<'a> {
             "run the expression without `:trace`".into(),
             "`:plan EXPR` explains a query without running it".into(),
         ],
+    )
+}
+
+/// `:open EXPR` would open the source the expression names in the user's
+/// editor. A declaration's file and line are what an editor needs, and the
+/// project load keeps only a declaration's name, doc comment and text, so this
+/// session cannot say where the source lives. The command refuses with the
+/// portable code for source that is not retained, and starts no editor.
+fn open_command<'a>(cmd: &Cmd<'a>) -> Refusal<'a> {
+    if cmd.arg.is_empty() {
+        return refuse_name(cmd, "usage: :open EXPR".into(), Vec::new());
+    }
+    refuse_unavailable(
+        cmd,
+        "sys.source.unavailable",
+        "`:open` needs the file and line a declaration was read from, which this session does \
+         not retain"
+            .into(),
+        vec!["`:source NAME` prints a declaration's source text".into()],
     )
 }
 
