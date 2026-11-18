@@ -348,13 +348,8 @@ fn spec_reason(name: &str, code: &str) -> Option<&'static str> {
             "OPEN HIR gap: `get` is not an export of the module, which the checker resolves; the checker reports \
              the forbidden network effect (ASSERT-039)",
         ),
-        ("assert-owner-type-mismatch.orna", "E2001") => Some(
-            "OPEN: the checker reports operator `>=` is not defined for Int in a table assertion; HIR does not \
-             port table-assertion typing",
-        ),
         ("assert-owner-type-mismatch.orna", "ORNA-S022-UNSUPPORTED") => Some(
-            "OPEN: HIR reports an unknown unary operator on the assertion, where the checker reports E2001 and \
-             ORNA-A091-004",
+            "OPEN: HIR reports an unknown unary operator on the assertion, where the checker reports ORNA-A091-004",
         ),
         ("two-durable-sources.orna", "ORNA-S021-TYPE") => Some(
             "OPEN: the checker reports the named arguments do not match the consumer's static signature; HIR cannot \

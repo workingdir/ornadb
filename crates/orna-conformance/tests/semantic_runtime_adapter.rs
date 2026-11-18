@@ -508,10 +508,17 @@ fn semantic_project_adapter_admits_sys_snapshot_string_as_pinned_read() {
     );
     assert!(analysis.is_ok(), "{:?}", analysis.diagnostics);
     let before_change = &analysis.modules.values().next().unwrap().exports["before_change"];
+    // A literal selector is checked as a pinned contextual SnapshotRef that
+    // carries its selector identity (`sys.snapshot` in orna-check).
     assert!(matches!(
         &before_change.ty,
         Type::Function { result, .. }
-            if result.as_ref() == &Type::Named("sys.SnapshotRef".into())
+            if matches!(
+                result.as_ref(),
+                Type::Applied { base, arguments }
+                    if base == "sys.SnapshotRefContext"
+                        && matches!(arguments.as_slice(), [Type::Named(selector)] if selector == "selector:HEAD~3")
+            )
     ));
     assert_eq!(
         before_change.effects.effects,
@@ -591,8 +598,8 @@ fn semantic_project_adapter_admits_sys_database_cwd_as_snapshot_ref_read() {
     assert_eq!(adapter.typecheck_project(&project), StageOutcome::Passed);
 
     // The project stages exercise the production adapter route.  Inspect the
-    // native graph separately to prove the admitted source retains the
-    // descriptor's typed SnapshotRef result and database-read effect.
+    // native graph separately to prove the admitted source retains a pinned
+    // contextual SnapshotRef result and database-read effect.
     let analysis = analyze_with_catalogue(
         &[ModuleInput::new("main.orna", source)],
         &Catalogue::authoritative_fixture(),
@@ -602,7 +609,12 @@ fn semantic_project_adapter_admits_sys_database_cwd_as_snapshot_ref_read() {
     assert!(matches!(
         &cwd.ty,
         Type::Function { result, .. }
-            if result.as_ref() == &Type::Named("sys.SnapshotRef".into())
+            if matches!(
+                result.as_ref(),
+                Type::Applied { base, arguments }
+                    if base == "sys.SnapshotRefContext"
+                        && matches!(arguments.as_slice(), [Type::Named(selector)] if selector.starts_with("selector:"))
+            )
     ));
     assert!(
         cwd.effects

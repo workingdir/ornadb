@@ -126,6 +126,18 @@ pub(crate) fn infer_table_assertion(
             return Inferred::pure(Type::Bool);
         }
     }
+    if let Expr::Unary { op, rhs, .. } = value
+        && matches!(op.as_str(), "==" | "!=" | "<" | "<=" | ">" | ">=" | "in")
+    {
+        // A bare comparison is the refined-type assertion form, not a predicate
+        // over the owner's relation. Type its operand so its own diagnostics
+        // surface; `assertion` then reports the non-Boolean table form.
+        let inferred = infer(rhs, scope, &BTreeMap::new(), diagnostics);
+        return Inferred {
+            ty: Type::Error,
+            effects: inferred.effects,
+        };
+    }
     let Expr::Call {
         callee, arguments, ..
     } = value
@@ -262,7 +274,12 @@ pub(crate) fn infer_ordinary_table_predicate(
     scope: &Scope,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Inferred {
-    let expected_relation = Type::Relation(Box::new(Type::Named(owner_name.to_owned())));
+    // The predicate's `Relation<Owner>` parameter carries the owner's canonical
+    // nominal identity (module-qualified), the same identity `check_table_item`
+    // gives the table row type.
+    let expected_relation = Type::Relation(Box::new(Type::Named(canonical_nominal_name(
+        owner_name, scope,
+    ))));
     let inferred = infer_contextual(
         value,
         &Type::Function {
