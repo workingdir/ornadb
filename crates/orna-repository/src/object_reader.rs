@@ -465,6 +465,35 @@ impl ObjectReader {
         Ok(found)
     }
 
+    /// The entry at `path` in the tree of `treeish`, or `None` when no entry
+    /// has that path. Each component is looked up in the tree its parent names,
+    /// so a path through a non-tree entry has no entry. A `treeish` that names
+    /// no tree fails.
+    pub(crate) fn path_entry(
+        &self,
+        treeish: &str,
+        path: &[u8],
+    ) -> Result<Option<TreeEntry>, RepositoryError> {
+        let root = self
+            .info(&format!("{treeish}^{{tree}}"))?
+            .ok_or(RepositoryError::GitOperationFailed)?;
+        let mut tree = root.oid().to_owned();
+        let mut components = path.split(|byte| *byte == b'/').peekable();
+        while let Some(name) = components.next() {
+            let Some(entry) = self.find_tree_entry(&tree, name)? else {
+                return Ok(None);
+            };
+            if components.peek().is_none() {
+                return Ok(Some(entry));
+            }
+            if entry.mode() != TreeEntryMode::Tree {
+                return Ok(None);
+            }
+            tree = entry.oid().to_owned();
+        }
+        Ok(None)
+    }
+
     /// Streams the entries of one tree object to `visit` as Git stores them.
     /// A missing object or another object type fails.
     fn visit_tree(

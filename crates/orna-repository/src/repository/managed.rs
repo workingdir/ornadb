@@ -1,3 +1,4 @@
+use crate::object_reader::ObjectKind;
 use crate::*;
 
 impl Repository {
@@ -18,6 +19,9 @@ impl Repository {
         &self,
         expression: &str,
     ) -> Result<Option<GitCommitRef>, RepositoryError> {
+        if let Some(commit) = self.commit_from_object_session(expression) {
+            return Ok(Some(commit));
+        }
         let mut command = self.command();
         command.args([
             "rev-parse",
@@ -40,6 +44,27 @@ impl Repository {
             return Ok(None);
         }
         Err(RepositoryError::GitOperationFailed)
+    }
+
+    /// The commit that `expression` names, answered by the persistent object
+    /// session without a process per call. Only a name that resolves to a
+    /// commit is answered here; every other outcome (absent, another object
+    /// type, or a name the line protocol cannot carry) returns `None` and takes
+    /// the `rev-parse` path, so each failure keeps its original classification.
+    fn commit_from_object_session(&self, expression: &str) -> Option<GitCommitRef> {
+        let carries_name = !expression.is_empty()
+            && !expression.starts_with('-')
+            && !expression.bytes().any(|byte| {
+                byte.is_ascii_control() || byte == b' ' || matches!(byte, b'"' | b'\\' | b'\'')
+            });
+        if !carries_name {
+            return None;
+        }
+        let header = self.objects().info(expression).ok()??;
+        if header.kind() != ObjectKind::Commit {
+            return None;
+        }
+        self.snapshot_from_native_oid(header.oid().to_owned()).ok()
     }
 
     pub(crate) fn commit_required(

@@ -22,6 +22,13 @@ const ROWS: usize = 50;
 /// the pin listing, and `git status`. The bound leaves no slack for a per-row
 /// spawn.
 const STATUS_GIT_PROCESS_BUDGET: usize = 10;
+/// `orna run main.main` on the same fixture starts fifteen Git processes:
+/// repository discovery (three), the object-format probe (three), the pin
+/// listing, the `git-path` probes, the index listing (two), and the object
+/// session. Every committed read (HEAD resolution, commit peel, tree walk and
+/// blob read) goes through the object session, so the count is independent of
+/// the row total.
+const RUN_GIT_PROCESS_BUDGET: usize = 15;
 
 /// Keeps the host's Git configuration and repository routing out of every
 /// process this test starts.
@@ -184,5 +191,17 @@ fn status_on_a_fifty_row_repository_starts_a_bounded_number_of_git_processes() {
     assert!(
         started <= STATUS_GIT_PROCESS_BUDGET,
         "orna status started {started} git processes on {ROWS} rows; budget is {STATUS_GIT_PROCESS_BUDGET}"
+    );
+}
+
+#[test]
+fn run_on_a_fifty_row_repository_starts_a_bounded_number_of_git_processes() {
+    let directory = TempDir::new().expect("create the test directory");
+    let root = fifty_row_database(&directory);
+
+    let started = git_processes_started(&root, &["run", "main.main"]);
+    assert!(
+        started <= RUN_GIT_PROCESS_BUDGET,
+        "orna run main.main started {started} git processes on {ROWS} rows; budget is {RUN_GIT_PROCESS_BUDGET}"
     );
 }

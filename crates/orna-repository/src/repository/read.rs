@@ -1,3 +1,4 @@
+use crate::object_reader::TreeEntryMode;
 use crate::*;
 
 impl Repository {
@@ -139,29 +140,19 @@ impl Repository {
         max_bytes: usize,
     ) -> Result<Vec<u8>, RepositoryError> {
         let path = ManagedPath::new(path)?;
-        let mut tree = self.command();
-        tree.env("GIT_NO_LAZY_FETCH", "1")
-            .args(["ls-tree", "-z", "--full-tree", treeish, "--"])
-            .arg(path.as_path());
-        let tree_output = self.run(tree)?;
-        let entry = tree_output
-            .stdout
-            .split(|byte| *byte == 0)
-            .find(|entry| !entry.is_empty())
+        let entry = self
+            .objects
+            .path_entry(treeish, path.as_path().as_os_str().as_encoded_bytes())?
             .ok_or(RepositoryError::GitOperationFailed)?;
-        let record = GitTreeRecord::parse(entry).ok_or(RepositoryError::GitOperationFailed)?;
-        if record.path != path.as_path().as_os_str().as_encoded_bytes() {
+        if !matches!(
+            entry.mode(),
+            TreeEntryMode::File | TreeEntryMode::Executable
+        ) {
             return Err(RepositoryError::GitOperationFailed);
         }
-        if record.mode != b"100644" && record.mode != b"100755" || record.kind != b"blob" {
-            return Err(RepositoryError::GitOperationFailed);
-        }
-        let object = String::from_utf8(record.object.to_vec())
-            .map_err(|_| RepositoryError::GitOperationFailed)?;
-        require_native_object_id(&object, self.native_object_id_length()?)?;
-        self.ensure_blob_readable(&object)?;
-
-        self.objects.read_blob(&object, max_bytes)
+        let object = entry.oid();
+        self.ensure_blob_readable(object)?;
+        self.objects.read_blob(object, max_bytes)
     }
 
     /// Lists a committed tree recursively without consulting or changing the
