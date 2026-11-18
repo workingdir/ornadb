@@ -484,6 +484,7 @@ fn write_json_value(
         | Value::Date(_)
         | Value::Uuid(_)
         | Value::Digest(_)
+        | Value::GitOid(_)
         | Value::Reference(_)
         | Value::TableReference(_)
         | Value::Instant { .. }
@@ -616,6 +617,7 @@ fn encode_orna_value(value: &Value, depth: usize) -> Result<String, EvaluationEr
         }
         Value::Uuid(value) => encode_orna_string(&format_uuid_bytes(value)),
         Value::Digest(value) => encode_orna_string(&format_digest_hex(value)),
+        Value::GitOid(value) => encode_orna_string(&value.to_hex()),
         Value::TableReference(value) => encode_orna_string(&orna_value::base64_encode(
             &value.encode().map_err(|_| error("ORNA-EVAL-VALUE"))?,
         )),

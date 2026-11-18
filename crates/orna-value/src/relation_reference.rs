@@ -35,6 +35,8 @@
 //! `sys.Checkpoint`, `sys.Failure`, ...) are registered bit for bit as their dedicated
 //! constructors in the contract module produce them.
 
+use std::fmt;
+
 use num_bigint::{BigInt, Sign};
 
 use crate::contract::{
@@ -42,8 +44,9 @@ use crate::contract::{
 };
 use crate::relations;
 use crate::{
-    CanonicalSnapshot, CanonicalValue, ContractError, ENUM_TAG, GitHash, ObjectRef, OvbRaw,
-    PATH_TAG, RowRef, SystemReferenceError, UUID_TAG, enum_type_id, enum_variant_id,
+    CanonicalSnapshot, CanonicalValue, ContractError, ENUM_TAG, Error, GitHash,
+    OPAQUE_SYSTEM_ID_TAG, ObjectRef, OvbRaw, PATH_TAG, RowRef, SystemReferenceError, UUID_TAG,
+    enum_type_id, enum_variant_id,
 };
 
 /// The representation of one natural-key component.
@@ -124,8 +127,17 @@ impl PathFlavour {
     }
 }
 
+/// The qualified type name a `sys.GitOid` carries in its tag-60023 value.
+pub const GIT_OID_TYPE_NAME: &str = "sys.GitOid";
+
 /// A Git object id: its hash algorithm and exactly that algorithm's number of bytes.
-#[derive(Clone, Debug, Eq, PartialEq)]
+///
+/// This is the typed `sys.GitOid` (`source/29-formats.md`, "Portable opaque and contextual values"): an opaque
+/// identity that compares by the object it names (ORNA-SYS-016), never as a `Str`, a `Uuid` or a digest. Its
+/// canonical value is the tag-60023 `["sys.GitOid", [algorithm, bytes]]` ([`GitObjectId::to_opaque_raw`]), and
+/// that is the only form [`GitObjectId::from_opaque_raw`] reads back. Ids order by algorithm and then by bytes,
+/// which for one algorithm is the order of Git's lowercase hexadecimal spellings.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct GitObjectId {
     algorithm: GitHash,
     bytes: Vec<u8>,
@@ -149,6 +161,33 @@ impl GitObjectId {
         Ok(Self { algorithm, bytes })
     }
 
+    /// The object id Git's lowercase hexadecimal spelling `hex` names: 40 digits are a SHA-1 id and 64 a
+    /// SHA-256 id.
+    ///
+    /// # Errors
+    ///
+    /// [`SystemReferenceError::InvalidRelationKey`] when `hex` is not exactly 40 or 64 lowercase hexadecimal
+    /// digits.
+    pub fn from_hex(hex: &str) -> Result<Self, SystemReferenceError> {
+        let algorithm = match hex.len() {
+            40 => GitHash::Sha1,
+            64 => GitHash::Sha256,
+            _ => return Err(SystemReferenceError::InvalidRelationKey),
+        };
+        let digit = |byte: u8| match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            _ => None,
+        };
+        let bytes = hex
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| Some((digit(pair[0])? << 4) | digit(pair[1])?))
+            .collect::<Option<Vec<u8>>>()
+            .ok_or(SystemReferenceError::InvalidRelationKey)?;
+        Self::new(algorithm, bytes)
+    }
+
     /// The object-hash algorithm.
     #[must_use]
     pub fn algorithm(&self) -> GitHash {
@@ -161,6 +200,63 @@ impl GitObjectId {
         &self.bytes
     }
 
+    /// The lowercase hexadecimal spelling Git prints for the object id.
+    #[must_use]
+    pub fn to_hex(&self) -> String {
+        const DIGITS: &[u8; 16] = b"0123456789abcdef";
+        let mut text = String::with_capacity(self.bytes.len() * 2);
+        for byte in &self.bytes {
+            text.push(char::from(DIGITS[usize::from(byte >> 4)]));
+            text.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+        }
+        text
+    }
+
+    /// The canonical tag-60023 value of the object id: `["sys.GitOid", ["sha1", bytes20]]`, or
+    /// `["sys.GitOid", ["sha256", bytes32]]`.
+    #[must_use]
+    pub fn to_opaque_raw(&self) -> OvbRaw {
+        OvbRaw::Tag(
+            OPAQUE_SYSTEM_ID_TAG,
+            Box::new(OvbRaw::Array(vec![
+                OvbRaw::Text(GIT_OID_TYPE_NAME.to_owned()),
+                self.raw(),
+            ])),
+        )
+    }
+
+    /// The validated canonical `sys.GitOid` value of the object id.
+    ///
+    /// # Errors
+    ///
+    /// [`Error`] when the value does not validate, which an id built through [`GitObjectId::new`] never
+    /// causes.
+    pub fn to_canonical(&self) -> Result<CanonicalValue, Error> {
+        CanonicalValue::new(self.to_opaque_raw())
+    }
+
+    /// The object id a tag-60023 `sys.GitOid` value holds, or `None` when `raw` is anything else: another opaque
+    /// identifier (a `sys.RevisionId` is also tag 60023, and is not a Git object id), or a `sys.GitOid` whose
+    /// algorithm and byte width disagree.
+    #[must_use]
+    pub fn from_opaque_raw(raw: &OvbRaw) -> Option<Self> {
+        let OvbRaw::Tag(OPAQUE_SYSTEM_ID_TAG, body) = raw else {
+            return None;
+        };
+        let OvbRaw::Array(parts) = body.as_ref() else {
+            return None;
+        };
+        let [OvbRaw::Text(name), representation] = parts.as_slice() else {
+            return None;
+        };
+        if name != GIT_OID_TYPE_NAME {
+            return None;
+        }
+        Self::from_raw(representation)
+    }
+
+    /// The `[algorithm, bytes]` representation inside the tag-60023 wrapper, which is also how a `sys.GitOid`
+    /// natural key of a reference is held.
     fn raw(&self) -> OvbRaw {
         OvbRaw::Array(vec![
             OvbRaw::Text(algorithm_name(self.algorithm).to_owned()),
@@ -181,6 +277,13 @@ impl GitObjectId {
             _ => return None,
         };
         Self::new(algorithm, bytes.clone()).ok()
+    }
+}
+
+/// The lowercase hexadecimal spelling Git prints.
+impl fmt::Display for GitObjectId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.to_hex())
     }
 }
 
