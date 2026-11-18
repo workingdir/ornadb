@@ -18,9 +18,12 @@ use crate::{
     row_admission::{admit_project_rows, preflight_project_rows},
 };
 use num_bigint::BigInt;
+use orna_check::catalogue_rows::{
+    admitted_table_schemas_by_name, catalogue_column_rows, catalogue_table_rows,
+};
 use orna_check::{
     AssertionOwner, AssertionPlan, Catalogue, DIAG_AMBIGUOUS, DIAG_IMPORT, EffectSummary,
-    ModuleInput, Namespace, StandardDependencyProfile, SystemProviders,
+    ModuleInput, Namespace, StandardDependencyProfile, SystemProviders, TableSchema,
     UNRESOLVED_TABLE_DEPENDENCY, analyze_with_providers, assertion_dependencies_apply,
 };
 use orna_cursor::{
@@ -35,7 +38,7 @@ use orna_evaluator::{
     SysHostAttachment, SysHostContext, evaluate_expression, evaluate_expression_with_functions,
     evaluate_with_functions_and_budget, evaluate_with_functions_and_nominals,
     invoke_named_with_effects_and_budget, invoke_named_with_effects_nominals_and_budget,
-    invoke_named_with_nominals, source_enum_definitions,
+    invoke_named_with_nominals, page_precomputed_rows, source_enum_definitions,
 };
 use orna_project::{
     LoadedProject, ProjectLoader, ResolvedTableSchema, admit_format3_row,
@@ -71,10 +74,11 @@ use orna_sys::{
     AdmissionError, AdmissionRequest, ExecutionBoundary, FunctionDescriptor, InvocationCompletion,
     InvocationExecutor, InvocationHandle, InvocationState, RuntimeSupervisor, TypedValue,
 };
-use orna_sys_id::SysRelation;
+use orna_sys_id::{SysGroupedHandle, SysRelation};
 use orna_table::{ActivationError, DatabaseActivation, DatabaseRuntime, TableError};
 use orna_value::{
-    CanonicalSnapshot, Diagnostic, DiagnosticSeverity, DiagnosticSpan, OvbRaw, SafeText, Value,
+    CanonicalSnapshot, CanonicalValue, Diagnostic, DiagnosticSeverity, DiagnosticSpan, OvbRaw,
+    SafeText, Value,
 };
 use sha2::{Digest, Sha256};
 use std::{

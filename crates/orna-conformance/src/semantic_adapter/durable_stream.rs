@@ -428,6 +428,7 @@ impl DurableTransactionalEvaluator {
             .with_sys_host_context(self.sys_host.clone())
             .with_activation_time(context.activation_time())
             .with_publication_rows(publication_rows)
+            .with_table_object_ids(table_object_ids)
             .with_mutation_scope(request_mutation_scope(&request))
             .with_explain_catalogue(explain_catalogue)
             .with_stored_references(self.stored_references.clone());

@@ -713,6 +713,7 @@ pub(super) fn admitted_transaction_module(
         table_assertions: assertions,
         module_assertions,
         nominal_definitions: source_enum_definitions(namespace, items),
+        table_schemas: BTreeMap::new(),
     })
 }
 
