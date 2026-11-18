@@ -64,7 +64,7 @@ impl Repository {
         if !valid_remote_name(remote) {
             return RemoteContinuity::Unverifiable;
         }
-        let native_length = match self.observer_native_object_id_length() {
+        let native_length = match self.native_object_id_length() {
             Ok(length) => length,
             Err(_) => return RemoteContinuity::Unverifiable,
         };
@@ -216,7 +216,7 @@ impl Repository {
         // comparing command output so this observer agrees with
         // `NativeObjectId::new` without weakening exact-ID validation.
         let object_id = object_id.to_ascii_lowercase();
-        let object_id_length = self.observer_native_object_id_length()?;
+        let object_id_length = self.native_object_id_length()?;
         if object_id.len() != object_id_length
             || !object_id.bytes().all(|byte| byte.is_ascii_hexdigit())
         {
@@ -472,23 +472,6 @@ impl Repository {
         let output =
             std::str::from_utf8(&output.stdout).map_err(|_| RepositoryError::GitOperationFailed)?;
         parse_remote_orna_refs(output, object_id_length, expected)
-    }
-
-    pub(crate) fn observer_native_object_id_length(&self) -> Result<usize, RepositoryError> {
-        let mut command = self.observer_command();
-        command.env("GIT_NO_LAZY_FETCH", "1");
-        command.args(["rev-parse", "--show-object-format"]);
-        let output = command
-            .output()
-            .map_err(|_| RepositoryError::GitUnavailable)?;
-        if !output.status.success() {
-            return Err(RepositoryError::GitOperationFailed);
-        }
-        match trim_output(&output.stdout).as_str() {
-            "sha1" => Ok(40),
-            "sha256" => Ok(64),
-            _ => Err(RepositoryError::UnsupportedObjectFormat),
-        }
     }
 
     pub(crate) fn promisor_reachability(

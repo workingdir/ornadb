@@ -3187,7 +3187,7 @@ impl Repository {
             entries,
         };
         if manifest
-            .validate(Some(self.observer_native_object_id_length()?))
+            .validate(Some(self.native_object_id_length()?))
             .is_err()
             || verify_canonical_manifest_files(&manifest, &bytes, &shard_bytes_by_path).is_err()
         {
@@ -3489,7 +3489,7 @@ impl Repository {
             next_generation: header.next_generation,
             entries,
         };
-        manifest.validate(Some(self.observer_native_object_id_length()?))?;
+        manifest.validate(Some(self.native_object_id_length()?))?;
         verify_canonical_manifest_files(&manifest, &manifest_bytes, &shard_bytes_by_path)?;
         Ok(manifest)
     }
@@ -3527,7 +3527,7 @@ impl Repository {
             .args(["ls-tree", "-z", "--full-tree", commit.as_str(), "--"])
             .arg(path.as_path());
         let output = self.run(command)?.stdout;
-        parse_tree_entry(&output, path, self.observer_native_object_id_length()?)
+        parse_tree_entry(&output, path, self.native_object_id_length()?)
     }
 
     /// Test-only fixture writer for legacy compact reader tests. It assembles
