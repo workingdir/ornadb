@@ -7,7 +7,8 @@
 //! activation context and is never published by this crate.
 
 use num_bigint::BigInt;
-use orna_check::catalogue_rows::{catalogue_column_rows, catalogue_table_rows};
+use orna_check::catalogue_identities::CatalogueIdentities;
+use orna_check::catalogue_rows::CatalogueRows;
 use orna_check::{
     Analysis, Catalogue, DIAG_AMBIGUOUS, DIAG_IMPORT, ModuleInput, Namespace,
     StandardCatalogueError, StandardDependencyProfile, SystemProviders, TableSchema,
@@ -19,7 +20,7 @@ use orna_evaluator::{
     Ovb2EffectHandler, PureFunction, RelationPage, ReplSession, StandardLayer, StepBudget,
     SysHostAttachment, SysHostBindingRegistry, SysHostContext, invoke_named,
     invoke_named_with_effects, invoke_named_with_sys_host_context, module_function_alias_key,
-    page_precomputed_rows, reference_standard_profile, reference_standard_sources,
+    page_catalogue_rows, reference_standard_profile, reference_standard_sources,
 };
 use orna_live::{
     Error as LiveError, FirstPartyEffectTrust, LiveAdminEffectDispatcher, LiveApplication,
@@ -514,6 +515,7 @@ impl ApplicationAuthority {
             table_insert_defaults,
             limits: self.limits,
             table_schemas,
+            catalogue_identities: None,
             #[cfg(test)]
             module_header,
         })
@@ -725,7 +727,8 @@ impl ApplicationAuthority {
                     application.functions.clone(),
                     application.limits,
                 )
-                .with_sys_host_context(self.sys_host.clone());
+                .with_sys_host_context(self.sys_host.clone())
+                .with_catalogue_identities(application.catalogue_identities());
         for row in source_rows {
             let value_context = value_context.ok_or(ApplicationError::InvalidTableMetadata)?;
             handler.record_admitted_source_row(row, value_context)?;
@@ -820,6 +823,7 @@ impl ApplicationAuthority {
             application.limits,
         )
         .with_sys_host_context(self.sys_host.clone())
+        .with_catalogue_identities(application.catalogue_identities())
         .with_stored_references(references);
         handler.publication_rows = publication_rows;
         let value = invoke_named_with_effects(
@@ -858,7 +862,8 @@ impl ApplicationAuthority {
             application.functions.clone(),
             application.limits,
         )
-        .with_sys_host_context(self.sys_host.clone());
+        .with_sys_host_context(self.sys_host.clone())
+        .with_catalogue_identities(application.catalogue_identities());
         let value = invoke_named_with_effects(
             &application.entry,
             &application.functions,
@@ -916,7 +921,8 @@ impl ApplicationAuthority {
                 application.functions.clone(),
                 application.limits,
             )
-            .with_sys_host_context(self.sys_host.clone());
+            .with_sys_host_context(self.sys_host.clone())
+            .with_catalogue_identities(application.catalogue_identities());
         let mut value = invoke_named_with_effects(
             &application.entry,
             &application.functions,
@@ -1462,10 +1468,11 @@ pub struct SourceMutationEffectHandler {
     mutations: Vec<TableMutation>,
     next_ordinal: u64,
     publication_rows: Option<RuntimePublicationMetadataRows>,
-    /// `sys.Table` rows served through the `sys.catalog.tables` grouped handle.
-    catalogue_tables: Vec<CanonicalValue>,
-    /// `sys.Column` rows served through the `sys.catalog.columns` handle.
-    catalogue_columns: Vec<CanonicalValue>,
+    /// The `sys.Table` and `sys.Column` rows served through the
+    /// `sys.catalog.tables` and `sys.catalog.columns` grouped handles. `None`
+    /// when the activation holds no committed identity for its tables: a read
+    /// then fails closed with `sys.snapshot.incomplete` (ORNA-SYS-111).
+    catalogue: Option<CatalogueRows>,
     captured_rows: Option<BTreeMap<String, BTreeMap<Vec<u8>, CanonicalValue>>>,
     overlay: BTreeMap<String, BTreeMap<Vec<u8>, Option<CanonicalValue>>>,
     source_row_schemas: Vec<SourceRowSchemaProvenance>,
@@ -1487,8 +1494,7 @@ impl SourceMutationEffectHandler {
     pub fn new(tables: BTreeMap<String, TableSchema>) -> Self {
         let next_automatic_ids = automatic_id_counters(&tables);
         Self {
-            catalogue_tables: catalogue_table_rows(&tables, &BTreeMap::new()),
-            catalogue_columns: catalogue_column_rows(&tables),
+            catalogue: CatalogueRows::build(&tables, None).ok(),
             tables,
             table_object_ids: BTreeMap::new(),
             insert_defaults: BTreeMap::new(),
@@ -1507,6 +1513,32 @@ impl SourceMutationEffectHandler {
             context_table_rows: BTreeMap::new(),
             stored_references: None,
         }
+    }
+
+    /// Serves the catalogue rows over the committed identities of the
+    /// activation's snapshot. Without identities only a project of no tables
+    /// has a catalogue to serve.
+    fn with_catalogue_identities(mut self, identities: Option<&CatalogueIdentities>) -> Self {
+        self.catalogue = CatalogueRows::build(&self.tables, identities).ok();
+        self
+    }
+
+    /// One page of `sys.catalog.tables` or `sys.catalog.columns`; `None` for
+    /// any other source. A catalogue with no committed identities fails closed
+    /// with `sys.snapshot.incomplete` rather than serving null references.
+    fn catalogue_page(
+        &self,
+        source: &str,
+        after: Option<&[u8]>,
+        limit: usize,
+        budget: &mut StepBudget,
+    ) -> Result<Option<RelationPage>, EvaluationError> {
+        let rows = match source {
+            SYS_CATALOGUE_TABLES_SOURCE => self.catalogue.as_ref().map(CatalogueRows::tables),
+            SYS_CATALOGUE_COLUMNS_SOURCE => self.catalogue.as_ref().map(CatalogueRows::columns),
+            _ => return Ok(None),
+        };
+        page_catalogue_rows(rows, after, limit, budget).map(Some)
     }
 
     fn with_sys_host_context(mut self, sys_host: Option<SysHostContext>) -> Self {
@@ -2461,21 +2493,11 @@ impl EffectHandler for AsyncSourceMutationEffectHandler {
                 next: None,
             }));
         }
-        if source == SYS_CATALOGUE_TABLES_SOURCE {
-            return Ok(Some(page_precomputed_rows(
-                &self.mutations.catalogue_tables,
-                after,
-                limit,
-                budget,
-            )?));
-        }
-        if source == SYS_CATALOGUE_COLUMNS_SOURCE {
-            return Ok(Some(page_precomputed_rows(
-                &self.mutations.catalogue_columns,
-                after,
-                limit,
-                budget,
-            )?));
+        if let Some(page) = self
+            .mutations
+            .catalogue_page(source, after, limit, budget)?
+        {
+            return Ok(Some(page));
         }
         let Some(publication_rows) = self.publication_rows.as_ref() else {
             return Ok(None);
@@ -2859,21 +2881,8 @@ impl EffectHandler for SourceMutationEffectHandler {
                 .table_relation_page(source, after, limit, budget)
                 .map(Some);
         }
-        if source == SYS_CATALOGUE_TABLES_SOURCE {
-            return Ok(Some(page_precomputed_rows(
-                &self.catalogue_tables,
-                after,
-                limit,
-                budget,
-            )?));
-        }
-        if source == SYS_CATALOGUE_COLUMNS_SOURCE {
-            return Ok(Some(page_precomputed_rows(
-                &self.catalogue_columns,
-                after,
-                limit,
-                budget,
-            )?));
+        if let Some(page) = self.catalogue_page(source, after, limit, budget)? {
+            return Ok(Some(page));
         }
         let Some(publication_rows) = self.publication_rows.as_ref() else {
             return Ok(None);
@@ -4349,6 +4358,7 @@ pub struct AdmittedApplication {
     table_insert_defaults: TableInsertDefaults,
     limits: Limits,
     table_schemas: BTreeMap<String, AdmittedTableSchema>,
+    catalogue_identities: Option<Arc<CatalogueIdentities>>,
     #[cfg(test)]
     module_header: orna_check::ModuleHeader,
 }
@@ -4417,6 +4427,21 @@ impl AdmittedApplication {
             })
             .collect()
     }
+
+    /// Binds the committed identities of the tables and columns of the commit
+    /// this module was admitted against, so the `sys.catalog.*` rows carry typed
+    /// references (ORNA-SYS-111). Without them a catalogue read of a project
+    /// with tables fails with `sys.snapshot.incomplete`.
+    #[must_use]
+    pub fn with_catalogue_identities(mut self, identities: CatalogueIdentities) -> Self {
+        self.catalogue_identities = Some(Arc::new(identities));
+        self
+    }
+
+    /// The committed identities the catalogue rows are built over, when bound.
+    fn catalogue_identities(&self) -> Option<&CatalogueIdentities> {
+        self.catalogue_identities.as_deref()
+    }
 }
 
 fn put_bytes(digest: &mut Sha256, bytes: &[u8]) {
@@ -4458,6 +4483,75 @@ mod tests {
         );
     }
 
+    /// The identities `orna commit` records for every table and column of
+    /// `tables`, read at one commit of one database.
+    fn committed_identities(tables: &BTreeMap<String, TableSchema>) -> CatalogueIdentities {
+        let database = [4; 16];
+        let mut next = 0_u8;
+        let mut id = || {
+            next += 1;
+            [next; 16]
+        };
+        let committed = tables
+            .iter()
+            .map(|(name, schema)| {
+                let columns = schema
+                    .declaration_order
+                    .iter()
+                    .map(|column| (column.clone(), id()))
+                    .collect();
+                (
+                    name.clone(),
+                    orna_check::catalogue_identities::TableIdentity::new(id(), columns),
+                )
+            })
+            .collect();
+        let pin = CanonicalSnapshot::Commit {
+            database,
+            algorithm: orna_value::GitHash::Sha1,
+            oid: vec![5; 20],
+        };
+        CatalogueIdentities::new(database, pin, committed)
+            .expect("identities of the pinned database")
+    }
+
+    #[test]
+    // Specified: ORNA-SYS-111; a null reference breaches the declared type, so a
+    // catalogue with no committed identity for a table fails closed with
+    // `sys.snapshot.incomplete` instead of serving null references.
+    fn catalogue_read_without_committed_identities_fails_closed() {
+        let source = "pub table Note(id: Int) {\n    body: Str,\n}\n\npub fn main(): Int = 1;\n";
+        let authority =
+            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let application = authority
+            .admit_module("notes/main.orna", source, "main")
+            .expect("admit the fixture table");
+        let tables = application_table_schemas(&application);
+        let mut budget = StepBudget::new(Limits::default().max_steps);
+        let mut handler = SourceMutationEffectHandler::new(tables.clone());
+        for source in ["sys.catalog.tables", "sys.catalog.columns"] {
+            let error = handler
+                .scan_relation_page(source, None, 10, &mut budget)
+                .expect_err("a table without a committed identity has no row");
+            assert_eq!(error.code(), "sys.snapshot.incomplete", "{source}");
+        }
+        let identities = committed_identities(&tables);
+        let mut handler =
+            SourceMutationEffectHandler::new(tables).with_catalogue_identities(Some(&identities));
+        let page = handler
+            .scan_relation_page("sys.catalog.tables", None, 10, &mut budget)
+            .expect("a catalogue over its identities serves")
+            .expect("the handle is served");
+        assert_eq!(page.rows.len(), 1);
+        // A project of no tables has no row that needs an identity.
+        let mut empty = SourceMutationEffectHandler::new(BTreeMap::new());
+        let page = empty
+            .scan_relation_page("sys.catalog.columns", None, 10, &mut budget)
+            .expect("an empty catalogue serves")
+            .expect("the handle is served");
+        assert!(page.rows.is_empty());
+    }
+
     #[test]
     // Specified: Orna-1.1.0 sys.Table; the grouped handle lists admitted tables.
     fn catalogue_tables_serves_one_row_per_admitted_table() {
@@ -4468,7 +4562,9 @@ mod tests {
             .admit_module("notes/main.orna", source, "main")
             .expect("admit the fixture table");
         let tables = application_table_schemas(&application);
-        let rows = catalogue_table_rows(&tables, &BTreeMap::new());
+        let catalogue = CatalogueRows::build(&tables, Some(&committed_identities(&tables)))
+            .expect("rows over committed identities");
+        let rows = catalogue.tables();
         assert_eq!(rows.len(), 1, "one row per admitted table");
         let rendered = format!("{:?}", rows[0]);
         assert!(rendered.contains("Note"), "the row names its table");
@@ -4491,7 +4587,9 @@ mod tests {
             .admit_module("notes/main.orna", source, "main")
             .expect("admit the fixture table");
         let tables = application_table_schemas(&application);
-        let rows = catalogue_column_rows(&tables);
+        let catalogue = CatalogueRows::build(&tables, Some(&committed_identities(&tables)))
+            .expect("rows over committed identities");
+        let rows = catalogue.columns();
         assert_eq!(rows.len(), 3, "one row per column, including the key");
         let rendered: Vec<String> = rows.iter().map(|row| format!("{row:?}")).collect();
         let position_of = |name: &str| {

@@ -284,6 +284,12 @@ impl ServeApp {
                 committed,
             )
             .map_err(|_| "serve.evaluation_failed")?;
+        let admitted = crate::catalogue_identities::bind_committed_catalogue(
+            admitted,
+            &repository,
+            &commit,
+            identity.database_id,
+        );
         if admitted.requires_publication_metadata() {
             return Err("serve.table_read_unsupported");
         }

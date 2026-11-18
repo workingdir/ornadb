@@ -32,6 +32,9 @@ pub(crate) struct ReplTransactions {
     pub(crate) identities: orna_project::ObjectIdentityManifest,
     pub(crate) table_object_ids: Arc<BTreeMap<String, TableObjectId>>,
     pub(crate) table_schemas: BTreeMap<String, orna_check::TableSchema>,
+    /// The committed identities of every table and column at `commit`, pinned to
+    /// it: the `sys.catalog.*` rows of every input carry references over them.
+    pub(crate) catalogue_identities: orna_check::catalogue_identities::CatalogueIdentities,
     pub(crate) capture_relation_id: [u8; 16],
     pub(crate) session_id: [u8; 16],
     pub(crate) host_bindings: Rc<RefCell<Option<SysHostBindingRegistry>>>,
@@ -526,6 +529,12 @@ pub(crate) fn run_committed_table_invocation(
     let tables = committed_tables(&repository, &commit, admitted)?;
     let admitted = admit_committed_metadata(&authority, admitted, logical_path, source, &tables)?;
     let (identity, initial_digest) = runtime_identity(&repository)?;
+    let admitted = crate::catalogue_identities::bind_committed_catalogue(
+        admitted,
+        &repository,
+        &commit,
+        identity.database_id,
+    );
     let authority = invocation_host(authority, &repository, identity, &admitted, std_snapshot);
     let (runtime, state, publication_rows) =
         open_committed_runtime(&repository, identity, initial_digest, &admitted, &commit)?;

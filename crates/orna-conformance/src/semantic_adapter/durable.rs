@@ -21,6 +21,7 @@ pub struct DurableTransactionalEvaluator {
     pub(super) sys_host: Option<std::sync::Arc<SysHostAttachment>>,
     pub(super) catalogue: std::sync::Arc<Catalogue>,
     pub(super) stored_references: Option<std::sync::Arc<orna_project::ReferenceCatalogue>>,
+    pub(super) catalogue_identities: Option<std::sync::Arc<CatalogueIdentities>>,
     #[cfg(test)]
     pub(super) activation_time_observer:
         Option<std::sync::Arc<std::sync::Mutex<Option<SystemTime>>>>,
@@ -109,6 +110,7 @@ impl DurableTransactionalEvaluator {
             sys_host: None,
             catalogue: std::sync::Arc::new(Catalogue::authoritative_core()),
             stored_references: None,
+            catalogue_identities: None,
             #[cfg(test)]
             activation_time_observer: None,
         }
@@ -119,6 +121,17 @@ impl DurableTransactionalEvaluator {
     #[must_use]
     pub fn with_catalogue(mut self, catalogue: std::sync::Arc<Catalogue>) -> Self {
         self.catalogue = catalogue;
+        self
+    }
+
+    /// Attaches the committed identities of the tables and columns of the
+    /// project's commit, so the `sys.catalog.tables` and `sys.catalog.columns`
+    /// rows carry typed references (ORNA-SYS-111). A project with tables and no
+    /// identities (no commit yet) fails a catalogue read with
+    /// `sys.snapshot.incomplete` instead of serving null references.
+    #[must_use]
+    pub fn with_catalogue_identities(mut self, identities: Option<CatalogueIdentities>) -> Self {
+        self.catalogue_identities = identities.map(std::sync::Arc::new);
         self
     }
 

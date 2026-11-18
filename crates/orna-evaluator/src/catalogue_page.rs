@@ -8,8 +8,33 @@ use orna_value::CanonicalValue;
 
 use super::{EvaluationError, RelationPage, StepBudget, error};
 
+/// `sys.snapshot.incomplete`: the required snapshot objects are unavailable.
+#[cfg(feature = "system-host-bindings")]
+const SNAPSHOT_INCOMPLETE: &str = orna_sys::SysFailureCode::SnapshotIncomplete.as_str();
+/// Without host bindings the generated identity crate is not linked; the exact
+/// portable failure code bytes are preserved here.
+#[cfg(not(feature = "system-host-bindings"))]
+const SNAPSHOT_INCOMPLETE: &str = "sys.snapshot.incomplete";
+
+/// Pages the rows of one `sys.catalog.*` relation, or fails closed.
+///
+/// `rows` is `None` when the activation holds no committed identity for its
+/// admitted tables. The rows then cannot carry the references the specification
+/// declares non-null (ORNA-SYS-111), so the read fails with
+/// `sys.snapshot.incomplete` (required snapshot objects are unavailable) and
+/// never serves a null or textual stand-in.
+pub fn page_catalogue_rows(
+    rows: Option<&[CanonicalValue]>,
+    after: Option<&[u8]>,
+    limit: usize,
+    budget: &mut StepBudget,
+) -> Result<RelationPage, EvaluationError> {
+    let rows = rows.ok_or_else(|| error(SNAPSHOT_INCOMPLETE))?;
+    page_precomputed_rows(rows, after, limit, budget)
+}
+
 /// Pages over precomputed catalogue rows, using the row index as the cursor.
-pub fn page_precomputed_rows(
+fn page_precomputed_rows(
     rows: &[CanonicalValue],
     after: Option<&[u8]>,
     limit: usize,

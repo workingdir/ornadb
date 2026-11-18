@@ -127,7 +127,8 @@ pub(crate) fn run_repl_input(
         &storage_orders,
         request,
         publication_rows,
-    );
+    )
+    .with_catalogue_identities(&transactions.catalogue_identities);
     #[cfg(test)]
     let scope = scope.with_dispatch_observer(&observe_first_dispatch);
     transactions

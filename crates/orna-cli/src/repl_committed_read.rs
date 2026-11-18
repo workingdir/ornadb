@@ -106,7 +106,8 @@ pub(super) fn submit_committed_read(
         &storage_orders,
         request,
         publication_rows,
-    );
+    )
+    .with_catalogue_identities(&transactions.catalogue_identities);
     transactions
         .authority
         .evaluate_read_repl_input(session, source, &scope)

@@ -295,7 +295,8 @@ fn evaluate_contextual_page_read(
         application.functions.clone(),
         application.limits,
     )
-    .with_sys_host_context(sys_host.cloned());
+    .with_sys_host_context(sys_host.cloned())
+    .with_catalogue_identities(application.catalogue_identities());
     handler.context_table_rows = context_table_rows;
     let mut budget = StepBudget::new(application.limits.max_steps);
     let value = invoke_named_with_context_effects(

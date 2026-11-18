@@ -28,7 +28,7 @@ pub struct TransactionalEvaluator {
     pub(super) explain_catalogue: Option<ActivationExplainCatalogue>,
     pub(super) admission: AdmissionCatalogue,
     pub(super) stored_references: Option<std::sync::Arc<orna_project::ReferenceCatalogue>>,
-    pub(super) table_object_ids: BTreeMap<String, [u8; 16]>,
+    pub(super) catalogue_identities: Option<std::sync::Arc<CatalogueIdentities>>,
 }
 
 /// Catalogue that admission checks user modules against. `Production` is the
@@ -67,7 +67,7 @@ impl TransactionalEvaluator {
             sys_host: None,
             explain_catalogue: None,
             stored_references: None,
-            table_object_ids: BTreeMap::new(),
+            catalogue_identities: None,
         }
     }
 
@@ -91,13 +91,15 @@ impl TransactionalEvaluator {
         self
     }
 
-    /// Supplies the committed table identities the `sys.catalog.tables` rows
-    /// carry. Without them the identity fields are null.
-    pub(super) fn with_table_object_ids(mut self, ids: &BTreeMap<String, TableObjectId>) -> Self {
-        self.table_object_ids = ids
-            .iter()
-            .map(|(name, id)| (name.clone(), id.bytes()))
-            .collect();
+    /// Supplies the committed identities of the tables and columns the
+    /// `sys.catalog.*` rows carry as typed references (ORNA-SYS-111). Without
+    /// them a catalogue read of a project with tables fails with
+    /// `sys.snapshot.incomplete`.
+    pub(super) fn with_catalogue_identities(
+        mut self,
+        identities: Option<std::sync::Arc<CatalogueIdentities>>,
+    ) -> Self {
+        self.catalogue_identities = identities;
         self
     }
 
@@ -275,8 +277,8 @@ impl TransactionalEvaluator {
             nominal_definitions,
             table_schemas,
         } = admitted;
-        let catalogue_tables = catalogue_table_rows(table_schemas, &self.table_object_ids);
-        let catalogue_columns = catalogue_column_rows(table_schemas);
+        let catalogue =
+            CatalogueRows::build(table_schemas, self.catalogue_identities.as_deref()).ok();
         let entry = self.entry.clone();
         let limits = self.limits;
         let mut mutations = Vec::new();
@@ -296,8 +298,7 @@ impl TransactionalEvaluator {
                 sys_host: self.sys_host.as_deref(),
                 explain_catalogue: self.explain_catalogue.as_ref(),
                 references: self.stored_references.as_deref(),
-                catalogue_tables: &catalogue_tables,
-                catalogue_columns: &catalogue_columns,
+                catalogue: catalogue.as_ref(),
             };
             let mut budget = StepBudget::new(limits.max_steps);
             let result = invoke_named_with_effects_nominals_and_budget(
