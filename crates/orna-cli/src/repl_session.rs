@@ -96,18 +96,20 @@ pub(crate) fn repl_transactions(
     let (identity, initial_digest) = committed_store_identity(repository, &format_context)?;
     let catalogue_identities = repl_catalogue_identities(&identities, &commit, identity)?;
     let runtime = repl_tokio_runtime()?;
+    let authority = ApplicationAuthority::new(catalogue, Limits::default()).with_sys_host_context(
+        sys_host::sys_host_context(
+            repository.worktree(),
+            identity,
+            RuntimeMode::Repl,
+            sys_host::std_snapshot_pin(workspace_project),
+            Some(&commit),
+        ),
+    );
     Ok(ReplTransactions {
         project,
         commit,
         format_context,
-        authority: ApplicationAuthority::new(catalogue, Limits::default()).with_sys_host_context(
-            sys_host::sys_host_context(
-                repository.worktree(),
-                identity,
-                RuntimeMode::Repl,
-                sys_host::std_snapshot_pin(workspace_project),
-            ),
-        ),
+        authority,
         runtime,
         identity,
         initial_digest,
@@ -256,11 +258,13 @@ pub(crate) fn same_repl_project_inputs(
 }
 
 /// The activation facts a project REPL session reports through
-/// `sys.rt.info()`. `None` leaves the session unattached, so the evaluator
-/// reports `sys.version.incompatible` rather than inventing host facts.
+/// `sys.rt.info()`, pinned to `head` for the Git-state rows (`sys.git.branches`).
+/// `None` leaves the session unattached, so the evaluator reports
+/// `sys.version.incompatible` rather than inventing host facts.
 pub(crate) fn repl_sys_host_context(
     repository: &orna_repository::Repository,
     project: &orna_project::LoadedProject,
+    head: Option<&orna_repository::GitCommitRef>,
 ) -> Option<SysHostContext> {
     let (identity, _) = runtime_identity(repository).ok()?;
     Some(sys_host::sys_host_context(
@@ -268,6 +272,7 @@ pub(crate) fn repl_sys_host_context(
         identity,
         RuntimeMode::Repl,
         sys_host::std_snapshot_pin(project),
+        head,
     ))
 }
 
@@ -284,11 +289,17 @@ pub(crate) fn repl_runtime(
             Limits::default(),
         )
         .map_err(|error| repl_session_error(&error))?;
-        let session = match repl_sys_host_context(repository, &project) {
+        let transactions = repl_transactions(repository, &project);
+        // The session reports the commit its transactions are bound to, so its
+        // sys host and its catalogue rows carry one pin.
+        let head = match &transactions {
+            Ok(bound) => Some(bound.commit.clone()),
+            Err(_) => repository.head().ok().flatten(),
+        };
+        let session = match repl_sys_host_context(repository, &project, head.as_ref()) {
             Some(context) => session.with_sys_host_context(context),
             None => session,
         };
-        let transactions = repl_transactions(repository, &project);
         (session, transactions)
     } else {
         // Preserve the core-only REPL when the current directory has no Git
@@ -388,9 +399,13 @@ impl ReplSnapshotSessionLoader<'_> {
             Limits::default(),
         )
         .map_err(|_| ())?;
-        let context = self
-            .repository
-            .and_then(|repository| repl_sys_host_context(repository, project));
+        let context = self.repository.and_then(|repository| {
+            repl_sys_host_context(
+                repository,
+                project,
+                repository.head().ok().flatten().as_ref(),
+            )
+        });
         Ok(match context {
             Some(context) => session.with_sys_host_context(context),
             None => session,

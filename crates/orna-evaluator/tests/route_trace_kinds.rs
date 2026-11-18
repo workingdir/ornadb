@@ -265,6 +265,7 @@ fn branch_7_system_host_is_recorded() {
         repository_layout_version: "layout-1".to_owned(),
         storage_manifest_version: "store-3".to_owned(),
         std_snapshot: StdSnapshotPin::Unpinned,
+        head_commit: None,
     });
     let body = orna_syntax::parse_expression("sys.rt.info().read_only");
     assert!(body.is_ok(), "{:#?}", body.diagnostics);

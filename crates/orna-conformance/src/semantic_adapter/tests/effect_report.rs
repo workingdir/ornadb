@@ -12,6 +12,7 @@ fn host_context() -> SysHostContext {
         repository_layout_version: "layout-1".to_owned(),
         storage_manifest_version: "store-3".to_owned(),
         std_snapshot: StdSnapshotPin::Unpinned,
+        head_commit: None,
     }
 }
 

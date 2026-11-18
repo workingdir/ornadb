@@ -501,3 +501,6 @@ mod repl_request_effect_tests;
 
 #[cfg(test)]
 mod repl_catalogue_tests;
+
+#[cfg(test)]
+mod repl_git_branch_tests;

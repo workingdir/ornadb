@@ -535,7 +535,14 @@ pub(crate) fn run_committed_table_invocation(
         &commit,
         identity.database_id,
     );
-    let authority = invocation_host(authority, &repository, identity, &admitted, std_snapshot);
+    let authority = invocation_host(
+        authority,
+        &repository,
+        &commit,
+        identity,
+        &admitted,
+        std_snapshot,
+    );
     let (runtime, state, publication_rows) =
         open_committed_runtime(&repository, identity, initial_digest, &admitted, &commit)?;
     let committed =
@@ -618,10 +625,12 @@ pub(crate) fn admit_committed_metadata(
         })
 }
 
-/// The authority with the host context a committed-table read runs under.
+/// The authority with the host context a committed-table read runs under,
+/// pinned to the commit the read is bound to.
 pub(crate) fn invocation_host(
     authority: ApplicationAuthority,
     repository: &orna_repository::Repository,
+    commit: &orna_repository::GitCommitRef,
     identity: RuntimeIdentity,
     admitted: &AdmittedApplication,
     std_snapshot: StdSnapshotPin,
@@ -636,6 +645,7 @@ pub(crate) fn invocation_host(
         identity,
         mode,
         std_snapshot,
+        Some(commit),
     ))
 }
 

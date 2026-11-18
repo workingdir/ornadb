@@ -4,18 +4,27 @@
 use std::path::Path;
 
 use orna_project::LoadedProject;
-use orna_repository::{GitHashAlgorithm, NativeOid, REPOSITORY_LAYOUT_VERSION, STORAGE_PROFILE};
+use orna_repository::{
+    GitCommitRef, GitHashAlgorithm, NativeOid, REPOSITORY_LAYOUT_VERSION, STORAGE_PROFILE,
+};
 use orna_runtime::RuntimeIdentity;
 use orna_sys::{RuntimeMode, StdSnapshotPin, SysHostContext, new_runtime_id};
 
 /// Describes one writable runtime attachment rooted at the repository worktree.
 /// Every CLI attachment is writable, so the carrier always reports
 /// `read_only: false`.
+///
+/// `head` is the commit every reference the activation serves from the
+/// repository's Git state (`sys.git.branches`) is pinned to. Callers pass the
+/// commit the activation's catalogue rows are pinned to, so one activation
+/// carries one pin; `None` (an unborn or unreadable `HEAD`) leaves those rows
+/// unservable rather than pinned to a commit the activation does not read.
 pub(crate) fn sys_host_context(
     root: &Path,
     identity: RuntimeIdentity,
     mode: RuntimeMode,
     std_snapshot: StdSnapshotPin,
+    head: Option<&GitCommitRef>,
 ) -> SysHostContext {
     SysHostContext {
         database_id: identity.database_id,
@@ -27,7 +36,20 @@ pub(crate) fn sys_host_context(
         repository_layout_version: REPOSITORY_LAYOUT_VERSION.to_owned(),
         storage_manifest_version: STORAGE_PROFILE.to_owned(),
         std_snapshot,
+        head_commit: head.and_then(commit_object_id),
     }
+}
+
+/// The raw Git object id of `commit`, or `None` when its text is not one.
+fn commit_object_id(commit: &GitCommitRef) -> Option<Vec<u8>> {
+    let algorithm = match commit.as_str().len() {
+        40 => GitHashAlgorithm::Sha1,
+        64 => GitHashAlgorithm::Sha256,
+        _ => return None,
+    };
+    NativeOid::from_hex(algorithm, commit.as_str())
+        .ok()
+        .map(|oid| oid.as_bytes().to_vec())
 }
 
 /// Pins the selected `std` package to its retained source snapshot. A project
@@ -86,6 +108,7 @@ mod tests {
             identity(),
             RuntimeMode::Serve,
             StdSnapshotPin::Unpinned,
+            None,
         );
         let adapter = ApplicationLiveAdapter::new(
             ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default())

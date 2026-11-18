@@ -167,5 +167,6 @@ pub(crate) fn pure_sys_host_context(
         identity,
         RuntimeMode::Run,
         std_snapshot,
+        repository.head().ok().flatten().as_ref(),
     ))
 }

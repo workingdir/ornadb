@@ -95,10 +95,10 @@ pub use checkout::{
 #[cfg(test)]
 pub(crate) use commit::{AcceptAllAssertions, AcceptAllCheckoutAssertions};
 pub use commit::{
-    CandidateAssertionGate, CandidateAssertionRefusal, CheckoutAssertionGate, CommitIdentity,
-    CommitStamp, CommittedBranch, CommittedLogEntry, CommittedRevisionSnapshot, CommittedTreeEntry,
-    CommittedTreeEntryKind, GitCommitRef, IndexTreeRef, ManagedFileChange, PrivateCommit,
-    ReviewedCandidateReview,
+    BranchUpstream, CandidateAssertionGate, CandidateAssertionRefusal, CheckoutAssertionGate,
+    CommitIdentity, CommitStamp, CommittedBranch, CommittedLogEntry, CommittedRevisionSnapshot,
+    CommittedTreeEntry, CommittedTreeEntryKind, GitCommitRef, IndexTreeRef, ManagedFileChange,
+    PrivateCommit, ReviewedCandidateReview,
 };
 pub(crate) use commit::{
     MAX_COMMITTED_REVISION_WALK, commit_gate_refusal, reviewed_candidate_runtime_intent_id,
@@ -129,10 +129,10 @@ pub use format_context::{
 pub(crate) use git_command::{
     ConfigValue, GitListRecord, GitTreeRecord, PromisorReachability, git_command,
     git_command_at_root, git_command_in, git_stderr_indicates_malformed_object,
-    parse_committed_tree_entry, parse_git_bool, parse_remote_orna_refs, remote_ref_records,
-    require_native_object_id, run_bounded_listing, run_command, run_command_with_input,
-    scrub_git_routing_environment, trim_output, valid_branch_name, valid_native_object_id,
-    valid_orna_internal_ref, valid_remote_name,
+    parse_committed_branch, parse_committed_tree_entry, parse_git_bool, parse_remote_orna_refs,
+    remote_ref_records, require_native_object_id, run_bounded_listing, run_command,
+    run_command_with_input, scrub_git_routing_environment, trim_output, valid_branch_name,
+    valid_native_object_id, valid_orna_internal_ref, valid_remote_name,
 };
 #[cfg(test)]
 pub(crate) use git_command::{bind_git_ceiling_above, bind_git_discovery_to_worktree};

@@ -266,6 +266,12 @@ mod tests {
                 SysSingleton::Database,
             )),
             SystemSurfaceMember::Singleton(SysSingleton::Rt),
+            // Only `sys.git.branches` is served from the repository so far.
+            SystemSurfaceMember::GroupedHandle(SysGroupedHandle::GitRefs),
+            SystemSurfaceMember::GroupedHandle(SysGroupedHandle::GitCommits),
+            SystemSurfaceMember::GroupedHandle(SysGroupedHandle::GitTags),
+            SystemSurfaceMember::GroupedHandle(SysGroupedHandle::GitRemotes),
+            SystemSurfaceMember::GroupedHandle(SysGroupedHandle::GitStashes),
         ] {
             assert!(!linkage.is_linked(member), "{member:?}");
         }
@@ -279,6 +285,7 @@ mod tests {
             SystemSurfaceMember::Callable(SysFunction::BlobCaptureFile),
             SystemSurfaceMember::Relation(SysRelation::Storage),
             SystemSurfaceMember::GroupedHandle(SysGroupedHandle::CatalogTables),
+            SystemSurfaceMember::GroupedHandle(SysGroupedHandle::GitBranches),
         ] {
             assert!(linkage.is_linked(member), "{member:?}");
         }

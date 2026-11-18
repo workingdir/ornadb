@@ -952,8 +952,10 @@ fn new_serve_state(
     let std_snapshot = project
         .as_ref()
         .map_or(StdSnapshotPin::Unpinned, sys_host::std_snapshot_pin);
+    // A server outlives the commit it started at and pins no `HEAD` of its own,
+    // so the Git-state rows (`sys.git.branches`) fail closed here.
     let sys_host_context =
-        sys_host::sys_host_context(&root, identity, RuntimeMode::Serve, std_snapshot);
+        sys_host::sys_host_context(&root, identity, RuntimeMode::Serve, std_snapshot, None);
     // Every Eval is one input to its session's REPL (30-protocol); the host
     // selects no application module for Eval admission.
     let mut application = ApplicationLiveAdapter::new(

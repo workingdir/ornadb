@@ -281,48 +281,37 @@ impl Repository {
             .any(|(metadata, named)| named == path.as_bytes() && !metadata.starts_with(b"040000 ")))
     }
 
-    /// Lists local branches in Git's ref order, bounded by `max_branches`.
+    /// Lists local branches in Git's ref order: the commit each names, the one
+    /// `HEAD` is attached to, and the upstream each tracks with how far the two
+    /// have diverged.
+    ///
+    /// One `for-each-ref` run observes the refs, the `HEAD` marker and the
+    /// ahead/behind counts together, so they describe one state. More than
+    /// `max_branches` branches is refused rather than served truncated.
     pub fn local_branches(
         &self,
         max_branches: usize,
     ) -> Result<Vec<CommittedBranch>, RepositoryError> {
-        if max_branches == 0 {
-            return Ok(Vec::new());
-        }
-
         let mut command = self.command();
         command
             .env("GIT_NO_LAZY_FETCH", "1")
+            // `%(upstream:track)` is untranslated plumbing text; the locale is
+            // pinned so no Git build can change what the listing parser reads.
+            .env("LC_ALL", "C")
             .args(["for-each-ref", "--count"])
-            .arg(max_branches.to_string())
-            .arg("--format=%(refname:strip=2)%00%(objectname)")
+            .arg(max_branches.saturating_add(1).to_string())
+            .arg(
+                "--format=%(HEAD)%00%(refname:strip=2)%00%(objectname)%00%(upstream)%00%(upstream:track)",
+            )
             .arg("refs/heads");
         let output = run_bounded_listing(command)?;
 
         let object_id_length = self.native_object_id_length()?;
-        let mut branches = Vec::new();
-        for record in output
+        let branches = output
             .split(|byte| *byte == b'\n')
             .filter(|record| !record.is_empty())
-        {
-            let separator = record
-                .iter()
-                .position(|byte| *byte == 0)
-                .ok_or(RepositoryError::GitOperationFailed)?;
-            let (name, object_id_with_separator) = record.split_at(separator);
-            let object_id = &object_id_with_separator[1..];
-            let name = String::from_utf8(name.to_vec())
-                .map_err(|_| RepositoryError::GitOperationFailed)?;
-            if !valid_branch_name(&name) {
-                return Err(RepositoryError::GitOperationFailed);
-            }
-            let object_id = String::from_utf8(object_id.to_vec())
-                .map_err(|_| RepositoryError::GitOperationFailed)?;
-            branches.push(CommittedBranch {
-                name,
-                commit: GitCommitRef::from_verified_commit(object_id, object_id_length)?,
-            });
-        }
+            .map(|record| parse_committed_branch(record, object_id_length))
+            .collect::<Result<Vec<_>, _>>()?;
         if branches.len() > max_branches {
             return Err(RepositoryError::GitOperationFailed);
         }
