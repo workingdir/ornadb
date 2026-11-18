@@ -10,10 +10,10 @@ use orna_sys::{
     PRESENTATION_PROTOCOL_VERSION, SUPPORTED_PROFILES, SYS_VERSION, StdSnapshotPin, SysEnum,
     SysFailureCode, SysHostContext,
 };
-use orna_value::{CanonicalSnapshot, CanonicalValue, GitHash, snapshot_reference};
-use orna_value::{OVB2_VERSION, enum_type_id, enum_variant_id};
+use orna_value::{CanonicalSnapshot, CanonicalValue, GitHash, OVB2_VERSION, snapshot_reference};
 
-use crate::{EvaluationError, TIMEZONE_DATASET_VERSION, Value, error, object_id_raw};
+use crate::source_enums::system_enum_value;
+use crate::{EvaluationError, TIMEZONE_DATASET_VERSION, Value, error};
 
 /// The host context one activation is attached with, together with the
 /// `sys.RuntimeInfo` record it determines. The record is computed once, when
@@ -86,14 +86,7 @@ pub(crate) fn runtime_info(context: &SysHostContext) -> Result<Value, Evaluation
         ("runtime", Value::Uuid(context.runtime_id)),
         (
             "mode",
-            Value::Enum {
-                type_id: object_id_raw(enum_type_id(SysEnum::RuntimeMode.name())),
-                variant_id: object_id_raw(enum_variant_id(
-                    SysEnum::RuntimeMode.name(),
-                    context.mode.label(),
-                )),
-                payload: None,
-            },
+            system_enum_value(SysEnum::RuntimeMode.name(), context.mode.label()),
         ),
         ("read_only", Value::Bool(context.read_only)),
         ("std_snapshot", std_snapshot_field(context)?),

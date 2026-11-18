@@ -551,6 +551,33 @@ pub fn stash_reference(
     )
 }
 
+/// The `sys.TreeEntryRef` of the entry `path` of the tree `tree`: the entry is keyed by
+/// its tree and its repository path.
+///
+/// # Errors
+///
+/// As [`SysRef::new`].
+pub fn tree_entry_reference(
+    database_id: [u8; 16],
+    snapshot: CanonicalSnapshot,
+    tree: GitObjectId,
+    path: impl Into<String>,
+) -> Result<SysRef, SystemReferenceError> {
+    let tree = git_object_reference(database_id, snapshot.clone(), tree)?.into_row_ref();
+    SysRef::new(
+        &relations::TREE_ENTRY,
+        database_id,
+        snapshot,
+        vec![
+            KeyPart::Reference(tree),
+            KeyPart::Path {
+                flavour: PathFlavour::Repo,
+                text: path.into(),
+            },
+        ],
+    )
+}
+
 /// The `sys.DatabaseRef` of the database `database_id`, pinned to `snapshot`.
 ///
 /// # Errors
