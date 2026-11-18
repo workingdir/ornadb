@@ -112,6 +112,13 @@ fn committed_project(directory: &TempDir, source: &str) -> PathBuf {
         &["init", root.to_str().expect("UTF-8 test path")],
     );
     assert_success(&init, "orna init");
+    // CI has no Git identity, and `orna commit` refuses to commit without one.
+    git(&root, &["config", "user.name", "Orna Test"]);
+    git(
+        &root,
+        &["config", "user.email", "orna-test@example.invalid"],
+    );
+    git(&root, &["config", "commit.gpgsign", "false"]);
     fs::write(root.join("main.orna"), source).expect("write main.orna");
     git(&root, &["add", "main.orna", ".orna/database.orna"]);
     let committed = orna(&root, &["commit", "-m", "Declare the project"]);
