@@ -551,6 +551,77 @@ pub fn stash_reference(
     )
 }
 
+/// The `sys.DatabaseRef` of the database `database_id`, pinned to `snapshot`.
+///
+/// # Errors
+///
+/// As [`SysRef::new`].
+pub fn database_reference(
+    database_id: [u8; 16],
+    snapshot: CanonicalSnapshot,
+) -> Result<SysRef, SystemReferenceError> {
+    SysRef::new(
+        &relations::DATABASE,
+        database_id,
+        snapshot,
+        vec![KeyPart::Uuid(database_id)],
+    )
+}
+
+/// The `sys.GitRepositoryRef` of the repository whose `database` row is `database`.
+///
+/// # Errors
+///
+/// As [`SysRef::new`].
+pub fn git_repository_reference(
+    database_id: [u8; 16],
+    snapshot: CanonicalSnapshot,
+    database: RowRef,
+) -> Result<SysRef, SystemReferenceError> {
+    SysRef::new(
+        &relations::GIT_REPOSITORY,
+        database_id,
+        snapshot,
+        vec![KeyPart::Reference(database)],
+    )
+}
+
+/// The `sys.WorktreeEntryRef` of the worktree entry at the repository-relative `path`.
+///
+/// # Errors
+///
+/// As [`SysRef::new`]; `path` must be a safe repository path.
+pub fn worktree_entry_reference(
+    database_id: [u8; 16],
+    snapshot: CanonicalSnapshot,
+    path: &str,
+) -> Result<SysRef, SystemReferenceError> {
+    SysRef::new(
+        &relations::WORKTREE_ENTRY,
+        database_id,
+        snapshot,
+        vec![KeyPart::Path {
+            flavour: PathFlavour::Repo,
+            text: path.to_owned(),
+        }],
+    )
+}
+
+/// The canonical `Path` value (tag 60024) of `text` in `flavour`, or `None` when the
+/// canonical encoding rejects `text` for that flavour: a repository path for
+/// [`PathFlavour::Repo`], a host path for [`PathFlavour::Posix`] and
+/// [`PathFlavour::Windows`].
+pub fn path_value(flavour: PathFlavour, text: &str) -> Option<CanonicalValue> {
+    CanonicalValue::new(OvbRaw::Tag(
+        PATH_TAG,
+        Box::new(OvbRaw::Array(vec![
+            OvbRaw::Text(flavour.as_str().to_owned()),
+            OvbRaw::Text(text.to_owned()),
+        ])),
+    ))
+    .ok()
+}
+
 /// The reference to the row of an object-keyed `relation` (`sys.Table`, `sys.Column`,
 /// `sys.Namespace`, ...) whose `object` is `object`, pinned to the object's own snapshot.
 ///
