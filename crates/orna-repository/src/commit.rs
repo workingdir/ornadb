@@ -125,11 +125,14 @@ pub(crate) fn split_committed_revision_record(record: &str) -> (&str, Option<&st
 /// an over-large `--limit` at the same coordinate.
 pub(crate) const MAX_COMMITTED_REVISION_WALK: usize = 4096;
 
-/// One local Git branch and the commit currently named by its ref.
+/// One local Git branch: the commit its ref names, whether `HEAD` is attached
+/// to it, and the upstream it tracks.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommittedBranch {
     pub(crate) name: String,
     pub(crate) commit: GitCommitRef,
+    pub(crate) current: bool,
+    pub(crate) upstream: Option<BranchUpstream>,
 }
 impl CommittedBranch {
     pub fn name(&self) -> &str {
@@ -138,6 +141,43 @@ impl CommittedBranch {
 
     pub fn commit(&self) -> &GitCommitRef {
         &self.commit
+    }
+
+    /// Whether `HEAD` is attached to this branch. A detached `HEAD` is attached
+    /// to none, even when it names the commit of a branch.
+    pub const fn is_current(&self) -> bool {
+        self.current
+    }
+
+    /// The upstream the branch tracks, when one is configured and its ref
+    /// exists. A configured upstream whose ref is gone is reported as none:
+    /// there is no ref to name and nothing to count against.
+    pub fn upstream(&self) -> Option<&BranchUpstream> {
+        self.upstream.as_ref()
+    }
+}
+
+/// The upstream ref a local branch tracks, and how the two have diverged.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchUpstream {
+    pub(crate) reference: String,
+    pub(crate) ahead: u64,
+    pub(crate) behind: u64,
+}
+impl BranchUpstream {
+    /// The full name of the upstream ref (`refs/remotes/origin/main`).
+    pub fn reference(&self) -> &str {
+        &self.reference
+    }
+
+    /// Commits the branch has that its upstream lacks.
+    pub const fn ahead(&self) -> u64 {
+        self.ahead
+    }
+
+    /// Commits the upstream has that the branch lacks.
+    pub const fn behind(&self) -> u64 {
+        self.behind
     }
 }
 

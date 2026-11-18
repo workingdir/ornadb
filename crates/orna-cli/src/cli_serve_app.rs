@@ -87,11 +87,14 @@ fn page_authority(
     catalogue: &orna_check::Catalogue,
     identity: RuntimeIdentity,
 ) -> ApplicationAuthority {
+    // A server outlives the commit it started at and pins no `HEAD` of its own,
+    // so the Git-state rows (`sys.git.branches`) fail closed here.
     let sys_host = crate::sys_host::sys_host_context(
         std::path::Path::new(root),
         identity,
         RuntimeMode::Serve,
         crate::sys_host::std_snapshot_pin(project),
+        None,
     );
     ApplicationAuthority::new(catalogue.clone(), Limits::default()).with_sys_host_context(sys_host)
 }

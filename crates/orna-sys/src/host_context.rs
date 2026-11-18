@@ -96,6 +96,13 @@ pub struct SysHostContext {
     pub storage_manifest_version: String,
     /// The standard library pin of the attached project; see [`StdSnapshotPin`].
     pub std_snapshot: StdSnapshotPin,
+    /// The raw Git object id (20 bytes for SHA-1, 32 for SHA-256) of the commit
+    /// `HEAD` named when the host attached: the snapshot every reference this
+    /// activation serves from the repository's Git state (`sys.git.branches`)
+    /// is pinned to, the same commit the catalogue rows are pinned to. `None`
+    /// when the repository has no readable commit, so no such reference can be
+    /// pinned and a read of those rows fails closed.
+    pub head_commit: Option<Vec<u8>>,
 }
 
 impl SysHostContext {
@@ -147,6 +154,7 @@ mod tests {
             repository_layout_version: "3".to_owned(),
             storage_manifest_version: "store-3".to_owned(),
             std_snapshot: StdSnapshotPin::Unpinned,
+            head_commit: None,
         }
     }
 

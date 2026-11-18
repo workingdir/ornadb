@@ -97,16 +97,16 @@ pub(crate) fn committed_catalogue_identities(
     catalogue_identities(&manifest, commit, database_id)
 }
 
-/// The identities committed at `HEAD`, or `None` when the repository has no
+/// The identities committed at `head`, or `None` when the repository has no
 /// commit or its inventory cannot be read. A run still executes then (bead
 /// ornadb-jm0d), and a catalogue read of a project with tables fails with
 /// `sys.snapshot.incomplete` instead of serving null references.
 pub(crate) fn head_catalogue_identities(
     repository: &Repository,
+    head: Option<&GitCommitRef>,
     database_id: [u8; 16],
 ) -> Option<CatalogueIdentities> {
-    let head = repository.head().ok().flatten()?;
-    committed_catalogue_identities(repository, &head, database_id).ok()
+    committed_catalogue_identities(repository, head?, database_id).ok()
 }
 
 /// `admitted` bound to the identities committed at `commit`. Identities that

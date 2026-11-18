@@ -408,6 +408,120 @@ pub(crate) fn parse_committed_tree_entry(
     Ok(CommittedTreeEntry { path, kind })
 }
 
+/// How a local branch has diverged from its upstream, as `for-each-ref` reports
+/// it in `%(upstream:track)`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum UpstreamTrack {
+    /// The upstream ref is missing, or its commit cannot be read: there is
+    /// nothing to count against.
+    Gone,
+    /// The branch has `ahead` commits its upstream lacks and the upstream has
+    /// `behind` commits the branch lacks.
+    Diverged { ahead: u64, behind: u64 },
+}
+
+/// Reads the text Git prints for `%(upstream:track)`: nothing when the branch
+/// is level with its upstream, `[gone]`, or `[ahead N]`, `[behind M]` or
+/// `[ahead N, behind M]` with each side printed only when it is nonzero. Any
+/// other text is not Git's and is refused.
+pub(crate) fn parse_upstream_track(track: &str) -> Option<UpstreamTrack> {
+    if track.is_empty() {
+        return Some(UpstreamTrack::Diverged {
+            ahead: 0,
+            behind: 0,
+        });
+    }
+    let inner = track.strip_prefix('[')?.strip_suffix(']')?;
+    if inner == "gone" {
+        return Some(UpstreamTrack::Gone);
+    }
+    let (mut ahead, mut behind) = (None, None);
+    for side in inner.split(", ") {
+        let (label, count) = side.split_once(' ')?;
+        let slot = match label {
+            "ahead" => &mut ahead,
+            "behind" => &mut behind,
+            _ => return None,
+        };
+        if slot.is_some() || count.is_empty() || !count.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        *slot = Some(count.parse::<u64>().ok()?);
+    }
+    Some(UpstreamTrack::Diverged {
+        ahead: ahead.unwrap_or(0),
+        behind: behind.unwrap_or(0),
+    })
+}
+
+/// Parses one record of the `for-each-ref` listing behind
+/// [`Repository::local_branches`]: the `HEAD` marker (`*` or a space), the
+/// branch name, its commit, its upstream ref and its upstream tracking text,
+/// NUL-separated. A record that does not have exactly that shape, or whose
+/// upstream fields contradict one another, is refused.
+pub(crate) fn parse_committed_branch(
+    record: &[u8],
+    object_id_length: usize,
+) -> Result<CommittedBranch, RepositoryError> {
+    let mut fields = record.split(|byte| *byte == 0);
+    let (Some(head), Some(name), Some(object_id), Some(upstream), Some(track), None) = (
+        fields.next(),
+        fields.next(),
+        fields.next(),
+        fields.next(),
+        fields.next(),
+        fields.next(),
+    ) else {
+        return Err(RepositoryError::GitOperationFailed);
+    };
+    let current = match head {
+        b"*" => true,
+        b" " => false,
+        _ => return Err(RepositoryError::GitOperationFailed),
+    };
+    let name = listing_text(name)?;
+    if !valid_branch_name(name) {
+        return Err(RepositoryError::GitOperationFailed);
+    }
+    let commit =
+        GitCommitRef::from_verified_commit(listing_text(object_id)?.to_owned(), object_id_length)?;
+    let track =
+        parse_upstream_track(listing_text(track)?).ok_or(RepositoryError::GitOperationFailed)?;
+    let upstream = match (listing_text(upstream)?, track) {
+        (
+            "",
+            UpstreamTrack::Diverged {
+                ahead: 0,
+                behind: 0,
+            },
+        )
+        | (_, UpstreamTrack::Gone) => None,
+        ("", UpstreamTrack::Diverged { .. }) => return Err(RepositoryError::GitOperationFailed),
+        (reference, UpstreamTrack::Diverged { ahead, behind }) => {
+            if !reference.starts_with("refs/") {
+                return Err(RepositoryError::GitOperationFailed);
+            }
+            Some(BranchUpstream {
+                reference: reference.to_owned(),
+                ahead,
+                behind,
+            })
+        }
+    };
+    Ok(CommittedBranch {
+        name: name.to_owned(),
+        commit,
+        current,
+        upstream,
+    })
+}
+
+/// One field of a `for-each-ref` listing as text; a listing that holds anything
+/// else is not one Git wrote.
+fn listing_text(bytes: &[u8]) -> Result<&str, RepositoryError> {
+    std::str::from_utf8(bytes).map_err(|_| RepositoryError::GitOperationFailed)
+}
+
 pub(crate) fn valid_native_object_id(object_id: &str) -> bool {
     matches!(object_id.len(), 40 | 64) && object_id.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
@@ -439,4 +553,147 @@ pub(crate) fn valid_branch_name(name: &str) -> bool {
                 || byte == 0x7f
                 || matches!(byte, b'~' | b'^' | b':' | b'?' | b'*' | b'[' | b'\\')
         })
+}
+
+#[cfg(test)]
+mod branch_listing_tests {
+    use super::{
+        BranchUpstream, RepositoryError, UpstreamTrack, parse_committed_branch,
+        parse_upstream_track,
+    };
+
+    const OID: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    fn diverged(ahead: u64, behind: u64) -> Option<UpstreamTrack> {
+        Some(UpstreamTrack::Diverged { ahead, behind })
+    }
+
+    #[test]
+    fn upstream_track_reads_exactly_the_text_git_prints() {
+        for (text, expected) in [
+            ("", diverged(0, 0)),
+            ("[gone]", Some(UpstreamTrack::Gone)),
+            ("[ahead 3]", diverged(3, 0)),
+            ("[behind 2]", diverged(0, 2)),
+            ("[ahead 3, behind 2]", diverged(3, 2)),
+            ("[ahead 18446744073709551615]", diverged(u64::MAX, 0)),
+        ] {
+            assert_eq!(parse_upstream_track(text), expected, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn upstream_track_refuses_text_git_does_not_print() {
+        for text in [
+            "ahead 3",
+            "[]",
+            "[ahead]",
+            "[ahead ]",
+            "[ahead +3]",
+            "[ahead -1]",
+            "[ahead 3,behind 2]",
+            "[ahead 3, ahead 4]",
+            "[sideways 3]",
+            "[gone, ahead 1]",
+            "[ahead 18446744073709551616]",
+        ] {
+            assert_eq!(parse_upstream_track(text), None, "{text:?}");
+        }
+    }
+
+    fn record(head: &str, name: &str, object_id: &str, upstream: &str, track: &str) -> Vec<u8> {
+        [head, name, object_id, upstream, track]
+            .join("\0")
+            .into_bytes()
+    }
+
+    #[test]
+    fn a_branch_record_carries_head_commit_and_upstream() {
+        let current = parse_committed_branch(&record("*", "main", OID, "", ""), 40)
+            .expect("a branch without an upstream");
+        assert_eq!(current.name(), "main");
+        assert_eq!(current.commit().as_str(), OID);
+        assert!(current.is_current());
+        assert_eq!(current.upstream(), None);
+
+        let tracking = parse_committed_branch(
+            &record(
+                " ",
+                "feature/x",
+                OID,
+                "refs/remotes/origin/feature/x",
+                "[ahead 3, behind 2]",
+            ),
+            40,
+        )
+        .expect("a branch with a diverged upstream");
+        assert_eq!(tracking.name(), "feature/x");
+        assert!(!tracking.is_current());
+        assert_eq!(
+            tracking.upstream(),
+            Some(&BranchUpstream {
+                reference: "refs/remotes/origin/feature/x".to_owned(),
+                ahead: 3,
+                behind: 2,
+            })
+        );
+
+        let level = parse_committed_branch(
+            &record(" ", "level", OID, "refs/remotes/origin/level", ""),
+            40,
+        )
+        .expect("a branch level with its upstream");
+        assert_eq!(
+            level.upstream().map(|up| (up.ahead(), up.behind())),
+            Some((0, 0))
+        );
+    }
+
+    #[test]
+    fn a_gone_upstream_is_no_upstream() {
+        let gone = parse_committed_branch(
+            &record("*", "main", OID, "refs/remotes/origin/main", "[gone]"),
+            40,
+        )
+        .expect("a branch whose upstream is gone");
+        assert_eq!(gone.upstream(), None);
+    }
+
+    #[test]
+    fn a_malformed_branch_record_is_refused() {
+        let cases: [(&str, Vec<u8>); 7] = [
+            ("too few fields", b"*\0main\0".to_vec()),
+            (
+                "too many fields",
+                [record("*", "main", OID, "", ""), b"\0".to_vec()].concat(),
+            ),
+            ("unknown HEAD marker", record("x", "main", OID, "", "")),
+            ("invalid branch name", record(" ", "a..b", OID, "", "")),
+            (
+                "upstream text without an upstream",
+                record(" ", "main", OID, "", "[ahead 1]"),
+            ),
+            (
+                "upstream that is not a ref",
+                record(" ", "main", OID, "origin/main", ""),
+            ),
+            (
+                "unreadable tracking text",
+                record(" ", "main", OID, "refs/remotes/origin/main", "[ahead]"),
+            ),
+        ];
+        for (what, bytes) in cases {
+            assert!(
+                matches!(
+                    parse_committed_branch(&bytes, 40),
+                    Err(RepositoryError::GitOperationFailed)
+                ),
+                "{what}"
+            );
+        }
+        assert!(matches!(
+            parse_committed_branch(&record(" ", "main", "0123", "", ""), 40),
+            Err(RepositoryError::InvalidObjectId)
+        ));
+    }
 }

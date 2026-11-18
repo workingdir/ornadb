@@ -169,6 +169,7 @@ mod tests {
             repository_layout_version: "3".to_owned(),
             storage_manifest_version: "store-3".to_owned(),
             std_snapshot,
+            head_commit: None,
         }
     }
 

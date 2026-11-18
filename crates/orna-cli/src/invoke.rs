@@ -170,17 +170,23 @@ pub(crate) fn run_project_invocation_with_arguments(
     })?;
     let std_snapshot = sys_host::std_snapshot_pin(&project);
     let table_object_ids = committed_table_object_ids(&repository, &project)?;
-    let catalogue_identities =
-        crate::catalogue_identities::head_catalogue_identities(&repository, identity.database_id);
+    // One read of `HEAD` binds the catalogue identities, the sys host's pin and
+    // the admitted snapshot to the same commit.
+    let head = repository.head().ok().flatten();
+    let catalogue_identities = crate::catalogue_identities::head_catalogue_identities(
+        &repository,
+        head.as_ref(),
+        identity.database_id,
+    );
     let committed_base = committed_base_reader(&repository, &project);
     // Admission is bound to the committed snapshot when there is one; a
     // repository with no commit yet runs from the worktree project, which is
     // what the seed test exercises (bead ornadb-jm0d).
-    let loaded_project = match repository.head() {
-        Ok(Some(head)) => orna_project::ProjectLoader::default()
-            .load_committed_snapshot(&repository, &head)
+    let loaded_project = match &head {
+        Some(head) => orna_project::ProjectLoader::default()
+            .load_committed_snapshot(&repository, head)
             .map_err(project_load_diagnostic)?,
-        _ => project.clone(),
+        None => project.clone(),
     };
     let project = execution_project(&loaded_project);
     let references = crate::stored_references::committed_stored_references(
@@ -208,6 +214,7 @@ pub(crate) fn run_project_invocation_with_arguments(
                     identity,
                     RuntimeMode::Run,
                     std_snapshot,
+                    head.as_ref(),
                 ))
                 .with_stored_references(references)
                 .with_catalogue_identities(catalogue_identities)
@@ -352,6 +359,7 @@ pub(crate) fn run_project_stream_invocation_with_project(
                     identity,
                     RuntimeMode::Run,
                     std_snapshot,
+                    repository.head().ok().flatten().as_ref(),
                 ))
                 .execute_project_stream(
                     &repository,

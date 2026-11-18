@@ -193,6 +193,7 @@ pub(crate) fn runtime_publication_metadata_rows(
         identity,
         RuntimeMode::Embedded,
         std_snapshot,
+        repository.head().ok().flatten().as_ref(),
     );
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()

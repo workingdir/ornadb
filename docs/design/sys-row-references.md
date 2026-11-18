@@ -83,3 +83,21 @@ objects are unavailable); only a project of no tables serves an empty catalogue 
 `sys.Column.type`, `sys.Table.key`, `storage`, `references` and `assertions` stay in their earlier form: their targets
 (`sys.Type`, `sys.Key`, `sys.Storage`, `sys.Reference`, `sys.Assertion`) are keyed by catalogue object identities that
 the committed inventory does not hold for builtin types, keys or storage.
+
+## The branch rows
+
+`sys.git.branches` is the first relation served from the repository's Git state. The evaluator
+(`orna-evaluator/src/git_branches.rs`) reads the local branches of the repository the host attached
+(`SysHostContext::root`, `Repository::local_branches`) and pins every reference to the commit the host attached at
+(`SysHostContext::head_commit`): the commit `HEAD` named when `orna run` or the REPL session bound its catalogue
+identities, so one activation carries one pin. A `sys.Branch` row exposes `reference` (`sys.BranchRef`, keyed by the
+branch name), `name`, `commit` (`sys.CommitRef` over the branch tip), `current` (the branch `HEAD` is attached to; a
+detached `HEAD` attaches to none), `upstream` (`sys.RefRef` of the full tracked ref name, for example
+`refs/remotes/origin/main`) and `ahead`/`behind` (commits the branch has that the upstream lacks, and the reverse).
+The three upstream fields are null together when the branch tracks nothing, and present together when it does,
+including `0` counts for a branch level with its upstream. An upstream configured but gone (its ref deleted or its
+commit unreadable) has no ref to name and nothing to count against, so it reads as no upstream. With no readable
+commit to pin to, a repository that has branches fails the read with `sys.snapshot.incomplete`; a repository with no
+branch (an unborn `HEAD`) serves an empty relation. Remote-tracking branches are refs, not rows of this relation;
+`sys.Ref.remote` and `sys.git.refs` carry them. `orna serve` pins no `HEAD` of its own, so the relation is not served
+there yet and fails closed with `sys.snapshot.incomplete`.
