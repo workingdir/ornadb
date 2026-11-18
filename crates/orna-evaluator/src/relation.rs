@@ -283,6 +283,10 @@ pub(super) struct RelationPlan {
     /// result remain a Relation<T> and replay safely through later operators.
     pub(super) source_values: Option<Arc<Vec<Value>>>,
     pub(super) stages: Vec<RelationStage>,
+    /// The exact row count of a source whose rows a host serves by cursor
+    /// rather than enumerates, so a presenter can state the count without
+    /// reading every row. `None` when the count is not known.
+    pub(super) known_rows: Option<usize>,
 }
 
 impl PartialEq for RelationPlan {
@@ -682,6 +686,23 @@ impl RelationStage {
             _ => None,
         }
     }
+
+    /// Whether this stage holds a callable value: a predicate, a transform, or
+    /// a sort key. Stages that hold only data hold none.
+    fn holds_callable(&self) -> bool {
+        let callable = |value: &Value| value.contains_callable(RelationPlan::holds_callable);
+        match self {
+            Self::Filter(predicates) => predicates.iter().any(callable),
+            Self::SharedFilter(batch) => batch.values().any(callable),
+            Self::Map(value) | Self::FlatMap(value) | Self::SortBy(value) => callable(value),
+            Self::BucketBy(_)
+            | Self::Distinct
+            | Self::Pairs
+            | Self::Window(..)
+            | Self::Drop(_)
+            | Self::Take(_) => false,
+        }
+    }
 }
 
 impl PartialEq for RelationStage {
@@ -815,7 +836,46 @@ impl RelationPlan {
             source_union: None,
             source_values: None,
             stages: Vec::new(),
+            known_rows: None,
         }
+    }
+
+    /// A plan over a host-served source whose `rows` rows are known without
+    /// enumerating them, so [`Self::exact_rows`] states the count.
+    pub(super) fn with_known_rows(source: String, rows: usize) -> Self {
+        Self {
+            known_rows: Some(rows),
+            ..Self::new(source)
+        }
+    }
+
+    /// The row count of this plan when it is known without enumerating the
+    /// rows: a materialized relation's length or a host-declared count of an
+    /// unfiltered source. `None` for unions and for any plan with stages.
+    pub(super) fn exact_rows(&self) -> Option<usize> {
+        if self.source_union.is_some() || !self.stages.is_empty() {
+            return None;
+        }
+        match &self.source_values {
+            Some(values) => Some(values.len()),
+            None => self.known_rows,
+        }
+    }
+
+    /// Whether a callable is pending anywhere in this plan: an inline source
+    /// value, either arm of a union, or a stage. A plan of plain sources with
+    /// data-only stages holds none, so a row carrying one stays a row.
+    pub(super) fn holds_callable(&self) -> bool {
+        let inline_values = self.source_values.as_ref().is_some_and(|values| {
+            values
+                .iter()
+                .any(|value| value.contains_callable(Self::holds_callable))
+        });
+        let union_arms = self
+            .source_union
+            .as_ref()
+            .is_some_and(|(left, right)| left.holds_callable() || right.holds_callable());
+        inline_values || union_arms || self.stages.iter().any(RelationStage::holds_callable)
     }
 
     pub(super) fn from_values(values: Vec<Value>) -> Self {
@@ -826,6 +886,7 @@ impl RelationPlan {
             source_union: None,
             source_values: Some(Arc::new(values)),
             stages: Vec::new(),
+            known_rows: None,
         }
     }
 
@@ -842,6 +903,7 @@ impl RelationPlan {
             source_union: Some((Box::new(left), Box::new(right))),
             source_values: None,
             stages: Vec::new(),
+            known_rows: None,
         }
     }
 

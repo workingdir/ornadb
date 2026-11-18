@@ -5,9 +5,9 @@
 "Portable opaque and contextual values": tag 60027, tag 60022 and the sentence "A finite relation may be encoded only
 after its complete bounded observation succeeds"; `source/15-system.md`, ORNA-SYS-009, ORNA-SYS-012, ORNA-SYS-021,
 ORNA-SYS-074 and ORNA-SYS-094; `source/13-presentation.md`, ORNA-PRES-001, ORNA-PRES-002 and ORNA-PRES-006).
-**Status:** the decision below is made and recorded; the `sys.GitOid` value it depends on is implemented
-([the `sys.GitOid` value](sys-row-references.md)); the lazy handle, the presentation summary and the `sys.git.commits`
-member are the next slice of the bead and are not implemented yet.
+**Status:** the decision below is made and implemented: the `sys.GitOid` value it depends on
+([the `sys.GitOid` value](sys-row-references.md)), the lazy `parents` handle, the presentation summary and the
+`sys.git.commits` member (slices 1 to 3 below).
 
 ## The problem
 
@@ -79,8 +79,8 @@ clauses and is an implementation decision, not a specified encoding.
 
 1. `sys.GitOid` value (done): `Value::GitOid` in `orna-evaluator` and `orna-exec`, the `orna-value` codec, REPL display
    and `$_`.
-2. Lazy handle and presentation summary: `git_rows::served_page` dispatches the `parents` sub-source;
-   `Value::canonical_repl_result` and the UI node materialisation summarise nested relations.
-3. `sys.git.commits`: a bounded `git log` reader in `orna-repository`, the `sys.Commit` rows in `orna-evaluator`
+2. Lazy handle and presentation summary (done): `git_rows::served_page` dispatches the `parents` sub-source;
+   `Value::canonical_repl_result` and the UI node property check summarise nested relations.
+3. `sys.git.commits` (done): a bounded `git log` reader in `orna-repository`, the `sys.Commit` rows in `orna-evaluator`
    (`reference`, `oid`, `snapshot`, `parents`, `author`, `committer`, `message`, `authored_at`, `committed_at`,
    `tree`), the `LINKED_GROUPED_HANDLES` entry in the `orna-sys-id` generator and the `git_rows::MEMBERS` entry.

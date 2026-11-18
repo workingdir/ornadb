@@ -537,6 +537,17 @@ pub(crate) fn listing_text(bytes: &[u8]) -> Result<&str, RepositoryError> {
     std::str::from_utf8(bytes).map_err(|_| RepositoryError::GitOperationFailed)
 }
 
+/// A Unix timestamp as Git prints it: decimal digits with an optional minus
+/// sign, nothing else (no plus sign, no spaces, no empty text).
+pub(crate) fn parse_unix_seconds(text: &str) -> Result<i64, RepositoryError> {
+    let digits = text.strip_prefix('-').unwrap_or(text);
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(RepositoryError::GitOperationFailed);
+    }
+    text.parse()
+        .map_err(|_| RepositoryError::GitOperationFailed)
+}
+
 pub(crate) fn valid_native_object_id(object_id: &str) -> bool {
     matches!(object_id.len(), 40 | 64) && object_id.bytes().all(|byte| byte.is_ascii_hexdigit())
 }

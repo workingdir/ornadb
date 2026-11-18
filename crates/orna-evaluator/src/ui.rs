@@ -312,8 +312,9 @@ pub(super) fn ui_property_type_matches(type_name: &str, value: &Value) -> bool {
 /// a Blob reference, so the property is checked through its skeleton with every
 /// well-formed ROV-3 reference replaced by null. Any other Blob form is refused
 /// here, as it was before a UI property could carry a Blob at all.
+/// A relation nested in a row is checked as its summary, which reads nothing.
 fn ui_property_is_canonical(value: &Value) -> Result<(), EvaluationError> {
-    let raw = value.raw()?;
+    let raw = value.raw_with(NestedRelations::Summarise)?;
     if !ui_blob_forms_are_references(&raw) {
         return Err(error("ORNA-EVAL-VALUE"));
     }

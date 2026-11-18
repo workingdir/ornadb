@@ -24,8 +24,20 @@ pub const DATABASE: [u8; 16] = [7; 16];
 /// Runs `git` in `directory` under a fixed identity with `input` on its standard
 /// input and returns its trimmed standard output.
 pub fn git_with_input(directory: &Path, arguments: &[&str], input: &str) -> String {
+    git_with_environment(directory, &[], arguments, input)
+}
+
+/// Runs `git` in `directory` under a fixed identity, with `environment` set for it and
+/// `input` on its standard input; returns its trimmed standard output.
+pub fn git_with_environment(
+    directory: &Path,
+    environment: &[(&str, &str)],
+    arguments: &[&str],
+    input: &str,
+) -> String {
     let mut child = Command::new("git")
         .current_dir(directory)
+        .envs(environment.iter().copied())
         .args([
             "-c",
             "user.name=orna-test",
