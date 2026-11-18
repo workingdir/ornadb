@@ -281,6 +281,7 @@ mod tests {
             SystemSurfaceMember::GroupedHandle(SysGroupedHandle::CatalogTables),
             SystemSurfaceMember::GroupedHandle(SysGroupedHandle::GitBranches),
             SystemSurfaceMember::GroupedHandle(SysGroupedHandle::GitCommits),
+            SystemSurfaceMember::GroupedHandle(SysGroupedHandle::GitObjects),
             SystemSurfaceMember::GroupedHandle(SysGroupedHandle::GitRefs),
             SystemSurfaceMember::GroupedHandle(SysGroupedHandle::GitRemotes),
             SystemSurfaceMember::GroupedHandle(SysGroupedHandle::GitRepositories),
