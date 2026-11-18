@@ -276,6 +276,7 @@ fn ui_value_type_name(value: &Value) -> String {
         Value::GitOid(_) => "std.git_oid".into(),
         Value::Reference(_) => "std.reference".into(),
         Value::TableReference(_) => "std.table_reference".into(),
+        Value::Path(_) => "std.path".into(),
         Value::Instant { .. } => "std.timestamp".into(),
         Value::Duration { .. } => "std.duration".into(),
         Value::Period { .. } => "std.period".into(),

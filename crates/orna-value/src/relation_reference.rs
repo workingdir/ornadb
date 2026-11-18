@@ -551,6 +551,21 @@ pub fn stash_reference(
     )
 }
 
+/// The canonical `Path` value (tag 60024) of `text` in `flavour`, or `None` when the
+/// canonical encoding rejects `text` for that flavour: a repository path for
+/// [`PathFlavour::Repo`], a host path for [`PathFlavour::Posix`] and
+/// [`PathFlavour::Windows`].
+pub fn path_value(flavour: PathFlavour, text: &str) -> Option<CanonicalValue> {
+    CanonicalValue::new(OvbRaw::Tag(
+        PATH_TAG,
+        Box::new(OvbRaw::Array(vec![
+            OvbRaw::Text(flavour.as_str().to_owned()),
+            OvbRaw::Text(text.to_owned()),
+        ])),
+    ))
+    .ok()
+}
+
 /// The reference to the row of an object-keyed `relation` (`sys.Table`, `sys.Column`,
 /// `sys.Namespace`, ...) whose `object` is `object`, pinned to the object's own snapshot.
 ///
