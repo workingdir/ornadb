@@ -59,6 +59,7 @@ mod types;
 pub use types::*;
 mod catalogue;
 pub use catalogue::*;
+pub mod catalogue_rows;
 mod scope;
 pub(crate) use scope::*;
 mod std_support;

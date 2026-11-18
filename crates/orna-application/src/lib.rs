@@ -7,6 +7,7 @@
 //! activation context and is never published by this crate.
 
 use num_bigint::BigInt;
+use orna_check::catalogue_rows::{catalogue_column_rows, catalogue_table_rows};
 use orna_check::{
     Analysis, Catalogue, DIAG_AMBIGUOUS, DIAG_IMPORT, ModuleInput, Namespace,
     StandardCatalogueError, StandardDependencyProfile, SystemProviders, TableSchema,
@@ -18,7 +19,7 @@ use orna_evaluator::{
     Ovb2EffectHandler, PureFunction, RelationPage, ReplSession, StandardLayer, StepBudget,
     SysHostAttachment, SysHostBindingRegistry, SysHostContext, invoke_named,
     invoke_named_with_effects, invoke_named_with_sys_host_context, module_function_alias_key,
-    reference_standard_profile, reference_standard_sources,
+    page_precomputed_rows, reference_standard_profile, reference_standard_sources,
 };
 use orna_live::{
     Error as LiveError, FirstPartyEffectTrust, LiveAdminEffectDispatcher, LiveApplication,
@@ -1444,200 +1445,6 @@ const SYS_CATALOGUE_TABLES_SOURCE: &str = SysGroupedHandle::CatalogTables.name()
 /// The grouped handle that serves the admitted column catalogue.
 const SYS_CATALOGUE_COLUMNS_SOURCE: &str = SysGroupedHandle::CatalogColumns.name();
 
-/// Builds a canonical record from named fields.
-///
-/// OVB orders map keys by their complete encoded form, and
-/// `CanonicalValue::new` validates that order instead of sorting, so the keys
-/// are sorted by encoded bytes here (see `Value::Record`'s raw conversion).
-fn catalogue_map(fields: Vec<(&str, OvbRaw)>) -> OvbRaw {
-    let mut encoded = fields
-        .into_iter()
-        .map(|(key, value)| {
-            let bytes = CanonicalValue::new(OvbRaw::Text(key.to_owned()))
-                .expect("text key is canonical")
-                .encode()
-                .expect("text key encodes");
-            (bytes, key, value)
-        })
-        .collect::<Vec<_>>();
-    encoded.sort_by(|(left, _, _), (right, _, _)| left.cmp(right));
-    OvbRaw::Map(
-        encoded
-            .into_iter()
-            .map(|(_, key, value)| (OvbRaw::Text(key.to_owned()), value))
-            .collect(),
-    )
-}
-
-/// `sys.Column` rows for every column of every admitted table.
-///
-/// A column carries its table, its declaration position, its type, whether it
-/// is optional and its key position when it is a key column. Object and
-/// expression references stay null until the engine holds per-column
-/// identities.
-fn catalogue_column_rows(tables: &BTreeMap<String, TableSchema>) -> Vec<CanonicalValue> {
-    let mut rows = Vec::new();
-    for (table, schema) in tables {
-        for (position, column) in schema.declaration_order.iter().enumerate() {
-            let ty = schema.fields.get(column);
-            let optional = matches!(ty, Some(orna_check::Type::Optional(_)));
-            let key_position = schema
-                .admission
-                .as_ref()
-                .and_then(|admission| admission.keys.iter().position(|(key, _)| key == column))
-                .map(|index| OvbRaw::Int(index.into()))
-                .unwrap_or(OvbRaw::Null);
-            let record = catalogue_map(vec![
-                ("default_expression", OvbRaw::Null),
-                ("key_position", key_position),
-                ("name", OvbRaw::Text(column.clone())),
-                ("object", OvbRaw::Null),
-                ("optional", OvbRaw::Bool(optional)),
-                ("position", OvbRaw::Int(position.into())),
-                ("reference", OvbRaw::Null),
-                ("table", OvbRaw::Text(table.clone())),
-                (
-                    "type",
-                    ty.map(|ty| OvbRaw::Text(format!("{ty:?}")))
-                        .unwrap_or(OvbRaw::Null),
-                ),
-            ]);
-            rows.push(CanonicalValue::new(record).expect("catalogue column is a canonical record"));
-        }
-    }
-    rows
-}
-
-/// Pages over pre-built catalogue rows, using the row index as the cursor.
-fn catalogue_tables_page(
-    rows: &[CanonicalValue],
-    after: Option<&[u8]>,
-    limit: usize,
-    budget: &mut StepBudget,
-) -> Result<RelationPage, EvaluationError> {
-    let start = match after {
-        None => 0,
-        Some(cursor) => {
-            let bytes: [u8; 8] = cursor
-                .try_into()
-                .map_err(|_| catalogue_error("ORNA-EVAL-VALUE"))?;
-            usize::try_from(u64::from_be_bytes(bytes))
-                .map_err(|_| catalogue_error("ORNA-EVAL-VALUE"))?
-        }
-    };
-    if start > rows.len() {
-        return Err(catalogue_error("ORNA-EVAL-VALUE"));
-    }
-    let end = start.saturating_add(limit).min(rows.len());
-    budget.debit(u64::try_from(end - start).map_err(|_| catalogue_error("ORNA-EVAL-LIMIT"))?)?;
-    Ok(RelationPage {
-        rows: rows[start..end].to_vec(),
-        next: (end < rows.len()).then(|| (end as u64).to_be_bytes().to_vec()),
-    })
-}
-
-fn catalogue_error(code: &'static str) -> EvaluationError {
-    EvaluationError::redacted(SafeText::new(code).expect("static safe code"))
-}
-
-/// `sys.Table` rows for every admitted table, in name order.
-///
-/// `columns` follow the declaration order, `key` comes from the admission
-/// metadata and `references` from the resolved stored references. `row_count`
-/// stays null and `row_count_exact` false until an exact count is held, which
-/// the spec's nullable `Int` and `Bool` allow.
-fn catalogue_table_rows(
-    tables: &BTreeMap<String, TableSchema>,
-    table_object_ids: &BTreeMap<String, TableObjectId>,
-) -> Vec<CanonicalValue> {
-    let mut rows = Vec::new();
-    for (name, schema) in tables {
-        // The committed table identity is both the catalogue object and the
-        // definition: it is the only rename-stable per-table UUID in committed
-        // metadata (ORNA-OBJECT-002), and ORNA-OBJECT-003 forbids a rename
-        // changing it. Deriving the definition from the qualified name would
-        // break that.
-        let identity = table_object_ids
-            .get(name)
-            .map(|id| OvbRaw::Bytes(id.bytes().to_vec()))
-            .unwrap_or(OvbRaw::Null);
-        let object = identity.clone();
-        let definition = identity;
-        let columns = OvbRaw::Array(
-            schema
-                .declaration_order
-                .iter()
-                .enumerate()
-                .map(|(position, column)| {
-                    let ty = schema
-                        .fields
-                        .get(column)
-                        .map(|ty| OvbRaw::Text(format!("{ty:?}")))
-                        .unwrap_or(OvbRaw::Null);
-                    catalogue_map(vec![
-                        ("name", OvbRaw::Text(column.clone())),
-                        ("position", OvbRaw::Int(position.into())),
-                        ("ty", ty),
-                    ])
-                })
-                .collect(),
-        );
-        let keys = OvbRaw::Array(
-            schema
-                .admission
-                .as_ref()
-                .map(|admission| {
-                    admission
-                        .keys
-                        .iter()
-                        .map(|(key, ty)| {
-                            catalogue_map(vec![
-                                ("name", OvbRaw::Text(key.clone())),
-                                ("ty", OvbRaw::Text(format!("{ty:?}"))),
-                            ])
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
-        );
-        let references = OvbRaw::Array(
-            schema
-                .references
-                .iter()
-                .map(|reference| {
-                    catalogue_map(vec![
-                        ("from_column", OvbRaw::Text(reference.from_column.clone())),
-                        (
-                            "on_delete",
-                            OvbRaw::Text(format!("{:?}", reference.on_delete)),
-                        ),
-                        (
-                            "on_rekey",
-                            OvbRaw::Text(format!("{:?}", reference.on_rekey)),
-                        ),
-                        ("optional", OvbRaw::Bool(reference.optional)),
-                        ("to_table", OvbRaw::Text(reference.to_table.clone())),
-                    ])
-                })
-                .collect(),
-        );
-        let record = catalogue_map(vec![
-            ("assertions", OvbRaw::Array(Vec::new())),
-            ("columns", columns),
-            ("definition", definition),
-            ("key", keys),
-            ("name", OvbRaw::Text(name.clone())),
-            ("object", object),
-            ("references", references),
-            ("row_count", OvbRaw::Null),
-            ("row_count_exact", OvbRaw::Bool(false)),
-            ("storage", OvbRaw::Null),
-        ]);
-        rows.push(CanonicalValue::new(record).expect("catalogue row is a canonical record"));
-    }
-    rows
-}
-
 /// Lowers admitted source table effects into validated runtime mutations.
 ///
 /// Every effect argument vector is evaluated exactly once by the evaluator
@@ -2655,7 +2462,7 @@ impl EffectHandler for AsyncSourceMutationEffectHandler {
             }));
         }
         if source == SYS_CATALOGUE_TABLES_SOURCE {
-            return Ok(Some(catalogue_tables_page(
+            return Ok(Some(page_precomputed_rows(
                 &self.mutations.catalogue_tables,
                 after,
                 limit,
@@ -2663,7 +2470,7 @@ impl EffectHandler for AsyncSourceMutationEffectHandler {
             )?));
         }
         if source == SYS_CATALOGUE_COLUMNS_SOURCE {
-            return Ok(Some(catalogue_tables_page(
+            return Ok(Some(page_precomputed_rows(
                 &self.mutations.catalogue_columns,
                 after,
                 limit,
@@ -3053,7 +2860,7 @@ impl EffectHandler for SourceMutationEffectHandler {
                 .map(Some);
         }
         if source == SYS_CATALOGUE_TABLES_SOURCE {
-            return Ok(Some(catalogue_tables_page(
+            return Ok(Some(page_precomputed_rows(
                 &self.catalogue_tables,
                 after,
                 limit,
@@ -3061,7 +2868,7 @@ impl EffectHandler for SourceMutationEffectHandler {
             )?));
         }
         if source == SYS_CATALOGUE_COLUMNS_SOURCE {
-            return Ok(Some(catalogue_tables_page(
+            return Ok(Some(page_precomputed_rows(
                 &self.catalogue_columns,
                 after,
                 limit,

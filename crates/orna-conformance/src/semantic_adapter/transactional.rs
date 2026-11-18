@@ -28,6 +28,7 @@ pub struct TransactionalEvaluator {
     pub(super) explain_catalogue: Option<ActivationExplainCatalogue>,
     pub(super) admission: AdmissionCatalogue,
     pub(super) stored_references: Option<std::sync::Arc<orna_project::ReferenceCatalogue>>,
+    pub(super) table_object_ids: BTreeMap<String, [u8; 16]>,
 }
 
 /// Catalogue that admission checks user modules against. `Production` is the
@@ -66,6 +67,7 @@ impl TransactionalEvaluator {
             sys_host: None,
             explain_catalogue: None,
             stored_references: None,
+            table_object_ids: BTreeMap::new(),
         }
     }
 
@@ -86,6 +88,16 @@ impl TransactionalEvaluator {
 
     pub(super) fn with_publication_rows(mut self, rows: RuntimePublicationMetadataRows) -> Self {
         self.publication_rows = Some(rows);
+        self
+    }
+
+    /// Supplies the committed table identities the `sys.catalog.tables` rows
+    /// carry. Without them the identity fields are null.
+    pub(super) fn with_table_object_ids(mut self, ids: &BTreeMap<String, TableObjectId>) -> Self {
+        self.table_object_ids = ids
+            .iter()
+            .map(|(name, id)| (name.clone(), id.bytes()))
+            .collect();
         self
     }
 
@@ -261,7 +273,10 @@ impl TransactionalEvaluator {
             table_assertions,
             module_assertions,
             nominal_definitions,
+            table_schemas,
         } = admitted;
+        let catalogue_tables = catalogue_table_rows(table_schemas, &self.table_object_ids);
+        let catalogue_columns = catalogue_column_rows(table_schemas);
         let entry = self.entry.clone();
         let limits = self.limits;
         let mut mutations = Vec::new();
@@ -281,6 +296,8 @@ impl TransactionalEvaluator {
                 sys_host: self.sys_host.as_deref(),
                 explain_catalogue: self.explain_catalogue.as_ref(),
                 references: self.stored_references.as_deref(),
+                catalogue_tables: &catalogue_tables,
+                catalogue_columns: &catalogue_columns,
             };
             let mut budget = StepBudget::new(limits.max_steps);
             let result = invoke_named_with_effects_nominals_and_budget(

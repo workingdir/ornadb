@@ -18,6 +18,8 @@ pub(super) struct TableEffectHandler<'activation, 'runtime> {
     pub(super) sys_host: Option<&'activation SysHostAttachment>,
     pub(super) explain_catalogue: Option<&'activation ActivationExplainCatalogue>,
     pub(super) references: Option<&'activation orna_project::ReferenceCatalogue>,
+    pub(super) catalogue_tables: &'activation [CanonicalValue],
+    pub(super) catalogue_columns: &'activation [CanonicalValue],
 }
 
 impl EffectHandler for TableEffectHandler<'_, '_> {
@@ -37,6 +39,13 @@ impl EffectHandler for TableEffectHandler<'_, '_> {
                 rows: Vec::new(),
                 next: None,
             }));
+        }
+        if let Some(rows) = match source {
+            name if name == SysGroupedHandle::CatalogTables.name() => Some(self.catalogue_tables),
+            name if name == SysGroupedHandle::CatalogColumns.name() => Some(self.catalogue_columns),
+            _ => None,
+        } {
+            return page_precomputed_rows(rows, after, max_rows, budget).map(Some);
         }
         if let Some(row) = match (source, self.publication_rows.as_ref()) {
             (name, Some(rows)) if name == SysRelation::Storage.name() => Some(&rows.sys_storage),

@@ -57,6 +57,9 @@ pub(super) struct AdmittedTransaction {
     pub(super) module_assertions: ModuleAssertions,
     /// Construction plans of the admitted source enums (ORNA-ENUM-001..003).
     pub(super) nominal_definitions: NominalDefinitions,
+    /// Admitted table schemas keyed by the name each table is addressed by.
+    /// They build the `sys.catalog.tables` and `sys.catalog.columns` rows.
+    pub(super) table_schemas: BTreeMap<String, TableSchema>,
 }
 
 pub(super) type AdmissionFailure = Box<StageOutcome<Diagnostic>>;
@@ -134,6 +137,7 @@ pub(super) fn admit_transaction_source_inner(
         table_assertions,
         module_assertions,
         nominal_definitions,
+        table_schemas: _,
     } = admitted;
     if let Err(error) = limits.check_items(functions.len()) {
         return Err(Box::new(StageOutcome::Failed(error.diagnostic().clone())));
@@ -151,6 +155,7 @@ pub(super) fn admit_transaction_source_inner(
         table_assertions,
         module_assertions,
         nominal_definitions,
+        table_schemas: admitted_table_schemas_by_name(&analysis),
     })
 }
 
@@ -267,6 +272,7 @@ pub(super) fn admit_transaction_project_with(
             table_assertions: module_assertions_by_table,
             module_assertions: module_assertions_only,
             nominal_definitions: module_nominal_definitions,
+            table_schemas: _,
         } = module;
         if let Err(error) = limits.check_items(module_functions.len()) {
             return Err(Box::new(StageOutcome::Failed(error.diagnostic().clone())));
@@ -352,6 +358,7 @@ pub(super) fn admit_transaction_project_with(
         table_assertions,
         module_assertions,
         nominal_definitions,
+        table_schemas: admitted_table_schemas_by_name(&analysis),
     })
 }
 

@@ -239,6 +239,8 @@ fn table_effect_handler_scan_relation_page_advances_integer_cursors() {
                 sys_host: None,
                 explain_catalogue: None,
                 references: None,
+                catalogue_tables: &[],
+                catalogue_columns: &[],
             };
             let mut budget = StepBudget::new(limits.max_steps);
 
@@ -589,6 +591,8 @@ fn typed_composite_scan_orders_components_and_rejects_invalid_cursors() {
                 sys_host: None,
                 explain_catalogue: None,
                 references: None,
+                catalogue_tables: &[],
+                catalogue_columns: &[],
             };
             let mut budget = StepBudget::new(limits.max_steps);
             let first = handler
@@ -783,6 +787,8 @@ fn admitted_rehydration_keeps_typed_composite_order_for_staged_scan() {
                 sys_host: None,
                 explain_catalogue: None,
                 references: None,
+                catalogue_tables: &[],
+                catalogue_columns: &[],
             };
             let mut budget = StepBudget::new(limits.max_steps);
             let first = handler
