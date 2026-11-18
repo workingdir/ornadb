@@ -249,48 +249,30 @@ mod tests {
         }
     }
 
-    // When the draft compatibility archive is readable, every inline golden
-    // value must equal its `stored_reference_cbor` and `length` in the archive's
-    // `Orna-1.1.0/tests/blob-vectors.json`. The archive lives outside the
-    // checkout, so its location comes from `ORNA_DRAFT_ZIP` (set it to
-    // `reference/Orna-1.1.0/compatibility/previous-1.1.0-draft.zip`). When it is
-    // unset or unreadable the test prints a SKIPPED line and returns, unless
-    // `ORNA_REQUIRE_DRAFT_ZIP=1` is set (evidence mode), which makes it fail.
+    // Every inline golden value must equal its `stored_reference_cbor` and
+    // `length` in the previous-draft authoring bundle's
+    // `Orna-1.1.0/tests/blob-vectors.json`. That member is vendored byte-for-byte
+    // under `tests/fixtures/compatibility/`, extracted from
+    // `crates/orna-conformance/tests/fixtures/reference/compatibility/previous-1.1.0-draft.zip`
+    // (zip SHA-256 096273779e0ce773ef5ede4eb9b1fe0af4817776fb78097fb58fadb366449e59).
+    // The test is unconditional: it pins the member's SHA-256 and compares it.
     #[test]
-    fn inline_golden_vectors_match_draft_zip_when_readable() {
-        let require = std::env::var_os("ORNA_REQUIRE_DRAFT_ZIP").is_some_and(|v| v == "1");
-        let Some(zip) = std::env::var_os("ORNA_DRAFT_ZIP") else {
-            assert!(
-                !require,
-                "ORNA_REQUIRE_DRAFT_ZIP=1 but ORNA_DRAFT_ZIP is unset"
-            );
-            eprintln!("SKIPPED draft golden comparison: ORNA_DRAFT_ZIP not set");
-            return;
-        };
-        let output = match std::process::Command::new("unzip")
-            .arg("-p")
-            .arg(&zip)
-            .arg("Orna-1.1.0/tests/blob-vectors.json")
-            .output()
-        {
-            Ok(output) if output.status.success() => output,
-            _ => {
-                assert!(
-                    !require,
-                    "ORNA_REQUIRE_DRAFT_ZIP=1 but draft zip unreadable: {zip:?}"
-                );
-                eprintln!("SKIPPED draft golden comparison: draft zip not readable at {zip:?}");
-                return;
-            }
-        };
+    fn inline_golden_vectors_match_vendored_draft_blob_vectors() {
+        use sha2::Digest;
+        const VENDORED: &str =
+            include_str!("../tests/fixtures/compatibility/previous-1.1.0-draft-blob-vectors.json");
+        const VENDORED_SHA256: &str =
+            "0a12fd87250433644ccbf3c88fb0c0495c4f6832c691bfc08dd61f7b794df8bb";
+        let digest: [u8; 32] = sha2::Sha256::digest(VENDORED.as_bytes()).into();
+        assert_eq!(digest.to_vec(), decode_bytes(VENDORED_SHA256));
         let doc: serde_json::Value =
-            serde_json::from_slice(&output.stdout).expect("blob-vectors.json parses");
+            serde_json::from_str(VENDORED).expect("blob-vectors.json parses");
         let vectors = doc["vectors"].as_array().expect("vectors array");
         for (name, encoded, length) in GOLDEN {
             let vector = vectors
                 .iter()
                 .find(|v| v["name"] == *name)
-                .unwrap_or_else(|| panic!("{name}: missing in draft zip"));
+                .unwrap_or_else(|| panic!("{name}: missing in vendored draft vectors"));
             assert_eq!(
                 vector["stored_reference_cbor"].as_str(),
                 Some(*encoded),
