@@ -77,6 +77,7 @@ mod tags;
 #[cfg(test)]
 pub(crate) mod test_support;
 mod transport;
+mod tree_listing;
 mod wire;
 
 pub use adapter::{OrnaRepositoryAdapter, OrnaRepositoryAdapterError};
@@ -199,6 +200,7 @@ pub use row_store::{
 pub use stashes::CommittedStash;
 pub use tags::{CommittedTag, GitPerson, TagAnnotation};
 pub use transport::{FetchError, FetchReport, FetchRequest, FetchedRef, PushRequest, RequestedRef};
+pub use tree_listing::CommittedTreeListingEntry;
 
 /// A normal Git repository and its selected worktree.
 ///

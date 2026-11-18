@@ -87,10 +87,10 @@ the committed inventory does not hold for builtin types, keys or storage.
 ## The branch rows
 
 `sys.git.branches` is the first relation served from the repository's Git state; `sys.git.tags`, `sys.git.remotes`,
-`sys.git.refs` and `sys.git.stashes` follow it, below. The evaluator reads the repository the host attached itself
-(`SysHostContext::root`) and `orna-evaluator/src/git_rows.rs` holds what the five members share: the pin, the failure
-when the repository or the pin is unavailable, and the pages (ordered by a key the member names: a name, or the index
-of a stash). `orna-evaluator/src/git_branches.rs` reads the local branches
+`sys.git.refs`, `sys.git.stashes` and `sys.git.tree_entries` follow it, below. The evaluator reads the repository the host attached itself
+(`SysHostContext::root`) and `orna-evaluator/src/git_rows.rs` holds what the members share: the pin, the failure
+when the repository or the pin is unavailable, and the pages (ordered by a key the member names: a name, the index
+of a stash, or a path). `orna-evaluator/src/git_branches.rs` reads the local branches
 (`Repository::local_branches`) and pins every reference to the commit the host attached at
 (`SysHostContext::head_commit`): the commit `HEAD` named when `orna run` or the REPL session bound its catalogue
 identities, so one activation carries one pin. A `sys.Branch` row exposes `reference` (`sys.BranchRef`, keyed by the
@@ -241,3 +241,11 @@ index and not by the spelling of the number). A repository with no stash serves 
 A record that does not have the shape Git writes, an object id of the wrong width, a time that is not a number, text
 that is not UTF-8, a stash commit Git cannot read, more than 10,000 entries or a listing past the 4 MiB bound of a Git
 listing fails the read with `sys.snapshot.incomplete`; so does the absence of the commit pin the references need.
+
+## The tree entry rows
+
+`sys.git.tree_entries` serves one `sys.TreeEntry` row per entry of the root tree of the commit the host attached at, at every depth: a directory is a row of its own and so are the entries under it, so the relation holds what `git ls-tree -r -t` lists. The rows order by the bytes of their path relative to the root tree, and the cursor of a page is the path of its last row. `reference` is a `sys.TreeEntryRef` keyed by the tree and the path; `tree` (the root tree) and `object` (the blob, subtree or submodule commit the entry names) are `sys.GitObjectRef`s; all three are pinned to that commit. `path` is a `Path` in the `repo` flavour (tag 60024, built by `path_value` in `orna-value`), relative to the root tree; `mode` is the mode Git records as an `Int` (`100644` is 33188, `100755` is 33261, a directory's `040000` is 16384); `kind` is the `sys.GitObjectKind` variant of the object: `blob`, `tree`, `commit` (a submodule) or `tag`.
+
+Every page lists the root tree again and serves at most `PAGE_ROWS` (256) rows after its cursor, unless the caller's limit asks for more, so a scan of n pages reads the tree n times. Any failure to list the tree refuses every page with `sys.snapshot.incomplete`: a tree of more than 100,000 entries (`MAX_TREE_ENTRIES`), a listing past the 4 MiB bound of a Git listing (`MAX_LISTING_BYTES`), a path that is not UTF-8, a mode Git does not write, a kind outside the closed set, or an object id of the wrong width. A path the `repo` flavour refuses fails only the page that serves its row, with the same code.
+
+Without a commit pin the relation refuses with `sys.snapshot.incomplete`, as does a host with no repository attached at its root. The one exception is an unborn `HEAD` with no commit pin: it names no commit, so there is no tree, and the relation serves no rows and needs no pin. A page of no rows reads nothing and pins nothing.

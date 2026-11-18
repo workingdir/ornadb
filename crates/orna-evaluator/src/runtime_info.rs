@@ -10,9 +10,9 @@ use orna_sys::{
     PRESENTATION_PROTOCOL_VERSION, SUPPORTED_PROFILES, SYS_VERSION, StdSnapshotPin, SysEnum,
     SysFailureCode, SysHostContext,
 };
-use orna_value::{CanonicalSnapshot, CanonicalValue, GitHash, snapshot_reference};
-use orna_value::{OVB2_VERSION, Raw};
+use orna_value::{CanonicalSnapshot, CanonicalValue, GitHash, OVB2_VERSION, snapshot_reference};
 
+use crate::source_enums::system_enum_value;
 use crate::{EvaluationError, TIMEZONE_DATASET_VERSION, Value, error};
 
 /// The host context one activation is attached with, together with the
@@ -86,11 +86,7 @@ pub(crate) fn runtime_info(context: &SysHostContext) -> Result<Value, Evaluation
         ("runtime", Value::Uuid(context.runtime_id)),
         (
             "mode",
-            Value::Enum {
-                type_id: Raw::Text(SysEnum::RuntimeMode.name().to_owned()),
-                variant_id: Raw::Text(context.mode.label().to_owned()),
-                payload: None,
-            },
+            system_enum_value(SysEnum::RuntimeMode.name(), context.mode.label()),
         ),
         ("read_only", Value::Bool(context.read_only)),
         ("std_snapshot", std_snapshot_field(context)?),

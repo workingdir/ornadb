@@ -4499,11 +4499,11 @@ const LINKED_RELATIONS: [(&str, &str); 3] = [
 ];
 
 /// Grouped handles bound by a production host. `sys.git.branches`,
-/// `sys.git.commits`, `sys.git.refs`, `sys.git.remotes`, `sys.git.stashes` and
-/// `sys.git.tags` are read from the attached repository by the evaluator
-/// (`sys.Branch`, `sys.Commit`, `sys.Ref`, `sys.Remote`, `sys.Stash` and
-/// `sys.Tag` rows).
-const LINKED_GROUPED_HANDLES: [(&str, &str); 8] = [
+/// `sys.git.commits`, `sys.git.refs`, `sys.git.remotes`, `sys.git.stashes`,
+/// `sys.git.tags` and `sys.git.tree_entries` are read from the attached repository
+/// by the evaluator (`sys.Branch`, `sys.Commit`, `sys.Ref`, `sys.Remote`,
+/// `sys.Stash`, `sys.Tag` and `sys.TreeEntry` rows).
+const LINKED_GROUPED_HANDLES: [(&str, &str); 9] = [
     ("sys.catalog.columns", "Evaluator"),
     ("sys.catalog.tables", "Evaluator"),
     ("sys.git.branches", "Evaluator"),
@@ -4512,6 +4512,7 @@ const LINKED_GROUPED_HANDLES: [(&str, &str); 8] = [
     ("sys.git.remotes", "Evaluator"),
     ("sys.git.stashes", "Evaluator"),
     ("sys.git.tags", "Evaluator"),
+    ("sys.git.tree_entries", "Evaluator"),
 ];
 
 fn render_provider_links(catalogue: &Catalogue) -> Result<String> {
