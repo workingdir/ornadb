@@ -551,6 +551,62 @@ pub fn stash_reference(
     )
 }
 
+/// The `sys.DatabaseRef` of the database `database_id`, pinned to `snapshot`.
+///
+/// # Errors
+///
+/// As [`SysRef::new`].
+pub fn database_reference(
+    database_id: [u8; 16],
+    snapshot: CanonicalSnapshot,
+) -> Result<SysRef, SystemReferenceError> {
+    SysRef::new(
+        &relations::DATABASE,
+        database_id,
+        snapshot,
+        vec![KeyPart::Uuid(database_id)],
+    )
+}
+
+/// The `sys.GitRepositoryRef` of the repository whose `database` row is `database`.
+///
+/// # Errors
+///
+/// As [`SysRef::new`].
+pub fn git_repository_reference(
+    database_id: [u8; 16],
+    snapshot: CanonicalSnapshot,
+    database: RowRef,
+) -> Result<SysRef, SystemReferenceError> {
+    SysRef::new(
+        &relations::GIT_REPOSITORY,
+        database_id,
+        snapshot,
+        vec![KeyPart::Reference(database)],
+    )
+}
+
+/// The `sys.WorktreeEntryRef` of the worktree entry at the repository-relative `path`.
+///
+/// # Errors
+///
+/// As [`SysRef::new`]; `path` must be a safe repository path.
+pub fn worktree_entry_reference(
+    database_id: [u8; 16],
+    snapshot: CanonicalSnapshot,
+    path: &str,
+) -> Result<SysRef, SystemReferenceError> {
+    SysRef::new(
+        &relations::WORKTREE_ENTRY,
+        database_id,
+        snapshot,
+        vec![KeyPart::Path {
+            flavour: PathFlavour::Repo,
+            text: path.to_owned(),
+        }],
+    )
+}
+
 /// The reference to the row of an object-keyed `relation` (`sys.Table`, `sys.Column`,
 /// `sys.Namespace`, ...) whose `object` is `object`, pinned to the object's own snapshot.
 ///

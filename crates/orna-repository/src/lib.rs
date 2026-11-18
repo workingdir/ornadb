@@ -78,6 +78,7 @@ mod tags;
 pub(crate) mod test_support;
 mod transport;
 mod wire;
+mod worktree_status;
 
 pub use adapter::{OrnaRepositoryAdapter, OrnaRepositoryAdapterError};
 pub use blob_store::{ContentIdentity, raw_content_bytes_digested};
@@ -199,6 +200,7 @@ pub use row_store::{
 pub use stashes::CommittedStash;
 pub use tags::{CommittedTag, GitPerson, TagAnnotation};
 pub use transport::{FetchError, FetchReport, FetchRequest, FetchedRef, PushRequest, RequestedRef};
+pub use worktree_status::{GitRepositoryFacts, StatusChange, WorktreeStatusEntry};
 
 /// A normal Git repository and its selected worktree.
 ///

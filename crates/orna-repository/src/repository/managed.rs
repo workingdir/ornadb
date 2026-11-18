@@ -212,6 +212,10 @@ impl Repository {
         Ok(self.objects.algorithm()?.width() * 2)
     }
 
+    pub(crate) fn object_hash_algorithm(&self) -> Result<GitHashAlgorithm, RepositoryError> {
+        self.objects.algorithm()
+    }
+
     /// The local branch currently attached to `HEAD`, for callers that must
     /// name it as a transport ref. `None` for a detached `HEAD`.
     pub fn checked_out_branch(&self) -> Result<Option<String>, RepositoryError> {
