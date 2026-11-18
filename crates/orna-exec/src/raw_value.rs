@@ -15,7 +15,7 @@ use orna_value::{
 use crate::calendar;
 use crate::decimal::Decimal;
 use crate::error::Stop;
-use crate::value::{Value, typed_reference_from_raw};
+use crate::value::{Value, git_oid_from_raw, typed_reference_from_raw};
 
 /// The executor value of the canonical raw value `raw`.
 pub(crate) fn from_raw(raw: &Raw) -> Result<Value, Stop> {
@@ -49,7 +49,9 @@ pub(crate) fn from_raw(raw: &Raw) -> Result<Value, Stop> {
         Raw::Tag(PINNED_ROW_REFERENCE_TAG | OPAQUE_SYSTEM_ID_TAG, body)
             if matches!(&**body, Raw::Array(_)) =>
         {
-            Ok(typed_reference_from_raw(raw).unwrap_or_else(|| Value::RowRef(raw.clone())))
+            Ok(git_oid_from_raw(raw)
+                .or_else(|| typed_reference_from_raw(raw))
+                .unwrap_or_else(|| Value::RowRef(raw.clone())))
         }
         Raw::Null => Ok(Value::Null),
         Raw::Tag(INSTANT_TAG, body) => instant_from(body),

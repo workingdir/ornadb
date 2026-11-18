@@ -28,7 +28,7 @@ use orna_value::{
     ROV3_BLOB_TAG, ROV3_OVERFLOW_TAG, Raw, SOV3_BLOB_TAG, ValueFormat, domain_digest, float_max,
     float_min, float_ordinary_eq, float_total_cmp, ovb2_blob_fingerprint,
 };
-use orna_value::{CanonicalValue, Diagnostic, DiagnosticSeverity, SafeText};
+use orna_value::{CanonicalValue, Diagnostic, DiagnosticSeverity, GitObjectId, SafeText};
 use serde::{
     Deserialize,
     de::{self, MapAccess, Visitor},
@@ -3706,6 +3706,10 @@ enum Value {
     Uuid([u8; 16]),
     /// A nominal `Digest` (tag 60025): the raw-content SHA-256 commitment.
     Digest([u8; 32]),
+    /// A nominal `sys.GitOid` (tag 60023): a Git object id with its hash algorithm. It compares by the object
+    /// it names and orders by algorithm and then bytes; it is never a `Str`, a `Uuid` or a digest
+    /// (ORNA-SYS-016).
+    GitOid(GitObjectId),
     /// OVB's complete stored identity is retained, including its snapshot pin.
     Reference(CanonicalValue),
     /// A stored table reference (tag 60021): database identity, table and key.
@@ -4195,6 +4199,7 @@ impl Value {
             Self::Date(value) => Ok(Self::raw_date(value)),
             Self::Uuid(value) => Ok(object_id_raw(*value)),
             Self::Digest(value) => Ok(Self::raw_digest(value)),
+            Self::GitOid(value) => Ok(value.to_opaque_raw()),
             Self::Instant {
                 unix_seconds,
                 nanosecond,
@@ -4465,6 +4470,9 @@ impl Value {
                     .map_err(|_| error("ORNA-EVAL-VALUE"))?;
                 Ok(Self::Digest(bytes))
             }
+            Raw::Tag(60023, _) => GitObjectId::from_opaque_raw(value.raw())
+                .map(Self::GitOid)
+                .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED")),
             Raw::Tag(60010, _) => Ok(Self::Reference(value.clone())),
             Raw::Tag(60021, _) => Ok(Self::TableReference(value.clone())),
             Raw::Tag(60002, boxed) => Self::instant_from_raw(boxed, context),
@@ -4590,7 +4598,10 @@ impl Value {
                 context.depth(depth)?;
                 Self::range_from_raw(boxed, context, depth)
             }
-            Raw::Tag(37 | 60000 | 60001 | 60002 | 60005 | 60007 | 60010 | 60014 | 60021, _) => {
+            Raw::Tag(
+                37 | 60000 | 60001 | 60002 | 60005 | 60007 | 60010 | 60014 | 60021 | 60023,
+                _,
+            ) => {
                 let value =
                     CanonicalValue::new(raw.clone()).map_err(|_| error("ORNA-EVAL-VALUE"))?;
                 Self::from_canonical(&value, context, depth)
@@ -7111,6 +7122,7 @@ impl Context<'_, '_> {
             (Value::Float(a), Value::Float(b)) => self.float_binary(op, a, b),
             (Value::String(a), Value::String(b)) => compare(op, a.cmp(&b)),
             (Value::Date(a), Value::Date(b)) => compare(op, a.cmp(&b)),
+            (Value::GitOid(a), Value::GitOid(b)) => compare(op, a.cmp(&b)),
             (Value::Bool(a), Value::Bool(b)) => compare(op, a.cmp(&b)),
             (
                 left @ (Value::Money { .. } | Value::Decimal(_)),
@@ -12124,6 +12136,7 @@ fn compare_values(left: &Value, right: &Value) -> Result<std::cmp::Ordering, Eva
     match (left, right) {
         (Value::Int(a), Value::Int(b)) => Ok(a.cmp(b)),
         (Value::Date(a), Value::Date(b)) => Ok(a.cmp(b)),
+        (Value::GitOid(a), Value::GitOid(b)) => Ok(a.cmp(b)),
         (Value::Decimal(a), Value::Decimal(b)) => {
             let delta = &a.exponent10 - &b.exponent10;
             if delta
@@ -12309,7 +12322,8 @@ fn lawful_sort_key(value: &Value) -> Result<(), EvaluationError> {
         | Value::String(_)
         | Value::Date(_)
         | Value::Instant { .. }
-        | Value::Duration { .. } => Ok(()),
+        | Value::Duration { .. }
+        | Value::GitOid(_) => Ok(()),
         Value::Range { .. } => Ok(()),
         Value::Tuple(values) => values.iter().try_for_each(lawful_sort_key),
         _ => Err(error("ORNA-EVAL-TYPE")),
@@ -12324,6 +12338,7 @@ fn compare_sort_keys(left: &Value, right: &Value) -> Result<std::cmp::Ordering, 
         (Value::Blob(left), Value::Blob(right)) => Ok(left.cmp(right)),
         (Value::String(left), Value::String(right)) => Ok(left.cmp(right)),
         (Value::Date(left), Value::Date(right)) => Ok(left.cmp(right)),
+        (Value::GitOid(left), Value::GitOid(right)) => Ok(left.cmp(right)),
         (
             Value::Instant {
                 unix_seconds: left_seconds,
@@ -12366,7 +12381,11 @@ fn compare_sort_keys(left: &Value, right: &Value) -> Result<std::cmp::Ordering, 
 }
 fn lawful_group_key(value: &Value) -> Result<(), EvaluationError> {
     match value {
-        Value::Bool(_) | Value::Int(_) | Value::Decimal(_) | Value::String(_) => Ok(()),
+        Value::Bool(_)
+        | Value::Int(_)
+        | Value::Decimal(_)
+        | Value::String(_)
+        | Value::GitOid(_) => Ok(()),
         Value::Tuple(values) => values.iter().try_for_each(lawful_group_key),
         _ => Err(error("ORNA-EVAL-TYPE")),
     }
@@ -12386,6 +12405,7 @@ fn compare_group_keys(left: &Value, right: &Value) -> Result<std::cmp::Ordering,
             &Value::Decimal(right.clone()),
         ),
         (Value::String(left), Value::String(right)) => Ok(left.cmp(right)),
+        (Value::GitOid(left), Value::GitOid(right)) => Ok(left.cmp(right)),
         (Value::Tuple(left), Value::Tuple(right)) => {
             for (left, right) in left.iter().zip(right) {
                 let ordering = compare_group_keys(left, right)?;

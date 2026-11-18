@@ -23,7 +23,7 @@ pub enum Snapshot {
     },
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum GitHash {
     Sha1,
     Sha256,

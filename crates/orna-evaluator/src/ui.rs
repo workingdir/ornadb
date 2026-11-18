@@ -273,6 +273,7 @@ fn ui_value_type_name(value: &Value) -> String {
         Value::Date(_) => "std.date".into(),
         Value::Uuid(_) => "std.uuid".into(),
         Value::Digest(_) => "std.digest".into(),
+        Value::GitOid(_) => "std.git_oid".into(),
         Value::Reference(_) => "std.reference".into(),
         Value::TableReference(_) => "std.table_reference".into(),
         Value::Instant { .. } => "std.timestamp".into(),
