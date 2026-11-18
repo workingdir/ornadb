@@ -266,11 +266,10 @@ mod tests {
                 SysSingleton::Database,
             )),
             SystemSurfaceMember::Singleton(SysSingleton::Rt),
-            // Only `sys.git.branches`, `sys.git.remotes` and `sys.git.tags` are
-            // served from the repository so far.
-            SystemSurfaceMember::GroupedHandle(SysGroupedHandle::GitRefs),
+            // Only `sys.git.branches`, `sys.git.refs`, `sys.git.remotes`,
+            // `sys.git.stashes` and `sys.git.tags` are served from the
+            // repository so far.
             SystemSurfaceMember::GroupedHandle(SysGroupedHandle::GitCommits),
-            SystemSurfaceMember::GroupedHandle(SysGroupedHandle::GitStashes),
         ] {
             assert!(!linkage.is_linked(member), "{member:?}");
         }
@@ -285,7 +284,9 @@ mod tests {
             SystemSurfaceMember::Relation(SysRelation::Storage),
             SystemSurfaceMember::GroupedHandle(SysGroupedHandle::CatalogTables),
             SystemSurfaceMember::GroupedHandle(SysGroupedHandle::GitBranches),
+            SystemSurfaceMember::GroupedHandle(SysGroupedHandle::GitRefs),
             SystemSurfaceMember::GroupedHandle(SysGroupedHandle::GitRemotes),
+            SystemSurfaceMember::GroupedHandle(SysGroupedHandle::GitStashes),
             SystemSurfaceMember::GroupedHandle(SysGroupedHandle::GitTags),
         ] {
             assert!(linkage.is_linked(member), "{member:?}");

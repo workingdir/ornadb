@@ -65,11 +65,13 @@ mod overflow;
 mod paths;
 pub mod publication_describe;
 mod publication_transaction;
+mod refs;
 pub mod relation_admission;
 mod remotes;
 mod repository;
 mod row_store;
 pub mod schema_evolution;
+mod stashes;
 mod tags;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -186,11 +188,13 @@ pub use paths::{
 pub use publication_transaction::{
     ProtectedBlobRowInsert, PublicationTransactionError, commit_protected_blob_row,
 };
+pub use refs::CommittedRef;
 pub use remotes::{ConfiguredRemote, REDACTED_CREDENTIALS};
 pub use row_store::{
     AdmittedRow, KeyRange, KeyValue, RepositoryVfsFieldIdentity, RepositoryVfsRowIdentity,
     RowDependency, RowMapSnapshot, RowMapVersion, RowValue, SchemaGeneration, TypedKey,
 };
+pub use stashes::CommittedStash;
 pub use tags::{CommittedTag, GitPerson, TagAnnotation};
 pub use transport::{FetchError, FetchReport, FetchRequest, FetchedRef, PushRequest, RequestedRef};
 
