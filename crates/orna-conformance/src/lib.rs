@@ -28,6 +28,7 @@ use std::{
 
 const EXPECTED_DIAGNOSTIC_STATUS: &str = "expected-not-executed";
 
+pub mod release_profile;
 pub mod row_admission;
 mod semantic_adapter;
 mod syntax_adapter;
@@ -512,6 +513,7 @@ impl Corpus {
         Ok(corpus)
     }
     pub fn validate(&self) -> Result<(), CorpusError> {
+        release_profile::load_checked(&self.root)?;
         if self.invalid_metadata.version != self.manifest.version {
             return Err(CorpusError(
                 "invalid metadata version disagrees with the conformance manifest".into(),
