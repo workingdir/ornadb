@@ -101,8 +101,9 @@ pub enum Value {
         /// The payload fields, in name order.
         payload: Option<Rc<[(Name, Value)]>>,
     },
-    /// A pinned row reference (a `RunRef`, `SnapshotRef` and the like), held as its canonical
-    /// `PINNED_ROW_REFERENCE_TAG` form and carried unchanged. The codecs refuse it; no operation reads its fields.
+    /// A pinned row reference that is not a checked `sys.XRef` of a canonical relation (its relation is unknown, or its
+    /// natural key is not that relation's), held as its canonical `PINNED_ROW_REFERENCE_TAG` form and carried unchanged.
+    /// The codecs refuse it; no operation reads its fields.
     RowRef(Raw),
     /// A checked `sys.XRef` of a canonical relation (a `sys.FunctionRef`, `sys.BranchRef`, `sys.CommitRef` and the
     /// like): a row reference whose relation identity and natural key the registry of `orna_value::relations`

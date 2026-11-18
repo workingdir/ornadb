@@ -327,6 +327,31 @@ impl SysRef {
     }
 }
 
+/// The reference to the row `name` of the relation `relation`, whose natural key is one `Str`.
+fn named_reference(
+    relation: &'static RelationSpec,
+    database_id: [u8; 16],
+    snapshot: CanonicalSnapshot,
+    name: impl Into<String>,
+) -> Result<SysRef, SystemReferenceError> {
+    SysRef::new(
+        relation,
+        database_id,
+        snapshot,
+        vec![KeyPart::Text(name.into())],
+    )
+}
+
+/// The reference to the row `oid` of the relation `relation`, whose natural key is one `sys.GitOid`.
+fn oid_reference(
+    relation: &'static RelationSpec,
+    database_id: [u8; 16],
+    snapshot: CanonicalSnapshot,
+    oid: GitObjectId,
+) -> Result<SysRef, SystemReferenceError> {
+    SysRef::new(relation, database_id, snapshot, vec![KeyPart::GitOid(oid)])
+}
+
 /// The `sys.BranchRef` of branch `name`.
 ///
 /// # Errors
@@ -337,12 +362,7 @@ pub fn branch_reference(
     snapshot: CanonicalSnapshot,
     name: impl Into<String>,
 ) -> Result<SysRef, SystemReferenceError> {
-    SysRef::new(
-        &relations::BRANCH,
-        database_id,
-        snapshot,
-        vec![KeyPart::Text(name.into())],
-    )
+    named_reference(&relations::BRANCH, database_id, snapshot, name)
 }
 
 /// The `sys.CommitRef` of the commit `oid`.
@@ -355,12 +375,7 @@ pub fn commit_reference(
     snapshot: CanonicalSnapshot,
     oid: GitObjectId,
 ) -> Result<SysRef, SystemReferenceError> {
-    SysRef::new(
-        &relations::COMMIT,
-        database_id,
-        snapshot,
-        vec![KeyPart::GitOid(oid)],
-    )
+    oid_reference(&relations::COMMIT, database_id, snapshot, oid)
 }
 
 /// The `sys.GitObjectRef` of the Git object `oid`.
@@ -373,12 +388,7 @@ pub fn git_object_reference(
     snapshot: CanonicalSnapshot,
     oid: GitObjectId,
 ) -> Result<SysRef, SystemReferenceError> {
-    SysRef::new(
-        &relations::GIT_OBJECT,
-        database_id,
-        snapshot,
-        vec![KeyPart::GitOid(oid)],
-    )
+    oid_reference(&relations::GIT_OBJECT, database_id, snapshot, oid)
 }
 
 /// The `sys.RefRef` of the Git ref `name` (the full ref name).
@@ -391,12 +401,7 @@ pub fn git_ref_reference(
     snapshot: CanonicalSnapshot,
     name: impl Into<String>,
 ) -> Result<SysRef, SystemReferenceError> {
-    SysRef::new(
-        &relations::REF,
-        database_id,
-        snapshot,
-        vec![KeyPart::Text(name.into())],
-    )
+    named_reference(&relations::REF, database_id, snapshot, name)
 }
 
 /// The `sys.TagRef` of tag `name`.
@@ -409,12 +414,7 @@ pub fn tag_reference(
     snapshot: CanonicalSnapshot,
     name: impl Into<String>,
 ) -> Result<SysRef, SystemReferenceError> {
-    SysRef::new(
-        &relations::TAG,
-        database_id,
-        snapshot,
-        vec![KeyPart::Text(name.into())],
-    )
+    named_reference(&relations::TAG, database_id, snapshot, name)
 }
 
 /// The `sys.RemoteRef` of remote `name`.
@@ -427,12 +427,7 @@ pub fn remote_reference(
     snapshot: CanonicalSnapshot,
     name: impl Into<String>,
 ) -> Result<SysRef, SystemReferenceError> {
-    SysRef::new(
-        &relations::REMOTE,
-        database_id,
-        snapshot,
-        vec![KeyPart::Text(name.into())],
-    )
+    named_reference(&relations::REMOTE, database_id, snapshot, name)
 }
 
 /// The `sys.StashRef` of the stash at `index`.
