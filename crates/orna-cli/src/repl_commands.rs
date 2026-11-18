@@ -5,7 +5,9 @@
 //! `repl.rs` dispatches the session, watch, and help commands itself. Every
 //! other `:name` reaches [`run`], which either runs the command or refuses it
 //! with a located error that names the command. A command this console does
-//! not implement yet is refused by name, never silently ignored.
+//! not implement yet is refused by name, never silently ignored. A command
+//! that needs a `sys` coordinate this implementation does not provide, such
+//! as `:trace`, is refused with the portable failure code for it.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::io::{self, Write};
@@ -35,7 +37,7 @@ const COMMANDS: [&str; 19] = [
 
 /// Commands the console recognises but does not implement yet. Each is
 /// refused by name; none is silently accepted.
-const UNSUPPORTED: [&str; 3] = ["open", "trace", "display"];
+const UNSUPPORTED: [&str; 2] = ["open", "display"];
 
 /// The code every console refusal carries.
 const COMMAND_CODE: &str = "ORNA-REPL-COMMAND";
@@ -135,6 +137,7 @@ fn execute<'a, W: Write>(
         "members" => members_command(&cmd, session, writer, color_enabled),
         "table" => table_command(&cmd, session, writer, color_enabled),
         "plan" => plan_command(&cmd, session, evaluate, writer, color_enabled),
+        "trace" => Ok(Some(trace_command(&cmd))),
         "history" => history_command(&cmd, console, writer),
         "timing" => Ok(timing_command(&cmd, console)),
         "clear" => clear_command(&cmd, writer, color_enabled),
@@ -385,6 +388,28 @@ fn plan_command<'a, W: Write>(
     }
 }
 
+/// `:trace EXPR` would run the expression and print the trace of its
+/// activation. This implementation records and serves no trace: the
+/// `sys.rt.traces` relation has no provider linked. The command refuses with
+/// the portable code for an unavailable coordinate, and does so before it
+/// evaluates anything, so a refused `:trace` never changes the database.
+fn trace_command<'a>(cmd: &Cmd<'a>) -> Refusal<'a> {
+    if cmd.arg.is_empty() {
+        return refuse_name(cmd, "usage: :trace EXPR".into(), Vec::new());
+    }
+    refuse_unavailable(
+        cmd,
+        "sys.version.incompatible",
+        "`:trace` needs the activation trace, `sys.rt.traces`, which has no provider linked in \
+         this implementation"
+            .into(),
+        vec![
+            "run the expression without `:trace`".into(),
+            "`:plan EXPR` explains a query without running it".into(),
+        ],
+    )
+}
+
 /// Prints each retained input with its submission number. An argument
 /// filters to inputs containing it.
 fn history_command<'a, W: Write>(
@@ -459,11 +484,31 @@ fn refuse_arg_message<'a>(cmd: &Cmd<'a>, message: String) -> Refusal<'a> {
     refuse_arg(cmd, located(0..cmd.arg.len(), message, Vec::new()))
 }
 
+/// Refuses the command name with a portable `sys` failure code, for a command
+/// that needs a coordinate this implementation does not provide. A consumer of
+/// an unavailable coordinate fails before it does anything (ORNA-SYS-008), so
+/// the command's expression is never evaluated.
+fn refuse_unavailable<'a>(
+    cmd: &Cmd<'a>,
+    code: &str,
+    message: String,
+    help: Vec<String>,
+) -> Refusal<'a> {
+    Refusal {
+        failure: located_with(code, cmd.name_span.clone(), message, help),
+        source: cmd.source,
+    }
+}
+
 fn located(span: Range<usize>, message: String, help: Vec<String>) -> ReplFailure {
+    located_with(COMMAND_CODE, span, message, help)
+}
+
+fn located_with(code: &str, span: Range<usize>, message: String, help: Vec<String>) -> ReplFailure {
     ReplFailure {
-        code: COMMAND_CODE.into(),
+        code: code.into(),
         detail: Some(ReplDetail {
-            code: COMMAND_CODE.into(),
+            code: code.into(),
             message,
             span: Some(span),
             notes: Vec::new(),
@@ -546,6 +591,30 @@ mod tests {
                 "{text}"
             );
         }
+    }
+
+    #[test]
+    fn trace_refuses_with_the_portable_unavailable_code() {
+        let mut console = ConsoleState::default();
+        let text = run_source(":trace 1 + 1", &mut console);
+        assert!(
+            text.contains(
+                "error[sys.version.incompatible]: `:trace` needs the activation trace, \
+                 `sys.rt.traces`, which has no provider linked in this implementation"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("help: `:plan EXPR` explains a query without running it"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("not available in this console yet"),
+            "{text}"
+        );
+        assert!(!text.contains("ORNA-REPL-COMMAND"), "{text}");
+        let usage = run_source(":trace", &mut console);
+        assert!(usage.contains("usage: :trace EXPR"), "{usage}");
     }
 
     #[test]
