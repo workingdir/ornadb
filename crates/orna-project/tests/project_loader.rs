@@ -1,9 +1,7 @@
 use std::{fs, path::Path, process::Command};
 
 use orna_check::{Catalogue, StandardDependencyProfile, analyze_with_catalogue};
-use orna_project::{
-    LoadedProject, ProjectLimits, ProjectLoadError, ProjectLoadMode, ProjectLoader,
-};
+use orna_project::{LoadedProject, ProjectLimits, ProjectLoadError, ProjectLoader};
 use orna_repository::{FormatContextError, ManagedFileChange, ManagedPath, Repository};
 use tempfile::TempDir;
 
@@ -1429,7 +1427,7 @@ fn committed_snapshot_loader_rejects_symlink_entries() {
 }
 
 #[test]
-fn committed_snapshot_loader_rejects_submodule_entries() {
+fn committed_snapshot_loader_pins_submodule_entries() {
     let (directory, repository) =
         repository(&[("main.orna", include_str!("fixtures/main_run.orna"))]);
     commit_all(&directory);
@@ -1453,10 +1451,22 @@ fn committed_snapshot_loader_rejects_submodule_entries() {
     );
     let commit = repository.resolve_snapshot("HEAD").unwrap();
 
-    assert!(matches!(
-        ProjectLoader::default().load_committed_snapshot(&repository, &commit),
-        Err(ProjectLoadError::UnsafePath)
-    ));
+    let project = ProjectLoader::default()
+        .load_committed_snapshot(&repository, &commit)
+        .expect("a dependency gitlink is pinned, not refused");
+    assert_eq!(
+        project
+            .identities()
+            .iter()
+            .map(|identity| identity.logical_path())
+            .collect::<Vec<_>>(),
+        ["main.orna"]
+    );
+    let [pin] = project.opaque_pins() else {
+        panic!("expected one opaque pin, got {:?}", project.opaque_pins());
+    };
+    assert_eq!(pin.path(), "vendor");
+    assert_eq!(pin.commit().as_str(), object.trim());
 }
 
 /// Binds `path` to `object` as a gitlink in a new commit, the way a submodule
@@ -1485,7 +1495,7 @@ fn commit_gitlink(directory: &TempDir, path: &str, object: &str) -> String {
 }
 
 #[test]
-fn migration_load_pins_a_dirty_dependency_gitlink_without_reading_it() {
+fn committed_load_pins_dirty_dependency_gitlink_without_reading_it() {
     let (directory, repository) =
         repository(&[("main.orna", include_str!("fixtures/main_run.orna"))]);
     commit_all(&directory);
@@ -1506,7 +1516,6 @@ fn migration_load_pins_a_dirty_dependency_gitlink_without_reading_it() {
     let commit = repository.resolve_snapshot("HEAD").unwrap();
 
     let project = ProjectLoader::default()
-        .with_mode(ProjectLoadMode::Migration)
         .load_committed_snapshot(&repository, &commit)
         .unwrap();
 
@@ -1523,15 +1532,84 @@ fn migration_load_pins_a_dirty_dependency_gitlink_without_reading_it() {
     };
     assert_eq!(pin.path(), "dependencies/example");
     assert_eq!(pin.commit().as_str(), object);
-    // The strict default still refuses the same gitlink.
-    assert!(matches!(
-        ProjectLoader::default().load_committed_snapshot(&repository, &commit),
-        Err(ProjectLoadError::UnsafePath)
-    ));
 }
 
 #[test]
-fn migration_load_fails_closed_when_a_module_imports_from_an_opaque_pin() {
+fn worktree_load_treats_a_gitlinked_dependency_as_a_boundary() {
+    let (directory, repository) =
+        repository(&[("main.orna", include_str!("fixtures/main_run.orna"))]);
+    commit_all(&directory);
+    let object = git_output(&directory, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+    commit_gitlink(&directory, "dependencies/example", &object);
+    // The checked-out dependency carries a non-portable file name that only a
+    // walk into the dependency would reject.
+    fs::create_dir_all(directory.path().join("dependencies/example")).unwrap();
+    fs::write(
+        directory
+            .path()
+            .join("dependencies/example/invalid.name.orna"),
+        "pub fn dirty(): Int = 1;\n",
+    )
+    .unwrap();
+
+    let project = ProjectLoader::default()
+        .load(&repository)
+        .expect("a gitlinked checkout is a dependency boundary, not project source");
+    assert_eq!(
+        project
+            .identities()
+            .iter()
+            .map(|identity| identity.logical_path())
+            .collect::<Vec<_>>(),
+        ["main.orna"]
+    );
+    let [pin] = project.opaque_pins() else {
+        panic!("expected one opaque pin, got {:?}", project.opaque_pins());
+    };
+    assert_eq!(pin.path(), "dependencies/example");
+    assert_eq!(pin.commit().as_str(), object);
+}
+
+#[test]
+fn worktree_load_fails_closed_when_a_module_imports_from_a_gitlinked_dependency() {
+    let (directory, repository) = repository(&[(
+        "main.orna",
+        "use dependencies.example;\npub fn run(): Int = 1;\n",
+    )]);
+    commit_all(&directory);
+    let object = git_output(&directory, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+    commit_gitlink(&directory, "dependencies/example", &object);
+    // The dependency's checkout holds a loadable module. The import must not
+    // resolve into it.
+    fs::create_dir_all(directory.path().join("dependencies/example")).unwrap();
+    fs::write(
+        directory.path().join("dependencies/example/main.orna"),
+        "pub fn run(): Int = 1;\n",
+    )
+    .unwrap();
+
+    let Err(error) = ProjectLoader::default().load(&repository) else {
+        panic!("the worktree loaded an import from a gitlinked dependency");
+    };
+    let ProjectLoadError::OpaqueGitlinkImport {
+        module,
+        import,
+        gitlink,
+    } = &error
+    else {
+        panic!("expected OpaqueGitlinkImport, got {error:?}");
+    };
+    assert_eq!(module, "main.orna");
+    assert_eq!(import, "dependencies.example");
+    assert_eq!(gitlink, "dependencies/example");
+}
+
+#[test]
+fn committed_load_fails_closed_when_a_module_imports_from_an_opaque_pin() {
     for (import, source) in [
         (
             "dependencies.example",
@@ -1550,11 +1628,9 @@ fn migration_load_fails_closed_when_a_module_imports_from_an_opaque_pin() {
         let commit = commit_gitlink(&directory, "dependencies/example", &object);
         let commit = repository.resolve_snapshot(&commit).unwrap();
 
-        let Err(error) = ProjectLoader::default()
-            .with_mode(ProjectLoadMode::Migration)
-            .load_committed_snapshot(&repository, &commit)
+        let Err(error) = ProjectLoader::default().load_committed_snapshot(&repository, &commit)
         else {
-            panic!("{import}: migration loaded a module importing an opaque pin");
+            panic!("{import}: the committed loader loaded a module importing an opaque pin");
         };
 
         let ProjectLoadError::OpaqueGitlinkImport {
@@ -1571,7 +1647,7 @@ fn migration_load_fails_closed_when_a_module_imports_from_an_opaque_pin() {
         assert_eq!(
             error.to_string(),
             format!(
-                "module main.orna imports {import} from opaque dependency gitlink dependencies/example, whose declared tables a migration cannot derive"
+                "module main.orna imports {import} from opaque dependency gitlink dependencies/example, whose declared tables cannot be derived"
             )
         );
     }

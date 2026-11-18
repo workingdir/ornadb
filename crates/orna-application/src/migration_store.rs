@@ -9,7 +9,7 @@
 
 use std::collections::BTreeSet;
 
-use orna_project::{ObjectIdentityManifest, ProjectLoadMode, ProjectLoader};
+use orna_project::{ObjectIdentityManifest, ProjectLoader};
 use orna_repository::migration_copy::{
     CandidateGate, MigrationStore, RetiredLegacyKind, RetiredLegacyPath,
 };
@@ -75,7 +75,6 @@ pub(crate) fn build_store_with_expectation(
         .map_err(RepositoryError::FormatContext)?;
     let format2 = format.repository_format() == RepositoryFormat::Legacy2;
     let project = ProjectLoader::default()
-        .with_mode(ProjectLoadMode::Migration)
         .load_committed_snapshot(repository, &commit)
         .map_err(|error| refused(format!("the source does not load: {error:?}")))?;
     let catalogue = project
