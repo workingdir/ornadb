@@ -33,6 +33,7 @@ use std::{
     process::Stdio,
 };
 
+use crate::object_reader::TreeEntryMode;
 use num_bigint::BigInt;
 use orna_value::{Raw, SchemaDescriptor, Value, decode_canonical_storage_value};
 use sha2::{Digest, Sha256};
@@ -1684,21 +1685,10 @@ impl Repository {
         &self,
         treeish: &str,
     ) -> Result<bool, RelationAdmissionError> {
-        let mut command = self.command();
-        command.args([
-            "ls-tree",
-            "-z",
-            "--full-tree",
-            treeish,
-            "--",
-            LEGACY_OBJECT_IDENTITY_SIDECAR_PATH,
-        ]);
-        let listed = self.run(command)?.stdout;
-        Ok(listed.split(|byte| *byte == 0).any(|entry| {
-            crate::GitListRecord::parse(entry).is_some_and(|record| {
-                record.name() == LEGACY_OBJECT_IDENTITY_SIDECAR_PATH.as_bytes()
-            })
-        }))
+        Ok(self
+            .objects()
+            .path_entry(treeish, LEGACY_OBJECT_IDENTITY_SIDECAR_PATH.as_bytes())?
+            .is_some())
     }
 
     /// The repository format the ordinary index's tree declares. An unborn
@@ -1938,32 +1928,14 @@ impl Repository {
         &self,
         treeish: &str,
     ) -> Result<Option<NativeOid>, RelationAdmissionError> {
-        let mut command = self.command();
-        command.args(["ls-tree", "-z", "--full-tree", treeish, "--", STORE_PATH]);
-        let output = self.run(command)?.stdout;
-        let Some(entry) = output
-            .split(|byte| *byte == 0)
-            .find(|entry| !entry.is_empty())
-        else {
+        let Some(entry) = self.objects().path_entry(treeish, STORE_PATH.as_bytes())? else {
             return Ok(None);
         };
-        let entry =
-            std::str::from_utf8(entry).map_err(|_| RelationAdmissionError::InvalidStoreEntry)?;
-        let (header, path) = entry
-            .split_once('\t')
-            .ok_or(RelationAdmissionError::InvalidStoreEntry)?;
-        let mut fields = header.split(' ');
-        let (Some("040000"), Some("tree"), Some(object), None, STORE_PATH) = (
-            fields.next(),
-            fields.next(),
-            fields.next(),
-            fields.next(),
-            path,
-        ) else {
+        if entry.mode() != TreeEntryMode::Tree {
             return Err(RelationAdmissionError::InvalidStoreEntry);
-        };
+        }
         let algorithm = self.native_hash_algorithm()?;
-        Ok(Some(NativeOid::from_hex(algorithm, object)?))
+        Ok(Some(NativeOid::from_hex(algorithm, entry.oid())?))
     }
 
     fn native_hash_algorithm(&self) -> Result<GitHashAlgorithm, RelationAdmissionError> {

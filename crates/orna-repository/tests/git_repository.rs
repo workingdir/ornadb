@@ -899,6 +899,26 @@ fn snapshot_resolution_accepts_commits_and_rejects_non_commits_and_malformed_ids
 }
 
 #[test]
+fn ref_resolution_follows_external_updates_on_a_live_handle() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let before = repo.resolve_snapshot("HEAD").unwrap();
+
+    fs::write(root.path().join("fresh.txt"), b"fresh\n").unwrap();
+    git(root.path(), &["add", "fresh.txt"]);
+    git(root.path(), &["commit", "-m", "External update"]);
+
+    let after = repo.resolve_snapshot("HEAD").unwrap();
+    assert_ne!(before, after);
+    assert_eq!(after.as_str(), git(root.path(), &["rev-parse", "HEAD"]));
+    assert_eq!(
+        repo.read_committed_file(&after, "fresh.txt", 64).unwrap(),
+        b"fresh\n"
+    );
+    assert!(repo.read_committed_file(&before, "fresh.txt", 64).is_err());
+}
+
+#[test]
 fn exact_committed_oid_resolution_reuses_commit_and_reachability_guards() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
