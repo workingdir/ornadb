@@ -35,10 +35,6 @@ const COMMANDS: [&str; 19] = [
     "timing", "clear", "doc", "source", "open", "plan", "trace", "copy", "display",
 ];
 
-/// Commands the console recognises but does not implement yet. Each is
-/// refused by name; none is silently accepted.
-const UNSUPPORTED: [&str; 1] = ["display"];
-
 /// The code every console refusal carries.
 const COMMAND_CODE: &str = "ORNA-REPL-COMMAND";
 
@@ -145,15 +141,7 @@ fn execute<'a, W: Write>(
         "doc" => doc_command(&cmd, session, writer, color_enabled),
         "source" => source_command(&cmd, session, writer, color_enabled),
         "copy" => repl_copy::run(cmd.arg, session, writer, color_enabled).map(|()| None),
-        name if UNSUPPORTED.contains(&name) => Ok(Some(refuse_name(
-            &cmd,
-            format!("`:{name}` is not available in this console yet"),
-            vec![
-                "the console runs :type, :doc, :source, :inspect, :members, :table, :plan, :history, :timing, :copy, and :clear"
-                    .into(),
-                "enter `:help` to see the supported commands".into(),
-            ],
-        ))),
+        "display" => Ok(Some(display_command(&cmd))),
         // These are dispatched by `repl.rs` before a submission reaches the
         // console; the arms keep a usage error if that routing ever changes.
         "help" => Ok(Some(refuse_name(
@@ -430,6 +418,30 @@ fn open_command<'a>(cmd: &Cmd<'a>) -> Refusal<'a> {
     )
 }
 
+/// `:display Type formatter|default` would record a session presentation
+/// override. The specification keeps session overrides in
+/// `sys.repl.presentation_overrides`, and this implementation links no
+/// provider for `sys.repl`, so there is nowhere to record one and none could
+/// be applied. The command refuses with the portable code for an unavailable
+/// coordinate, and every rendering stays as it was.
+fn display_command<'a>(cmd: &Cmd<'a>) -> Refusal<'a> {
+    if cmd.arg.split_whitespace().count() < 2 {
+        return refuse_name(
+            cmd,
+            "usage: :display Type formatter|default".into(),
+            Vec::new(),
+        );
+    }
+    refuse_unavailable(
+        cmd,
+        "sys.version.incompatible",
+        "`:display` records the override in `sys.repl.presentation_overrides`, which has no \
+         provider linked in this implementation"
+            .into(),
+        vec!["results keep their default rendering in this session".into()],
+    )
+}
+
 /// Prints each retained input with its submission number. An argument
 /// filters to inputs containing it.
 fn history_command<'a, W: Write>(
@@ -599,18 +611,6 @@ mod tests {
         let text = run_source(":zzzzzzzz", &mut console);
         assert!(text.contains("unknown command `:zzzzzzzz`"), "{text}");
         assert!(!text.contains("did you mean"), "{text}");
-    }
-
-    #[test]
-    fn unsupported_command_is_refused_by_name_not_ignored() {
-        let mut console = ConsoleState::default();
-        for name in UNSUPPORTED {
-            let text = run_source(&format!(":{name}"), &mut console);
-            assert!(
-                text.contains(&format!("`:{name}` is not available in this console yet")),
-                "{text}"
-            );
-        }
     }
 
     #[test]
