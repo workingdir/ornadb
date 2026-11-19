@@ -79,8 +79,7 @@ pub(crate) fn admitted_tables_of(
 ///
 /// Interim cost (bead ornadb-t5tz): every gated commit or publish in a project
 /// that declares assertions runs this read, which encodes every admitted table
-/// at `HEAD` and is bounded by `ApplicationAuthority::committed_read_limits`.
-/// Past a limit, or when `HEAD` cannot be read, `changed_tables` treats every
+/// at `HEAD`. When `HEAD` cannot be read, `changed_tables` treats every
 /// candidate table as changed. A cheaper change signal is not adopted yet; the
 /// bead names the proof it requires first.
 fn head_table_rows(
@@ -142,7 +141,6 @@ fn committed_admitted_rows(
         commit,
         &schemas,
         &table_object_ids,
-        orna_application::ApplicationAuthority::committed_read_limits(),
     )
     .map_err(|_| "committed rows could not be read")?;
     let mut rows = orna_runtime::RuntimeTableRows::new();
@@ -224,7 +222,6 @@ fn validate_candidate_assertions(
         &format,
         &schemas,
         &table_object_ids,
-        orna_application::ApplicationAuthority::committed_read_limits(),
     )
     .map_err(|_| unvalidated(&format!("{word} committed rows could not be read")))?;
     let mut rows = orna_runtime::RuntimeTableRows::new();

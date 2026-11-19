@@ -59,11 +59,11 @@ pub use stored_reference::{
     CandidateState, DANGLING_REFERENCE_CODE, ReferenceCatalogue, ReferenceError, ReferenceIdentity,
 };
 pub use table_storage::{
-    CommittedReadError, CommittedReadLimits, CommittedTable, StoredBlobReference,
-    TableStorageError, admitted_table_schemas, blob_placeholder, committed_tables,
-    contextual_table_rows, evaluator_rows, evaluator_rows_from_stored, has_text_primary_key,
-    holds_blob, private_candidate_tables, restore_stored_blobs, runtime_key_from_evaluator,
-    storage_row_from_record, stored_blob_references, stored_field_names,
+    CommittedTable, StoredBlobReference, TableStorageError, admitted_table_schemas,
+    blob_placeholder, committed_tables, contextual_table_rows, evaluator_rows,
+    evaluator_rows_from_stored, has_text_primary_key, holds_blob, private_candidate_tables,
+    restore_stored_blobs, runtime_key_from_evaluator, storage_row_from_record,
+    stored_blob_references, stored_field_names,
 };
 pub use typed_row::{DescriptorField, StoredSchema, TypedRowError};
 

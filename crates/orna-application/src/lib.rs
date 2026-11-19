@@ -27,10 +27,7 @@ use orna_live::{
     LiveEvalResponse, LiveEvalTransaction,
 };
 use orna_live_lease::LiveApplicationWorkLease;
-use orna_project::{
-    AdmittedSourceRow, CommittedReadLimits, LoadedProject, ProjectLimits, ResolvedTableSchema,
-    admitted_table_schemas,
-};
+use orna_project::{AdmittedSourceRow, LoadedProject, ResolvedTableSchema, admitted_table_schemas};
 use orna_project_repl::{AdmittedReplSession, ReplError, RepositoryScope, StagedReplActivation};
 use orna_protocol::{
     Envelope, Message, PresentIdentity, PresentKind, PresentNode, PresentPropertyKey, ResultStatus,
@@ -771,15 +768,6 @@ impl ApplicationAuthority {
         })?;
         let effects = handler.effect_report();
         handler.into_staged_activation(value, None, effects)
-    }
-
-    /// The bound every committed table read observes: the admitted rows' key and
-    /// stored tuple bytes across the read may not exceed the project source byte
-    /// limit. The read refuses the first row past it before retaining it.
-    pub fn committed_read_limits() -> CommittedReadLimits {
-        CommittedReadLimits {
-            max_bytes: ProjectLimits::default().max_source_bytes,
-        }
     }
 
     /// Evaluates admitted source with `rows` as the contents of every admitted
