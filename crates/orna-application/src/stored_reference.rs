@@ -14,7 +14,7 @@ use orna_check::TableSchema;
 use orna_evaluator::EvaluationError;
 use orna_project::{CandidateState, ReferenceCatalogue, ReferenceError};
 use orna_runtime::TableObjectId;
-use orna_value::{CanonicalValue, OvbRaw};
+use orna_value::{CanonicalValue, ContextValue, OvbRaw};
 
 use super::{ApplicationError, SourceMutationEffectHandler, encoded_table_key};
 
@@ -125,6 +125,35 @@ impl SourceMutationEffectHandler {
             .ok_or_else(|| Self::effect_error("ORNA-EVAL-VALUE"))?;
         let key = key_bytes(&identity.key).map_err(reference_failure)?;
         self.current_row(identity.table, &key)
+    }
+
+    /// The context row the stored reference `reference` names, when the
+    /// activation serves that row as a context value because its table holds a
+    /// Blob (ORNA-REF-002). A write the activation made to the same key wins:
+    /// `None` leaves the reference to the canonical resolution, which reads it.
+    pub(crate) fn resolve_context_stored_reference(
+        &self,
+        reference: &CanonicalValue,
+    ) -> Result<Option<ContextValue>, EvaluationError> {
+        let Some(references) = self.stored_references.as_ref() else {
+            return Ok(None);
+        };
+        let Some(identity) = references.identity(reference.raw()) else {
+            return Ok(None);
+        };
+        let key = key_bytes(&identity.key).map_err(reference_failure)?;
+        if self
+            .overlay
+            .get(identity.table)
+            .is_some_and(|rows| rows.contains_key(&key))
+        {
+            return Ok(None);
+        }
+        Ok(self
+            .context_table_rows
+            .get(identity.table)
+            .and_then(|rows| rows.get(&key))
+            .cloned())
     }
 }
 

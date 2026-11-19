@@ -494,6 +494,12 @@ fn committed_blob_rows_are_served_as_contextual_values() {
 /// Stores one pixel blob row through the REPL. The row is CWD state until a
 /// publish commits it.
 fn store_pixel_blob(root: &Path, id: &str) {
+    store_pixel_through_repl(root, &format!("main.store(\"{id}\", image).id"));
+}
+
+/// Captures the pixel fixture as `image` and runs `expression` in the REPL. The
+/// rows the expression inserts are CWD state until a publish commits them.
+fn store_pixel_through_repl(root: &Path, expression: &str) {
     let pixel = fs::read(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/media/pixel.png"
@@ -504,7 +510,7 @@ fn store_pixel_blob(root: &Path, id: &str) {
     let stored = orna_repl(
         root,
         &format!(
-            "let raw = sys.blob.capture_file({root_text:?}, \"pixel.png\", 65536);\nlet image = sys.blob.annotate(raw, \"image/png\");\nmain.store(\"{id}\", image).id"
+            "let raw = sys.blob.capture_file({root_text:?}, \"pixel.png\", 65536);\nlet image = sys.blob.annotate(raw, \"image/png\");\n{expression}"
         ),
     );
     assert_success(&stored, "REPL blob insert");
@@ -544,6 +550,39 @@ fn committed_stored_reference_resolves_on_a_blob_table_page() {
     let directory = TempDir::new().expect("create the test directory");
     let root = committed_project(&directory, REFERENCE_BLOB_SOURCE);
     assert_success(&orna(&root, &["run", "seed"]), "orna run seed");
+    publish(&root);
+    let (_server, address) = start_server(&root);
+    let (status, body) = http_get(&address, "/").expect("GET /");
+    assert_eq!(status, 200, "body: {body}");
+    assert!(body.contains("Ada"), "the owner's name is served: {body}");
+}
+
+const REFERENCE_BLOB_TARGET_SOURCE: &str = "pub table Owner(id: Str) { name: Str, portrait: Blob, }\n\npub table Vehicle(id: Str) { owner: Owner, }\n\npub fn serve(): Str = Vehicle | map(v => v.owner.name) | first() ?? \"none\";\n\npub fn main() {}\n";
+
+/// The stored reference of a committed Vehicle names an Owner whose row is held
+/// in a Blob table, so that row is served only as a contextual value. The owner's
+/// name still resolves through the same snapshot (ORNA-REF-002). The Owner is
+/// committed by an earlier activation: the REPL refuses a reference to a Blob
+/// table row inserted in the same activation.
+#[test]
+fn committed_stored_reference_resolves_to_a_blob_table_target() {
+    let directory = TempDir::new().expect("create the test directory");
+    let root = committed_project(&directory, REFERENCE_BLOB_TARGET_SOURCE);
+    store_pixel_through_repl(
+        &root,
+        r#"main.Owner.insert({ id: "ada", name: "Ada", portrait: image }).id"#,
+    );
+    publish(&root);
+    let referenced = orna_repl(
+        &root,
+        r#"main.Vehicle.insert({ id: "v1", owner: main.Owner | one(o => o.id == "ada") }).id"#,
+    );
+    assert_success(&referenced, "REPL reference insert");
+    assert!(
+        !transcript(&referenced).contains("error["),
+        "the REPL accepts the reference\n{}",
+        transcript(&referenced)
+    );
     publish(&root);
     let (_server, address) = start_server(&root);
     let (status, body) = http_get(&address, "/").expect("GET /");

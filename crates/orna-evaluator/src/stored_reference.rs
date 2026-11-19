@@ -40,16 +40,29 @@ impl Context<'_, '_> {
         }
 
         self.invalidate_call_reuse();
-        let target = self
-            .with_effect_budget(|context, budget| {
-                context
-                    .effects
-                    .as_deref_mut()
-                    .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?
-                    .resolve_table_reference_with_budget(reference, budget)
-            })?
-            .ok_or_else(|| error(DANGLING_REFERENCE))?;
-        match Value::from_canonical(&target, self, 0)? {
+        // A Blob-holding target is served as a context value, keeping its
+        // profile; any other target resolves through the canonical snapshot.
+        let context_row = self
+            .effects
+            .as_deref_mut()
+            .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?
+            .resolve_context_table_reference(reference)?;
+        let target = match context_row {
+            Some(row) => Value::from_context_value(&row, self, 0)?,
+            None => {
+                let canonical = self
+                    .with_effect_budget(|context, budget| {
+                        context
+                            .effects
+                            .as_deref_mut()
+                            .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?
+                            .resolve_table_reference_with_budget(reference, budget)
+                    })?
+                    .ok_or_else(|| error(DANGLING_REFERENCE))?;
+                Value::from_canonical(&canonical, self, 0)?
+            }
+        };
+        match target {
             Value::Record(fields) => fields
                 .get(name)
                 .cloned()
