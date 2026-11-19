@@ -50,6 +50,10 @@ pub struct Report {
     /// Reviewed production-unit evidence. This remains distinct from both
     /// engine and scenario execution witnesses.
     pub bounded_production_evidence: Vec<BoundedProductionEvidence>,
+    /// Profile requirement sets bound to `release.json` by the checked loader.
+    pub conformance_profiles: orna_conformance::release_profile::ConformanceProfiles,
+    /// Coordinate record bound to `release.json` by the checked loader.
+    pub coordinates: orna_conformance::release_profile::Coordinates,
 }
 /// A release-payload disposition. This inventory does not establish execution;
 /// missing implementation and test references remain explicit coverage gaps.
@@ -343,7 +347,8 @@ fn generate_inner(root: &Path, execution: ExecutionEvidence<'_>) -> Result<Repor
     let requirements: Vec<Requirement> = read_json(root, "tests/requirements.json")?;
     let evidence: EvidenceFile = read_json(root, "tests/requirement-evidence.json")?;
     let manifest: Manifest = read_json(root, "tests/conformance-manifest.json")?;
-    orna_conformance::release_profile::load_checked(root).map_err(|error| err(error.0))?;
+    let (conformance_profiles, coordinates) =
+        orna_conformance::release_profile::load_checked(root).map_err(|error| err(error.0))?;
     if release.version != manifest.version {
         return Err(err(
             "release version disagrees with the conformance manifest",
@@ -440,6 +445,8 @@ fn generate_inner(root: &Path, execution: ExecutionEvidence<'_>) -> Result<Repor
             })
             .collect::<Result<Vec<_>>>()?,
         bounded_production_evidence: Vec::new(),
+        conformance_profiles,
+        coordinates,
     };
     match execution {
         ExecutionEvidence::None => {}
