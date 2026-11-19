@@ -1,4 +1,4 @@
-//! A pending insert whose key the published HEAD already holds (ORNA-PUB-013).
+//! A pending insert whose key the published HEAD already holds (ORNA-PUB-006).
 //! `orna publish` over a HEAD that another worktree moved onto refuses the
 //! candidate as a row-key conflict: nothing is published, HEAD stays on the
 //! other worktree's commit, and the pending insert is kept, so a retry refuses
