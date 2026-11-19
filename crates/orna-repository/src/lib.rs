@@ -46,6 +46,7 @@ mod commits;
 mod compact;
 pub mod complete_copy;
 mod crash_barrier;
+pub mod dependency_origins;
 mod error;
 pub mod format2_read;
 mod format_context;
