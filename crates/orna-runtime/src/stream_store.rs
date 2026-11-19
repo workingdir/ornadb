@@ -325,6 +325,7 @@ pub(crate) fn encode_code(code: DiagnosticCode) -> i64 {
         DiagnosticCode::Internal => 5,
         DiagnosticCode::TableAssertionFalse => 6,
         DiagnosticCode::StaleBaseline => 7,
+        DiagnosticCode::DanglingReference => 8,
     }
 }
 
@@ -337,6 +338,7 @@ pub(crate) fn decode_code(value: i64) -> Result<DiagnosticCode, RuntimeError> {
         5 => Ok(DiagnosticCode::Internal),
         6 => Ok(DiagnosticCode::TableAssertionFalse),
         7 => Ok(DiagnosticCode::StaleBaseline),
+        8 => Ok(DiagnosticCode::DanglingReference),
         _ => Err(RuntimeError::RecoveryInvalid),
     }
 }

@@ -7,6 +7,7 @@
 //! that stored form, the reference reads back through the same snapshot, and an
 //! activation that would leave a reference without its row is refused at
 //! commit, with none of its writes committed.
+//! A row saved through the mounted filesystem is refused at sync the same way.
 //!
 //! No fixture builds the store or the identity inventory: each test creates a
 //! database with `orna init`, declares the tables, and commits them with
@@ -17,12 +18,19 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
+    time::Duration,
 };
 
 use orna_cli_testkit::format3;
 use orna_repository::{Repository, TypedKey};
 use orna_value::{Raw, decode_canonical_storage_value};
 use tempfile::TempDir;
+
+#[path = "support/editor_mount.rs"]
+mod editor_mount;
+use editor_mount::{
+    assert_errno, require_fuse_or_skip, run_orna_unmount, spawn_mount_process, write_and_sync,
+};
 
 const SOURCE: &str = r#"pub table Owner(id: Str) { name: Str, }
 pub table Vehicle(id: Str) { owner: Owner, }
@@ -618,6 +626,58 @@ fn a_cross_module_table_field_references_a_row_of_the_other_module() {
     assert!(
         transcript(&key).contains("\"ada\""),
         "the cross-module reference exposes the owner's key\n{}",
+        transcript(&key)
+    );
+}
+
+#[test]
+fn a_mounted_save_of_a_missing_reference_is_refused_and_keeps_the_stored_row() {
+    // ORNA-MUT-007 and ORNA-REF-003 through the mount: a saved row whose reference
+    // names no committed row is refused at sync with EINVAL, and the stored row keeps
+    // the reference it had.
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let database = published_garage();
+    let root = database.root();
+    let mount_parent = TempDir::new().expect("create the mount parent");
+    let mountpoint = mount_parent.path().join("library");
+    let mut mounted = spawn_mount_process(&root, &mountpoint);
+    let vehicle = mountpoint.join("Vehicle/v1/data.orna");
+    mounted.await_path(&vehicle);
+
+    let stored = fs::read_to_string(&vehicle).expect("read the stored vehicle");
+    assert!(stored.contains("\"ada\""), "the stored vehicle names its owner\n{stored}");
+    write_and_sync(&vehicle, &stored)
+        .expect("a save whose reference names a committed owner is admitted");
+
+    let dangling = stored.replace("\"ada\"", "\"ghost\"");
+    assert_ne!(dangling, stored, "the candidate must name a missing owner");
+    assert_errno(
+        write_and_sync(&vehicle, &dangling),
+        &[libc::EINVAL],
+        "a save whose reference names no committed owner is refused at sync",
+    );
+    assert_eq!(
+        fs::read_to_string(&vehicle).expect("read the accepted vehicle through a new open"),
+        stored,
+        "the refused save leaves the stored row unchanged"
+    );
+
+    // The refused candidate is retained as a draft, which blocks unmount until a valid
+    // save replaces it.
+    write_and_sync(&vehicle, &stored).expect("the restored vehicle is admitted");
+    run_orna_unmount(&root, &mountpoint);
+    let status = mounted
+        .wait_for_exit(Duration::from_secs(10))
+        .expect("the mount exits after unmount");
+    assert!(status.success(), "mount stderr: {}", mounted.stderr_text());
+
+    let key = orna(&root, &["run", "main.owner_key"]);
+    assert_success(&key, "orna run of the reference's key after the refused save");
+    assert!(
+        transcript(&key).contains("\"ada\""),
+        "the committed reference still names the owner\n{}",
         transcript(&key)
     );
 }

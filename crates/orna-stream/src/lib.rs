@@ -226,6 +226,9 @@ pub enum DiagnosticCode {
     /// so the save is refused as a stale edit rather than a failed validation
     /// (ORNA-VFS-011). The caller's retained draft is untouched.
     StaleBaseline,
+    /// A stored reference names no live row when the activation commits
+    /// (ORNA-REF-DANGLING, ORNA-MUT-007).
+    DanglingReference,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

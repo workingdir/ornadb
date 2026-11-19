@@ -227,6 +227,7 @@ pub(crate) fn run_repl_input(
             Some(cwd_generation),
             Arc::clone(&transactions.table_object_ids),
             Limits::default(),
+            None,
         ) {
             Ok(validator) => validator,
             Err(outcome) => {

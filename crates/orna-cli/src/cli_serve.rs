@@ -805,6 +805,7 @@ fn served_table_candidate_validator(
         Some(cwd_generation),
         table_object_ids,
         Limits::default(),
+        None,
     )
     .map_err(|_| orna_live::Error::RuntimeUnavailable)
 }

@@ -17,6 +17,13 @@ pub(super) struct TransactionalTableCandidateValidator {
     /// last `validate_changed` found false; the commit gate reads it to name the
     /// refusal (ORNA-A091-009).
     pub(super) refused_assertion: Option<orna_runtime::FalseAssertion>,
+    /// The stored references of the row a mounted save wrote, which the candidate
+    /// state must still resolve (ORNA-REF-001, ORNA-MUT-007). Absent when the
+    /// caller writes no row through the mounted path.
+    pub(super) saved_row: Option<SavedRowReferences>,
+    /// The primary keys of the candidate tables; they name the rows the saved
+    /// row's reference check reads.
+    pub(super) candidate_keys: TableKeys,
 }
 
 /// Reports whether any committed module declares a table-level or module-level
@@ -41,12 +48,16 @@ pub fn project_declares_assertions(loaded: &orna_project::LoadedProject) -> bool
 /// Builds a transaction validator from every committed project module. This
 /// keeps mounted row saves on the same cross-module assertion and effect
 /// admission path as project-backed transactions.
+///
+/// The mounted save's `saved_row` is the row it wrote: its stored references
+/// must still resolve in the candidate state (ORNA-REF-001, ORNA-MUT-007).
 pub fn transactional_loaded_project_candidate_validator(
     loaded: &orna_project::LoadedProject,
     identities: &orna_project::ObjectIdentityManifest,
     cwd_generation: Option<orna_repository::CwdGeneration>,
     table_object_ids: Arc<BTreeMap<String, orna_runtime::TableObjectId>>,
     limits: EvaluatorLimits,
+    saved_row: Option<SavedRowReferences>,
 ) -> Result<Box<dyn TableActivationCandidateValidator>, StageOutcome<Diagnostic>> {
     transactional_loaded_project_validator(
         loaded,
@@ -55,6 +66,7 @@ pub fn transactional_loaded_project_candidate_validator(
         table_object_ids,
         limits,
         admit_transaction_project,
+        saved_row,
     )
 }
 
@@ -74,6 +86,7 @@ pub fn transactional_loaded_project_commit_validator(
         table_object_ids,
         limits,
         admit_transaction_project_tolerant,
+        None,
     )
 }
 
@@ -89,47 +102,9 @@ pub(super) fn transactional_loaded_project_validator(
         &str,
         &Catalogue,
     ) -> Result<AdmittedTransaction, AdmissionFailure>,
+    saved_row: Option<SavedRowReferences>,
 ) -> Result<Box<dyn TableActivationCandidateValidator>, StageOutcome<Diagnostic>> {
-    let mut modules = loaded
-        .modules()
-        .iter()
-        .map(|module| SourceUnit {
-            fixture_id: "vfs-mounted-row".into(),
-            source_id: format!("mounted/{}", module.logical_path),
-            parse_as: "module_unit".into(),
-            source: module.source.clone(),
-        })
-        .collect::<Vec<_>>();
-    modules.extend(
-        loaded
-            .standard_sources()
-            .iter()
-            .map(|(path, source)| SourceUnit {
-                fixture_id: "vfs-mounted-row".into(),
-                source_id: path.clone(),
-                parse_as: "module_unit".into(),
-                source: source.clone(),
-            }),
-    );
-
-    let project = ProjectUnit {
-        fixture_id: "vfs-mounted-row".into(),
-        project_id: "mounted".into(),
-        environment_id: None,
-        modules,
-        loose_rows: Vec::new(),
-        expectations: ProjectExpectations {
-            environment: ProjectEnvironment {
-                network: false,
-                credentials: false,
-                intrinsics: "none".into(),
-                stdlib: None,
-                initial_tables: "empty".into(),
-            },
-            steps: Vec::new(),
-            negative_cases: Vec::new(),
-        },
-    };
+    let project = project_unit_of(loaded);
     let catalogue = loaded
         .production_catalogue()
         .map_err(|_| StageOutcome::Failed(standard_profile_diagnostic()))?;
@@ -153,6 +128,7 @@ pub(super) fn transactional_loaded_project_validator(
         limits,
     );
     validator.candidate_table_fields = candidate_table_fields;
+    validator.saved_row = saved_row;
     // A table whose key admission could not lower (bead ornadb-gq4g) holds rows
     // and assertions but no key; the commit gate refuses only the checks that read it.
     validator.unsupported = admitted
@@ -162,6 +138,50 @@ pub(super) fn transactional_loaded_project_validator(
         .cloned()
         .collect();
     Ok(Box::new(validator))
+}
+
+/// The project unit a loaded project is admitted as: its committed modules and
+/// standard sources, with no loose rows and no expectations.
+pub(super) fn project_unit_of(loaded: &orna_project::LoadedProject) -> ProjectUnit {
+    let mut modules = loaded
+        .modules()
+        .iter()
+        .map(|module| SourceUnit {
+            fixture_id: "vfs-mounted-row".into(),
+            source_id: format!("mounted/{}", module.logical_path),
+            parse_as: "module_unit".into(),
+            source: module.source.clone(),
+        })
+        .collect::<Vec<_>>();
+    modules.extend(
+        loaded
+            .standard_sources()
+            .iter()
+            .map(|(path, source)| SourceUnit {
+                fixture_id: "vfs-mounted-row".into(),
+                source_id: path.clone(),
+                parse_as: "module_unit".into(),
+                source: source.clone(),
+            }),
+    );
+    ProjectUnit {
+        fixture_id: "vfs-mounted-row".into(),
+        project_id: "mounted".into(),
+        environment_id: None,
+        modules,
+        loose_rows: Vec::new(),
+        expectations: ProjectExpectations {
+            environment: ProjectEnvironment {
+                network: false,
+                credentials: false,
+                intrinsics: "none".into(),
+                stdlib: None,
+                initial_tables: "empty".into(),
+            },
+            steps: Vec::new(),
+            negative_cases: Vec::new(),
+        },
+    }
 }
 
 pub(super) fn candidate_table_fields_in_stable_id_order(
@@ -241,6 +261,8 @@ impl TransactionalTableCandidateValidator {
             tables: tables.into_iter().collect(),
             unsupported: BTreeSet::new(),
             refused_assertion: None,
+            saved_row: None,
+            candidate_keys: key_fields.clone(),
         }
     }
 }
@@ -407,6 +429,15 @@ impl TableActivationCandidateValidator for TransactionalTableCandidateValidator 
                     return Err(table_assertion_diagnostic());
                 }
             }
+        }
+        if let Some(saved) = &self.saved_row {
+            validate_saved_row_references(
+                saved,
+                &self.candidate_keys,
+                &self.candidate_table_fields,
+                &self.candidate_key_fields,
+                rows,
+            )?;
         }
         Ok(())
     }

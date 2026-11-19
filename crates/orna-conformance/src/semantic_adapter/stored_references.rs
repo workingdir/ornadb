@@ -165,3 +165,151 @@ impl CandidateState for ActivationRows<'_, '_> {
             .map_err(|_| ReferenceError::State)
     }
 }
+
+/// The stored references a mounted save of one row must still resolve to: the
+/// catalogue of the committed database, the table and stored key of the row
+/// the save wrote (ORNA-REF-001, ORNA-MUT-007).
+pub struct SavedRowReferences {
+    pub catalogue: ReferenceCatalogue,
+    pub table: String,
+    pub key: Vec<u8>,
+}
+
+/// The reference catalogue of the committed database `loaded` runs against,
+/// bound to the identity its `HEAD` commits. `None` when no table has a
+/// committed identity to name, or when there is no commit yet. An unreadable
+/// identity fails closed rather than writing references without a database.
+pub fn committed_reference_catalogue(
+    repository: &orna_repository::Repository,
+    loaded: &orna_project::LoadedProject,
+    table_object_ids: &BTreeMap<String, orna_runtime::TableObjectId>,
+    limits: EvaluatorLimits,
+) -> Result<Option<ReferenceCatalogue>, StageOutcome<Diagnostic>> {
+    if table_object_ids.is_empty() {
+        return Ok(None);
+    }
+    let head = match repository.head() {
+        Ok(Some(head)) => head,
+        Ok(None) => return Ok(None),
+        Err(_) => return Err(StageOutcome::Failed(reference_identity_diagnostic())),
+    };
+    let project = project_unit_of(loaded);
+    let catalogue = loaded
+        .production_catalogue()
+        .map_err(|_| StageOutcome::Failed(standard_profile_diagnostic()))?;
+    let admitted = admit_transaction_project(&project, limits, "", &catalogue)
+        .map_err(|failure| *failure)?;
+    let database_id = repository
+        .open_pinned_format_context(head.as_str())
+        .and_then(|format| format.require_database_id())
+        .map_err(|_| StageOutcome::Failed(reference_identity_diagnostic()))?;
+    ReferenceCatalogue::new(
+        *database_id.as_bytes(),
+        &admitted.table_schemas,
+        table_object_ids,
+    )
+    .map_err(|_| StageOutcome::Failed(reference_identity_diagnostic()))
+}
+
+fn reference_identity_diagnostic() -> Diagnostic {
+    Diagnostic::new(
+        SafeText::new("ORNA-REF-IDENTITY").expect("static code"),
+        DiagnosticSeverity::Error,
+        SafeText::new("the committed database identity could not be read for stored references")
+            .expect("static message"),
+    )
+    .expect("valid diagnostic")
+    .redacted()
+}
+
+/// The candidate rows of a saved-row check: the rows of the candidate state,
+/// each row decoded into the map shape a reference column is read from.
+struct CandidateRowsState<'a> {
+    rows: &'a orna_runtime::RuntimeTableRows,
+    keys: &'a TableKeys,
+    table_fields: &'a TableFields,
+    key_fields: &'a TableFields,
+}
+
+impl CandidateRowsState<'_> {
+    fn key_names(&self, table: &str) -> Result<&[String], ReferenceError> {
+        self.key_fields
+            .get(table)
+            .map(Vec::as_slice)
+            .ok_or(ReferenceError::Unbound)
+    }
+}
+
+impl CandidateState for CandidateRowsState<'_> {
+    fn row(&mut self, table: &str, key: &[OvbRaw]) -> Result<Option<OvbRaw>, ReferenceError> {
+        key_from_components(self.keys, table, key)?;
+        let key_names = self.key_names(table)?;
+        let entries = self.rows.get(table).ok_or(ReferenceError::State)?;
+        for (stored_key, encoded) in entries {
+            let components =
+                candidate_key_components(stored_key, key_names).map_err(|_| ReferenceError::State)?;
+            if components.as_slice() == key {
+                return candidate_assertion_row(
+                    table,
+                    stored_key,
+                    encoded,
+                    self.table_fields,
+                    self.key_fields,
+                )
+                .map(|row| Some(row.raw().clone()))
+                .map_err(|_| ReferenceError::State);
+            }
+        }
+        Ok(None)
+    }
+
+    fn rows(&mut self, table: &str) -> Result<Vec<OvbRaw>, ReferenceError> {
+        let entries = self.rows.get(table).ok_or(ReferenceError::State)?;
+        entries
+            .iter()
+            .map(|(stored_key, encoded)| {
+                candidate_assertion_row(
+                    table,
+                    stored_key,
+                    encoded,
+                    self.table_fields,
+                    self.key_fields,
+                )
+                .map(|row| row.raw().clone())
+                .map_err(|_| ReferenceError::State)
+            })
+            .collect()
+    }
+}
+
+/// Validates that the row a mounted save wrote still resolves its stored
+/// references over the candidate state (ORNA-REF-001, ORNA-MUT-007). A dangling
+/// reference is refused with its own code; any other failure to read the state
+/// is refused as an evaluation failure, so nothing commits unchecked.
+pub(super) fn validate_saved_row_references(
+    saved: &SavedRowReferences,
+    keys: &TableKeys,
+    table_fields: &TableFields,
+    key_fields: &TableFields,
+    rows: &orna_runtime::RuntimeTableRows,
+) -> Result<(), SafeDiagnostic> {
+    let key_names = key_fields
+        .get(&saved.table)
+        .ok_or_else(table_evaluation_diagnostic)?;
+    let components =
+        candidate_key_components(&saved.key, key_names).map_err(|_| table_row_decode_diagnostic())?;
+    let touched = [(saved.table.clone(), components)];
+    let mut state = CandidateRowsState {
+        rows,
+        keys,
+        table_fields,
+        key_fields,
+    };
+    saved
+        .catalogue
+        .validate(&touched, &mut state)
+        .map_err(|error| match error {
+            ReferenceError::Dangling => dangling_reference_diagnostic(),
+            _ => table_evaluation_diagnostic(),
+        })
+}

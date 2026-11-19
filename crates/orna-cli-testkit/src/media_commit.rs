@@ -415,6 +415,7 @@ pub async fn commit_source_captures_for_table(
                 owner_field_values: Vec::new(),
                 key_components: &[key_component],
                 mutation_id: source_row_id,
+                references: None,
             },
         )
         .unwrap_or_else(|error| {
@@ -593,6 +594,7 @@ pub async fn commit_source_replacement_through_save_admission(
             owner_field_values: Vec::new(),
             key_components: &[key_component],
             mutation_id: source_row_id,
+            references: None,
         },
     )
     .unwrap_or_else(|error| {
@@ -651,6 +653,7 @@ pub async fn commit_source_replacement_through_save_admission(
         None,
         Arc::clone(&table_object_ids),
         Limits::default(),
+        None,
     )
     .unwrap_or_else(|_| panic!("the committed project yields a candidate validator"));
     let live_repository = repository.clone();
