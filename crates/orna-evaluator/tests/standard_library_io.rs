@@ -1,7 +1,7 @@
 #[path = "support/pinned_io_std.rs"]
 mod pinned_io_std;
 
-use orna_evaluator::Limits;
+use orna_evaluator::{Limits, SysHostBindingRegistry};
 use orna_project_repl::AdmittedReplSession;
 use orna_value::CanonicalValue;
 use orna_value::Raw;
@@ -17,12 +17,23 @@ fn pinned_filesystem_module_requires_a_host_effect_handler() {
         session.submit(include_str!("fixtures/stdlib-use-io-t7auz.orna")),
         Ok(None)
     );
+    let mut bindings = SysHostBindingRegistry::default();
+    assert_eq!(
+        session
+            .submit_with_sys_host_bindings(
+                include_str!("fixtures/stdlib-call-io-read-text-t7auz.orna"),
+                &mut bindings,
+            )
+            .unwrap_err()
+            .code(),
+        "ORNA-EVAL-UNSUPPORTED"
+    );
     assert_eq!(
         session
             .submit(include_str!("fixtures/stdlib-call-io-read-text-t7auz.orna"))
             .unwrap_err()
             .code(),
-        "ORNA-EVAL-UNSUPPORTED"
+        "ORNA-REPL-EFFECT"
     );
 }
 

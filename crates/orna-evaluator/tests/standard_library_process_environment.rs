@@ -67,14 +67,34 @@ fn process_and_environment_host_effects_require_a_host_effect_handler() {
         .submit(include_str!("fixtures/stdlib-use-io-t7auz.orna"))
         .unwrap_or_else(|error| panic!("std.io import failed: {}", error.code()));
 
-    for source in [
-        include_str!("fixtures/stdlib-io-process-run-host-call-xbf3n.orna"),
-        include_str!("fixtures/stdlib-io-environment-get-host-call-xbf3n.orna"),
-        include_str!("fixtures/stdlib-io-environment-require-host-call-xbf3n.orna"),
+    // The default registry binds no process provider, so `run` has no handler.
+    // The environment provider is always bound and answers with its own
+    // declared failure instead.
+    let mut bindings = SysHostBindingRegistry::default();
+    for (source, bound_code) in [
+        (
+            include_str!("fixtures/stdlib-io-process-run-host-call-xbf3n.orna"),
+            "ORNA-EVAL-UNSUPPORTED",
+        ),
+        (
+            include_str!("fixtures/stdlib-io-environment-get-host-call-xbf3n.orna"),
+            "ORNA-EVAL-ERROR",
+        ),
+        (
+            include_str!("fixtures/stdlib-io-environment-require-host-call-xbf3n.orna"),
+            "ORNA-EVAL-ERROR",
+        ),
     ] {
         assert_eq!(
+            session
+                .submit_with_sys_host_bindings(source, &mut bindings)
+                .unwrap_err()
+                .code(),
+            bound_code
+        );
+        assert_eq!(
             session.submit(source).unwrap_err().code(),
-            "ORNA-EVAL-UNSUPPORTED"
+            "ORNA-REPL-EFFECT"
         );
     }
 }
