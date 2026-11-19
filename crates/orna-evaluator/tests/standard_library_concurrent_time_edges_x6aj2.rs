@@ -110,6 +110,6 @@ fn zero_elapsed_sleep_uses_an_admitted_clock_and_returns_null() {
             ))
             .unwrap_err()
             .code(),
-        "ORNA-EVAL-UNSUPPORTED"
+        "ORNA-REPL-EFFECT"
     );
 }

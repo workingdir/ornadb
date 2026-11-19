@@ -110,13 +110,9 @@ pub(crate) fn summarize_standard_function_effects(
         })
         .collect();
 
-    // A source function's effects come only from its body: its callees' host
-    // classifications and the summaries of the source functions it calls. The
-    // path of the function itself is not a classification, so a pure function
-    // in a host-named module such as `std.net.*` stays effect-free.
     let mut summary: BTreeMap<Vec<String>, EffectSummary> = functions
         .keys()
-        .map(|key| (key.clone(), EffectSummary::default()))
+        .map(|key| (key.clone(), initial_effects(key)))
         .collect();
     loop {
         let mut changed = false;
@@ -167,6 +163,36 @@ pub(crate) fn standard_path_effects(path: &[String]) -> EffectSummary {
         }
     }
     summary
+}
+
+/// Starting effects of a source function, before its body is summarised. A
+/// source wrapper of a system host operation starts from that operation's
+/// classification, because its body only reports the missing binding. Any
+/// other source function starts pure: the path of a pure function in a
+/// host-named module such as `std.net.*` is not a classification.
+fn initial_effects(key: &[String]) -> EffectSummary {
+    if is_host_operation(key) {
+        standard_path_effects(key)
+    } else {
+        EffectSummary::default()
+    }
+}
+
+/// Whether `path` names a system host operation in the registry. A source
+/// wrapper of such an operation performs that host effect even though its body
+/// only reports the missing binding.
+#[cfg(not(target_arch = "wasm32"))]
+fn is_host_operation(path: &[String]) -> bool {
+    orna_sys::system_host_operation_registry()
+        .operation(&path.join("."))
+        .is_some()
+}
+
+/// Wasm builds link no host operation registry, so no source wrapper is a host
+/// operation there and keeps the unsupported-binding result of its body.
+#[cfg(target_arch = "wasm32")]
+fn is_host_operation(_path: &[String]) -> bool {
+    false
 }
 
 pub(crate) fn concat_path(prefix: &[String], suffix: &[String]) -> Vec<String> {
