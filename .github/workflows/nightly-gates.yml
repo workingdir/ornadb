@@ -391,9 +391,9 @@ jobs:
 
       - name: Run the 100,001-row committed table scan
         # The committed table store scans a table above the retired 100,000-row
-        # cap with bounded peak memory. The fixture seeds in 2,000-row runs, so
-        # the case takes about two hours. The recorder stops it 20 minutes before
-        # the job cap and still writes its record.
+        # cap with bounded peak memory. The case takes about 15 minutes in a local
+        # run. The recorder stops it at 170 minutes, inside the 200-minute job cap,
+        # and still writes its record.
         run: >-
           python3 scripts/gate_evidence.py run
           --record committed-table-scan-100k
