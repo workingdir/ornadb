@@ -8,7 +8,7 @@
 use std::{cmp::Ordering, str};
 
 use num_bigint::{BigInt, Sign};
-use orna_value::{OvbRaw, Value, compare_primary_keys};
+use orna_value::{ENUM_TAG, OvbRaw, UUID_TAG, Value, compare_primary_keys};
 use sha2::{Digest, Sha256};
 
 /// A payload-free cursor or key codec failure.
@@ -41,14 +41,20 @@ impl std::error::Error for CursorError {}
 /// and compare without delegating ordering to an OVB byte representation.
 ///
 /// `Float` is deliberately absent: ORNA-KEY-003 forbids it as a primary-key
-/// component. More elaborate nominal key forms remain outside this bounded
-/// transaction seam until their runtime representations are available here.
+/// component. `Enum` admits only the payload-free variants of one enum type
+/// (ORNA-ENUM-005); its cursor is the variant identity, which orders exactly as
+/// `compare_primary_keys` orders that type's keys. More elaborate nominal key
+/// forms remain outside this bounded transaction seam.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TransactionKeyType {
     Bool,
     Int,
     Decimal,
     Str,
+    /// A payload-free enum of the type with this identity.
+    Enum {
+        type_id: [u8; 16],
+    },
 }
 
 impl TransactionKeyType {
@@ -58,8 +64,12 @@ impl TransactionKeyType {
             Self::Int => b"Int",
             Self::Decimal => b"Decimal",
             Self::Str => b"Str",
+            Self::Enum { .. } => b"Enum",
         });
         output.push(0);
+        if let Self::Enum { type_id } = self {
+            output.extend_from_slice(type_id);
+        }
     }
 
     pub fn validate(&self, value: &Value) -> Result<(), CursorError> {
@@ -70,12 +80,53 @@ impl TransactionKeyType {
             (Self::Decimal, OvbRaw::Tag(60000, value)) => {
                 matches!(value.as_ref(), OvbRaw::Array(parts) if matches!(parts.as_slice(), [OvbRaw::Int(_), OvbRaw::Int(_)]))
             }
+            (Self::Enum { type_id }, raw) => {
+                payload_free_enum_identity(raw).is_some_and(|(actual, _)| actual == *type_id)
+            }
             _ => false,
         };
         valid
             .then_some(())
             .ok_or_else(|| CursorError::new("ORNA-EVAL-TABLE-KEY"))
     }
+}
+
+fn payload_free_enum_identity(raw: &OvbRaw) -> Option<([u8; 16], [u8; 16])> {
+    let OvbRaw::Tag(ENUM_TAG, body) = raw else {
+        return None;
+    };
+    let OvbRaw::Array(parts) = body.as_ref() else {
+        return None;
+    };
+    let [type_id, variant_id, OvbRaw::Null] = parts.as_slice() else {
+        return None;
+    };
+    Some((uuid_bytes(type_id)?, uuid_bytes(variant_id)?))
+}
+
+fn payload_free_enum_raw(type_id: [u8; 16], variant_id: [u8; 16]) -> OvbRaw {
+    OvbRaw::Tag(
+        ENUM_TAG,
+        Box::new(OvbRaw::Array(vec![
+            uuid_raw(type_id),
+            uuid_raw(variant_id),
+            OvbRaw::Null,
+        ])),
+    )
+}
+
+fn uuid_raw(bytes: [u8; 16]) -> OvbRaw {
+    OvbRaw::Tag(UUID_TAG, Box::new(OvbRaw::Bytes(bytes.to_vec())))
+}
+
+fn uuid_bytes(raw: &OvbRaw) -> Option<[u8; 16]> {
+    let OvbRaw::Tag(UUID_TAG, body) = raw else {
+        return None;
+    };
+    let OvbRaw::Bytes(bytes) = body.as_ref() else {
+        return None;
+    };
+    <[u8; 16]>::try_from(bytes.as_slice()).ok()
 }
 
 /// Declared table key metadata retained after transaction admission.
@@ -538,6 +589,11 @@ pub fn encode_typed_cursor_value(
         (TransactionKeyType::Str, OvbRaw::Text(value)) => {
             encode_ordered_string_cursor(value, output)
         }
+        (TransactionKeyType::Enum { .. }, _) => {
+            let (_, variant_id) = payload_free_enum_identity(value.raw())
+                .ok_or_else(|| CursorError::new("ORNA-EVAL-VALUE"))?;
+            output.extend_from_slice(&variant_id);
+        }
         _ => return Err(CursorError::new("ORNA-EVAL-VALUE")),
     }
     Ok(())
@@ -570,6 +626,15 @@ pub fn decode_typed_cursor_value(
                 Value::new(OvbRaw::Text(value)).expect("decoded UTF-8 is canonical"),
                 used,
             ))
+        }
+        TransactionKeyType::Enum { type_id } => {
+            let variant_id: [u8; 16] = encoded
+                .get(..16)
+                .and_then(|bytes| bytes.try_into().ok())
+                .ok_or_else(|| CursorError::new("ORNA-EVAL-VALUE"))?;
+            let value = Value::new(payload_free_enum_raw(*type_id, variant_id))
+                .map_err(|_| CursorError::new("ORNA-EVAL-VALUE"))?;
+            Ok((value, variant_id.len()))
         }
     }
 }

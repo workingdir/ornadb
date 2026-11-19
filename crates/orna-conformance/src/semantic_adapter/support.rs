@@ -1,5 +1,7 @@
 use super::*;
 
+use orna_value::{enum_type_id, qualified_name};
+
 pub(super) fn debit_effect_step(
     budget: &mut Option<&mut StepBudget>,
 ) -> Result<(), EvaluationError> {
@@ -453,31 +455,69 @@ pub(super) fn replace_record_fields(
     Value::new(OvbRaw::Map(row_fields)).map_err(|_| transaction_error("ORNA-EVAL-TABLE-ROW"))
 }
 
+const KEY_COMPONENT_REFUSAL: &str =
+    "transactional source seam admits only scalar and payload-free enum primary-key components";
+
+/// Lowers one table key annotation: a scalar name, or the simple name of a
+/// payload-free enum of this module listed in `enum_keys`.
 pub(super) fn transaction_key_type_from_syntax(
     ty: &orna_syntax_ast::TypeExpr,
+    enum_keys: &BTreeMap<String, [u8; 16]>,
 ) -> Result<TransactionKeyType, String> {
     let orna_syntax_ast::TypeExpr::Name {
         path, arguments, ..
     } = ty
     else {
-        return Err(
-            "transactional source seam supports only scalar Bool, Int, Decimal, and Str primary-key components".into(),
-        );
+        return Err(KEY_COMPONENT_REFUSAL.into());
     };
     if path.len() != 1 || !arguments.is_empty() {
-        return Err(
-            "transactional source seam supports only scalar Bool, Int, Decimal, and Str primary-key components".into(),
-        );
+        return Err(KEY_COMPONENT_REFUSAL.into());
     }
     match path[0].as_str() {
         "Bool" => Ok(TransactionKeyType::Bool),
         "Int" => Ok(TransactionKeyType::Int),
         "Decimal" => Ok(TransactionKeyType::Decimal),
         "Str" => Ok(TransactionKeyType::Str),
-        _ => Err(
-            "transactional source seam supports only scalar Bool, Int, Decimal, and Str primary-key components".into(),
-        ),
+        name => enum_keys
+            .get(name)
+            .map(|type_id| TransactionKeyType::Enum { type_id: *type_id })
+            .ok_or_else(|| KEY_COMPONENT_REFUSAL.into()),
     }
+}
+
+/// ORNA-ENUM-005: the payload-free enums this module declares, keyed by the
+/// simple name a key annotation uses, with their nominal type identity.
+///
+/// An enum with a payload-carrying variant, a unit variant, a unit-family
+/// marker or generic parameters is not payload-free and is not listed, so its
+/// key annotations keep the refusal.
+pub(super) fn payload_free_enum_keys(
+    namespace: Option<&str>,
+    items: &[orna_syntax_ast::Item],
+) -> BTreeMap<String, [u8; 16]> {
+    let mut keys = BTreeMap::new();
+    for item in items {
+        let Declaration::Enum {
+            name,
+            generics,
+            variants,
+            unit_family,
+            ..
+        } = &item.declaration
+        else {
+            continue;
+        };
+        let payload_free = !unit_family
+            && generics.is_empty()
+            && !variants.is_empty()
+            && variants
+                .iter()
+                .all(|variant| variant.fields.is_empty() && variant.unit.is_none());
+        if payload_free {
+            keys.insert(name.clone(), enum_type_id(&qualified_name(namespace, name)));
+        }
+    }
+    keys
 }
 
 pub(super) fn cursor_error(error: CursorError) -> EvaluationError {

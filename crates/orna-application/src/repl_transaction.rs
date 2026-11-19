@@ -657,9 +657,7 @@ impl ReplTransactionEffectHandler<'_, '_> {
                 }
                 self.mutations.mutations[mutation_index] = insert;
                 self.mutations
-                    .overlay
-                    .entry(table)
-                    .or_default()
+                    .overlay_rows_mut(&table)
                     .insert(key, Some(row.clone()));
                 self.next_row_ordinal = self.next_row_ordinal.saturating_add(1);
                 Ok(Some(row))

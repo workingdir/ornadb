@@ -54,6 +54,26 @@ fn false_table_assertion_rejects_the_insert() {
 }
 
 #[test]
+fn false_enum_keyed_assertion_rejects_the_insert() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let root = initialized_database(&directory, ENUM_KEYED_ASSERTED_LIBRARY);
+    commit_source(&root, "enum keyed asserting table fixture");
+
+    // The empty title makes the table assertion false for this candidate.
+    let output = orna_repl(
+        &root,
+        "main.Task.insert({ level: main.Level.low, title: \"\" })\n\
+         main.Task | count()",
+    );
+    let text = transcript(&output);
+    assert!(text.contains("ORNA-A091-009"), "{text}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("0 : Int"),
+        "{text}"
+    );
+}
+
+#[test]
 fn false_table_assertion_keeps_the_committed_store_unchanged() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let root = initialized_database(&directory, TITLED_LIBRARY);
@@ -128,7 +148,7 @@ fn enum_keyed_table_without_assertion_admits_the_write() {
     commit_source(&root, "enum keyed table fixture");
 
     // No assertion is declared, so the write keeps the unvalidated commit path
-    // and the scalar-only candidate seam is never reached.
+    // and the candidate seam is never reached.
     let output = orna_repl(
         &root,
         "main.Task.insert({ level: main.Level.low, title: \"Ship\" })\n\
@@ -143,8 +163,7 @@ fn enum_keyed_table_without_assertion_admits_the_write() {
     );
 }
 
-// INTERIM (ornadb-gq4g): the candidate seam is project-wide, so an enum key on
-// any table refuses every write in a project that declares an assertion.
+// Book has a scalar key and a true assertion; Journal has an enum key.
 const MIXED_KEY_LIBRARY: &str = "pub enum Level {\n    low,\n    high,\n}\n\
 pub table Book(id: Int) {\n    title: Str,\n    \
 assert every(row => row.title != \"\");\n}\n\
@@ -154,52 +173,37 @@ const ENUM_KEYED_ASSERTED_LIBRARY: &str = "pub enum Level {\n    low,\n    high,
 pub table Task(level: Level) {\n    title: Str,\n    \
 assert every(row => row.title != \"\");\n}\n";
 
-/// Commits `asserting` over the committed source with plain git. The commit gate
-/// refuses an asserting project with a non-scalar key (ORNA-ASSERT-050, interim
-/// ornadb-gq4g), so the asserting source reaches HEAD the way a repository
-/// committed before that gate would hold it. The store already admitted the
-/// tables through `orna commit`; only the source changes here.
-fn commit_asserting_source_outside_the_gate(root: &std::path::Path, asserting: &str) {
-    std::fs::write(root.join("main.orna"), asserting).expect("write asserting source");
-    git(root, &["add", "main.orna"]);
-    git(root, &["commit", "-m", "asserting source outside the gate"]);
-}
-
-const MIXED_KEY_PLAIN_LIBRARY: &str = "pub enum Level {\n    low,\n    high,\n}\n\
-pub table Book(id: Int) {\n    title: Str,\n}\n\
-pub table Journal(level: Level) {\n    note: Str,\n}\n";
-
 #[test]
-fn enum_keyed_assertion_write_is_refused_and_leaves_the_store_unchanged() {
+fn enum_keyed_assertion_write_is_admitted_without_moving_head() {
     let directory = tempfile::tempdir().expect("temporary directory");
-    let root = initialized_database(&directory, ENUM_KEYED_LIBRARY);
-    commit_source(&root, "enum keyed table fixture");
-    commit_asserting_source_outside_the_gate(&root, ENUM_KEYED_ASSERTED_LIBRARY);
+    let root = initialized_database(&directory, ENUM_KEYED_ASSERTED_LIBRARY);
+    commit_source(&root, "enum keyed asserting table fixture");
     let head = git(&root, &["rev-parse", "HEAD"]);
 
+    // The enum key is admitted and the one candidate row is valid. The write
+    // reaches the store, not HEAD: only `orna commit` moves HEAD.
     let output = orna_repl(
         &root,
         "main.Task.insert({ level: main.Level.low, title: \"Ship\" })\n\
          main.Task | count()",
     );
     let text = transcript(&output);
-    assert!(text.contains("ORNA-REPL-EFFECT"), "{text}");
-    assert_eq!(git(&root, &["rev-parse", "HEAD"]), head);
+    assert_success(&output, "REPL session");
+    assert!(!text.contains("ORNA-REPL-EFFECT"), "{text}");
     assert!(
-        String::from_utf8_lossy(&output.stdout).contains("0 : Int"),
+        String::from_utf8_lossy(&output.stdout).contains("1 : Int"),
         "{text}"
     );
+    assert_eq!(git(&root, &["rev-parse", "HEAD"]), head, "{text}");
 }
 
 #[test]
-fn unrelated_enum_keyed_table_refuses_a_valid_write_in_an_asserting_project() {
-    // INTERIM: Book has a scalar key and a true assertion, but Journal's enum
-    // key is checked project-wide, so the valid write is refused. The read-only
-    // count still answers. Expect admission here once the seam accepts enums.
+fn unrelated_enum_keyed_table_admits_a_valid_write_in_an_asserting_project() {
+    // Book has a scalar key and a true assertion. Journal's enum key is read by
+    // the candidate seam too, and the valid write to Book is admitted.
     let directory = tempfile::tempdir().expect("temporary directory");
-    let root = initialized_database(&directory, MIXED_KEY_PLAIN_LIBRARY);
+    let root = initialized_database(&directory, MIXED_KEY_LIBRARY);
     commit_source(&root, "mixed key fixture");
-    commit_asserting_source_outside_the_gate(&root, MIXED_KEY_LIBRARY);
     let head = git(&root, &["rev-parse", "HEAD"]);
 
     let output = orna_repl(
@@ -208,12 +212,13 @@ fn unrelated_enum_keyed_table_refuses_a_valid_write_in_an_asserting_project() {
          main.Book | count()",
     );
     let text = transcript(&output);
-    assert!(text.contains("ORNA-REPL-EFFECT"), "{text}");
-    assert_eq!(git(&root, &["rev-parse", "HEAD"]), head);
+    assert_success(&output, "REPL session");
+    assert!(!text.contains("ORNA-REPL-EFFECT"), "{text}");
     assert!(
-        String::from_utf8_lossy(&output.stdout).contains("0 : Int"),
+        String::from_utf8_lossy(&output.stdout).contains("1 : Int"),
         "{text}"
     );
+    assert_eq!(git(&root, &["rev-parse", "HEAD"]), head, "{text}");
 }
 
 const DATE_KEYED_LIBRARY: &str = "pub table Day(date: Date) {\n    title: Str,\n}\n";

@@ -544,6 +544,7 @@ pub(super) fn admitted_transaction_module(
     let mut table_fields = TableFields::new();
     let mut assertions = TableAssertions::new();
     let mut module_assertions = ModuleAssertions::new();
+    let enum_keys = payload_free_enum_keys(namespace, items);
     for (source_order, item) in items.iter().enumerate() {
         match &item.declaration {
             Declaration::Function { signature, body } => {
@@ -587,7 +588,7 @@ pub(super) fn admitted_transaction_module(
                                         "transactional source seam requires typed table keys"
                                             .to_owned()
                                     })
-                                    .and_then(transaction_key_type_from_syntax)
+                                    .and_then(|ty| transaction_key_type_from_syntax(ty, &enum_keys))
                             })
                             .collect::<Result<Vec<_>, String>>(),
                     )

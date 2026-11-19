@@ -128,10 +128,12 @@ pub(crate) fn summarize_standard_function_effects(
 }
 
 /// Least fixed point of the source-function effect summaries. A source
-/// function's effects come only from its body: each callee's host
-/// classification by path, joined with the summary of each source function it
-/// calls. A declared callee is classified by path too. The typed wrapper
-/// `std.io.fs.read_text` calls `__read_text`, which calls back into
+/// function starts from `initial_effects`: when it is itself a system host
+/// operation, its host classification, so a wrapper whose body only reports a
+/// missing binding keeps that effect. Its effects then grow from its body: each
+/// callee's host classification by path, joined with the summary of each source
+/// function it calls. A declared callee is classified by path too. The typed
+/// wrapper `std.io.fs.read_text` calls `__read_text`, which calls back into
 /// `std.io.fs.read_text`; without that path classification the cycle closes on
 /// an empty summary. The cost: a source function that calls any declared
 /// function in a host-named namespace such as `std.net.*` carries that
@@ -142,7 +144,7 @@ fn fixpoint_standard_effects(
 ) -> BTreeMap<Vec<String>, EffectSummary> {
     let mut summary: BTreeMap<Vec<String>, EffectSummary> = candidates
         .keys()
-        .map(|key| (key.clone(), EffectSummary::default()))
+        .map(|key| (key.clone(), initial_effects(key)))
         .collect();
     loop {
         let mut changed = false;
@@ -180,6 +182,36 @@ pub(crate) fn standard_path_effects(path: &[String]) -> EffectSummary {
         }
     }
     summary
+}
+
+/// Starting effects of a source function, before its body is summarised. A
+/// source wrapper of a system host operation starts from that operation's
+/// classification, because its body only reports the missing binding. Any
+/// other source function starts pure: the path of a pure function in a
+/// host-named module such as `std.net.*` is not a classification.
+fn initial_effects(key: &[String]) -> EffectSummary {
+    if is_host_operation(key) {
+        standard_path_effects(key)
+    } else {
+        EffectSummary::default()
+    }
+}
+
+/// Whether `path` names a system host operation in the registry. A source
+/// wrapper of such an operation performs that host effect even though its body
+/// only reports the missing binding.
+#[cfg(not(target_arch = "wasm32"))]
+fn is_host_operation(path: &[String]) -> bool {
+    orna_sys::system_host_operation_registry()
+        .operation(&path.join("."))
+        .is_some()
+}
+
+/// Wasm builds link no host operation registry, so no source wrapper is a host
+/// operation there and keeps the unsupported-binding result of its body.
+#[cfg(target_arch = "wasm32")]
+fn is_host_operation(_path: &[String]) -> bool {
+    false
 }
 
 pub(crate) fn concat_path(prefix: &[String], suffix: &[String]) -> Vec<String> {
