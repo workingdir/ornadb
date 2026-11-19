@@ -11,6 +11,15 @@ pub(crate) fn blob_aware_eq(left: &Value, right: &Value) -> Result<bool, Evaluat
         }
         (Value::Tuple(left), Value::Tuple(right)) => blob_aware_seq_eq(left, right),
         (Value::Option(left), Value::Option(right)) => blob_aware_option_eq(left, right),
+        // An Error's identity is its canonical code, message, causes and
+        // details. The raised-at source span and diagnostic are provenance,
+        // so equal errors raised at different sites still compare equal.
+        (Value::Error(left), Value::Error(right)) => {
+            match (left.canonical_error(), right.canonical_error()) {
+                (Some(left), Some(right)) => Ok(left == right),
+                _ => Ok(left == right),
+            }
+        }
         (Value::Record(left), Value::Record(right)) => blob_aware_record_eq(left, right),
         (
             Value::NominalRecord {
