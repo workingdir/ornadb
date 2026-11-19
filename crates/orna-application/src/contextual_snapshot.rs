@@ -245,8 +245,13 @@ impl ContextValueEffectHandler for SourceMutationEffectHandler {
 /// any other effect is declined, and a read that stages a mutation is refused.
 /// `sys_host` is the authority's host context: `sys.rt.info()` on a page with a
 /// Blob table resolves exactly as it does on the canonical read path.
+///
+/// `database_id` is the committed database whose stored references the rows
+/// name. A reference resolves through the catalogue of that database, so
+/// `.name` on a reference reads its target row (ORNA-REF-002).
 fn evaluate_contextual_page_read(
     application: &AdmittedApplication,
+    database_id: [u8; 16],
     sys_host: Option<&SysHostContext>,
     arguments: &BTreeMap<String, ContextValue>,
     mut rows: RuntimeTableRows,
@@ -304,6 +309,11 @@ fn evaluate_contextual_page_read(
         context_table_rows.insert(table, decoded);
     }
     let table_object_ids = crate::application_table_object_ids(application);
+    let references = crate::stored_reference::stored_reference_catalogue(
+        database_id,
+        &tables,
+        &table_object_ids,
+    )?;
     let mut handler = SourceMutationEffectHandler::with_table_rows_and_table_object_ids(
         tables,
         rows,
@@ -315,7 +325,8 @@ fn evaluate_contextual_page_read(
         application.limits,
     )
     .with_sys_host_context(sys_host.cloned())
-    .with_catalogue_identities(application.catalogue_identities());
+    .with_catalogue_identities(application.catalogue_identities())
+    .with_stored_references(references);
     handler.context_table_rows = context_table_rows;
     let mut budget = StepBudget::new(application.limits.max_steps);
     let value = invoke_named_with_context_effects(
@@ -339,12 +350,14 @@ impl ApplicationAuthority {
     pub fn evaluate_contextual_page_read(
         &self,
         application: &AdmittedApplication,
+        database_id: [u8; 16],
         arguments: &BTreeMap<String, ContextValue>,
         rows: RuntimeTableRows,
         context_rows: BTreeMap<String, Vec<(Vec<u8>, ContextValue)>>,
     ) -> Result<ContextValue, ApplicationError> {
         evaluate_contextual_page_read(
             application,
+            database_id,
             self.sys_host.as_ref(),
             arguments,
             rows,
@@ -496,6 +509,7 @@ mod tests {
         for (source, expected) in [(TWO_BLOB_SOURCE, 1), (TWO_BLOB_CLIP_SOURCE, 2)] {
             let result = evaluate_contextual_page_read(
                 &admit(source),
+                [0x21; 16],
                 None,
                 &BTreeMap::new(),
                 RuntimeTableRows::from([
@@ -572,6 +586,7 @@ mod tests {
             .expect("key bytes");
         let result = evaluate_contextual_page_read(
             &admit(BLOB_SOURCE),
+            [0x21; 16],
             None,
             &BTreeMap::new(),
             RuntimeTableRows::from([("Media".to_owned(), Vec::new())]),
@@ -608,6 +623,7 @@ mod tests {
     fn blob_table_without_context_rows_is_refused() {
         let result = evaluate_contextual_page_read(
             &admit(BLOB_SOURCE),
+            [0x21; 16],
             None,
             &BTreeMap::new(),
             RuntimeTableRows::from([("Media".to_owned(), Vec::new())]),
@@ -622,6 +638,7 @@ mod tests {
     fn context_rows_for_a_non_blob_table_are_refused() {
         let result = evaluate_contextual_page_read(
             &admit(NOTE_SOURCE),
+            [0x21; 16],
             None,
             &BTreeMap::new(),
             RuntimeTableRows::from([("Note".to_owned(), Vec::new())]),
@@ -663,6 +680,7 @@ mod tests {
         );
         let result = evaluate_contextual_page_read(
             &admitted,
+            [0x21; 16],
             None,
             &BTreeMap::new(),
             RuntimeTableRows::from([("Note".to_owned(), Vec::new())]),
@@ -709,6 +727,7 @@ mod tests {
             .expect("canonical read");
         let contextual = evaluate_contextual_page_read(
             &application,
+            [0x21; 16],
             None,
             &BTreeMap::new(),
             rows,

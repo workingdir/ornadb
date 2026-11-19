@@ -336,7 +336,15 @@ impl ServeApp {
                 storage_orders,
             };
             return evaluate_contextual_serve(
-                &authority, &format, &runtime, &state, &admitted, &tables, committed, &rows,
+                &authority,
+                &format,
+                &runtime,
+                &state,
+                &admitted,
+                identity.database_id,
+                &tables,
+                committed,
+                &rows,
             )
             .map(|value| (ServedValue::Contextual(value), commit));
         }
@@ -908,6 +916,7 @@ fn evaluate_contextual_serve(
     runtime: &tokio::runtime::Runtime,
     state: &RuntimeState,
     admitted: &AdmittedApplication,
+    database_id: [u8; 16],
     tables: &[RuntimeTableIdentity],
     committed: PinnedCommittedTables,
     committed_rows: &RuntimeTableRows,
@@ -957,7 +966,7 @@ fn evaluate_contextual_serve(
         context_rows.insert(name.clone(), table_rows);
     }
     authority
-        .evaluate_contextual_page_read(admitted, &BTreeMap::new(), plain, context_rows)
+        .evaluate_contextual_page_read(admitted, database_id, &BTreeMap::new(), plain, context_rows)
         .map_err(|error| match error {
             ApplicationError::ReadStagedMutation => "serve.write_refused",
             _ => "serve.evaluation_failed",
