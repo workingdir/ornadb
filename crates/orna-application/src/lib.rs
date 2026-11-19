@@ -2948,6 +2948,13 @@ impl EffectHandler for SourceMutationEffectHandler {
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
         self.resolve_stored_reference(reference)
     }
+
+    fn resolve_context_table_reference(
+        &mut self,
+        reference: &CanonicalValue,
+    ) -> Result<Option<ContextValue>, EvaluationError> {
+        self.resolve_context_stored_reference(reference)
+    }
 }
 
 fn encoded_key(key: &CanonicalValue) -> Result<Vec<u8>, EvaluationError> {
