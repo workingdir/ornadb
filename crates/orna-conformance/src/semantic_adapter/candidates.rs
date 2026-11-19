@@ -284,6 +284,24 @@ impl TransactionalTableCandidateValidator {
             candidate_keys: key_fields.clone(),
         }
     }
+
+    /// Checks the references of the row a mounted save wrote against the candidate
+    /// state (ORNA-REF-001, ORNA-MUT-007). A validator without a saved row checks nothing.
+    fn validate_saved_row(
+        &self,
+        rows: &orna_runtime::RuntimeTableRows,
+    ) -> Result<(), SafeDiagnostic> {
+        let Some(saved) = &self.saved_row else {
+            return Ok(());
+        };
+        validate_saved_row_references(
+            saved,
+            &self.candidate_keys,
+            &self.candidate_table_fields,
+            &self.candidate_key_fields,
+            rows,
+        )
+    }
 }
 
 impl TableActivationCandidateValidator for TransactionalTableCandidateValidator {
@@ -449,15 +467,7 @@ impl TableActivationCandidateValidator for TransactionalTableCandidateValidator 
                 }
             }
         }
-        if let Some(saved) = &self.saved_row {
-            validate_saved_row_references(
-                saved,
-                &self.candidate_keys,
-                &self.candidate_table_fields,
-                &self.candidate_key_fields,
-                rows,
-            )?;
-        }
+        self.validate_saved_row(rows)?;
         Ok(())
     }
 }
