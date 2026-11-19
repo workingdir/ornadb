@@ -83,8 +83,15 @@ impl BodyCheck<'_> {
             }
         }
         let is_supplied = |def: DefId| supplied.contains(&def);
+        // A row that supplies a computed field is already an insertion-shape
+        // violation (COMPUTED_INSERT, below). Its absent required fields are
+        // not a second primary code for the same row.
+        let supplies_computed = declared.iter().any(|field| {
+            matches!(field.initializer, Some(FieldInitializer::Computed(_)))
+                && is_supplied(field.def)
+        });
         match op {
-            TableOp::Insert => {
+            TableOp::Insert if !supplies_computed => {
                 for field in &declared {
                     if field.initializer.is_none() && !is_supplied(field.def) {
                         self.missing_field_error(
@@ -95,7 +102,7 @@ impl BodyCheck<'_> {
                     }
                 }
             }
-            TableOp::Upsert => {
+            TableOp::Upsert if !supplies_computed => {
                 for field in declared.iter().filter(|field| field.key) {
                     if !is_supplied(field.def) {
                         self.missing_field_error(
