@@ -747,6 +747,8 @@ fn core_std_modules(modules: &mut BTreeMap<Namespace, ModuleHeader>) {
             std::iter::empty::<&str>(),
         ),
     );
+    // The checker accepts `std.net.http.get` from the spec, but the pinned
+    // stdlib does not define it (ornadb-5il1.242).
     modules.insert(
         Namespace(vec!["std".into(), "net".into(), "http".into()]),
         catalogue_module(

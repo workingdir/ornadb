@@ -526,3 +526,34 @@ fn sys_filesystem_provider_enforces_host_selected_text_and_entry_limits() {
         );
     }
 }
+
+#[test]
+fn piped_std_wrapper_calls_bind_input_to_the_first_parameter() {
+    let base = tempfile::tempdir().unwrap();
+    let root = base.path().join("root");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("input.txt"), "piped-file-value").unwrap();
+    let mut filesystem = FilesystemProvider::new();
+    filesystem.allow_root(&root).unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_filesystem_provider(filesystem);
+    let mut session = pinned_io_std::session();
+    session
+        .submit(include_str!("fixtures/stdlib-use-io-fs-mpk0d.orna"))
+        .unwrap();
+
+    assert_eq!(
+        session.submit_with_sys_host_bindings(
+            &fixture_root("\"ROOT_PATH\" | std.io.fs.read_text(\"input.txt\")", &root),
+            &mut bindings,
+        ),
+        Ok(Some(text_value("piped-file-value")))
+    );
+    assert_eq!(
+        session.submit_with_sys_host_bindings(
+            &fixture_root("\"ROOT_PATH\" | std.io.fs.exists(\"input.txt\")", &root),
+            &mut bindings,
+        ),
+        Ok(Some(CanonicalValue::new(Raw::Bool(true)).unwrap()))
+    );
+}

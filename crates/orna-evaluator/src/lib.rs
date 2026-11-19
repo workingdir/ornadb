@@ -9328,7 +9328,9 @@ impl Context<'_, '_> {
     /// Serves calls that resolve to the system host: `sys.explain`,
     /// `sys.rt.info`, Blob operations and registered host operations.
     /// `Ok(None)` means the call is not the host's to serve; `input` is then
-    /// untouched, because a registered host operation takes no piped input.
+    /// untouched. A registered host operation takes no piped input, so a piped
+    /// call to a public `std.` wrapper that shares its name is left to the source
+    /// route, which binds the input to the wrapper's first parameter.
     #[cfg(feature = "system-host-bindings")]
     fn call_system_host(
         &mut self,
@@ -9389,6 +9391,18 @@ impl Context<'_, '_> {
         };
         if self.effects.is_none() {
             return Err(error("ORNA-EVAL-UNSUPPORTED"));
+        }
+        // A public `std.` wrapper can share its name with a registered host
+        // operation. A piped call to such a wrapper belongs to the wrapper: the
+        // source route binds the input to its first parameter, and the wrapper's
+        // private body makes the unpiped host call. `sys.*` host calls keep
+        // rejecting piped input.
+        if input.is_some()
+            && let Some(name) = site.resolved.as_deref()
+            && name.starts_with("std.")
+            && self.functions.contains_key(name)
+        {
+            return Ok(None);
         }
         if input.is_some() || arguments.len() != operation.parameters.len() {
             return Err(error("ORNA-EVAL-ARGUMENT"));
