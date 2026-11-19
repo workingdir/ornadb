@@ -19,6 +19,7 @@ use orna_check::{
     StandardProfileError, SymbolKind, SystemProviders, analyze, analyze_with_catalogue,
     check_standard_sources, lower_data_expression, lower_row_unit_with_key_spelling,
 };
+use orna_repository::dependency_origins::MAX_GITMODULES_BYTES;
 use orna_repository::{
     CommittedTableBinding, CommittedTableBindingRequest, CommittedTreeEntry,
     CommittedTreeEntryKind, FINAL_REPOSITORY_FORMAT, FormatContextError, GitCommitRef,
@@ -39,6 +40,7 @@ use unicode_normalization::UnicodeNormalization;
 mod attachments;
 mod committed_store;
 mod declarations;
+mod gitlinks;
 mod object_identity;
 mod stored_reference;
 mod table_storage;
@@ -47,6 +49,7 @@ mod typed_row;
 pub use committed_store::CommittedTableStore;
 use declarations::declaration_records;
 pub use declarations::{DeclarationLocation, DeclarationRecord};
+use gitlinks::{bind_opaque_pins, read_worktree_gitmodules};
 
 pub use object_identity::{
     OBJECT_IDENTITY_MANIFEST_PATH, ObjectIdentity, ObjectIdentityError, ObjectIdentityManifest,
@@ -334,6 +337,7 @@ pub struct LoadedProject {
 pub struct OpaqueGitlinkPin {
     path: String,
     commit: GitCommitRef,
+    origin: Option<String>,
 }
 
 impl OpaqueGitlinkPin {
@@ -345,6 +349,12 @@ impl OpaqueGitlinkPin {
     /// The commit the parent tree binds at [`Self::path`].
     pub fn commit(&self) -> &GitCommitRef {
         &self.commit
+    }
+
+    /// The URL the parent's `.gitmodules` declares for [`Self::path`], or `None` when
+    /// no section declares that path. The pin is still bound to [`Self::commit`].
+    pub fn origin(&self) -> Option<&str> {
+        self.origin.as_deref()
     }
 }
 
@@ -1312,7 +1322,8 @@ impl ProjectLoader {
         overlays: &BTreeMap<String, String>,
     ) -> Result<LoadedProject, ProjectLoadError> {
         let root = canonical_worktree(repository)?;
-        let pins = worktree_opaque_pins(repository)?;
+        let gitlinks = worktree_gitlinks(repository)?;
+        let pins = bind_opaque_pins(gitlinks, || read_worktree_gitmodules(&root))?;
         let pin_paths = pins.iter().map(|pin| pin.path.clone()).collect::<Vec<_>>();
         validate_repository_paths(&root, self.limits, &pin_paths)?;
         // The worktree does not change during one load, and where an import
@@ -1410,20 +1421,27 @@ impl ProjectLoader {
                 .map(|context| context.repository_format_number())
         })?;
 
-        // Each pin binds the exact commit its parent records; the gitlink's
-        // tree is never read.
-        let opaque_pins = snapshot
+        // Each pin binds the exact commit its parent records and the origin its
+        // `.gitmodules` declares; the gitlink's tree is never read.
+        let gitlinks = snapshot
             .opaque_pins
             .iter()
-            .map(|path| -> Result<OpaqueGitlinkPin, ProjectLoadError> {
-                Ok(OpaqueGitlinkPin {
-                    path: path.clone(),
-                    commit: repository
-                        .committed_submodule_commit(commit, path)
-                        .map_err(ProjectLoadError::Repository)?,
-                })
+            .map(|path| {
+                repository
+                    .committed_submodule_commit(commit, path)
+                    .map(|pinned| (path.clone(), pinned))
+                    .map_err(ProjectLoadError::Repository)
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let opaque_pins = bind_opaque_pins(gitlinks, || {
+            if !snapshot.has_gitmodules {
+                return Ok(None);
+            }
+            repository
+                .read_committed_file(commit, ".gitmodules", MAX_GITMODULES_BYTES + 1)
+                .map(Some)
+                .map_err(ProjectLoadError::Repository)
+        })?;
 
         let mut project = load_reachable_project(
             self.limits,
@@ -1570,6 +1588,27 @@ impl ProjectLoader {
                 .map(|context| context.repository_format_number())
         })?;
 
+        let gitlinks = snapshot
+            .opaque_pins
+            .iter()
+            .map(|path| {
+                repository
+                    .private_candidate_submodule_commit(candidate, path)
+                    .map(|pinned| (path.clone(), pinned))
+                    .map_err(ProjectLoadError::Repository)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        // Pins bind the same exact commits and declared origins as a committed load.
+        let opaque_pins = bind_opaque_pins(gitlinks, || {
+            if !snapshot.has_gitmodules {
+                return Ok(None);
+            }
+            repository
+                .read_private_candidate_file(candidate, ".gitmodules", MAX_GITMODULES_BYTES + 1)
+                .map(Some)
+                .map_err(ProjectLoadError::Repository)
+        })?;
+
         let mut project = load_reachable_project(
             self.limits,
             standard_profile,
@@ -1586,7 +1625,10 @@ impl ProjectLoader {
                 )
                 .map(|source| (source, None))
             },
-            |_, segments| resolve_committed_import(&snapshot.source_paths, segments),
+            |importer, segments| {
+                reject_opaque_gitlink_import(&snapshot.opaque_pins, importer, segments)?;
+                resolve_committed_import(&snapshot.source_paths, segments)
+            },
             |tables, modules, total_bytes| {
                 if has_format3_database {
                     refuse_format3_loose_rows(&snapshot.row_paths, tables, modules)?;
@@ -1604,6 +1646,7 @@ impl ProjectLoader {
             },
         )?;
         project.source_commit = Some(candidate.commit().clone());
+        project.opaque_pins = opaque_pins;
         Ok(project)
     }
 
@@ -2271,6 +2314,8 @@ pub enum ProjectLoadError {
         import: String,
         gitlink: String,
     },
+    /// `.gitmodules` is oversized, not UTF-8, or declares an invalid or ambiguous origin.
+    InvalidGitmodules,
 }
 
 impl fmt::Display for ProjectLoadError {
@@ -2325,6 +2370,9 @@ impl fmt::Display for ProjectLoadError {
                     formatter,
                     "module {module} imports {import} from opaque dependency gitlink {gitlink}, whose declared tables cannot be derived"
                 );
+            }
+            Self::InvalidGitmodules => {
+                ".gitmodules declares an invalid or ambiguous dependency origin"
             }
         })
     }
@@ -2475,6 +2523,7 @@ struct ValidatedSnapshotTree {
     source_paths: BTreeSet<String>,
     row_paths: BTreeSet<String>,
     has_standard_gitlink: bool,
+    has_gitmodules: bool,
     has_database_metadata: bool,
     has_legacy_format_metadata: bool,
     opaque_pins: Vec<String>,
@@ -2499,11 +2548,7 @@ fn validate_private_candidate_tree(
     let entries = repository
         .list_private_candidate_source_tree(candidate)
         .map_err(source_tree_load_error)?;
-    let snapshot = validate_snapshot_tree(entries, limits)?;
-    if !snapshot.opaque_pins.is_empty() {
-        return Err(ProjectLoadError::UnsafePath);
-    }
-    Ok(snapshot)
+    validate_snapshot_tree(entries, limits)
 }
 
 /// A source tree over the fixed walk limit is reported as
@@ -2523,6 +2568,10 @@ fn validate_snapshot_tree(
     let has_standard_gitlink = entries.iter().any(|entry| {
         entry.path().as_path() == Path::new("stdlib/std")
             && entry.kind() == CommittedTreeEntryKind::Submodule
+    });
+    let has_gitmodules = entries.iter().any(|entry| {
+        entry.path().as_path() == Path::new(".gitmodules")
+            && matches!(entry.kind(), CommittedTreeEntryKind::File { .. })
     });
     let has_database_metadata = entries.iter().any(|entry| {
         entry.path().as_path() == Path::new(".orna/database.orna")
@@ -2554,6 +2603,7 @@ fn validate_snapshot_tree(
         source_paths,
         row_paths,
         has_standard_gitlink,
+        has_gitmodules,
         has_database_metadata,
         has_legacy_format_metadata,
         opaque_pins,
@@ -2795,17 +2845,16 @@ fn canonical_standard_module(requested: &str, available: impl Fn(&str) -> bool) 
     }
 }
 
-/// The dependency gitlinks the worktree index records, each pinned at the
-/// commit the index binds. `stdlib/std` is attached separately and is excluded.
-fn worktree_opaque_pins(
+/// The dependency gitlinks the worktree index records, each with the commit the
+/// index binds. `stdlib/std` is attached separately and is excluded.
+fn worktree_gitlinks(
     repository: &Repository,
-) -> Result<Vec<OpaqueGitlinkPin>, ProjectLoadError> {
+) -> Result<Vec<(String, GitCommitRef)>, ProjectLoadError> {
     Ok(repository
         .index_submodule_commits()
         .map_err(ProjectLoadError::Repository)?
         .into_iter()
         .filter(|(path, _)| path != "stdlib/std")
-        .map(|(path, commit)| OpaqueGitlinkPin { path, commit })
         .collect())
 }
 

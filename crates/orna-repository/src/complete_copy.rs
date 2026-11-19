@@ -68,6 +68,7 @@ use std::{
 use sha1::{Digest as Sha1Digest, Sha1};
 use sha2::{Digest as Sha2Digest, Sha256};
 
+use crate::dependency_origins::{DependencyOrigin, GitmodulesError, parse_dependency_origins};
 use crate::hex::hex_encode;
 use crate::native_graph::{GitHashAlgorithm, NODE_DATA_LIMIT, NodeData};
 use crate::object_reader::{ObjectKind, ObjectReader, TreeEntryMode};
@@ -101,8 +102,6 @@ pub const MAX_EXPORT_OBJECTS: usize = 1_000_000;
 pub const MAX_EXPORT_SNAPSHOTS: usize = 64;
 /// Largest number of distinct dependencies one archive may record.
 pub const MAX_EXPORT_DEPENDENCIES: usize = 4096;
-/// Largest `.gitmodules` file read while resolving dependency origins.
-pub const MAX_GITMODULES_BYTES: usize = 1 << 20;
 /// Largest single payload read back during verification.
 pub const MAX_VERIFY_PAYLOAD_BYTES: u64 = 1 << 33;
 
@@ -1243,13 +1242,13 @@ enum DependencyWork {
 }
 
 fn dependency_origin(
-    origins: &[(String, String)],
+    origins: &[DependencyOrigin],
     path: &str,
 ) -> Result<String, CompleteCopyError> {
     origins
         .iter()
-        .find(|(candidate, _)| candidate == path)
-        .map(|(_, origin)| origin.clone())
+        .find(|origin| origin.path() == path)
+        .map(|origin| origin.url().to_owned())
         .ok_or_else(|| CompleteCopyError::MissingDependencyOrigin {
             path: path.to_owned(),
         })
@@ -1333,20 +1332,19 @@ fn committed_gitlinks(
 fn read_gitmodules_from(
     directory: &Path,
     commit: &str,
-) -> Result<Vec<(String, String)>, CompleteCopyError> {
+) -> Result<Vec<DependencyOrigin>, CompleteCopyError> {
     let spec = format!("{commit}:.gitmodules");
-    let bytes = match git_output(directory, &["show", &spec]) {
-        Ok(bytes) => bytes,
-        Err(_) => return Ok(Vec::new()),
+    let Ok(bytes) = git_output(directory, &["show", &spec]) else {
+        return Ok(Vec::new());
     };
-    if bytes.len() > MAX_GITMODULES_BYTES {
-        return Err(CompleteCopyError::InvalidArchive(
-            "`.gitmodules` exceeds bound",
-        ));
-    }
-    let text = std::str::from_utf8(&bytes)
-        .map_err(|_| CompleteCopyError::InvalidArchive("`.gitmodules` is not UTF-8"))?;
-    parse_gitmodules(text)
+    parse_dependency_origins(&bytes).map_err(|error| match error {
+        GitmodulesError::TooLarge => {
+            CompleteCopyError::InvalidArchive("`.gitmodules` exceeds bound")
+        }
+        GitmodulesError::NotUtf8 => CompleteCopyError::InvalidArchive("`.gitmodules` is not UTF-8"),
+        GitmodulesError::InvalidValue => CompleteCopyError::InvalidArchive("`.gitmodules` value"),
+        GitmodulesError::GitUnavailable => CompleteCopyError::GitUnavailable,
+    })
 }
 
 /// A dependency path is joined onto the restored copy, so it must stay inside
@@ -1364,65 +1362,6 @@ fn valid_dependency_path(path: &str) -> bool {
                 && component != ".."
                 && !orna_base::is_git_metadata_component(component.as_bytes())
         })
-}
-
-/// Parses committed `.gitmodules` with Git's config parser so quoted paths and
-/// URLs are decoded before they are matched to gitlinks.
-fn parse_gitmodules(text: &str) -> Result<Vec<(String, String)>, CompleteCopyError> {
-    let output = git_output_stdin(
-        Path::new("."),
-        &["config", "--no-includes", "--null", "--list", "--file", "-"],
-        Some(text.as_bytes()),
-    )?;
-    let mut sections: BTreeMap<String, (Option<String>, Option<String>)> = BTreeMap::new();
-    for record in output
-        .split(|byte| *byte == 0)
-        .filter(|record| !record.is_empty())
-    {
-        let separator = record
-            .iter()
-            .position(|byte| *byte == b'\n')
-            .ok_or(CompleteCopyError::GitUnavailable)?;
-        let key = std::str::from_utf8(&record[..separator])
-            .map_err(|_| CompleteCopyError::GitUnavailable)?;
-        let value = std::str::from_utf8(&record[separator + 1..])
-            .map_err(|_| CompleteCopyError::InvalidArchive("`.gitmodules` is not UTF-8"))?;
-        let Some(key) = key.get("submodule.".len()..).filter(|_| {
-            key.get(.."submodule.".len())
-                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("submodule."))
-        }) else {
-            continue;
-        };
-        let (name, is_path) = if key.len() >= ".path".len()
-            && key
-                .get(key.len() - ".path".len()..)
-                .is_some_and(|suffix| suffix.eq_ignore_ascii_case(".path"))
-        {
-            (&key[..key.len() - ".path".len()], true)
-        } else if key.len() >= ".url".len()
-            && key
-                .get(key.len() - ".url".len()..)
-                .is_some_and(|suffix| suffix.eq_ignore_ascii_case(".url"))
-        {
-            (&key[..key.len() - ".url".len()], false)
-        } else {
-            continue;
-        };
-        if name.is_empty() || value.is_empty() || value.bytes().any(|byte| byte.is_ascii_control())
-        {
-            return Err(CompleteCopyError::InvalidArchive("`.gitmodules` value"));
-        }
-        let pair = sections.entry(name.to_owned()).or_default();
-        if is_path {
-            pair.0 = Some(value.to_owned());
-        } else {
-            pair.1 = Some(value.to_owned());
-        }
-    }
-    Ok(sections
-        .into_values()
-        .filter_map(|(path, url)| path.zip(url))
-        .collect())
 }
 
 /// Lists every object reachable from `commit`, ordered by object ID.
@@ -2164,42 +2103,8 @@ fn git_output_stdin(
 mod tests {
     use super::{
         CompleteCopyError, CompleteCopyManifest, CompleteCopyMember, RepositoryFormat,
-        parse_gitmodules, valid_dependency_bundle, valid_native_object_id, valid_snapshot_bundle,
+        valid_dependency_bundle, valid_native_object_id, valid_snapshot_bundle,
     };
-
-    #[test]
-    fn gitmodules_pairs_are_read_one_section_at_a_time() {
-        let text = "[submodule \"std\"]\n\tpath = stdlib/std\n\turl = https://example.invalid/std.git\n\
-                    [submodule \"tools\"]\n\tpath = tools\n\turl = ../tools.git\n\tbranch = main\n";
-        assert_eq!(
-            parse_gitmodules(text).unwrap(),
-            vec![
-                (
-                    "stdlib/std".to_owned(),
-                    "https://example.invalid/std.git".to_owned()
-                ),
-                ("tools".to_owned(), "../tools.git".to_owned()),
-            ]
-        );
-    }
-
-    #[test]
-    fn gitmodules_quoted_values_are_decoded() {
-        let text = "[submodule \"reference\"]\n\tpath = \"deps/reference project\"\n\turl = \"file:///tmp/reference project\"\n";
-        assert_eq!(
-            parse_gitmodules(text).unwrap(),
-            vec![(
-                "deps/reference project".to_owned(),
-                "file:///tmp/reference project".to_owned()
-            )]
-        );
-    }
-
-    #[test]
-    fn gitmodules_values_with_control_characters_are_refused() {
-        assert!(parse_gitmodules("[submodule \"a\"]\n\tpath = a\n\turl = oops\ttab\n").is_err());
-        assert!(parse_gitmodules("[submodule \"a\"]\n\tpath = a\n\turl = \n").is_err());
-    }
 
     #[test]
     fn manifest_round_trips_every_member_and_its_own_objects() {
