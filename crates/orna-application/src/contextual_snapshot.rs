@@ -8,6 +8,7 @@
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Range;
 
 use orna_evaluator::{
     ContextValueEffectHandler, ContextValueRelationPage, EffectHandler, EvaluationError,
@@ -22,17 +23,11 @@ use crate::{
     AdmittedApplication, ApplicationAuthority, ApplicationError, SourceMutationEffectHandler,
 };
 
-/// Orders decoded primary-key rows and returns one bounded page.
-///
-/// The cursor is the big-endian offset of the next row. Each returned row is
-/// debited once from `budget`, and a continuation is offered only while rows
-/// remain and the page is non-empty.
-pub(crate) fn page_table_rows<T: Clone>(
+/// Orders decoded primary-key rows by their logical key. A pair of keys that cannot be
+/// compared fails the order closed.
+pub(crate) fn order_table_rows<T>(
     mut live: Vec<(orna_value::Value, T)>,
-    after: Option<&[u8]>,
-    limit: usize,
-    budget: &mut StepBudget,
-) -> Result<(Vec<T>, Option<Vec<u8>>), EvaluationError> {
+) -> Result<Vec<(orna_value::Value, T)>, EvaluationError> {
     let mut comparison_failed = false;
     live.sort_by(|(left, _), (right, _)| {
         compare_primary_keys(left, right).unwrap_or_else(|_| {
@@ -45,6 +40,19 @@ pub(crate) fn page_table_rows<T: Clone>(
             "ORNA-EVAL-TABLE-SNAPSHOT",
         ));
     }
+    Ok(live)
+}
+
+/// Returns the ordinal window of one page over `len` ordered rows, and the cursor of the
+/// page after it. The cursor is the big-endian offset of the next row. Each row in the
+/// window is debited once from `budget`; a continuation is offered only while rows remain
+/// and the page is non-empty.
+pub(crate) fn page_window(
+    len: usize,
+    after: Option<&[u8]>,
+    limit: usize,
+    budget: &mut StepBudget,
+) -> Result<(Range<usize>, Option<Vec<u8>>), EvaluationError> {
     let start = match after {
         None => 0,
         Some(cursor) => {
@@ -56,14 +64,25 @@ pub(crate) fn page_table_rows<T: Clone>(
             })?
         }
     }
-    .min(live.len());
-    let end = start.saturating_add(limit).min(live.len());
-    let mut rows = Vec::with_capacity(end - start);
-    for (_, row) in &live[start..end] {
+    .min(len);
+    let end = start.saturating_add(limit).min(len);
+    for _ in start..end {
         budget.debit(1)?;
-        rows.push(row.clone());
     }
-    let next = (end < live.len() && !rows.is_empty()).then(|| (end as u64).to_be_bytes().to_vec());
+    let next = (end < len && end > start).then(|| (end as u64).to_be_bytes().to_vec());
+    Ok((start..end, next))
+}
+
+/// Orders decoded primary-key rows and returns one bounded page.
+pub(crate) fn page_table_rows<T: Clone>(
+    live: Vec<(orna_value::Value, T)>,
+    after: Option<&[u8]>,
+    limit: usize,
+    budget: &mut StepBudget,
+) -> Result<(Vec<T>, Option<Vec<u8>>), EvaluationError> {
+    let live = order_table_rows(live)?;
+    let (window, next) = page_window(live.len(), after, limit, budget)?;
+    let rows = live[window].iter().map(|(_, row)| row.clone()).collect();
     Ok((rows, next))
 }
 

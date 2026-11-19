@@ -286,11 +286,10 @@ fn repl_effectful_failure_before_any_external_binding_leaves_no_running_row() {
 }
 
 #[test]
-fn repl_enum_keyed_assertion_write_is_refused_as_repl_effect() {
-    // The candidate seam accepts only scalar primary-key components and
-    // checks every table of an asserting project, so an enum key anywhere in
-    // the project refuses the write before it is published (ornadb-gq4g).
-    // The refused write's reserved row is cancelled; it is never admitted.
+fn repl_enum_keyed_assertion_write_is_admitted() {
+    // The candidate seam reads payload-free enum keys (ORNA-ENUM-005), so a
+    // valid write to the asserting enum-keyed table is admitted, and its
+    // reserved row is completed rather than left running.
     let (_directory, repository, _relation) = format3_repository_for_table(
         "pub enum Level {\n    low,\n    high,\n}\n\
              pub table Task(level: Level) {\n    title: Str,\n    \
@@ -303,14 +302,13 @@ fn repl_enum_keyed_assertion_write_is_refused_as_repl_effect() {
         transactions,
     } = repl_runtime(Some(repository)).expect("repl runtime");
     let mut transactions = transactions.expect("repl transactions");
-    let failure = run_repl_input(
+    run_repl_input(
         repository.as_ref(),
         Some(&mut transactions),
         &mut session,
         r#"main.Task.insert({ level: main.Level.low, title: "Ship" })"#,
     )
-    .expect_err("the enum-keyed write is refused before it is published");
-    assert_eq!(failure.code, "ORNA-REPL-EFFECT");
+    .expect("the enum-keyed write is admitted");
     let state = transactions
         .writer_state()
         .expect("the effectful input opened the runtime state");
@@ -320,7 +318,7 @@ fn repl_enum_keyed_assertion_write_is_refused_as_repl_effect() {
         .expect("running requests");
     assert!(
         running.is_empty(),
-        "a refused candidate cancels its reserved row"
+        "an admitted write completes its reserved row"
     );
 }
 
