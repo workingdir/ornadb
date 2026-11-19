@@ -773,13 +773,11 @@ impl ApplicationAuthority {
         handler.into_staged_activation(value, None, effects)
     }
 
-    /// The bound every committed table read observes: a table may hold at most
-    /// the evaluator's collection limit of rows, and the admitted rows' key and
+    /// The bound every committed table read observes: the admitted rows' key and
     /// stored tuple bytes across the read may not exceed the project source byte
-    /// limit. The read refuses the first row past either bound before retaining it.
+    /// limit. The read refuses the first row past it before retaining it.
     pub fn committed_read_limits() -> CommittedReadLimits {
         CommittedReadLimits {
-            max_rows_per_table: Limits::default().max_collection_items,
             max_bytes: ProjectLimits::default().max_source_bytes,
         }
     }

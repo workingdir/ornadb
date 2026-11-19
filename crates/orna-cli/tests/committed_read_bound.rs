@@ -1,9 +1,8 @@
-//! Committed table read bound (ornadb-03ol, Orna-1.1.0 10-execution.md). The
-//! committed read checks the per-table row slot before the stored tuple of the
-//! row is decoded, so the row past the limit is never decoded or retained. The
-//! byte bound applies once the tuple's size is known. These tests drive the
-//! production `committed_tables` over a real committed format-3 table with
-//! injected limits.
+//! Committed table read byte bound (ornadb-03ol, Orna-1.1.0 10-execution.md).
+//! The committed read admits each row's key and stored-tuple bytes against the
+//! byte bound before the row is retained, and refuses the first row past it.
+//! These tests drive the production `committed_tables` over a real committed
+//! format-3 table with an injected byte limit.
 
 use std::{
     collections::BTreeMap,
@@ -43,7 +42,7 @@ fn assert_success(output: &Output, label: &str) {
 }
 
 #[test]
-fn committed_read_refuses_the_row_past_the_limit_before_it_is_retained() {
+fn committed_read_refuses_the_row_past_the_byte_limit_before_it_is_retained() {
     let (directory, _repository, relation_id) =
         format3::format3_repository_for_table(SOURCE, "music");
     for row in [
@@ -81,33 +80,23 @@ fn committed_read_refuses_the_row_past_the_limit_before_it_is_retained() {
         .map(|(name, table)| (name.clone(), table.schema().clone()))
         .collect();
     let table_ids = BTreeMap::from([("music".to_owned(), object_id)]);
-    let read = |max_rows_per_table: usize, max_bytes: usize| {
+    let read = |max_bytes: usize| {
         committed_tables(
             &repository,
             &format,
             &commit,
             &schemas,
             &table_ids,
-            CommittedReadLimits {
-                max_rows_per_table,
-                max_bytes,
-            },
+            CommittedReadLimits { max_bytes },
         )
     };
 
-    // Three committed rows and a two-row table limit: the third row is the first
-    // past the limit. Its refusal reports the count that reached the limit and
-    // yields no table, so no row past the limit is retained.
-    assert_eq!(
-        read(2, usize::MAX).map(|_| ()),
-        Err(CommittedReadError::Limit { rows_seen: 3 })
-    );
-    // At the limit exactly, all three rows are admitted in key order.
-    let tables = read(3, usize::MAX).expect("three rows fit a three-row limit");
+    // At no byte limit, all three rows are admitted in key order.
+    let tables = read(usize::MAX).expect("three rows fit an unbounded read");
     assert_eq!(tables["music"].rows.len(), 3);
     // A one-byte bound refuses the first row before any row is retained.
-    assert_eq!(
-        read(3, 1).map(|_| ()),
-        Err(CommittedReadError::Limit { rows_seen: 1 })
-    );
+    let Err(error) = read(1) else {
+        panic!("a one-byte bound refuses the first row");
+    };
+    assert_eq!(error, CommittedReadError::Limit { rows_seen: 1 });
 }

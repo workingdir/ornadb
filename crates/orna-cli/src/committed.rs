@@ -419,7 +419,7 @@ pub(crate) fn committed_invocation_rows(
             CommittedRowsError::Limit => Diagnostic::target(
                 "ORNA-CMD-RUNTIME-UNAVAILABLE",
                 "committed table rows exceed the read bound",
-                "keep each table within the evaluator collection limit and the source byte limit",
+                "keep the committed tables within the source byte limit",
             ),
             CommittedRowsError::Unavailable => committed_rows_read_error(),
         })?;
@@ -453,7 +453,7 @@ pub(crate) fn committed_rows_read_error() -> Diagnostic {
 pub(crate) enum CommittedRowsError {
     /// The committed base could not be read or does not match the admitted schemas.
     Unavailable,
-    /// The committed base holds more rows or bytes than the committed read bound allows.
+    /// The committed base holds more bytes than the committed read bound allows.
     Limit,
 }
 
