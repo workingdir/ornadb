@@ -110,33 +110,7 @@ pub(crate) fn summarize_standard_function_effects(
         })
         .collect();
 
-    // A source function's effects come only from its body: its callees' host
-    // classifications and the summaries of the source functions it calls. The
-    // path of the function itself is not a classification, so a pure function
-    // in a host-named module such as `std.net.*` stays effect-free.
-    let mut summary: BTreeMap<Vec<String>, EffectSummary> = functions
-        .keys()
-        .map(|key| (key.clone(), EffectSummary::default()))
-        .collect();
-    loop {
-        let mut changed = false;
-        for (key, paths) in &candidates {
-            let mut effects = summary[key].clone();
-            for path in paths {
-                match summary.get(path) {
-                    Some(known) => effects.join(known),
-                    None => effects.join(&standard_path_effects(path)),
-                }
-            }
-            if effects != summary[key] {
-                summary.insert(key.clone(), effects);
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
+    let summary = fixpoint_standard_effects(&candidates);
 
     for (key, effect_summary) in summary {
         let Some((name, namespace)) = key.split_last() else {
@@ -151,6 +125,45 @@ pub(crate) fn summarize_standard_function_effects(
             }
         }
     }
+}
+
+/// Least fixed point of the source-function effect summaries. A source
+/// function's effects come only from its body: each callee's host
+/// classification by path, joined with the summary of each source function it
+/// calls. A declared callee is classified by path too. The typed wrapper
+/// `std.io.fs.read_text` calls `__read_text`, which calls back into
+/// `std.io.fs.read_text`; without that path classification the cycle closes on
+/// an empty summary. The cost: a source function that calls any declared
+/// function in a host-named namespace such as `std.net.*` carries that
+/// namespace's classification. The embedded host namespaces hold only host
+/// wrappers, cycles and stubs, so no pure helper is tainted today.
+fn fixpoint_standard_effects(
+    candidates: &BTreeMap<Vec<String>, Vec<Vec<String>>>,
+) -> BTreeMap<Vec<String>, EffectSummary> {
+    let mut summary: BTreeMap<Vec<String>, EffectSummary> = candidates
+        .keys()
+        .map(|key| (key.clone(), EffectSummary::default()))
+        .collect();
+    loop {
+        let mut changed = false;
+        for (key, paths) in candidates {
+            let mut effects = summary[key].clone();
+            for path in paths {
+                effects.join(&standard_path_effects(path));
+                if let Some(known) = summary.get(path) {
+                    effects.join(known);
+                }
+            }
+            if effects != summary[key] {
+                summary.insert(key.clone(), effects);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    summary
 }
 
 /// Effects of a full path that is not a source-declared standard function: its

@@ -50,7 +50,7 @@ fn pinned_random_hash_modules_are_optional_and_do_not_replace_core() {
             .submit(include_str!("fixtures/stdlib-call-random-dmkss.orna"))
             .unwrap_err()
             .code(),
-        "ORNA-EVAL-UNSUPPORTED"
+        "ORNA-REPL-EFFECT"
     );
     assert_eq!(
         with_std.submit(include_str!("fixtures/stdlib-call-hash-dmkss.orna")),

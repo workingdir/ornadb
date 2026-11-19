@@ -22,7 +22,7 @@ fn pinned_filesystem_module_requires_a_host_effect_handler() {
             .submit(include_str!("fixtures/stdlib-call-io-read-text-t7auz.orna"))
             .unwrap_err()
             .code(),
-        "ORNA-EVAL-UNSUPPORTED"
+        "ORNA-REPL-EFFECT"
     );
 }
 

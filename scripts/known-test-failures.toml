@@ -67,10 +67,3 @@ target = "test:standard_library_networking_url"
 test = "networking_url_modules_are_optional_and_host_effects_are_separated"
 bead = "ornadb-5il1.89"
 reason = "Fails on main at standard_library_networking_url.rs:89: expected ORNA-REPL-EFFECT, got ORNA-EVAL-UNSUPPORTED. stdlib/std/net/http.orna start and wait fail with ORNA-EVAL-UNSUPPORTED because no cancellable HTTP evaluator binding exists."
-
-[[failure]]
-package = "orna-evaluator"
-target = "test:standard_profile_v1"
-test = "pinned_filesystem_effect_is_visible_to_consumers_and_forbidden_in_assertions"
-bead = "ornadb-kbabz"
-reason = "Fails on main at standard_profile_v1.rs:3043 with ORNA-S012-UNRESOLVED then ORNA-S021-TYPE (field access requires a record). The other 53 tests in the target pass."

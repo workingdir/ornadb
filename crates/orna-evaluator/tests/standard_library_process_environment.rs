@@ -74,7 +74,7 @@ fn process_and_environment_host_effects_require_a_host_effect_handler() {
     ] {
         assert_eq!(
             session.submit(source).unwrap_err().code(),
-            "ORNA-EVAL-UNSUPPORTED"
+            "ORNA-REPL-EFFECT"
         );
     }
 }
