@@ -643,7 +643,10 @@ fn enum_keyed_table_run_path_admits_the_write() {
          pub fn main() {}\n",
     )]);
     let output = orna(&root, &["run", "main.round_trip"]);
-    assert_success(&output, "orna run of an insert into an enum-keyed asserting table");
+    assert_success(
+        &output,
+        "orna run of an insert into an enum-keyed asserting table",
+    );
     assert!(
         transcript(&output).contains("\"Ship\""),
         "the enum-keyed row reads back in the same run\n{}",

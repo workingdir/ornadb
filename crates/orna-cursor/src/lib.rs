@@ -52,7 +52,9 @@ pub enum TransactionKeyType {
     Decimal,
     Str,
     /// A payload-free enum of the type with this identity.
-    Enum { type_id: [u8; 16] },
+    Enum {
+        type_id: [u8; 16],
+    },
 }
 
 impl TransactionKeyType {
