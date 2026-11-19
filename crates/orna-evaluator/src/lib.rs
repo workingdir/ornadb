@@ -1499,6 +1499,18 @@ pub trait EffectHandler {
         self.resolve_table_reference(reference)
     }
 
+    /// Resolve a stored table reference (tag 60021) to a row the activation
+    /// serves as a context value, which keeps the row's Blob profile
+    /// (ORNA-REF-002). A row of a table that holds a Blob is served this way.
+    /// `None` means the handler serves no such row, and the canonical
+    /// resolution decides.
+    fn resolve_context_table_reference(
+        &mut self,
+        _reference: &CanonicalValue,
+    ) -> Result<Option<ContextValue>, EvaluationError> {
+        Ok(None)
+    }
+
     /// Validate a relation source without enumerating rows. Runtime handlers
     /// use this to preserve relation visibility when a plan such as `take(0)`
     /// can return without requesting its first page.
@@ -2021,6 +2033,13 @@ impl EffectHandler for ContextValueEffectHandlerAdapter<'_> {
         budget: &mut StepBudget,
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
         EffectHandler::resolve_table_reference_with_budget(self.handler, reference, budget)
+    }
+
+    fn resolve_context_table_reference(
+        &mut self,
+        reference: &CanonicalValue,
+    ) -> Result<Option<ContextValue>, EvaluationError> {
+        EffectHandler::resolve_context_table_reference(self.handler, reference)
     }
 
     fn validate_relation_source(&mut self, source: &str) -> Result<(), EvaluationError> {
