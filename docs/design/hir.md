@@ -217,15 +217,15 @@ String, .. }` for a function value: a name, resolved again on every call.
 `Scope` is `BTreeMap<String, Value>` plus four more sets (`lib.rs:4797-4804`)
 and `Closure { captured: Scope, .. }` clones it (`lib.rs:3667-3673`).
 
-### 1.7 Table access: five mutation paths and a 2,048 cap
+### 1.7 Table access: five mutation paths and a 2,048 retained-collection cap
 
 `Limits::default()` has `max_collection_items: 2_048`, `max_steps:
 2_048 * 200 + 10_000 = 419,600`, `max_string_bytes: 16_384`, `max_depth: 64`,
 `max_integer_digits: 1_024` (`orna-evaluator/src/lib.rs:124-130`, `:223-234`).
-`ApplicationAuthority::committed_read_limits` sets `max_rows_per_table` to
-that same `max_collection_items` (`orna-application/src/lib.rs:708-717`), so a
-committed read refuses row 2,049. `Limits::check_integer` renders the integer
-to decimal text to measure its length (`lib.rs:253-259`).
+Committed reads carry no row or byte bound since ornadb-csenl.21 removed
+`committed_read_limits`, which had set `max_rows_per_table` to this cap.
+`Limits::check_integer` renders the integer to decimal text to measure its
+length (`lib.rs:253-259`).
 
 Insert semantics exist in `SourceMutationEffectHandler::handle`
 (`orna-application/src/lib.rs:2781`), its async wrapper (`:2478`),
@@ -1095,10 +1095,10 @@ they are named and reached changes.
 ### 5.1 What is wrong today
 
 Reads. Every table an activation may touch is read whole before the evaluator
-starts. `committed_rows_at` (`orna-cli/src/main.rs:2638-2672`) loads every row of
-every admitted table and refuses the first row past
-`ApplicationAuthority::committed_read_limits()` (2,048 rows per table, the
-project source byte limit in bytes, `orna-application/src/lib.rs:711-717`). The
+starts. `committed_rows_at` (`orna-cli/src/committed.rs:465`) loads every row of
+every admitted table with no row or byte bound, since ornadb-csenl.21 removed the
+2,048-row cap and the byte budget (`committed_read_limits`), so its memory grows
+with the table. The
 SQLite side does the same: `committed_table_rows` is documented "reads one
 complete committed relation" and returns `Vec<(Vec<u8>, Vec<u8>)>`
 (`orna-runtime/src/table_store.rs:1642-1685`). The assertion gate encodes every
@@ -1116,9 +1116,10 @@ variant at `lib.rs:2478`), accumulating into a per-handler `overlay` map, then
 committed through one of eight entry points in `orna-runtime`
 (`src/lib.rs:925, 939, 1010, 1272, 1325, 1351, 1365`, `src/catalogue.rs:1627`).
 
-Limits. Three distinct bounds produce the "2,048" symptom (section 1.12). Only
-one of them, the evaluator's `max_collection_items`, is a language-level
-resource bound; the other two exist because the reads are whole-table.
+Limits. Three distinct bounds produced the "2,048" symptom (section 1.12). Two of
+them, the committed read's row and byte bounds, existed only because the reads were
+whole-table, and ornadb-csenl.21 removed them. The evaluator's `max_collection_items`
+remains until the retained-bytes quota of section 5.5 replaces it.
 
 ### 5.2 The store interface
 
@@ -1242,7 +1243,7 @@ accidental caps, not the semantic cost.
 | Limit today | After | Why |
 |---|---|---|
 | `max_collection_items = 2,048`, checked at every retained collection (`orna-evaluator/src/lib.rs:5767`) | `Quotas.max_retained_bytes`, charged by operators that retain (`collect`, `SortBy`, `GroupBy`, a list literal, a string) and reported in `Usage` | a streaming `count` over a million rows retains nothing and needs no cap; a `sort_by` over a million rows retains them and must be bounded by memory, not by an item count |
-| `max_rows_per_table = 2,048` and the byte bound on the committed read (`orna-application/src/lib.rs:711-717`) | deleted, with `committed_read_limits`, `CommittedReadLimits` (`orna-project/src/table_storage.rs:66`) and the whole-table `committed_rows_at` | no whole-table read exists |
+| `max_rows_per_table = 2,048` and the byte bound on the committed read (`orna-application/src/lib.rs:711-717`) | removed with `committed_read_limits` and `CommittedReadLimits` (`orna-project/src/table_storage.rs:66`); the whole-table `committed_rows_at` (`orna-cli/src/committed.rs:465`) remains until cursors replace it | the bounds only refused large whole-table reads, and cursors are still to come |
 | one row per page, 1,024 maximum | deleted | cursors |
 
 `Limits::default()` is passed at eleven production call sites (section 1.12).
@@ -1546,6 +1547,7 @@ type, and H4 only needs types from H2 for arithmetic selection; section 7.2).
   tests are rewritten to assert the old limit is gone and listed as
   expected differences; the six handlers' behaviours covered by one parametrised
   test over `TableStore` implementations.
+- **Status.** Not met by ornadb-csenl.21: the 2,048-row cap and its byte bound are gone, and a 2,049-row committed table publishes and scans in full (`a_committed_table_past_2048_rows_publishes_and_scans_in_full`). `committed_rows_at` still loads every row of a committed table at once (section 5.1), so a 100,000-row scan has no bounded-memory proof until cursors (section 5.4) replace it.
 - **Deletes.** At H9 with the old evaluator; in H6 itself, the conformance
   crate's three handlers once assertion admission uses `table::apply`
   (`semantic_adapter.rs`, the parts at `:4590`, `:4695`, `:6318`), which also
@@ -1632,7 +1634,7 @@ becomes the definition: baselines are re-recorded once, in one reviewed PR, and
 | H3 | `orna check` on HIR; about 22,000 lines of checker deleted; per-function effects available to every consumer |
 | H4 | an executor with slot locals; B1 and B2 numbers |
 | H5 | one declaration mechanism for host functions; `api/sys.json` derived |
-| H6 | no 2,048-row read cap; one write path; `orna-cli` without `orna-conformance` |
+| H6 | no 2,048-row committed read cap (committed reads still load whole tables, section 5.1); one write path; `orna-cli` without `orna-conformance` |
 | H7 | `sys.explain` that describes what runs |
 | H8 | one REPL path; generics at the prompt |
 | H9 | the old pipeline gone |
@@ -2003,7 +2005,7 @@ crate total where only part goes.
 | H3 | `orna-check`: `inference.rs`, `calls.rs`, `intrinsics.rs`, `flow.rs`, `imports.rs`, `collections.rs`, `collection_calls.rs`, `scope.rs`, `types.rs`, `system_api.rs`, `system_calls.rs`, `checkpoint.rs`, `semantic_payload.rs`, `secrets.rs`, `located.rs` | 22,023 of 36,352 |
 | H4 | nothing | 0 |
 | H5 | `orna-sys-macros` 19; the JSON-scraping and id-generation steps of `orna-sys-codegen` (4,089) and `orna-sys/build.rs` (211) once `sys.orna` is the source; the `fail(..)` marker bodies in the pinned std (separate repository) | up to 4,319 |
-| H6 | the conformance crate's three table handlers and their use for assertion admission (`semantic_adapter.rs:4590, 4695, 6318`); `committed_read_limits` and `CommittedReadLimits` (`orna-project/src/table_storage.rs:66`) | to be counted in the PR |
+| H6 | the conformance crate's three table handlers and their use for assertion admission (`semantic_adapter.rs:4590, 4695, 6318`), still to do; `committed_read_limits` and `CommittedReadLimits` (`orna-project/src/table_storage.rs:66`), done by ornadb-csenl.21 | 295 deleted, 96 added (ornadb-csenl.21 code commits; the handler deletion is not yet counted) |
 | H7 | `orna-evaluator/src/explain_bindings.rs` 369 | 369 |
 | H8 | `orna-check/src/repl.rs` 564; `orna-evaluator/src/repl.rs` 1,766; the admission and alias code of `orna-project-repl` (2,605 total); the write path at `orna-application/src/repl_transaction.rs:525-560` | about 2,330 plus the project-repl share |
 | H9 | `orna-evaluator` entire (30,818, including `sys_bindings.rs` 2,942 and `relation.rs` 1,375); `orna-intrinsics` (4,894); `SourceMutationEffectHandler` and its async wrapper (`orna-application/src/lib.rs:1599-2963`, about 1,360), `Functions`, `StandardLayer`, `with_standard_sources` (`:294-406`); the three effect-handler traits and their adapters; `contextual_snapshot.rs` handler (668); the `route-trace` feature; `Expr.weight`; the legacy `analyze*` bodies | about 38,000 |
