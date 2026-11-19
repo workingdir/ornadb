@@ -802,6 +802,7 @@ fn served_table_candidate_validator(
     orna_conformance::transactional_loaded_project_candidate_validator(
         project,
         &identities,
+        orna_conformance::committed_database_id(repository),
         Some(cwd_generation),
         table_object_ids,
         Limits::default(),

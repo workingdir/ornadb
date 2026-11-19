@@ -914,6 +914,16 @@ pub(crate) fn render_stored_source_value(value: &Raw) -> Result<String, String> 
                 .collect::<Result<Vec<_>, String>>()?;
             Ok(format!("{{ {} }}", fields.join(", ")))
         }
+        Raw::Tag(60021, reference) => {
+            let Raw::Array(parts) = reference.as_ref() else {
+                return Err("stored table reference has an invalid payload".into());
+            };
+            let [_, _, key] = parts.as_slice() else {
+                return Err("stored table reference has an invalid payload".into());
+            };
+            // A row document spells a stored reference as its target key (29-formats.md).
+            render_stored_source_value(key)
+        }
         Raw::Tag(tag, _) => Err(format!(
             "committed row value tag {tag} has no source spelling"
         )),

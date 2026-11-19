@@ -29,6 +29,8 @@ use orna_check::{TableSchema, Type};
 use orna_runtime::TableObjectId;
 use orna_value::{Raw, Value};
 
+use crate::ProjectLoadError;
+
 const UUID_TAG: u64 = 37;
 const OPTION_TAG: u64 = 60_013;
 const TUPLE_TAG: u64 = 60_015;
@@ -247,6 +249,9 @@ impl ReferenceCatalogue {
     /// against its declaration and kept, and an absent optional reference stays
     /// absent. Returns `Ok(None)` when `row` needs no change.
     ///
+    /// A reference column may instead spell its target by key: the target
+    /// row's key, or the key tuple of a composite key (29-formats.md).
+    ///
     /// # Errors
     ///
     /// [`ReferenceError::NotARow`], [`ReferenceError::InvalidKey`] or
@@ -309,7 +314,8 @@ impl ReferenceCatalogue {
                     _ => Err(ReferenceError::NotARow),
                 }
             }
-            _ => Err(ReferenceError::NotARow),
+            Raw::Tag(..) => Err(ReferenceError::NotARow),
+            key => self.identity_of_key(&column.target, key).map(Some),
         }
     }
 
@@ -331,6 +337,30 @@ impl ReferenceCatalogue {
                 .ok_or(ReferenceError::InvalidKey)?;
             components.push(value.clone());
         }
+        self.identity_of_components(shape, components)
+    }
+
+    /// The stored reference to the row of `target` whose key is spelled `key`:
+    /// the key itself, or the key tuple of a composite key (29-formats.md).
+    fn identity_of_key(&self, target: &str, key: &Raw) -> Result<Raw, ReferenceError> {
+        let shape = self.shape(target)?;
+        let components = match shape.key_fields.len() {
+            0 => return Err(ReferenceError::InvalidKey),
+            1 => vec![key.clone()],
+            arity => match key {
+                Raw::Array(items) if items.len() == arity => items.clone(),
+                _ => return Err(ReferenceError::InvalidKey),
+            },
+        };
+        self.identity_of_components(shape, components)
+    }
+
+    /// The stored reference to the row of `shape` whose key is `components`.
+    fn identity_of_components(
+        &self,
+        shape: &TargetShape,
+        components: Vec<Raw>,
+    ) -> Result<Raw, ReferenceError> {
         Value::table_reference(self.database_id, shape.object_id, key_of(components))
             .map(|reference| reference.raw().clone())
             .map_err(|_| ReferenceError::InvalidKey)
@@ -535,6 +565,57 @@ fn encoded(key: &Raw) -> Result<Vec<u8>, ReferenceError> {
         .map_err(|_| ReferenceError::InvalidKey)
 }
 
+/// Binds the reference columns of a lowered source row (ORNA-REF-001). With a
+/// catalogue, each key spelling names the row it refers to and is replaced by
+/// that row's stored reference. `module_name` and `declaration` name the table in
+/// the qualified form the catalogue is keyed by.
+pub(crate) fn bind_source_row_references(
+    references: Option<&ReferenceCatalogue>,
+    module_name: &str,
+    declaration: &str,
+    reference_columns: &BTreeSet<String>,
+    fields: &mut BTreeMap<String, Raw>,
+) -> Result<(), ProjectLoadError> {
+    let Some(references) = references else {
+        // Without a reference catalogue the key spelling cannot name a target
+        // row, so a row holding one is refused rather than stored as text.
+        if reference_columns.iter().any(|column| {
+            fields
+                .get(column)
+                .is_some_and(|value| !matches!(value, Raw::Null))
+        }) {
+            return Err(ProjectLoadError::InvalidSourceRow);
+        }
+        return Ok(());
+    };
+    let table = if module_name.is_empty() {
+        declaration.to_owned()
+    } else {
+        format!("{module_name}.{declaration}")
+    };
+    let row = Raw::Map(
+        fields
+            .iter()
+            .map(|(name, value)| (Raw::Text(name.clone()), value.clone()))
+            .collect(),
+    );
+    let Some(Raw::Map(bound)) = references
+        .bind_row(&table, &row)
+        .map_err(|_| ProjectLoadError::InvalidSourceRow)?
+    else {
+        return Ok(());
+    };
+    for (name, value) in bound {
+        let Raw::Text(name) = name else {
+            return Err(ProjectLoadError::InvalidSourceRow);
+        };
+        *fields
+            .get_mut(&name)
+            .ok_or(ProjectLoadError::InvalidSourceRow)? = value;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -701,9 +782,13 @@ mod tests {
             );
         }
         let vehicle = record(vec![("id", text("v1")), ("owner", text("ada"))]);
+        let owner = Value::table_reference(DATABASE, OWNER_ID, text("ada"))
+            .unwrap()
+            .raw()
+            .clone();
         assert_eq!(
             catalogue.bind_row("Vehicle", &vehicle),
-            Err(ReferenceError::NotARow)
+            Ok(Some(record(vec![("id", text("v1")), ("owner", owner)])))
         );
         let keyless = record(vec![
             ("id", text("v1")),

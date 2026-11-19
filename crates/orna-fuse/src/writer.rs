@@ -6,9 +6,10 @@ use super::{
     RuntimeTableIdentity, SCAN_PENDING, SavedRowReferences, SchemaDescriptor, SourceRowRequest,
     TableSource, TypedKey, VfsRepositoryCache, VfsRetainedDraftStore, VfsSaveCandidate,
     VfsSaveCoordinates, VfsScratchStore, VfsTableRowReplacement, admit_row_under_descriptor,
-    admit_source_row, committed_reference_catalogue, runtime_row_baseline_from_rows,
-    settle_historical_scan, source_without_fields, substitute_text_fields,
-    transactional_loaded_project_candidate_validator, validate_blob_descriptors,
+    admit_source_row, committed_database_id, committed_reference_catalogue,
+    runtime_row_baseline_from_rows, settle_historical_scan, source_without_fields,
+    substitute_text_fields, transactional_loaded_project_candidate_validator,
+    validate_blob_descriptors,
 };
 
 pub(crate) struct MountWriter {
@@ -532,6 +533,7 @@ impl MountWriter {
         let validator = transactional_loaded_project_candidate_validator(
             &self.project,
             &self.identities,
+            committed_database_id(&self.repository),
             None,
             Arc::clone(&row.table_object_ids),
             EvaluatorLimits::default(),

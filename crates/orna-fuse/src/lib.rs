@@ -20,7 +20,7 @@ use orna_cli_support::source_edit::{
     checked_project_source_path, restore_source_after_failed_write, write_source_atomically,
 };
 use orna_conformance::{
-    SavedRowReferences, committed_reference_catalogue,
+    SavedRowReferences, committed_database_id, committed_reference_catalogue,
     transactional_loaded_project_candidate_validator,
 };
 use orna_evaluator::Limits as EvaluatorLimits;

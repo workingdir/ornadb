@@ -844,14 +844,13 @@ pub fn admit_source_row(
     if lowered.owner != table_path {
         return Err(ProjectLoadError::InvalidSourceRow);
     }
-    if let Some(references) = references {
-        bind_source_row_references(
-            references,
-            &module_name,
-            schema.declaration_name(),
-            &mut lowered.fields,
-        )?;
-    }
+    stored_reference::bind_source_row_references(
+        references,
+        &module_name,
+        schema.declaration_name(),
+        &lowered.reference_columns,
+        &mut lowered.fields,
+    )?;
 
     let row_fields = lowered
         .fields
@@ -871,43 +870,6 @@ pub fn admit_source_row(
         },
         mutation_id,
     )
-}
-
-/// Replaces the reference columns of a lowered source row with the stored
-/// reference each target row binds to (ORNA-REF-001). `module_name` and
-/// `declaration` name the table in the qualified form the catalogue is keyed by.
-fn bind_source_row_references(
-    references: &ReferenceCatalogue,
-    module_name: &str,
-    declaration: &str,
-    fields: &mut BTreeMap<String, Raw>,
-) -> Result<(), ProjectLoadError> {
-    let table = if module_name.is_empty() {
-        declaration.to_owned()
-    } else {
-        format!("{module_name}.{declaration}")
-    };
-    let row = Raw::Map(
-        fields
-            .iter()
-            .map(|(name, value)| (Raw::Text(name.clone()), value.clone()))
-            .collect(),
-    );
-    let Some(Raw::Map(bound)) = references
-        .bind_row(&table, &row)
-        .map_err(|_| ProjectLoadError::InvalidSourceRow)?
-    else {
-        return Ok(());
-    };
-    for (name, value) in bound {
-        let Raw::Text(name) = name else {
-            return Err(ProjectLoadError::InvalidSourceRow);
-        };
-        *fields
-            .get_mut(&name)
-            .ok_or(ProjectLoadError::InvalidSourceRow)? = value;
-    }
-    Ok(())
 }
 
 /// One key component of a source row: its canonical text and its canonical

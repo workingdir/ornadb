@@ -175,6 +175,31 @@ pub struct SavedRowReferences {
     pub key: Vec<u8>,
 }
 
+/// The database identity the committed `HEAD` of `repository` records: `None`
+/// when there is no commit yet. An unreadable identity fails rather than being
+/// guessed.
+fn committed_identity(
+    repository: &orna_repository::Repository,
+) -> Result<Option<[u8; 16]>, StageOutcome<Diagnostic>> {
+    let head = match repository.head() {
+        Ok(Some(head)) => head,
+        Ok(None) => return Ok(None),
+        Err(_) => return Err(StageOutcome::Failed(reference_identity_diagnostic())),
+    };
+    repository
+        .open_pinned_format_context(head.as_str())
+        .and_then(|format| format.require_database_id())
+        .map(|database_id| Some(*database_id.as_bytes()))
+        .map_err(|_| StageOutcome::Failed(reference_identity_diagnostic()))
+}
+
+/// The database identity a stored reference binds to, read from the committed
+/// `HEAD` (ORNA-REF-001). `None` when it cannot be read: a table that stores a
+/// reference is then refused by the validator, never checked without a database.
+pub fn committed_database_id(repository: &orna_repository::Repository) -> Option<[u8; 16]> {
+    committed_identity(repository).ok().flatten()
+}
+
 /// The reference catalogue of the committed database `loaded` runs against,
 /// bound to the identity its `HEAD` commits. `None` when no table has a
 /// committed identity to name, or when there is no commit yet. An unreadable
@@ -188,27 +213,17 @@ pub fn committed_reference_catalogue(
     if table_object_ids.is_empty() {
         return Ok(None);
     }
-    let head = match repository.head() {
-        Ok(Some(head)) => head,
-        Ok(None) => return Ok(None),
-        Err(_) => return Err(StageOutcome::Failed(reference_identity_diagnostic())),
+    let Some(database_id) = committed_identity(repository)? else {
+        return Ok(None);
     };
     let project = project_unit_of(loaded);
     let catalogue = loaded
         .production_catalogue()
         .map_err(|_| StageOutcome::Failed(standard_profile_diagnostic()))?;
-    let admitted = admit_transaction_project(&project, limits, "", &catalogue)
-        .map_err(|failure| *failure)?;
-    let database_id = repository
-        .open_pinned_format_context(head.as_str())
-        .and_then(|format| format.require_database_id())
-        .map_err(|_| StageOutcome::Failed(reference_identity_diagnostic()))?;
-    ReferenceCatalogue::new(
-        *database_id.as_bytes(),
-        &admitted.table_schemas,
-        table_object_ids,
-    )
-    .map_err(|_| StageOutcome::Failed(reference_identity_diagnostic()))
+    let admitted =
+        admit_transaction_project(&project, limits, "", &catalogue).map_err(|failure| *failure)?;
+    ReferenceCatalogue::new(database_id, &admitted.table_schemas, table_object_ids)
+        .map_err(|_| StageOutcome::Failed(reference_identity_diagnostic()))
 }
 
 fn reference_identity_diagnostic() -> Diagnostic {
@@ -246,8 +261,8 @@ impl CandidateState for CandidateRowsState<'_> {
         let key_names = self.key_names(table)?;
         let entries = self.rows.get(table).ok_or(ReferenceError::State)?;
         for (stored_key, encoded) in entries {
-            let components =
-                candidate_key_components(stored_key, key_names).map_err(|_| ReferenceError::State)?;
+            let components = candidate_key_components(stored_key, key_names)
+                .map_err(|_| ReferenceError::State)?;
             if components.as_slice() == key {
                 return candidate_assertion_row(
                     table,
@@ -296,8 +311,8 @@ pub(super) fn validate_saved_row_references(
     let key_names = key_fields
         .get(&saved.table)
         .ok_or_else(table_evaluation_diagnostic)?;
-    let components =
-        candidate_key_components(&saved.key, key_names).map_err(|_| table_row_decode_diagnostic())?;
+    let components = candidate_key_components(&saved.key, key_names)
+        .map_err(|_| table_row_decode_diagnostic())?;
     let touched = [(saved.table.clone(), components)];
     let mut state = CandidateRowsState {
         rows,

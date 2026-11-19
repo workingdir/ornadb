@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use orna_syntax_ast::{Expr, LiteralKind};
 use orna_value::{Decimal, Raw, Value};
@@ -21,6 +21,9 @@ pub struct LoweredRowUnit {
     pub owner: String,
     pub canonical_key: Vec<u8>,
     pub fields: BTreeMap<String, Raw>,
+    /// Columns that hold a stored reference to another row. Each value is that
+    /// row's key as source text until the caller binds it (ORNA-REF-001).
+    pub reference_columns: BTreeSet<String>,
 }
 
 /// Lowers one closed data expression, such as a row document field or a
@@ -150,10 +153,16 @@ pub fn lower_row_unit_with_key_spelling(
         };
         values.insert(field.name, value);
     }
+    let reference_columns = table_schema
+        .references
+        .iter()
+        .map(|reference| reference.from_column.clone())
+        .collect::<BTreeSet<_>>();
     Ok(LoweredRowUnit {
         owner,
         canonical_key: key,
         fields: values,
+        reference_columns,
     })
 }
 

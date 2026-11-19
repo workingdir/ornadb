@@ -51,9 +51,13 @@ pub fn project_declares_assertions(loaded: &orna_project::LoadedProject) -> bool
 ///
 /// The mounted save's `saved_row` is the row it wrote: its stored references
 /// must still resolve in the candidate state (ORNA-REF-001, ORNA-MUT-007).
+///
+/// `database_id` is the committed database the stored references bind to; a
+/// table that stores a reference is refused without one.
 pub fn transactional_loaded_project_candidate_validator(
     loaded: &orna_project::LoadedProject,
     identities: &orna_project::ObjectIdentityManifest,
+    database_id: Option<[u8; 16]>,
     cwd_generation: Option<orna_repository::CwdGeneration>,
     table_object_ids: Arc<BTreeMap<String, orna_runtime::TableObjectId>>,
     limits: EvaluatorLimits,
@@ -62,6 +66,7 @@ pub fn transactional_loaded_project_candidate_validator(
     transactional_loaded_project_validator(
         loaded,
         identities,
+        database_id,
         cwd_generation,
         table_object_ids,
         limits,
@@ -73,15 +78,18 @@ pub fn transactional_loaded_project_candidate_validator(
 /// Builds the commit gate's validator (bead ornadb-gq4g). A table whose primary
 /// key cannot be lowered is admitted without its key, and only the checks that
 /// read such a table are refused.
+/// `database_id` is the committed database the stored references bind to.
 pub fn transactional_loaded_project_commit_validator(
     loaded: &orna_project::LoadedProject,
     identities: &orna_project::ObjectIdentityManifest,
+    database_id: Option<[u8; 16]>,
     table_object_ids: Arc<BTreeMap<String, orna_runtime::TableObjectId>>,
     limits: EvaluatorLimits,
 ) -> Result<Box<dyn TableActivationCandidateValidator>, StageOutcome<Diagnostic>> {
     transactional_loaded_project_validator(
         loaded,
         identities,
+        database_id,
         None,
         table_object_ids,
         limits,
@@ -90,9 +98,11 @@ pub fn transactional_loaded_project_commit_validator(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn transactional_loaded_project_validator(
     loaded: &orna_project::LoadedProject,
     identities: &orna_project::ObjectIdentityManifest,
+    database_id: Option<[u8; 16]>,
     cwd_generation: Option<orna_repository::CwdGeneration>,
     table_object_ids: Arc<BTreeMap<String, orna_runtime::TableObjectId>>,
     limits: EvaluatorLimits,
@@ -112,6 +122,7 @@ pub(super) fn transactional_loaded_project_validator(
     let candidate_table_fields = candidate_table_fields_in_stable_id_order(
         loaded,
         identities,
+        database_id,
         &project,
         &admitted.table_fields,
     )
@@ -187,6 +198,7 @@ pub(super) fn project_unit_of(loaded: &orna_project::LoadedProject) -> ProjectUn
 pub(super) fn candidate_table_fields_in_stable_id_order(
     loaded: &orna_project::LoadedProject,
     identities: &orna_project::ObjectIdentityManifest,
+    database_id: Option<[u8; 16]>,
     project: &ProjectUnit,
     source_fields: &TableFields,
 ) -> Result<TableFields, String> {
@@ -213,9 +225,16 @@ pub(super) fn candidate_table_fields_in_stable_id_order(
             let fields = ordered_fields
                 .get_mut(&table)
                 .ok_or_else(|| format!("candidate table {table} has no admitted fields"))?;
-            let schema = loaded
-                .source_table_schema(identities, &schema_namespace, &name)
-                .map_err(|_| format!("candidate table {name} has no stable schema"))?;
+            let schema = match database_id {
+                Some(database_id) => loaded.source_table_schema_in_database(
+                    identities,
+                    database_id,
+                    &schema_namespace,
+                    &name,
+                ),
+                None => loaded.source_table_schema(identities, &schema_namespace, &name),
+            }
+            .map_err(|_| format!("candidate table {name} has no stable schema"))?;
             *fields = order_field_names_by_stable_id(fields, schema.field_object_ids())?;
         }
     }

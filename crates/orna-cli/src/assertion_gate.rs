@@ -237,7 +237,15 @@ fn validate_candidate_assertions(
         rows.insert(name.clone(), encoded);
     }
     let changed = changed_tables(repository, &rows);
-    validate_changed_rows(&project, &manifest, table_object_ids, &rows, &changed, word)
+    validate_changed_rows(
+        &project,
+        &manifest,
+        orna_conformance::committed_database_id(repository),
+        table_object_ids,
+        &rows,
+        &changed,
+        word,
+    )
 }
 
 /// Runs the production validator over the changed tables of `rows`. A false
@@ -247,6 +255,7 @@ fn validate_candidate_assertions(
 fn validate_changed_rows(
     project: &orna_project::LoadedProject,
     manifest: &orna_project::ObjectIdentityManifest,
+    database_id: Option<[u8; 16]>,
     table_object_ids: BTreeMap<String, orna_runtime::TableObjectId>,
     rows: &orna_runtime::RuntimeTableRows,
     changed: &BTreeSet<String>,
@@ -255,6 +264,7 @@ fn validate_changed_rows(
     let mut validator = orna_conformance::transactional_loaded_project_commit_validator(
         project,
         manifest,
+        database_id,
         std::sync::Arc::new(table_object_ids),
         orna_evaluator::Limits::default(),
     )
@@ -305,6 +315,7 @@ pub(crate) fn validate_committed_target(
     validate_changed_rows(
         &project,
         &committed.manifest,
+        orna_conformance::committed_database_id(repository),
         committed.table_object_ids,
         &committed.rows,
         &changed,

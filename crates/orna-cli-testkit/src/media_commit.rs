@@ -650,6 +650,7 @@ pub async fn commit_source_replacement_through_save_admission(
     let validator = transactional_loaded_project_candidate_validator(
         &project,
         &identities,
+        orna_conformance::committed_database_id(repository),
         None,
         Arc::clone(&table_object_ids),
         Limits::default(),

@@ -38,8 +38,8 @@ mod vector_suites;
 pub use semantic_adapter::{
     BoundedEvaluator, DurableTransactionalEvaluator, PendingPublicationError,
     RunningTableRequestDisposition, RuntimeAdapter, RuntimeEvaluator, RuntimeTarget,
-    SavedRowReferences, SemanticAdapter, TransactionalEvaluator, committed_reference_catalogue,
-    is_table_assertion_false, project_declares_assertions,
+    SavedRowReferences, SemanticAdapter, TransactionalEvaluator, committed_database_id,
+    committed_reference_catalogue, is_table_assertion_false, project_declares_assertions,
     transactional_loaded_project_candidate_validator,
     transactional_loaded_project_commit_validator, validation_refusal_code,
 };
