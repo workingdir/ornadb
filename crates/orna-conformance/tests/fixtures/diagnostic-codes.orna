@@ -47,7 +47,22 @@ pub protocol Currency { static fn code(): Str; }
 // CASE: TRYFROM
 pub type Port { impl TryFrom<Int> { fn from(value) = Port { value: value }; } }
 // CASE: CONVERSION-CHAIN
-pub fn bad(value: A): C = value;
+pub type A {
+    value: Str,
+}
+pub type B {
+    value: Str,
+    impl From<A> {
+        fn from(value) = B { value: value.value };
+    }
+}
+pub type C {
+    value: Str,
+    impl From<B> {
+        fn from(value) = C { value: value.value };
+    }
+}
+pub fn bad(value: A): C = value; // A reaches C only through B; no implicit chain is searched
 // CASE: OPAQUE
 pub opaque EmailAddress = Str;
 // CASE: FIELD-CONSTRAINT
