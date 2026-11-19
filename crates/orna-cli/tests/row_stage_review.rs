@@ -46,6 +46,8 @@ fn init_repository(root: &Path, files: &[(&str, &str)]) {
         }
         std::fs::write(path, contents).unwrap();
     }
+    // Orna metadata is committed with the fixture so each test starts from a clean `status`.
+    orna_repository::initialize_repository(root).expect("initialize Orna repository");
     git_ok(root, &["add", "--all"]);
     git_ok(root, &["commit", "--quiet", "-m", "initial"]);
 }

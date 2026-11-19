@@ -65,7 +65,7 @@ use committed::{
     table_identities_from_manifest,
 };
 use diagnostic_docs::{diagnostic_documentation, explain_diagnostic};
-use endpoint::{Endpoint, local_project_path, pure_sys_host_context};
+use endpoint::{Endpoint, local_project_path, pure_sys_host_context, require_orna_repository};
 use invoke::{
     application_failure, run_default_project_main, run_project_invocation,
     run_project_invocation_with_arguments, run_project_stream_invocation,

@@ -171,14 +171,7 @@ fn run_status_short_with_runtime_summary(
     endpoint: &Endpoint,
     color_enabled: bool,
 ) -> Result<(), Diagnostic> {
-    let path = local_project_path(endpoint)?;
-    let repository = orna_repository::Repository::discover(path).map_err(|_| {
-        Diagnostic::target(
-            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
-            "local Git worktree could not be discovered",
-            "run the command inside a Git worktree or provide a local project path",
-        )
-    })?;
+    let repository = crate::status_run::discover_status_repository(endpoint)?;
     let unpublished_count = unpublished_mutation_count(&repository)?;
     run_status_short(endpoint, color_enabled)?;
     writeln!(

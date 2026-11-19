@@ -155,6 +155,22 @@ pub(crate) fn local_project_path(endpoint: &Endpoint) -> Result<&str, Diagnostic
     }
 }
 
+/// Refuses a Git worktree without Orna repository metadata, so `check` and
+/// `status` never report a plain Git repository as an Orna repository. Legacy
+/// or malformed metadata passes through: the command's own reader reports it.
+pub(crate) fn require_orna_repository(
+    repository: &orna_repository::Repository,
+) -> Result<(), Diagnostic> {
+    if matches!(orna_repository::inspect_metadata(repository), Ok(None)) {
+        return Err(Diagnostic::target(
+            "ORNA-CMD-REPOSITORY-UNAVAILABLE",
+            "not an Orna repository (no .orna metadata directory)",
+            "run `orna init` to initialize the Orna repository",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn pure_sys_host_context(
     endpoint: &Endpoint,
     std_snapshot: StdSnapshotPin,

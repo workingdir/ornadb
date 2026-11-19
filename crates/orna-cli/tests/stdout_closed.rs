@@ -50,6 +50,7 @@ fn status_into_closed_stdout_exits_quietly() {
         .status()
         .expect("run git init");
     assert!(git.success(), "git init failed");
+    orna_repository::initialize_repository(directory.path()).expect("initialize Orna repository");
     // An untracked file makes `status --porcelain` produce output to write.
     std::fs::write(directory.path().join("untracked.orna"), "").expect("write file");
 

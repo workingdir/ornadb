@@ -1,6 +1,7 @@
 use super::{
     Diagnostic, Endpoint, ProjectEnvironment, ProjectExpectations, ProjectUnit, RuntimeIdentity,
     SourceUnit, cli_check_backend, cli_commit, local_project_path, project_load_diagnostic,
+    require_orna_repository,
 };
 
 pub(crate) fn load_project(endpoint: &Endpoint) -> Result<orna_project::LoadedProject, Diagnostic> {
@@ -12,18 +13,28 @@ pub(crate) fn load_project(endpoint: &Endpoint) -> Result<orna_project::LoadedPr
 pub(crate) fn load_project_without_standard_rejection(
     endpoint: &Endpoint,
 ) -> Result<orna_project::LoadedProject, Diagnostic> {
+    load_project_from(&discover_project_worktree(endpoint)?)
+}
+
+fn discover_project_worktree(
+    endpoint: &Endpoint,
+) -> Result<orna_repository::Repository, Diagnostic> {
     let path = local_project_path(endpoint)?;
-    let repository = orna_repository::Repository::discover(path).map_err(|_| {
+    orna_repository::Repository::discover(path).map_err(|_| {
         Diagnostic::target(
             "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "project Git worktree could not be discovered",
             "run the command inside a Git worktree or provide a local project path",
         )
-    })?;
-    let project = orna_project::ProjectLoader::default()
-        .load(&repository)
-        .map_err(project_load_diagnostic)?;
-    Ok(project)
+    })
+}
+
+fn load_project_from(
+    repository: &orna_repository::Repository,
+) -> Result<orna_project::LoadedProject, Diagnostic> {
+    orna_project::ProjectLoader::default()
+        .load(repository)
+        .map_err(project_load_diagnostic)
 }
 
 pub(crate) fn reject_uncaptured_standard_modules(
@@ -52,7 +63,10 @@ pub(crate) fn semantic_catalogue(
 }
 
 pub(crate) fn check_project(endpoint: &Endpoint, color_enabled: bool) -> Result<(), Diagnostic> {
-    let project = load_project(endpoint)?;
+    let repository = discover_project_worktree(endpoint)?;
+    require_orna_repository(&repository)?;
+    let project = load_project_from(&repository)?;
+    reject_uncaptured_standard_modules(&project)?;
     cli_check_backend::check_project(&project, color_enabled)
 }
 
