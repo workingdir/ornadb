@@ -327,7 +327,7 @@ fn link_diagnostics(
 }
 
 /// The keys of the engine natives a program declares.
-fn engine_keys(program: &orna_hir::Program) -> Vec<NativeKey> {
+pub(crate) fn engine_keys(program: &orna_hir::Program) -> Vec<NativeKey> {
     program
         .defs
         .iter()

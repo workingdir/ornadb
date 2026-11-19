@@ -654,7 +654,7 @@ pub(crate) fn hover(workspace: &Workspace, module: usize, byte: usize) -> Option
             let file = workspace.file(module);
             let declared = workspace.declaration(module, index);
             if let Some(symbol) = declared_symbol(&file.symbols, &declared.selection) {
-                return Some(hover_symbol(symbol));
+                return Some(hover_symbol(symbol, workspace.native_label(declared.def)));
             }
             let detail = source_slice(file.text(), &declared.full)
                 .lines()
@@ -667,13 +667,13 @@ pub(crate) fn hover(workspace: &Workspace, module: usize, byte: usize) -> Option
                 &declared.name,
                 Some(&detail),
                 &[],
-                None,
+                workspace.native_label(declared.def),
             ))
         }
         Target::Standard { module, name } => workspace
             .standard
             .symbol(&module, &name)
-            .map(|standard| hover_symbol(&standard.symbol)),
+            .map(|standard| hover_symbol(&standard.symbol, None)),
         Target::Module(path) => Some(crate::hover::declaration(
             "module",
             &path.join("."),
@@ -717,7 +717,7 @@ fn declared_noun(kind: DeclaredKind) -> &'static str {
     }
 }
 
-fn hover_symbol(symbol: &EditorSymbol) -> Hover {
+fn hover_symbol(symbol: &EditorSymbol, native_label: Option<&str>) -> Hover {
     let kind = match symbol.kind {
         EditorSymbolKind::Function => "function",
         EditorSymbolKind::Type => "type",
@@ -731,12 +731,17 @@ fn hover_symbol(symbol: &EditorSymbol) -> Hover {
         EditorSymbolKind::Dimension => "dimension",
         EditorSymbolKind::Unit => "unit",
     };
+    let documentation = match (symbol.documentation.as_deref(), native_label) {
+        (Some(documentation), Some(label)) => Some(format!("{documentation}\n\n{label}")),
+        (Some(documentation), None) => Some(documentation.to_owned()),
+        (None, label) => label.map(str::to_owned),
+    };
     crate::hover::declaration(
         kind,
         &symbol.name,
         symbol.detail.as_deref(),
         &symbol.parameters,
-        symbol.documentation.as_deref(),
+        documentation.as_deref(),
     )
 }
 

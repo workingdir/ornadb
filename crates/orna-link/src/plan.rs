@@ -18,6 +18,19 @@ use crate::manifest::{NativeLibrary, ProjectManifest};
 /// The library ABI this engine loads: the number `orna_library_abi()` must return.
 pub const LIBRARY_NATIVE_ABI: u32 = 1;
 
+/// The trust label of a library-bound native (ORNA-EXT-005). A library runs in the host
+/// process with host trust, so nothing sandboxes it and every description of one says so.
+pub const LIBRARY_TRUST_LABEL: &str = "host trust, not sandboxed";
+
+/// The label a library-bound native carries wherever it is described: the library name and
+/// the SHA-256 the plan verified, so a reader sees exactly which code runs with host trust.
+pub fn library_trust_label(library: &str, sha256: &[u8; 32]) -> String {
+    format!(
+        "Native library `{library}` (sha256 {}): {LIBRARY_TRUST_LABEL} (ORNA-EXT-005).",
+        hex(sha256)
+    )
+}
+
 /// The profile a program links for (docs/design/native-libraries.md, section 7).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LinkProfile {
@@ -318,4 +331,20 @@ fn check_library(
         file,
         sha256: entry.sha256,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn library_label_names_the_library_its_digest_and_the_host_trust() {
+        assert_eq!(
+            library_trust_label("slug", &[0xab; 32]),
+            format!(
+                "Native library `slug` (sha256 {}): host trust, not sandboxed (ORNA-EXT-005).",
+                "ab".repeat(32)
+            )
+        );
+    }
 }

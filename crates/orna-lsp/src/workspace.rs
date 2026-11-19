@@ -14,6 +14,7 @@
 //! after lowering, to the HIR's answer, not as a second resolver.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
 use lsp_types::Uri;
@@ -21,14 +22,19 @@ use orna_hir::{
     BodyId, DefId, DefKind, LocalId, ModuleId as HirModuleId, Name, NameTarget, NameUse, Program,
     SourceId, SourceUnit, TyKind, UseContext, lower_with_prelude,
 };
+use orna_link::{
+    Binding, EngineRegistry, LinkProfile, ProjectManifest, host_target, library_trust_label, plan,
+};
 use orna_syntax::{Keyword, Token, TokenKind, lex, parse_module};
 use orna_syntax_ast::SourceSpan as SyntaxSpan;
 use orna_syntax_ast::{Declaration, UseTail};
 
 use crate::analysis::{self, EditorParse, EditorSymbol};
 use crate::documents::Document;
-use crate::project::ProjectHome;
+use crate::project::{ProjectHome, engine_keys};
 use crate::standard::StandardLibrary;
+
+mod search;
 
 #[cfg(test)]
 thread_local! {
@@ -287,6 +293,8 @@ pub(crate) struct Workspace {
     occurrences: Vec<Vec<NameOccurrence>>,
     /// Top-level declarations of every detached module, by key.
     detached_defs: HashMap<String, Vec<DefId>>,
+    /// The trust label of each library-bound native, by definition (ORNA-EXT-005).
+    native_labels: HashMap<DefId, String>,
 }
 
 impl Workspace {
@@ -325,6 +333,42 @@ impl Workspace {
             std_sources,
             Scope::Project { incomplete },
         )
+    }
+
+    /// Labels each library-bound native of the project with its trust label,
+    /// from the link plan the run would build. A manifest or link failure
+    /// leaves every native unlabelled; the link diagnostics report it.
+    pub(crate) fn attach_native_labels(&mut self, root: &Path) {
+        let Ok(manifest) = ProjectManifest::load(root) else {
+            return;
+        };
+        let registry = EngineRegistry::new(engine_keys(&self.program));
+        let Ok(link) = plan(
+            &self.program,
+            &manifest,
+            root,
+            host_target(),
+            LinkProfile::Native,
+            &registry,
+        ) else {
+            return;
+        };
+        self.native_labels = link
+            .bindings
+            .iter()
+            .filter_map(|(def, binding)| match binding {
+                Binding::Library { library, .. } => {
+                    let file = link.libraries.get(library)?;
+                    Some((*def, library_trust_label(library, &file.sha256)))
+                }
+                Binding::Engine { .. } => None,
+            })
+            .collect();
+    }
+
+    /// The trust label of a native the link plan binds to a library, if any.
+    pub(crate) fn native_label(&self, def: DefId) -> Option<&str> {
+        self.native_labels.get(&def).map(String::as_str)
     }
 
     /// Documents outside a project with an explicit standard source set.
@@ -394,6 +438,7 @@ impl Workspace {
             bindings_by_local: HashMap::new(),
             occurrences: Vec::new(),
             detached_defs: HashMap::new(),
+            native_labels: HashMap::new(),
         };
         workspace.index();
         workspace
@@ -1023,72 +1068,6 @@ impl Workspace {
             Target::Module(path) => path.last().cloned().unwrap_or_default(),
             Target::Standard { name, .. } => name.clone(),
         }
-    }
-
-    /// Every occurrence that refers to `target`, and every same-named
-    /// occurrence that might.
-    pub(crate) fn search(&self, target: &Target) -> Search {
-        let key = self.target_key(target);
-        let member = match target {
-            Target::Declared { module, index } => self.declaration(*module, *index).owner.is_some(),
-            _ => false,
-        };
-        let parameter = match target {
-            Target::Local { module, binding } => {
-                self.binding(*module, *binding).kind == LocalBindingKind::Parameter
-            }
-            _ => false,
-        };
-        let mut search = Search::default();
-        if let Target::Local { module, binding } = target {
-            search
-                .found
-                .push((*module, self.binding(*module, *binding).selection.clone()));
-        }
-        if let Target::Declared { module, index } = target {
-            search
-                .found
-                .push((*module, self.declaration(*module, *index).selection.clone()));
-        }
-        for (module, occurrences) in self.occurrences.iter().enumerate() {
-            if self.modules[module]
-                .path
-                .segments()
-                .first()
-                .is_some_and(|name| name.as_str() == "std")
-            {
-                continue;
-            }
-            for occurrence in occurrences {
-                if occurrence.key != key {
-                    continue;
-                }
-                match &occurrence.resolved {
-                    Resolved::Target(found) if found == target => {
-                        search.found.push((module, occurrence.span.clone()));
-                    }
-                    Resolved::Target(_) => {}
-                    Resolved::Ambiguous => search.uncertain.push((module, occurrence.span.clone())),
-                    Resolved::Unknown => {
-                        let possible = match occurrence.context {
-                            UseContext::Field | UseContext::Label => member,
-                            UseContext::Value => false,
-                            _ => false,
-                        } || (occurrence.context == UseContext::Label && parameter);
-                        if possible {
-                            search.uncertain.push((module, occurrence.span.clone()));
-                        }
-                    }
-                }
-            }
-        }
-        search
-            .found
-            .sort_by_key(|(module, span)| (*module, span.start, span.end));
-        search
-            .found
-            .dedup_by(|right, left| left.0 == right.0 && left.1.start == right.1.start);
-        search
     }
 }
 
