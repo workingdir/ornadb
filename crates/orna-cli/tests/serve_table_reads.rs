@@ -531,3 +531,22 @@ fn uncommitted_blob_row_is_refused_without_a_value() {
         "the uncommitted Blob row names the refusal and carries no value"
     );
 }
+
+/// A Blob-holding app whose page reads a stored reference: `Vehicle | map(v =>
+/// v.owner.name)` resolves the owner through the same committed snapshot as a
+/// canonical read (ORNA-REF-002). The Blob table makes the page a contextual read.
+const REFERENCE_BLOB_SOURCE: &str = "pub table Owner(id: Str) { name: Str, }\n\npub table Vehicle(id: Str) { owner: Owner, }\n\npub table media(id: Str) { content: Blob, }\n\npub fn seed() { Vehicle.insert({ id: \"v1\", owner: Owner.insert({ id: \"ada\", name: \"Ada\" }) }); }\n\npub fn serve(): Str = Vehicle | map(v => v.owner.name) | first() ?? \"none\";\n\npub fn main() {}\n";
+
+/// The stored reference of a committed Vehicle resolves to its committed owner's
+/// name on a page of an app that also holds a Blob table (ORNA-REF-002).
+#[test]
+fn committed_stored_reference_resolves_on_a_blob_table_page() {
+    let directory = TempDir::new().expect("create the test directory");
+    let root = committed_project(&directory, REFERENCE_BLOB_SOURCE);
+    assert_success(&orna(&root, &["run", "seed"]), "orna run seed");
+    publish(&root);
+    let (_server, address) = start_server(&root);
+    let (status, body) = http_get(&address, "/").expect("GET /");
+    assert_eq!(status, 200, "body: {body}");
+    assert!(body.contains("Ada"), "the owner's name is served: {body}");
+}
