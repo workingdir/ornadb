@@ -232,8 +232,9 @@ fn run_restore(
 fn report_archive(archive: &Path) -> Result<(), Diagnostic> {
     let manifest = read_complete_copy_manifest(archive)
         .map_err(|error| describe_export_failure(&error, IoScope::ArchiveRead))?;
-    let scratch = tempfile::TempDir::new()
-        .map_err(|error| describe_export_failure(&CompleteCopyError::Io(error), IoScope::Scratch))?;
+    let scratch = tempfile::TempDir::new().map_err(|error| {
+        describe_export_failure(&CompleteCopyError::Io(error), IoScope::Scratch)
+    })?;
     restore_complete_copy(archive, scratch.path())
         .map_err(|error| describe_export_failure(&error, IoScope::ArchiveRead))?;
     let (objects, dependencies) = manifest.counts();
