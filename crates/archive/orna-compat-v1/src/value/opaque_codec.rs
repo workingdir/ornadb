@@ -17,6 +17,10 @@ use crate::{
 
 use super::{MAX_RUNTIME_VALUE_NODES, inspect_carrier_codec_by_type_id};
 
+mod canonical_json;
+
+use canonical_json::write_canonical_json;
+
 /// The maximum payload length accepted by every registered opaque codec.
 pub const MAX_OPAQUE_CODEC_PAYLOAD_LENGTH: usize = ORV_MAX_PAYLOAD_BYTES;
 
@@ -764,8 +768,9 @@ fn canonical_json_body(
     }
     let value = serde_json::from_slice::<serde_json::Value>(body)
         .map_err(|_| OpaqueValueError::InvalidJsonBody { opaque_type })?;
-    let canonical_body = serde_json::to_vec(&value)
-        .map_err(|_| OpaqueValueError::InvalidJsonBody { opaque_type })?;
+    let mut canonical_body = Vec::with_capacity(body.len());
+    write_canonical_json(&value, &mut canonical_body)
+        .ok_or(OpaqueValueError::InvalidJsonBody { opaque_type })?;
     if canonical_body != body {
         return Err(OpaqueValueError::InvalidJsonBody { opaque_type });
     }
