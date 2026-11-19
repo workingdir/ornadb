@@ -7,7 +7,7 @@ use crate::table_snapshot::{PinnedCommittedRows, RuntimeTableRows};
 use crate::{
     RuntimeActivationContext, RuntimeState, TableActivationCandidateValidator, TableSchemaIdentity,
 };
-use libsql::{Connection, TransactionBehavior, params};
+use libsql::{Connection, Rows, TransactionBehavior, params};
 use orna_repository::{
     ContentIdentity, GitHashAlgorithm, NativeOid, OrpBlobBinding, ProtectedContentPin,
     ProtectedContentTransfer,
@@ -1203,15 +1203,21 @@ pub(crate) async fn table_rows_tx(
         let storage = table_storage_key(table, table_object_ids.get(table).copied());
         // Beneath a committed base the relation is the committed `HEAD` rows no
         // mutation touched plus the live rows the tail overrode. With no base the
-        // live `table_row` state is the whole relation.
-        let mut rows_by_key: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
-        if let Some(committed) = base.tables.as_ref().and_then(|tables| tables.get(&storage)) {
-            for (key, value) in committed.rows {
-                if !committed.overridden.contains(key) {
-                    rows_by_key.insert(key.clone(), value.clone());
-                }
-            }
-        }
+        // live `table_row` state is the whole relation. Both sides arrive in byte
+        // order, the order the former map imposed, so they merge in one pass
+        // instead of being buffered in a map first.
+        let mut untouched = base
+            .tables
+            .as_ref()
+            .and_then(|tables| tables.get(&storage))
+            .into_iter()
+            .flat_map(|committed| {
+                let committed_rows = committed.rows;
+                committed_rows
+                    .iter()
+                    .filter(move |(key, _)| !committed.overridden.contains(*key))
+            })
+            .peekable();
         let mut query = connection
             .query(
                 "SELECT row_key, row_value FROM table_row
@@ -1219,16 +1225,45 @@ pub(crate) async fn table_rows_tx(
                 params![storage.clone()],
             )
             .await?;
-        while let Some(row) = query.next().await? {
-            let key: Vec<u8> = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
-            let value: Vec<u8> = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
-            if base.includes_live_row(&storage, &key) {
-                rows_by_key.insert(key, value);
+        let mut rows = Vec::new();
+        let mut live = next_live_row(&mut query, base, &storage, None).await?;
+        while let Some(live_row) = live.take() {
+            let live_key = live_row.0.as_slice();
+            while let Some((key, value)) = untouched.next_if(|(k, _)| k.as_slice() < live_key) {
+                rows.push((key.clone(), value.clone()));
             }
+            // A key both sides hold takes the live value; the committed copy is stale.
+            let _ = untouched.next_if(|(k, _)| k.as_slice() == live_key);
+            live = next_live_row(&mut query, base, &storage, Some(live_key)).await?;
+            rows.push(live_row);
         }
-        result.insert(table.clone(), rows_by_key.into_iter().collect());
+        rows.extend(untouched.map(|(key, value)| (key.clone(), value.clone())));
+        result.insert(table.clone(), rows);
     }
     Ok(result)
+}
+
+/// Advances the live `table_row` cursor of `storage` to its next row that
+/// belongs to the relation. The rows are merged in byte order, so a row that
+/// does not sort strictly after `after` fails closed as `RecoveryInvalid`.
+async fn next_live_row(
+    query: &mut Rows,
+    base: &CommittedTableBase<'_>,
+    storage: &str,
+    after: Option<&[u8]>,
+) -> Result<Option<(Vec<u8>, Vec<u8>)>, RuntimeError> {
+    while let Some(row) = query.next().await? {
+        let key: Vec<u8> = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let value: Vec<u8> = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        if !base.includes_live_row(storage, &key) {
+            continue;
+        }
+        if after.is_some_and(|previous| previous >= key.as_slice()) {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        return Ok(Some((key, value)));
+    }
+    Ok(None)
 }
 
 /// Returns the distinct declared names of a set of admitted table identities.
@@ -1733,3 +1768,6 @@ impl RuntimeState {
         Ok(next)
     }
 }
+
+#[cfg(test)]
+mod tests;
