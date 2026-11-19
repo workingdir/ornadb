@@ -845,3 +845,57 @@ fn a_bool_keyed_table_is_refused_for_bounds_and_key_lookup() {
         transcript(&keyed)
     );
 }
+
+/// Rows one `orna run` inserts through a seeding function. One run is charged
+/// against the evaluator's per-run step budget, so the table is seeded by one
+/// run per batch of this many rows.
+const SEED_BATCH_ROWS: usize = 1_000;
+
+/// Declares `Note` and the queries that read it, then one `seed_<start>`
+/// function per batch of rows `start..end`, each inserting its batch in a
+/// loop. Row `i` has id `i` and body `i % 10`; the loop keeps the source small
+/// whatever the row count.
+fn seeded_note_source(rows: usize) -> String {
+    use std::fmt::Write as _;
+    let mut source = String::from(
+        "pub table Note(id: Int) { body: Int, }\n\
+         pub fn long_bodies(): Int = Note | filter(n => n.body == 1) | count();\n\
+         pub fn main() = Note | count();\n",
+    );
+    for start in (0..rows).step_by(SEED_BATCH_ROWS) {
+        let end = (start + SEED_BATCH_ROWS).min(rows);
+        write!(
+            source,
+            "pub fn seed_{start}() {{\n    for i in {start}..{end} {{\n        Note.insert({{ id: i, body: i % 10 }});\n    }}\n}}\n"
+        )
+        .expect("writing to a String cannot fail");
+    }
+    source
+}
+
+/// A committed table of 2049 rows, one past the former 2048-row collection cap,
+/// publishes and is read in full: `main` counts every row, and `long_bodies`
+/// filters the 205 rows whose body is 1.
+#[test]
+fn a_committed_table_past_2048_rows_publishes_and_scans_in_full() {
+    const ROWS: usize = 2_049;
+    let directory = TempDir::new().expect("a temporary directory");
+    let (root, _) = committed_table(&directory, &seeded_note_source(ROWS), "Note");
+    for start in (0..ROWS).step_by(SEED_BATCH_ROWS) {
+        assert_success(
+            &orna(&root, &["run", &format!("main.seed_{start}")]),
+            "orna run seed batch",
+        );
+    }
+    publish(&root, "Add 2049 notes");
+
+    let total = orna(&root, &["run", "main.main"]);
+    assert_success(&total, "orna run main");
+    assert_eq!(String::from_utf8_lossy(&total.stdout).trim(), "2049 : Int");
+    let filtered = orna(&root, &["run", "main.long_bodies"]);
+    assert_success(&filtered, "orna run long_bodies");
+    assert_eq!(
+        String::from_utf8_lossy(&filtered.stdout).trim(),
+        "205 : Int"
+    );
+}

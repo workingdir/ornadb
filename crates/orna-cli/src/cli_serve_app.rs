@@ -317,10 +317,7 @@ impl ServeApp {
         }
         let schemas = admitted_table_schemas(&admitted);
         let (rows, storage_orders) = committed_rows_at(&repository, &commit, &schemas, &tables)
-            .map_err(|error| match error {
-                CommittedRowsError::Limit => "serve.table_read_limit",
-                CommittedRowsError::Unavailable => "serve.table_rows_unavailable",
-            })?;
+            .map_err(|CommittedRowsError::Unavailable| "serve.table_rows_unavailable")?;
         // A table whose schema holds a Blob is served as ROV-3 contextual values
         // (ORNA-APP-013): a committed Blob reference keeps its media authority,
         // and an uncommitted one is refused.
