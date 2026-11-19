@@ -25,6 +25,12 @@ fn catalogue_with_wrappers() -> Catalogue {
             "pub fn passthrough(path: Str): Str = path;\n".to_owned(),
         ),
         (
+            "std/io/fs.orna".to_owned(),
+            "pub fn read_text(root: Str, path: Str): Str = __read_text(root, path);\n\
+             fn __read_text(root: Str, path: Str): Str = std.io.fs.read_text(root, path);\n"
+                .to_owned(),
+        ),
+        (
             "std/reflection.orna".to_owned(),
             include_str!("../../../stdlib/std/reflection.orna").to_owned(),
         ),
@@ -142,6 +148,24 @@ fn std_wrapper_calling_sys_random_propagates_randomness() {
         "effects: {effects:?}; diagnostics: {diagnostics:?}"
     );
     assert_eq!(effects, vec!["randomness".to_owned()]);
+}
+
+/// A source function in a host-prefixed namespace must not close its cycle
+/// empty. The wrapper `std.io.fs.read_text` calls `__read_text`, which calls
+/// `std.io.fs.read_text` back; that call is the Filesystem host operation.
+#[test]
+fn source_cycle_in_host_prefixed_namespace_is_classified_filesystem() {
+    let (may_fail, effects, diagnostics) = consumer_effects(
+        "use std.io.fs as fs;\npub fn outer(p: Str): Str = fs.read_text(\"root\", p);\n",
+        "outer",
+    );
+
+    assert!(
+        may_fail,
+        "effects: {effects:?}; diagnostics: {diagnostics:?}"
+    );
+    assert_eq!(effects, vec!["filesystem".to_owned()]);
+    assert!(diagnostics.is_empty(), "diagnostics: {diagnostics:?}");
 }
 
 #[test]
