@@ -31,7 +31,7 @@ use crate::repl_plan::{self, PlanRefusal};
 const MAX_HISTORY: usize = 256;
 
 /// Every command name the console knows, in the order `:help` lists them.
-const COMMANDS: [&str; 19] = [
+pub(crate) const COMMANDS: [&str; 19] = [
     "help", "at", "watch", "unwatch", "quit", "type", "inspect", "members", "table", "history",
     "timing", "clear", "doc", "source", "open", "plan", "trace", "copy", "display",
 ];

@@ -85,4 +85,4 @@ orna-hir = { path = "../orna-hir" }
 orna-fuse = { path = "../orna-fuse" }
 fuser = { version = "0.18.0", default-features = false }
 libc = "0.2"
-rustix = { version = "0.38.44", features = ["fs", "process"] }
+rustix = { version = "0.38.44", features = ["fs", "process", "termios"] }
