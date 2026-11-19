@@ -648,7 +648,10 @@ fn a_mounted_save_of_a_missing_reference_is_refused_and_keeps_the_stored_row() {
     mounted.await_path(&vehicle);
 
     let stored = fs::read_to_string(&vehicle).expect("read the stored vehicle");
-    assert!(stored.contains("\"ada\""), "the stored vehicle names its owner\n{stored}");
+    assert!(
+        stored.contains("\"ada\""),
+        "the stored vehicle names its owner\n{stored}"
+    );
     write_and_sync(&vehicle, &stored)
         .expect("a save whose reference names a committed owner is admitted");
 
@@ -675,7 +678,10 @@ fn a_mounted_save_of_a_missing_reference_is_refused_and_keeps_the_stored_row() {
     assert!(status.success(), "mount stderr: {}", mounted.stderr_text());
 
     let key = orna(&root, &["run", "main.owner_key"]);
-    assert_success(&key, "orna run of the reference's key after the refused save");
+    assert_success(
+        &key,
+        "orna run of the reference's key after the refused save",
+    );
     assert!(
         transcript(&key).contains("\"ada\""),
         "the committed reference still names the owner\n{}",
