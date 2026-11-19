@@ -700,7 +700,7 @@ const LEGACY_READ_ONLY_HELP: &str = orna_repository::LegacyWriteRefused::REMEDY;
 const MIGRATION_PREPARED_HELP: &str = "this build has no writer for format-1/2 snapshots; a format-3 migration candidate is prepared here but not activated; activation is tracked as ornadb-5il1.192";
 
 /// Remedy for a pending insert whose key the published HEAD already holds
-/// (ORNA-PUB-013). The pending change is kept; this build has no command that
+/// (ORNA-PUB-006). The pending change is kept; this build has no command that
 /// reconciles it with the existing row.
 const ROW_KEY_CONFLICT_HELP: &str = "this build has no command that reconciles a pending insert with a row the published HEAD already holds; the pending change is kept, and reconciling it is tracked as ornadb-5il1.503";
 
