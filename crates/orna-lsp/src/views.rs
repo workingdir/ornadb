@@ -185,7 +185,10 @@ impl Views {
                 ));
             }
         }
-        Workspace::project_with_sources(modules, standard, std_sources, incomplete)
+        let mut workspace =
+            Workspace::project_with_sources(modules, standard, std_sources, incomplete);
+        workspace.attach_native_labels(project.root());
+        workspace
     }
 
     /// The standard dependency `loaded` captures, as `orna check` analyses it.

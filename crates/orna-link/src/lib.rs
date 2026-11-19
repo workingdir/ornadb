@@ -15,5 +15,6 @@ mod plan;
 pub use error::{DeclSite, LinkError, LinkErrorCode};
 pub use manifest::{LibraryTarget, MANIFEST_FILE, NativeLibrary, ProjectManifest, host_target};
 pub use plan::{
-    Binding, EngineRegistry, LIBRARY_NATIVE_ABI, LinkPlan, LinkProfile, PlannedLibrary, plan,
+    Binding, EngineRegistry, LIBRARY_NATIVE_ABI, LIBRARY_TRUST_LABEL, LinkPlan, LinkProfile,
+    PlannedLibrary, library_trust_label, plan,
 };

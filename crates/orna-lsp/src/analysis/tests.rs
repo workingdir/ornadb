@@ -1,14 +1,18 @@
+use std::fs;
 use std::sync::Arc;
 
 use lsp_types::{CompletionItemKind, Diagnostic};
+use orna_link::host_target;
 use orna_syntax::Keyword;
+use tempfile::TempDir;
 
 use super::{
     completion_at, declaration_symbols, definition, document_symbols, hover,
     lsp_diagnostic_message, references, signature_help, syntax_diagnostics,
 };
 use crate::documents::{Document, PositionMapper};
-use crate::workspace::{FileAnalysis, Workspace};
+use crate::standard::StandardLibrary;
+use crate::workspace::{FileAnalysis, Module, Workspace};
 
 const LEXICAL_SOURCE: &str = include_str!("../../tests/fixtures/lexical-v1.orna");
 const EXPRESSIONS_SOURCE: &str = include_str!("../../tests/fixtures/expressions-v1.orna");
@@ -533,4 +537,54 @@ fn signature_help_lists_every_same_name_declaration_as_a_signature() {
     counts.sort_unstable();
     assert_eq!(counts, vec![1, 2], "{:?}", help.signatures);
     assert_eq!(help.active_signature, Some(0));
+}
+
+const EMPTY_LIBRARY_DIGEST: &str =
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+/// The markdown of the hover on `clock`, a native of module `slug`. With
+/// `with_manifest` the project binds `slug` to an empty library for this host.
+fn native_hover_text(with_manifest: bool) -> String {
+    let root = TempDir::new().unwrap();
+    let triple = host_target();
+    let library = format!("native/{triple}/libslug.so");
+    fs::create_dir_all(root.path().join(format!("native/{triple}"))).unwrap();
+    fs::write(root.path().join(&library), b"").unwrap();
+    if with_manifest {
+        fs::write(
+            root.path().join("orna.toml"),
+            format!(
+                "[[native_library]]\nname = \"slug\"\nmodules = [\"slug\"]\nabi = 1\n\n\
+                 [native_library.target.{triple}]\npath = \"{library}\"\n\
+                 sha256 = \"{EMPTY_LIBRARY_DIGEST}\"\n"
+            ),
+        )
+        .unwrap();
+    }
+    let text = "pub native fn clock(): Int effect none;\n";
+    let module = Module::project(Arc::new(FileAnalysis::new(document(text))), "slug.orna");
+    let mut workspace =
+        Workspace::project_with_sources(vec![module], StandardLibrary::none(), Vec::new(), None);
+    workspace.attach_native_labels(root.path());
+    let card = hover(&workspace, 0, text.find("clock").unwrap()).expect("native hover");
+    let lsp_types::HoverContents::Markup(content) = card.contents else {
+        panic!("expected markdown hover")
+    };
+    content.value
+}
+
+#[test]
+fn library_native_hover_states_host_trust_with_the_verified_digest() {
+    let text = native_hover_text(true);
+    let label = format!(
+        "Native library `slug` (sha256 {EMPTY_LIBRARY_DIGEST}): \
+         host trust, not sandboxed (ORNA-EXT-005)."
+    );
+    assert!(text.contains(&label), "{text}");
+}
+
+#[test]
+fn native_without_a_library_manifest_has_no_host_trust_label() {
+    let text = native_hover_text(false);
+    assert!(!text.contains("host trust"), "{text}");
 }
