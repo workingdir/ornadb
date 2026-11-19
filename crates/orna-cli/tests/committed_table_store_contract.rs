@@ -124,7 +124,7 @@ fn committed_store_meets_the_read_contract() {
 }
 
 #[test]
-#[ignore = "seeds 100,001 rows in batched runs: about 2 hours; run as an evidence job"]
+#[ignore = "seeds 100,001 rows in batched runs: about 15 minutes; run as an evidence job"]
 fn scan_of_a_table_above_the_retired_cap_completes_with_bounded_memory() {
     scan_with_bounded_memory(LARGE_ROWS);
 }
