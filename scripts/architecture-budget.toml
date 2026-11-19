@@ -153,7 +153,7 @@ name = "orna-compat-v1"
 [[crate]]
 name = "orna-evaluator"
 [crate.files]
-"src/lib.rs" = 15780
+"src/lib.rs" = 14770
 "src/relation.rs" = 1375
 "src/repl.rs" = 1766
 "src/sys_bindings.rs" = 2392
