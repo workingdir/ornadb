@@ -12,8 +12,9 @@ use super::{OpaqueGitlinkPin, ProjectLoadError};
 
 /// Binds each dependency gitlink to the commit its parent records and to the URL
 /// its `.gitmodules` declares for that path. `read_gitmodules` runs only when a
-/// gitlink exists. A gitlink without exactly one declared origin is refused, since
-/// the dependency could not be identified.
+/// gitlink exists. A gitlink with no declared origin is still pinned to its exact
+/// commit, since legacy repositories record gitlinks without a `.gitmodules`
+/// section; a path declared more than once is refused, since its origin is ambiguous.
 pub(super) fn bind_opaque_pins(
     gitlinks: Vec<(String, GitCommitRef)>,
     read_gitmodules: impl FnOnce() -> Result<Option<Vec<u8>>, ProjectLoadError>,
@@ -40,8 +41,8 @@ pub(super) fn bind_opaque_pins(
                 .filter(|origin| origin.path() == path)
                 .collect::<Vec<_>>();
             let origin = match declared.as_slice() {
-                [origin] => origin.url().to_owned(),
-                [] => return Err(ProjectLoadError::UndeclaredGitlink { path }),
+                [origin] => Some(origin.url().to_owned()),
+                [] => None,
                 _ => return Err(ProjectLoadError::InvalidGitmodules),
             };
             Ok(OpaqueGitlinkPin {

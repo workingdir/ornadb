@@ -337,7 +337,7 @@ pub struct LoadedProject {
 pub struct OpaqueGitlinkPin {
     path: String,
     commit: GitCommitRef,
-    origin: String,
+    origin: Option<String>,
 }
 
 impl OpaqueGitlinkPin {
@@ -351,9 +351,10 @@ impl OpaqueGitlinkPin {
         &self.commit
     }
 
-    /// The URL the parent's `.gitmodules` declares for [`Self::path`].
-    pub fn origin(&self) -> &str {
-        &self.origin
+    /// The URL the parent's `.gitmodules` declares for [`Self::path`], or `None` when
+    /// no section declares that path. The pin is still bound to [`Self::commit`].
+    pub fn origin(&self) -> Option<&str> {
+        self.origin.as_deref()
     }
 }
 
@@ -2313,10 +2314,6 @@ pub enum ProjectLoadError {
         import: String,
         gitlink: String,
     },
-    /// A dependency gitlink has no `.gitmodules` section declaring its path and url.
-    UndeclaredGitlink {
-        path: String,
-    },
     /// `.gitmodules` is oversized, not UTF-8, or declares an invalid or ambiguous origin.
     InvalidGitmodules,
 }
@@ -2372,12 +2369,6 @@ impl fmt::Display for ProjectLoadError {
                 return write!(
                     formatter,
                     "module {module} imports {import} from opaque dependency gitlink {gitlink}, whose declared tables cannot be derived"
-                );
-            }
-            Self::UndeclaredGitlink { path } => {
-                return write!(
-                    formatter,
-                    "dependency gitlink {path} has no path and url declared in .gitmodules"
                 );
             }
             Self::InvalidGitmodules => {

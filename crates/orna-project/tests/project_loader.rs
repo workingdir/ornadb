@@ -1505,7 +1505,7 @@ fn committed_snapshot_loader_pins_submodule_entries() {
     };
     assert_eq!(pin.path(), "vendor");
     assert_eq!(pin.commit().as_str(), object.trim());
-    assert_eq!(pin.origin(), DEPENDENCY_ORIGIN);
+    assert_eq!(pin.origin(), Some(DEPENDENCY_ORIGIN));
 }
 
 /// The origin every test dependency declares in `.gitmodules`.
@@ -1594,7 +1594,7 @@ fn committed_load_pins_dirty_dependency_gitlink_without_reading_it() {
     };
     assert_eq!(pin.path(), "dependencies/example");
     assert_eq!(pin.commit().as_str(), object);
-    assert_eq!(pin.origin(), DEPENDENCY_ORIGIN);
+    assert_eq!(pin.origin(), Some(DEPENDENCY_ORIGIN));
 }
 
 #[test]
@@ -1634,7 +1634,7 @@ fn worktree_load_treats_a_gitlinked_dependency_as_a_boundary() {
     };
     assert_eq!(pin.path(), "dependencies/example");
     assert_eq!(pin.commit().as_str(), object);
-    assert_eq!(pin.origin(), DEPENDENCY_ORIGIN);
+    assert_eq!(pin.origin(), Some(DEPENDENCY_ORIGIN));
 }
 
 #[test]
@@ -1721,9 +1721,10 @@ fn committed_load_fails_closed_when_a_module_imports_from_an_opaque_pin() {
 }
 
 #[test]
-fn committed_load_refuses_a_gitlink_without_a_declared_origin() {
-    // A gitlink records a commit. Only a `.gitmodules` section declaring both a
-    // path and a url says where that dependency is fetched from.
+fn committed_load_pins_a_gitlink_without_a_declared_origin() {
+    // Legacy repositories record dependency gitlinks without a `.gitmodules`
+    // section. The gitlink still binds its exact commit, so the pin is admitted
+    // with no origin; a section declaring another path does not bind it.
     for declared in [None, Some("other")] {
         let (directory, repository) =
             repository(&[("main.orna", include_str!("fixtures/main_run.orna"))]);
@@ -1737,19 +1738,23 @@ fn committed_load_refuses_a_gitlink_without_a_declared_origin() {
         let commit = commit_gitlink(&directory, "vendor", &object);
         let commit = repository.resolve_snapshot(&commit).unwrap();
 
-        let Err(error) = ProjectLoader::default().load_committed_snapshot(&repository, &commit)
-        else {
-            panic!("{declared:?}: the committed loader pinned an undeclared gitlink");
+        let project = ProjectLoader::default()
+            .load_committed_snapshot(&repository, &commit)
+            .expect("a gitlink without a declared origin is pinned, not refused");
+        let [pin] = project.opaque_pins() else {
+            panic!(
+                "{declared:?}: expected one opaque pin, got {:?}",
+                project.opaque_pins()
+            );
         };
-        let ProjectLoadError::UndeclaredGitlink { path } = &error else {
-            panic!("{declared:?}: expected UndeclaredGitlink, got {error:?}");
-        };
-        assert_eq!(path, "vendor");
+        assert_eq!(pin.path(), "vendor");
+        assert_eq!(pin.commit().as_str(), object);
+        assert_eq!(pin.origin(), None);
     }
 }
 
 #[test]
-fn worktree_load_refuses_a_gitlink_without_a_declared_origin() {
+fn worktree_load_pins_a_gitlink_without_a_declared_origin() {
     let (directory, repository) =
         repository(&[("main.orna", include_str!("fixtures/main_run.orna"))]);
     commit_all(&directory);
@@ -1758,16 +1763,48 @@ fn worktree_load_refuses_a_gitlink_without_a_declared_origin() {
         .to_owned();
     commit_gitlink(&directory, "dependencies/example", &object);
 
-    let Err(error) = ProjectLoader::default().load(&repository) else {
-        panic!("the worktree loaded a gitlink with no declared origin");
+    let project = ProjectLoader::default()
+        .load(&repository)
+        .expect("a gitlink without a declared origin is pinned, not refused");
+    let [pin] = project.opaque_pins() else {
+        panic!("expected one opaque pin, got {:?}", project.opaque_pins());
     };
-    let ProjectLoadError::UndeclaredGitlink { path } = &error else {
-        panic!("expected UndeclaredGitlink, got {error:?}");
+    assert_eq!(pin.path(), "dependencies/example");
+    assert_eq!(pin.commit().as_str(), object);
+    assert_eq!(pin.origin(), None);
+}
+
+#[test]
+fn a_gitlink_declared_by_two_sections_is_refused_as_invalid_gitmodules() {
+    let (directory, repository) =
+        repository(&[("main.orna", include_str!("fixtures/main_run.orna"))]);
+    commit_all(&directory);
+    let object = git_output(&directory, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+    let gitmodules = format!(
+        "[submodule \"vendor\"]\n\tpath = vendor\n\turl = {DEPENDENCY_ORIGIN}\n\
+         [submodule \"vendor-again\"]\n\tpath = vendor\n\turl = {DEPENDENCY_ORIGIN}\n"
+    );
+    fs::write(directory.path().join(".gitmodules"), gitmodules).unwrap();
+    assert!(
+        Command::new("git")
+            .args(["add", ".gitmodules"])
+            .current_dir(directory.path())
+            .status()
+            .unwrap()
+            .success()
+    );
+    let commit = commit_gitlink(&directory, "vendor", &object);
+    let commit = repository.resolve_snapshot(&commit).unwrap();
+
+    let error = match ProjectLoader::default().load_committed_snapshot(&repository, &commit) {
+        Ok(_) => panic!("the committed loader bound a gitlink declared twice"),
+        Err(error) => error,
     };
-    assert_eq!(path, "dependencies/example");
-    assert_eq!(
-        error.to_string(),
-        "dependency gitlink dependencies/example has no path and url declared in .gitmodules"
+    assert!(
+        matches!(error, ProjectLoadError::InvalidGitmodules),
+        "expected InvalidGitmodules, got {error:?}"
     );
 }
 
