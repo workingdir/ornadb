@@ -2,8 +2,7 @@
 //!
 //! The admission rules live in `orna_evaluator::row_admission`. This module
 //! only adapts conformance project units onto that boundary, so the conformance
-//! corpus exercises the evaluator code. No production admission caller exists
-//! yet; production admission wiring is not yet present.
+//! corpus exercises the evaluator code.
 
 use crate::ProjectUnit;
 use orna_check::Analysis;
