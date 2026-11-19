@@ -1,10 +1,11 @@
 use super::repl_committed_read::{
     bound_head_unchanged, publication_rows_for_source, submit_committed_read, submit_effect_free,
 };
+use super::repl_line::ReplInput;
 #[cfg(test)]
 use super::repl_request::FIRST_SYS_DISPATCH_RUNNING;
 use super::{
-    AdmittedReplSession, ApplicationError, Arc, BufReader, ColorMode, Diagnostic, Endpoint, Limits,
+    AdmittedReplSession, ApplicationError, Arc, ColorMode, Diagnostic, Endpoint, Limits,
     PinnedCommittedRows, QueryObservationRegistration, Rc, RefCell, ReplEvaluationFailure,
     ReplSnapshotSessionLoader, ReplTransactionScope, ReplTransactions, ReplWriterInputs,
     RequestIdentity, Reserved, StageOutcome, StagedTableActivation, TableActivationError,
@@ -489,7 +490,6 @@ pub(crate) fn run_repl(
             &mut submitter,
         );
     }
-    let stdin = io::stdin();
     let stdout = io::stdout();
     let loader = ReplSnapshotSessionLoader {
         repository: runtime.repository.as_ref(),
@@ -505,7 +505,7 @@ pub(crate) fn run_repl(
     let mut watch = repl::ReplWatchHost::new(watch_identity, orna_protocol::Limits::default());
     let mut watch_state = repl::WatchCommandState::default();
     repl::run_with_loader_and_submitter(
-        &mut BufReader::new(stdin.lock()),
+        &mut ReplInput::stdio(),
         &mut stdout.lock(),
         &mut runtime.session,
         &loader,
