@@ -109,7 +109,7 @@ fn read_tables(
             .ok_or(TableStorageError)?;
         let resolved_schema = resolve(object_id).map_err(|_| TableStorageError)?;
         let opened = open_table(format_context, object_id, resolved_schema, table_schema)?;
-        let mut committed = BTreeMap::<Vec<u8>, Vec<u8>>::new();
+        let mut committed = Vec::<(Vec<u8>, Vec<u8>)>::new();
         let mut lower = None;
         loop {
             let range = KeyRange::new(lower.clone(), None, 64).map_err(|_| TableStorageError)?;
@@ -127,20 +127,24 @@ fn read_tables(
                 // The committed descriptor validates the whole stored tuple,
                 // Blob references included, so the tuple is kept as stored.
                 let value = stored_tuple_of_row(&opened, &row)?;
-                if committed.insert(runtime_key, value).is_some() {
-                    return Err(TableStorageError);
-                }
+                committed.push((runtime_key, value));
             }
             if next_lower == lower {
                 break;
             }
             lower = next_lower;
         }
+        // Order the rows by runtime key, as the map did, and refuse a repeated
+        // key the way the insert did.
+        committed.sort_unstable();
+        if committed.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+            return Err(TableStorageError);
+        }
         result.insert(
             table_name.clone(),
             CommittedTable {
                 storage_order: opened.storage_order,
-                rows: committed.into_iter().collect(),
+                rows: committed,
             },
         );
     }
