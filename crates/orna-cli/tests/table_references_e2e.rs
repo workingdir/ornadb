@@ -22,6 +22,7 @@ use std::{
 };
 
 use orna_cli_testkit::format3;
+use orna_cli_testkit::media_commit;
 use orna_repository::{Repository, TypedKey};
 use orna_value::{Raw, decode_canonical_storage_value};
 use tempfile::TempDir;
