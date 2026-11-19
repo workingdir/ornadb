@@ -215,3 +215,26 @@ fn overlay_rejects_model_unknown_and_duplicate_bindings() {
         .expect_err("duplicate evidence bindings must be rejected");
     assert!(error.contains("duplicate implementation evidence binding"));
 }
+
+#[test]
+fn release_metadata_must_agree_with_the_checked_profile_revision() {
+    let root = TemporaryReference::new("profile-revision");
+    let release_path = root.path().join("release.json");
+    let mut release: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&release_path).expect("read copied release metadata"),
+    )
+    .expect("copied release metadata parses");
+    release["publication_revision"] = serde_json::json!("final-2026-10-06");
+    fs::write(
+        &release_path,
+        serde_json::to_string_pretty(&release).expect("rebound release metadata serializes"),
+    )
+    .expect("write rebound release metadata");
+    let error = generate(root.path()).expect_err("profile revision must agree with release.json");
+    assert!(
+        error.to_string().contains(
+            "conformance profile version or publication revision disagrees with release.json"
+        ),
+        "unexpected error: {error}"
+    );
+}

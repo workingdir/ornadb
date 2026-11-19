@@ -8,18 +8,18 @@
 
 use std::{collections::BTreeMap, fs, path::Path};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::CorpusError;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConformanceProfiles {
     pub version: String,
     pub publication_revision: String,
     pub profiles: BTreeMap<String, ProfileRequirements>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProfileRequirements {
     #[serde(default)]
     pub required: Vec<String>,
@@ -29,7 +29,7 @@ pub struct ProfileRequirements {
     pub requires: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Coordinates {
     pub language: String,
     pub publication_revision: String,
