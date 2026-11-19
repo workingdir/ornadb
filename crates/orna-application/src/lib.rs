@@ -1487,6 +1487,9 @@ pub struct SourceMutationEffectHandler {
     catalogue: Option<CatalogueRows>,
     captured_rows: Option<BTreeMap<String, BTreeMap<Vec<u8>, CanonicalValue>>>,
     overlay: BTreeMap<String, BTreeMap<Vec<u8>, Option<CanonicalValue>>>,
+    /// Live primary keys of each table in logical order. The first page of a scan builds
+    /// a table's entry, and the next write to that table drops it (`overlay_rows_mut`).
+    ordered_keys: BTreeMap<String, Vec<Vec<u8>>>,
     source_row_schemas: Vec<SourceRowSchemaProvenance>,
     protected_field_pins: Vec<RetainedSourceBlobPin>,
     sys_host: Option<SysHostAttachment>,
@@ -1518,6 +1521,7 @@ impl SourceMutationEffectHandler {
             publication_rows: None,
             captured_rows: None,
             overlay: BTreeMap::new(),
+            ordered_keys: BTreeMap::new(),
             source_row_schemas: Vec::new(),
             protected_field_pins: Vec::new(),
             sys_host: None,
@@ -2036,14 +2040,37 @@ impl SourceMutationEffectHandler {
     /// the same relation (ORNA-QUERY-005). Canonical key bytes identify rows but are not
     /// in table order, so the cursor is the big-endian ordinal of the next live row in
     /// that order. Ordinals increase bytewise, as the evaluator requires of cursors.
-    /// The order is recomputed per page.
+    /// The order is built by the table's first page and kept until a write to the table
+    /// drops it, so a scan pays one sort rather than one sort per page.
     fn table_relation_page(
-        &self,
+        &mut self,
         table: &str,
         after: Option<&[u8]>,
         limit: usize,
         budget: &mut StepBudget,
     ) -> Result<RelationPage, EvaluationError> {
+        if !self.ordered_keys.contains_key(table) {
+            let order = self.live_key_order(table)?;
+            self.ordered_keys.insert(table.to_owned(), order);
+        }
+        let order = self
+            .ordered_keys
+            .get(table)
+            .ok_or_else(|| Self::effect_error("ORNA-EVAL-TABLE-SNAPSHOT"))?;
+        let (window, next) = contextual_snapshot::page_window(order.len(), after, limit, budget)?;
+        let mut rows = Vec::with_capacity(window.len());
+        for key in &order[window] {
+            let row = self
+                .current_row_if_known(table, key)?
+                .ok_or_else(|| Self::effect_error("ORNA-EVAL-TABLE-SNAPSHOT"))?;
+            rows.push(row);
+        }
+        Ok(RelationPage { rows, next })
+    }
+
+    /// The live keys of `table` in logical primary-key order: the activation snapshot
+    /// merged with this activation's writes, with tombstoned keys removed.
+    fn live_key_order(&self, table: &str) -> Result<Vec<Vec<u8>>, EvaluationError> {
         let captured = self
             .captured_rows
             .as_ref()
@@ -2057,16 +2084,22 @@ impl SourceMutationEffectHandler {
         }
         let mut live = Vec::with_capacity(merged.len());
         for (key, row) in merged {
-            let Some(row) = row else {
+            if row.is_none() {
                 continue;
-            };
+            }
             let logical = orna_value::Value::decode(key)
                 .map_err(|_| Self::effect_error("ORNA-EVAL-TABLE-SNAPSHOT"))?;
-            live.push((logical, row));
+            live.push((logical, key));
         }
-        let (rows, next) = contextual_snapshot::page_table_rows(live, after, limit, budget)?;
-        let rows = rows.into_iter().cloned().collect();
-        Ok(RelationPage { rows, next })
+        let ordered = contextual_snapshot::order_table_rows(live)?;
+        Ok(ordered.into_iter().map(|(_, key)| key.clone()).collect())
+    }
+
+    /// The activation's writes to `table`. Every write goes through here, because a write
+    /// can change the table's logical order and so drops the table's cached scan order.
+    fn overlay_rows_mut(&mut self, table: &str) -> &mut BTreeMap<Vec<u8>, Option<CanonicalValue>> {
+        self.ordered_keys.remove(table);
+        self.overlay.entry(table.to_owned()).or_default()
     }
 
     fn admitted_table_name(&self, path: &str) -> Option<&str> {
@@ -2720,10 +2753,7 @@ impl EffectHandler for SourceMutationEffectHandler {
                     return Err(Self::effect_error("ORNA-EVAL-TABLE-DUPLICATE-KEY"));
                 }
                 self.record_insert(&table, key.clone(), row.clone())?;
-                self.overlay
-                    .entry(table.to_owned())
-                    .or_default()
-                    .insert(key, Some(row.clone()));
+                self.overlay_rows_mut(&table).insert(key, Some(row.clone()));
                 Ok(Some(row))
             }
             "upsert" => {
@@ -2736,20 +2766,14 @@ impl EffectHandler for SourceMutationEffectHandler {
                     let row = self.patch_row(&schema, patch, &existing, true)?;
                     let row = self.bind_stored_references(&table, row)?;
                     self.record(&table, key.clone(), Some(row.clone()))?;
-                    self.overlay
-                        .entry(table.to_owned())
-                        .or_default()
-                        .insert(key, Some(row.clone()));
+                    self.overlay_rows_mut(&table).insert(key, Some(row.clone()));
                     Ok(Some(row))
                 } else {
                     let row = self.complete_insert_row(&table, &keyed_patch, false)?;
                     self.row_matches_schema(&schema, &row)?;
                     let key = self.key_from_row(&schema, &row)?;
                     self.record_insert(&table, key.clone(), row.clone())?;
-                    self.overlay
-                        .entry(table.to_owned())
-                        .or_default()
-                        .insert(key, Some(row.clone()));
+                    self.overlay_rows_mut(&table).insert(key, Some(row.clone()));
                     Ok(Some(row))
                 }
             }
@@ -2767,9 +2791,7 @@ impl EffectHandler for SourceMutationEffectHandler {
                     return Err(Self::effect_error("ORNA-EVAL-TABLE-KEY"));
                 }
                 self.record(&table, key_bytes.clone(), Some(row.clone()))?;
-                self.overlay
-                    .entry(table.to_owned())
-                    .or_default()
+                self.overlay_rows_mut(&table)
                     .insert(key_bytes, Some(row.clone()));
                 Ok(Some(row))
             }
@@ -2786,10 +2808,7 @@ impl EffectHandler for SourceMutationEffectHandler {
                     return Err(Self::effect_error("ORNA-EVAL-TABLE-MISSING-ROW"));
                 }
                 self.record(&table, key.clone(), None)?;
-                self.overlay
-                    .entry(table.to_owned())
-                    .or_default()
-                    .insert(key, None);
+                self.overlay_rows_mut(&table).insert(key, None);
                 Ok(Some(CanonicalValue::unit()))
             }
             "rekey" => {
@@ -2848,7 +2867,7 @@ impl EffectHandler for SourceMutationEffectHandler {
                     new_key_bytes.clone(),
                     row.clone(),
                 )?;
-                let rows = self.overlay.entry(table.to_owned()).or_default();
+                let rows = self.overlay_rows_mut(&table);
                 rows.insert(old_key_bytes, None);
                 rows.insert(new_key_bytes, Some(row.clone()));
                 Ok(Some(row))
@@ -7019,6 +7038,115 @@ mod tests {
             ]))
             .expect("expected row is canonical")
         );
+    }
+
+    #[test]
+    fn committed_table_scan_orders_100k_rows_once_and_tracks_overlay_writes() {
+        const ROWS: i64 = 100_000;
+        fn scan_all(handler: &mut SourceMutationEffectHandler) -> Vec<CanonicalValue> {
+            let mut rows = Vec::new();
+            let mut after: Option<Vec<u8>> = None;
+            loop {
+                let page = handler
+                    .table_relation_page(
+                        "Note",
+                        after.as_deref(),
+                        1,
+                        &mut StepBudget::new(u64::MAX),
+                    )
+                    .expect("committed page should be served");
+                rows.extend(page.rows);
+                match page.next {
+                    Some(next) => after = Some(next),
+                    None => return rows,
+                }
+            }
+        }
+        let authority =
+            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let application = authority
+            .admit_module(
+                "table-update-rekey.orna",
+                include_str!("../tests/fixtures/table-update-rekey.orna"),
+                "main",
+            )
+            .expect("checked-in table mutation fixture should be admitted");
+        let key_of = |id: i64| {
+            CanonicalValue::new(OvbRaw::Int(id.into()))
+                .expect("integer is canonical")
+                .encode()
+                .expect("key is canonical")
+        };
+        let row_of = |id: i64, text: &str| {
+            CanonicalValue::new(OvbRaw::Map(vec![
+                (OvbRaw::Text("id".into()), OvbRaw::Int(id.into())),
+                (OvbRaw::Text("text".into()), OvbRaw::Text(text.into())),
+                (OvbRaw::Text("quantity".into()), OvbRaw::Int(1.into())),
+            ]))
+            .expect("row is canonical")
+        };
+        // Negative keys encode under another major type, so key bytes do not sort like
+        // the integers they encode: a scan ordered by bytes fails the walk below.
+        let captured = (-ROWS / 2..ROWS / 2)
+            .map(|id| (key_of(id), row_of(id, "row").encode().expect("row encodes")))
+            .collect::<Vec<_>>();
+        let mut handler = SourceMutationEffectHandler::with_table_rows(
+            admitted_table_schemas(&application.module_header),
+            BTreeMap::from([("Note".to_owned(), captured)]),
+        )
+        .expect("100k-row snapshot should be valid");
+        let expected = (-ROWS / 2..ROWS / 2)
+            .map(|id| row_of(id, "row"))
+            .collect::<Vec<_>>();
+        let served = scan_all(&mut handler);
+        assert_eq!(
+            served.len(),
+            expected.len(),
+            "every live row is served once"
+        );
+        if let Some(index) = served
+            .iter()
+            .zip(&expected)
+            .position(|(got, want)| got != want)
+        {
+            panic!("row {index} is out of logical primary-key order");
+        }
+        assert_eq!(
+            handler.ordered_keys.get("Note").map(Vec::len),
+            Some(expected.len()),
+            "the scan order is built once and kept across pages"
+        );
+        // A write drops the cached order. Tombstone the first row, shadow row 0, and add a
+        // row past every captured key: the next scan must see exactly those three changes.
+        let first = -ROWS / 2;
+        handler.overlay_rows_mut("Note").insert(key_of(first), None);
+        handler
+            .overlay_rows_mut("Note")
+            .insert(key_of(0), Some(row_of(0, "updated")));
+        handler
+            .overlay_rows_mut("Note")
+            .insert(key_of(ROWS), Some(row_of(ROWS, "tail")));
+        assert!(
+            !handler.ordered_keys.contains_key("Note"),
+            "a write drops the cached scan order"
+        );
+        let mut expected_after_write = (first + 1..ROWS / 2)
+            .map(|id| row_of(id, if id == 0 { "updated" } else { "row" }))
+            .collect::<Vec<_>>();
+        expected_after_write.push(row_of(ROWS, "tail"));
+        let served_after_write = scan_all(&mut handler);
+        assert_eq!(
+            served_after_write.len(),
+            expected_after_write.len(),
+            "the tombstoned row is not served and the tail row is"
+        );
+        if let Some(index) = served_after_write
+            .iter()
+            .zip(&expected_after_write)
+            .position(|(got, want)| got != want)
+        {
+            panic!("row {index} is stale after an overlay write");
+        }
     }
 
     #[test]
