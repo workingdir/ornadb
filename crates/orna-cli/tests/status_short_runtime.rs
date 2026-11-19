@@ -31,9 +31,15 @@ fn short_status_preserves_git_rows_and_appends_runtime_summary() {
         git_init.stderr
     );
 
+    orna_repository::initialize_repository(directory.path()).expect("initialize Orna repository");
     let expected_git = git_status(directory.path());
     assert!(expected_git.status.success());
-    assert_eq!(expected_git.stdout, b"?? status-short.orna\n");
+    // `orna init` adds untracked `.orna/` and `main.orna`; the fixture row stays verbatim.
+    assert!(
+        String::from_utf8_lossy(&expected_git.stdout).contains("?? status-short.orna\n"),
+        "git rows: {:?}",
+        expected_git.stdout
+    );
 
     let cli = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args(["--color", "never", "status", "--short"])

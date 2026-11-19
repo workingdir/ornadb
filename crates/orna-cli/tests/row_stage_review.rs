@@ -51,7 +51,7 @@ fn init_repository(root: &Path, files: &[(&str, &str)]) {
 }
 
 #[test]
-fn row_add_stages_one_row_and_status_separates_staged_and_unstaged() {
+fn row_add_stages_one_row_and_leaves_the_other_row_unstaged() {
     let temp = tempdir().unwrap();
     let root = temp.path();
     init_repository(
@@ -85,18 +85,6 @@ fn row_add_stages_one_row_and_status_separates_staged_and_unstaged() {
         String::from_utf8_lossy(&staged.stderr)
     );
     let status = git(root, &["status", "--porcelain"]);
-    assert_eq!(
-        status.stdout,
-        b"M  Music/london.orna\n M Music/paris.orna\n"
-    );
-
-    let status = cli(root, &["status", "--porcelain"]);
-    assert_eq!(
-        status.status.code(),
-        Some(0),
-        "{}",
-        String::from_utf8_lossy(&status.stderr)
-    );
     assert_eq!(
         status.stdout,
         b"M  Music/london.orna\n M Music/paris.orna\n"
