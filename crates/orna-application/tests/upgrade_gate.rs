@@ -22,6 +22,7 @@ use orna_repository::{
     inspect_legacy_source_metadata,
     migration_copy::{self, CandidateGate, MigrationStore},
     relation_admission::StagedRelation,
+    write_legacy_format1_golden_fixture,
 };
 use orna_value::{
     ROV3_BLOB_TAG, Raw, decode_canonical_storage_value, encode_canonical_storage_value,
@@ -557,5 +558,90 @@ fn candidate_with_a_text_store_root_fails_the_installed_gate() {
     assert!(
         detail.starts_with("candidate format context is unavailable"),
         "the text store root is refused at the format context: {detail}"
+    );
+}
+
+/// Declares a field the `Contact` schema does not have, on the row's first line.
+fn add_nickname(text: String) -> String {
+    text.replacen("{\n", "{\n    nickname: \"Al\",\n", 1)
+}
+
+/// Writes a legacy format-1 repository whose `contacts/Contact/alice-smith` row
+/// unit is the committed fixture bytes passed through `edit`, and opens it.
+fn legacy_source_with_alice_row(edit: impl FnOnce(String) -> String) -> (TempDir, Repository) {
+    let directory = TempDir::new().expect("a temporary directory");
+    let sources = directory.path().join("sources");
+    fs::create_dir_all(&sources).expect("the sources directory");
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../orna-cli/tests/fixtures");
+    for name in [
+        "legacy-golden-main.orna",
+        "legacy-loose-contacts-main.orna",
+        "legacy-loose-contact-alice-smith.orna",
+        "legacy-loose-contact-bob-jones.orna",
+    ] {
+        fs::copy(fixtures.join(name), sources.join(name)).expect("a committed fixture copies");
+    }
+    // The root imports `contacts`, so the editable `Contact` table is part of
+    // the program and its loose rows are admitted against its declared schema.
+    let root_unit = sources.join("legacy-golden-main.orna");
+    let golden = fs::read_to_string(&root_unit).expect("the golden root unit reads");
+    fs::write(&root_unit, format!("use contacts;\n\n{golden}")).expect("the root unit writes");
+    let alice = sources.join("legacy-loose-contact-alice-smith.orna");
+    let text = fs::read_to_string(&alice).expect("the alice row unit reads");
+    fs::write(&alice, edit(text)).expect("the edited alice row unit writes");
+    let root = directory.path().join("legacy");
+    fs::create_dir_all(&root).expect("the legacy repository directory");
+    write_legacy_format1_golden_fixture(&root, &sources);
+    let repository = Repository::discover(&root).expect("the legacy repository opens");
+    (directory, repository)
+}
+
+#[test]
+fn loose_rows_admitted_by_their_schema_migrate() {
+    let (_directory, repository) = legacy_source_with_alice_row(|text| text);
+    prepare(&repository, &build_migration_store)
+        .expect("the committed loose rows are admitted and migrate");
+}
+
+#[test]
+fn undeclared_field_in_a_loose_row_refuses_naming_the_unit() {
+    let (_directory, repository) = legacy_source_with_alice_row(add_nickname);
+    let error = prepare(&repository, &build_migration_store)
+        .expect_err("a loose row with an undeclared field must refuse the migration");
+    let RepositoryError::MigrationStoreRefused(detail) = &error else {
+        panic!("the refusal is a migration store refusal: {error:?}");
+    };
+    for expected in ["contacts/Contact", "contacts/Contact/alice-smith.orna"] {
+        assert!(
+            detail.contains(expected),
+            "the refusal names {expected}: {detail}"
+        );
+    }
+}
+
+#[test]
+fn refused_loose_row_writes_no_migrated_destination() {
+    let (_directory, repository) = legacy_source_with_alice_row(add_nickname);
+    let parent = TempDir::new().expect("a temporary directory");
+    let destination: PathBuf = parent.path().join("migrated");
+    let Err(error) = migration_copy::prepare_format3_migration(
+        &repository,
+        &destination,
+        MigrationContinuityRecord::new(Vec::new()).expect("an empty continuity record"),
+        Some(MigrationAnnotationDefaults::new(1).expect("the default annotation")),
+        &build_migration_store,
+    ) else {
+        panic!("the refused migration reports an error");
+    };
+    let RepositoryError::MigrationStoreRefused(detail) = &error else {
+        panic!("the refusal is a migration store refusal: {error:?}");
+    };
+    assert!(
+        detail.contains("contacts/Contact/alice-smith.orna"),
+        "the refusal names the refused row: {detail}"
+    );
+    assert!(
+        !destination.exists(),
+        "a refused migration writes no destination"
     );
 }

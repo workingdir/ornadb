@@ -303,7 +303,9 @@ fn read_admitted_loose_rows(
 /// Admits every loose row unit of `table_path` against the project's declared
 /// table schemas (ADR 0121). Each unit is one source of the admission project,
 /// named by its repository path, keeping the `.orna` suffix that the key decoder
-/// reads. The first unit that is not admitted refuses the table.
+/// reads. Any unit that is not admitted refuses the table. The table-wide
+/// diagnostic does not name a unit, so the first unit refused when admitted
+/// alone is named in the refusal.
 fn admit_loose_units(
     table_path: &str,
     units: &[(LooseRowUnit, Vec<u8>)],
@@ -334,17 +336,31 @@ fn admit_loose_units(
         database_id,
         tables: BTreeMap::new(),
     };
-    admit_row_sources(
+    let Err(diagnostic) = admit_row_sources(
         MIGRATION_ROW_SOURCE_PROJECT,
         module_sources,
         analysis,
         &rows,
         &identity,
         Limits::default(),
-    )
-    .map(|_admitted| ())
-    .map_err(|diagnostic| LegacyReadError::RowNotAdmitted {
+    ) else {
+        return Ok(());
+    };
+    let unit = rows.iter().zip(units).find_map(|(row, (unit, _))| {
+        admit_row_sources(
+            MIGRATION_ROW_SOURCE_PROJECT,
+            module_sources,
+            analysis,
+            std::slice::from_ref(row),
+            &identity,
+            Limits::default(),
+        )
+        .err()
+        .map(|_| unit.path.clone())
+    });
+    Err(LegacyReadError::RowNotAdmitted {
         table: table_path.to_owned(),
+        unit,
         code: diagnostic.code().to_owned(),
     })
 }
@@ -385,8 +401,9 @@ mod tests {
         let analysis = analyze(&[ModuleInput::new("main.orna", NOTE_MODULE)]);
         let units = note_row("{ text: \"Alpha\", nickname: \"Al\", }\n");
         match admit_loose_units("Note", &units, &[NOTE_MODULE], &analysis, [0; 16]) {
-            Err(LegacyReadError::RowNotAdmitted { table, code }) => {
+            Err(LegacyReadError::RowNotAdmitted { table, unit, code }) => {
                 assert_eq!(table, "Note");
+                assert_eq!(unit.as_deref(), Some("Note/1.orna"));
                 assert_eq!(code, "ORNA-CONFORMANCE-ROW-UNKNOWN");
             }
             other => panic!("a row with an undeclared field is refused: {other:?}"),

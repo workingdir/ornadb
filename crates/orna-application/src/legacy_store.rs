@@ -208,10 +208,15 @@ pub enum LegacyReadError {
     /// rather than merging or choosing (ADR 0121 D4).
     CrossSourceConflict { relation: String },
     /// One loose row of an editable table fails admission against its declared
-    /// table schema (UPGRADE-3 step 3; ADR 0121). `code` is the admission
-    /// diagnostic's stable code. The read refuses rather than decoding the row
-    /// unchecked.
-    RowNotAdmitted { table: String, code: String },
+    /// table schema (UPGRADE-3 step 3; ADR 0121). `unit` is the repository path
+    /// of the row unit refused on its own, when one is isolated; `code` is the
+    /// admission diagnostic's stable code. The read refuses rather than decoding
+    /// the row unchecked.
+    RowNotAdmitted {
+        table: String,
+        unit: Option<String>,
+        code: String,
+    },
 }
 
 impl std::fmt::Display for LegacyReadError {
@@ -251,7 +256,19 @@ impl std::fmt::Display for LegacyReadError {
                 formatter,
                 "relation {relation} holds rows in both its compact and its loose source; no precedence between them is specified"
             ),
-            Self::RowNotAdmitted { table, code } => write!(
+            Self::RowNotAdmitted {
+                table,
+                unit: Some(unit),
+                code,
+            } => write!(
+                formatter,
+                "the loose row unit {unit:?} of table {table} is not admitted by its declared schema ({code})"
+            ),
+            Self::RowNotAdmitted {
+                table,
+                unit: None,
+                code,
+            } => write!(
                 formatter,
                 "a loose row of table {table} is not admitted by its declared schema ({code})"
             ),
