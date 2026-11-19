@@ -11,6 +11,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     iter::Peekable,
     ops::RangeBounds,
+    panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -86,45 +87,116 @@ impl Lifecycle {
     }
 }
 
-/// Applies staged inserts, replacements (`Some`) and deletions (`None`).
-fn apply_overlay<Key: Clone + Ord, Row: Clone>(
-    rows: &mut BTreeMap<Key, Row>,
-    overlay: &BTreeMap<Key, Option<Row>>,
-) {
-    for (key, mutation) in overlay {
-        match mutation {
-            Some(row) => {
-                rows.insert(key.clone(), row.clone());
-            }
-            None => {
-                rows.remove(key);
-            }
-        }
+/// Writes one staged entry: `Some` inserts or replaces, `None` removes. Returns
+/// the value the key held before the write.
+fn write_entry<Key: Ord, Value>(
+    entries: &mut BTreeMap<Key, Value>,
+    key: Key,
+    value: Option<Value>,
+) -> Option<Value> {
+    match value {
+        Some(value) => entries.insert(key, value),
+        None => entries.remove(&key),
     }
 }
 
-/// The required-reference graph after publication. Staged edges replace
-/// published ones, edges whose source row no longer exists are dropped, and an
-/// edge whose target row no longer exists refuses the publication.
-fn settle_references<Address: Clone + Ord>(
+/// Entries a publication displaced, in write order: each key with the value it
+/// held before the write, or `None` when the key was absent.
+type Displaced<Key, Value> = Vec<(Key, Option<Value>)>;
+
+/// Applies staged inserts, replacements (`Some`) and deletions (`None`).
+fn apply_overlay<Key: Ord, Row>(
+    rows: &mut BTreeMap<Key, Row>,
+    overlay: impl IntoIterator<Item = (Key, Option<Row>)>,
+) {
+    for (key, mutation) in overlay {
+        write_entry(rows, key, mutation);
+    }
+}
+
+/// Applies a staged overlay in place and records every displaced entry, so that
+/// [`restore_displaced`] can undo the writes after a panic.
+fn apply_overlay_journaled<Key: Ord + Clone, Row>(
+    rows: &mut BTreeMap<Key, Row>,
+    overlay: impl IntoIterator<Item = (Key, Option<Row>)>,
+    displaced: &mut Displaced<Key, Row>,
+) {
+    for (key, mutation) in overlay {
+        let recorded = key.clone();
+        let previous = write_entry(rows, key, mutation);
+        displaced.push((recorded, previous));
+    }
+}
+
+/// Undoes journaled writes, newest first, so `entries` returns to its state
+/// before the journal was recorded.
+fn restore_displaced<Key: Ord, Value>(
+    entries: &mut BTreeMap<Key, Value>,
+    displaced: Displaced<Key, Value>,
+) {
+    for (key, previous) in displaced.into_iter().rev() {
+        write_entry(entries, key, previous);
+    }
+}
+
+/// Checks the required-reference graph that publication would produce, without
+/// copying it. Staged edges replace the published edges of their source, and a
+/// surviving source must not name a missing target. Published edges of an
+/// untouched source stay valid unless the activation removes a row, so they are
+/// rechecked only then.
+fn check_references_after<Address: Ord>(
     published: &BTreeMap<Address, BTreeSet<Address>>,
     staged: &BTreeMap<Address, BTreeSet<Address>>,
-    exists: impl Fn(&Address) -> bool,
-) -> Result<BTreeMap<Address, BTreeSet<Address>>, TableError> {
-    let mut references = published.clone();
-    references.extend(
-        staged
-            .iter()
-            .map(|(source, targets)| (source.clone(), targets.clone())),
-    );
-    references.retain(|source, _| exists(source));
-    if references
-        .values()
-        .any(|targets| targets.iter().any(|target| !exists(target)))
-    {
-        return Err(TableError::ReferencedRow);
+    removes_rows: bool,
+    exists_after: impl Fn(&Address) -> bool,
+) -> Result<(), TableError> {
+    for (source, targets) in staged {
+        if exists_after(source) && targets.iter().any(|target| !exists_after(target)) {
+            return Err(TableError::ReferencedRow);
+        }
     }
-    Ok(references)
+    if removes_rows {
+        for (source, targets) in published {
+            if !staged.contains_key(source)
+                && exists_after(source)
+                && targets.iter().any(|target| !exists_after(target))
+            {
+                return Err(TableError::ReferencedRow);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Installs the required-reference graph after the row overlay has been applied.
+/// Staged edges replace the published edges of their source, edges whose source
+/// row no longer exists are dropped, and an empty target set is not stored: an
+/// absent entry means the same as an empty one. Every displaced edge is recorded
+/// in `displaced` so that [`restore_displaced`] can undo it.
+fn install_references<Address: Ord + Clone>(
+    published: &mut BTreeMap<Address, BTreeSet<Address>>,
+    staged: BTreeMap<Address, BTreeSet<Address>>,
+    removes_rows: bool,
+    exists: impl Fn(&Address) -> bool,
+    displaced: &mut Displaced<Address, BTreeSet<Address>>,
+) {
+    if removes_rows {
+        let orphaned: Vec<Address> = published
+            .keys()
+            .filter(|&source| !exists(source))
+            .cloned()
+            .collect();
+        for source in orphaned {
+            let previous = published.remove(&source);
+            displaced.push((source, previous));
+        }
+    }
+    for (source, targets) in staged {
+        let kept = (!targets.is_empty() && exists(&source)).then_some(targets);
+        let recorded = source.clone();
+        let previous = write_entry(published, source, kept);
+        displaced.push((recorded, previous));
+    }
 }
 
 /// The committed relation for one table.
@@ -167,8 +239,9 @@ where
     }
 
     /// Runs one activation and publishes its overlay only when the operation
-    /// succeeds. Returned errors roll the overlay back; a panic also leaves
-    /// the committed relation untouched because publication happens last.
+    /// succeeds. Returned errors roll the overlay back. A panic, including one
+    /// during publication, leaves the committed relation as it was before the
+    /// activation: publication undoes its own writes before the panic continues.
     pub fn activate<T, E, F>(&mut self, operation: F) -> Result<T, ActivationError<E>>
     where
         F: FnOnce(&mut Activation<'_, Key, Row>) -> Result<T, E>,
@@ -844,7 +917,12 @@ where
     pub fn candidate_rows(&self) -> Result<BTreeMap<Key, Row>, TableError> {
         self.lifecycle.require_open()?;
         let mut candidate = self.runtime.committed.clone();
-        apply_overlay(&mut candidate, &self.overlay);
+        apply_overlay(
+            &mut candidate,
+            self.overlay
+                .iter()
+                .map(|(key, mutation)| (key.clone(), mutation.clone())),
+        );
         Ok(candidate)
     }
 
@@ -913,17 +991,43 @@ where
 
     fn publish(&mut self) -> Result<(), TableError> {
         self.lifecycle.require_unpublished()?;
-        let mut committed = self.runtime.committed.clone();
-        apply_overlay(&mut committed, &self.overlay);
-        let references = settle_references(
+        let removes_rows = self.overlay.values().any(Option::is_none);
+        check_references_after(
             &self.runtime.required_references,
             &self.required_reference_overlay,
-            |key| committed.contains_key(key),
+            removes_rows,
+            |key| self.candidate(key).is_some(),
         )?;
-        self.runtime.committed = committed;
-        self.runtime.required_references = references;
-        self.lifecycle.state = ActivationState::Committed;
-        Ok(())
+        let overlay = std::mem::take(&mut self.overlay);
+        let staged_references = std::mem::take(&mut self.required_reference_overlay);
+        let runtime = &mut *self.runtime;
+        let mut displaced_rows = Vec::new();
+        let mut displaced_references = Vec::new();
+        // Writes land in place, so a panic partway through must first undo what
+        // was already written; the activation is then closed and the panic continues.
+        let written = catch_unwind(AssertUnwindSafe(|| {
+            apply_overlay_journaled(&mut runtime.committed, overlay, &mut displaced_rows);
+            let committed = &runtime.committed;
+            install_references(
+                &mut runtime.required_references,
+                staged_references,
+                removes_rows,
+                |key| committed.contains_key(key),
+                &mut displaced_references,
+            );
+        }));
+        match written {
+            Ok(()) => {
+                self.lifecycle.state = ActivationState::Committed;
+                Ok(())
+            }
+            Err(payload) => {
+                restore_displaced(&mut runtime.required_references, displaced_references);
+                restore_displaced(&mut runtime.committed, displaced_rows);
+                self.lifecycle.roll_back();
+                resume_unwind(payload)
+            }
+        }
     }
 
     /// Discards every staged change. The operation is idempotent for cleanup.
@@ -1412,7 +1516,12 @@ where
             .cloned()
             .unwrap_or_default();
         if let Some(overlay) = self.overlay.get(table) {
-            apply_overlay(&mut candidate, overlay);
+            apply_overlay(
+                &mut candidate,
+                overlay
+                    .iter()
+                    .map(|(key, mutation)| (key.clone(), mutation.clone())),
+            );
         }
         Ok(candidate)
     }
@@ -1507,23 +1616,69 @@ where
 
     fn publish(&mut self) -> Result<(), TableError> {
         self.lifecycle.require_unpublished()?;
-        let mut committed = self.runtime.committed.clone();
-        for (table, overlay) in &self.overlay {
-            apply_overlay(committed.entry(table.clone()).or_default(), overlay);
-        }
-        let references = settle_references(
+        let removes_rows = self
+            .overlay
+            .values()
+            .any(|relation| relation.values().any(Option::is_none));
+        check_references_after(
             &self.runtime.required_references,
             &self.required_reference_overlay,
-            |(table, key)| {
-                committed
-                    .get(table)
-                    .is_some_and(|rows| rows.contains_key(key))
-            },
+            removes_rows,
+            |(table, key)| self.candidate(table, key).is_some(),
         )?;
-        self.runtime.committed = committed;
-        self.runtime.required_references = references;
-        self.lifecycle.state = ActivationState::Committed;
-        Ok(())
+        let overlay = std::mem::take(&mut self.overlay);
+        let staged_references = std::mem::take(&mut self.required_reference_overlay);
+        let runtime = &mut *self.runtime;
+        let mut created = Vec::new();
+        let mut displaced_relations = Vec::new();
+        let mut displaced_references = Vec::new();
+        // Writes land in place, so a panic partway through must first undo what
+        // was already written; the activation is then closed and the panic continues.
+        let written = catch_unwind(AssertUnwindSafe(|| {
+            for (table, relation) in overlay {
+                if !runtime.committed.contains_key(&table) {
+                    created.push(table.clone());
+                }
+                // The journal entry is recorded before the first write, so a panic
+                // inside this relation still finds every write it made.
+                let index = displaced_relations.len();
+                displaced_relations.push((table.clone(), Vec::new()));
+                apply_overlay_journaled(
+                    runtime.committed.entry(table).or_default(),
+                    relation,
+                    &mut displaced_relations[index].1,
+                );
+            }
+            let committed = &runtime.committed;
+            install_references(
+                &mut runtime.required_references,
+                staged_references,
+                removes_rows,
+                |(table, key)| {
+                    committed
+                        .get(table)
+                        .is_some_and(|rows| rows.contains_key(key))
+                },
+                &mut displaced_references,
+            );
+        }));
+        match written {
+            Ok(()) => {
+                self.lifecycle.state = ActivationState::Committed;
+                Ok(())
+            }
+            Err(payload) => {
+                restore_displaced(&mut runtime.required_references, displaced_references);
+                for (table, displaced) in displaced_relations {
+                    restore_displaced(runtime.committed.entry(table).or_default(), displaced);
+                }
+                for table in created {
+                    runtime.committed.remove(&table);
+                }
+                self.lifecycle.roll_back();
+                resume_unwind(payload)
+            }
+        }
     }
 
     /// Discards every relation overlay. Repeated cleanup is harmless.
@@ -1694,19 +1849,40 @@ mod tests {
     };
     use std::{cell::Cell, panic::AssertUnwindSafe, rc::Rc};
 
-    #[derive(Debug, Eq, PartialEq)]
-    struct PanicOnClone {
-        value: &'static str,
-        panic_on_clone: bool,
+    thread_local! {
+        /// Armed by a test once staging is complete, so only publication clones trip a trap.
+        static PUBLICATION_ARMED: Cell<bool> = const { Cell::new(false) };
     }
 
-    impl Clone for PanicOnClone {
+    fn set_publication_armed(armed: bool) {
+        PUBLICATION_ARMED.with(|cell| cell.set(armed));
+    }
+
+    /// Cloning key 2 panics while publication is armed.
+    #[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
+    struct TrapKey(u64);
+
+    impl Clone for TrapKey {
         fn clone(&self) -> Self {
-            assert!(!self.panic_on_clone, "test row clone panic");
-            Self {
-                value: self.value,
-                panic_on_clone: self.panic_on_clone,
-            }
+            assert!(
+                !(self.0 == 2 && PUBLICATION_ARMED.with(Cell::get)),
+                "test key clone panic during publication"
+            );
+            Self(self.0)
+        }
+    }
+
+    /// Cloning the "orders" table name panics while publication is armed.
+    #[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
+    struct TrapTable(&'static str);
+
+    impl Clone for TrapTable {
+        fn clone(&self) -> Self {
+            assert!(
+                !(self.0 == "orders" && PUBLICATION_ARMED.with(Cell::get)),
+                "test table clone panic during publication"
+            );
+            Self(self.0)
         }
     }
 
@@ -2192,90 +2368,52 @@ mod tests {
 
     #[test]
     fn table_commit_panic_does_not_publish_a_partial_overlay() {
-        let mut table = TableRuntime::<u64, PanicOnClone>::default();
+        let mut table = TableRuntime::<TrapKey, &'static str>::default();
         table
             .activate(|activation| {
-                activation.insert(
-                    1,
-                    PanicOnClone {
-                        value: "old",
-                        panic_on_clone: false,
-                    },
-                )?;
+                activation.insert(TrapKey(1), "old")?;
                 Ok::<_, TableError>(())
             })
             .unwrap();
 
         let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
             table.activate(|activation| {
-                activation.update(
-                    1,
-                    PanicOnClone {
-                        value: "new",
-                        panic_on_clone: false,
-                    },
-                )?;
-                activation.insert(
-                    2,
-                    PanicOnClone {
-                        value: "panic",
-                        panic_on_clone: true,
-                    },
-                )?;
+                activation.update(TrapKey(1), "new")?;
+                activation.insert(TrapKey(2), "panic")?;
+                set_publication_armed(true);
                 Ok::<_, TableError>(())
             })
         }));
+        set_publication_armed(false);
 
         assert!(result.is_err());
-        assert_eq!(table.committed(&1).map(|row| row.value), Some("old"));
-        assert_eq!(table.committed(&2), None);
+        assert_eq!(table.committed(&TrapKey(1)), Some(&"old"));
+        assert_eq!(table.committed(&TrapKey(2)), None);
     }
 
     #[test]
     fn database_commit_panic_does_not_publish_a_partial_cross_relation_overlay() {
-        let mut database = DatabaseRuntime::<&'static str, u64, PanicOnClone>::default();
+        let mut database = DatabaseRuntime::<TrapTable, u64, &'static str>::default();
         database
             .activate(|activation| {
-                activation.insert(
-                    "orders",
-                    1,
-                    PanicOnClone {
-                        value: "old",
-                        panic_on_clone: false,
-                    },
-                )?;
+                activation.insert(TrapTable("orders"), 1, "old")?;
                 Ok::<_, TableError>(())
             })
             .unwrap();
 
         let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
             database.activate(|activation| {
-                activation.update(
-                    "orders",
-                    1,
-                    PanicOnClone {
-                        value: "new",
-                        panic_on_clone: false,
-                    },
-                )?;
-                activation.insert(
-                    "audits",
-                    1,
-                    PanicOnClone {
-                        value: "panic",
-                        panic_on_clone: true,
-                    },
-                )?;
+                activation.update(TrapTable("orders"), 1, "new")?;
+                activation.insert(TrapTable("audits"), 1, "panic")?;
+                set_publication_armed(true);
                 Ok::<_, TableError>(())
             })
         }));
+        set_publication_armed(false);
 
         assert!(result.is_err());
-        assert_eq!(
-            database.committed(&"orders", &1).map(|row| row.value),
-            Some("old")
-        );
-        assert_eq!(database.committed(&"audits", &1), None);
+        assert_eq!(database.committed(&TrapTable("orders"), &1), Some(&"old"));
+        assert_eq!(database.committed(&TrapTable("audits"), &1), None);
     }
 
     #[test]
