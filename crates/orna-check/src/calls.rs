@@ -2028,7 +2028,15 @@ pub(crate) fn infer_table_operation(
                 if let Some(schema) = admission
                     && let Type::Record(supplied) = &inferred.ty
                 {
-                    if insertion {
+                    // A row that supplies a computed field is already an
+                    // insertion-shape violation (E3010, reported below). Its
+                    // absent required fields are not a second primary code
+                    // for the same row.
+                    let supplies_computed = schema
+                        .computed
+                        .iter()
+                        .any(|field| supplied.contains_key(field));
+                    if insertion && !supplies_computed {
                         for field in &schema.required {
                             if !supplied.contains_key(field) {
                                 diagnostics.push(diag(
@@ -2041,7 +2049,7 @@ pub(crate) fn infer_table_operation(
                                 ));
                             }
                         }
-                    } else if upsert {
+                    } else if upsert && !supplies_computed {
                         // Upsert is a patch when its key identifies an
                         // existing row.  The runtime validates completeness
                         // if the key is absent, so semantic admission only
