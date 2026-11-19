@@ -18,6 +18,16 @@ pub(crate) fn discover_worktree(
     })
 }
 
+/// The local worktree a status report reads. A Git worktree without Orna
+/// repository metadata is refused rather than reported on.
+pub(crate) fn discover_status_repository(
+    endpoint: &Endpoint,
+) -> Result<orna_repository::Repository, Diagnostic> {
+    let repository = discover_worktree(endpoint, DISCOVER_WORKTREE_HELP)?;
+    require_orna_repository(&repository)?;
+    Ok(repository)
+}
+
 /// The write-failure diagnostic for status output. A closed stdout ends the
 /// process quietly instead (see `stdout_closed`).
 pub(crate) fn status_output_failed(error: &io::Error, retry: &'static str) -> Diagnostic {
@@ -31,7 +41,7 @@ pub(crate) fn status_output_failed(error: &io::Error, retry: &'static str) -> Di
 }
 
 pub(crate) fn run_status(endpoint: &Endpoint) -> Result<(), Diagnostic> {
-    let repository = discover_worktree(endpoint, DISCOVER_WORKTREE_HELP)?;
+    let repository = discover_status_repository(endpoint)?;
     let output = cli_status::git_output(
         cli_status::git_in(repository.worktree()).args([
             "-c",
@@ -48,7 +58,7 @@ pub(crate) fn run_status(endpoint: &Endpoint) -> Result<(), Diagnostic> {
 }
 
 pub(crate) fn run_status_json(endpoint: &Endpoint) -> Result<(), Diagnostic> {
-    let repository = discover_worktree(endpoint, DISCOVER_WORKTREE_HELP)?;
+    let repository = discover_status_repository(endpoint)?;
     let output = cli_status::git_output(
         cli_status::git_in(repository.worktree()).args([
             "-c",
@@ -551,7 +561,7 @@ pub(crate) fn write_short_status<W: io::Write>(
 }
 
 pub(crate) fn run_status_human(endpoint: &Endpoint, color_enabled: bool) -> Result<(), Diagnostic> {
-    let repository = discover_worktree(endpoint, DISCOVER_WORKTREE_HELP)?;
+    let repository = discover_status_repository(endpoint)?;
     let unpublished_count = unpublished_mutation_count(&repository)?;
     let output = cli_status::git_output(
         cli_status::git_in(repository.worktree()).args(["-c", "color.status=false", "status"]),
@@ -578,7 +588,7 @@ pub(crate) fn run_status_human(endpoint: &Endpoint, color_enabled: bool) -> Resu
 
 pub(crate) fn run_status_short(endpoint: &Endpoint, color_enabled: bool) -> Result<(), Diagnostic> {
     const RETRY: &str = "check that Git can read the local worktree, then retry `status --short`";
-    let repository = discover_worktree(endpoint, DISCOVER_WORKTREE_HELP)?;
+    let repository = discover_status_repository(endpoint)?;
     let git_dir_output = cli_status::git_output(
         cli_status::git_in(repository.worktree()).args(["rev-parse", "--git-dir"]),
         RETRY,

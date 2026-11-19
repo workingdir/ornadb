@@ -506,6 +506,7 @@ fn bare_status_dispatches_to_git_human_status() {
             .expect("git init")
             .success()
     );
+    orna_repository::initialize_repository(directory.path()).expect("initialize Orna repository");
     let parsed = parse_cli(&["status".into()]).expect("human status parses");
     assert_eq!(
         execute(&Parsed {
@@ -1109,6 +1110,7 @@ fn check_loads_reachable_project_sources_and_ignores_unreachable_modules() {
             .expect("git")
             .success()
     );
+    orna_repository::initialize_repository(directory.path()).expect("initialize Orna repository");
 
     let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
     assert_eq!(check_project(&endpoint, false), Ok(()));
@@ -1296,6 +1298,7 @@ fn check_rejects_an_uncaptured_standard_module() {
             .expect("git")
             .success()
     );
+    orna_repository::initialize_repository(directory.path()).expect("initialize Orna repository");
 
     let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
     let error = check_project(&endpoint, false).expect_err("uncaptured standard module");
@@ -1326,6 +1329,7 @@ fn check_rejects_each_uncaptured_standard_module() {
             .expect("git")
             .success()
     );
+    orna_repository::initialize_repository(directory.path()).expect("initialize Orna repository");
 
     let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
     let error = check_project(&endpoint, false).expect_err("unbundled standard module");
@@ -1422,6 +1426,7 @@ fn check_rejects_semantic_errors_with_a_stable_cli_diagnostic() {
             .expect("git")
             .success()
     );
+    orna_repository::initialize_repository(directory.path()).expect("initialize Orna repository");
 
     let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
     let error = check_project(&endpoint, false).expect_err("semantic error");

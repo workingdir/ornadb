@@ -19,6 +19,8 @@ fn status_hyperlinks_are_emitted_only_for_supported_terminal_stdout() {
         "git init stderr: {:?}",
         git_init.stderr
     );
+    // `status` needs an initialized Orna repository; plain Git is refused.
+    orna_repository::initialize_repository(repository.path()).expect("initialize Orna repository");
 
     let cli = env!("CARGO_BIN_EXE_orna");
     let plain = Command::new(cli)
