@@ -135,14 +135,9 @@ fn committed_admitted_rows(
     let format = repository
         .open_pinned_format_context(commit.as_str())
         .map_err(|_| "format context could not be opened")?;
-    let mut committed = orna_project::committed_tables(
-        repository,
-        &format,
-        commit,
-        &schemas,
-        &table_object_ids,
-    )
-    .map_err(|_| "committed rows could not be read")?;
+    let mut committed =
+        orna_project::committed_tables(repository, &format, commit, &schemas, &table_object_ids)
+            .map_err(|_| "committed rows could not be read")?;
     let mut rows = orna_runtime::RuntimeTableRows::new();
     for (name, schema) in &schemas {
         let table = committed.remove(name).ok_or("table rows are missing")?;

@@ -475,14 +475,9 @@ pub(crate) fn committed_rows_at(
         .iter()
         .map(|table| (table.table().to_owned(), table.object_id()))
         .collect();
-    let mut committed = orna_project::committed_tables(
-        repository,
-        &format,
-        commit,
-        schemas,
-        &table_ids,
-    )
-    .map_err(|_| CommittedRowsError::Unavailable)?;
+    let mut committed =
+        orna_project::committed_tables(repository, &format, commit, schemas, &table_ids)
+            .map_err(|_| CommittedRowsError::Unavailable)?;
     let mut rows = BTreeMap::new();
     let mut storage_orders = BTreeMap::new();
     for name in schemas.keys() {
