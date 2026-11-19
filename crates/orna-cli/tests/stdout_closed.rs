@@ -1,11 +1,7 @@
 //! A reader that closes stdout early (`orna --help | head -0`) ends `orna`
-//! quietly, the way a SIGPIPE-killed tool does, instead of panicking or
-//! printing a diagnostic.
+//! quietly with status 0, instead of panicking or printing a diagnostic.
 
 use std::process::{Command, Stdio};
-
-/// The shell status of a process terminated by SIGPIPE (128 + 13).
-const SIGPIPE_EXIT_STATUS: i32 = 141;
 
 /// A stdout pipe whose read end is already closed, as `head -0` leaves it.
 fn closed_stdout() -> Stdio {
@@ -14,18 +10,10 @@ fn closed_stdout() -> Stdio {
     Stdio::from(writer)
 }
 
-fn assert_quiet_sigpipe_exit(output: &std::process::Output) {
+fn assert_quiet_closed_stdout_exit(output: &std::process::Output) {
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!stderr.contains("panicked"), "orna panicked: {stderr}");
-    assert!(
-        !stderr.contains("ORNA-"),
-        "orna reported a diagnostic: {stderr}"
-    );
-    assert_eq!(
-        output.status.code(),
-        Some(SIGPIPE_EXIT_STATUS),
-        "stderr: {stderr}"
-    );
+    assert!(stderr.is_empty(), "orna wrote to stderr: {stderr}");
+    assert_eq!(output.status.code(), Some(0), "stderr: {stderr}");
 }
 
 #[test]
@@ -37,7 +25,7 @@ fn help_into_closed_stdout_exits_quietly() {
         .stderr(Stdio::piped())
         .output()
         .expect("run orna --help");
-    assert_quiet_sigpipe_exit(&output);
+    assert_quiet_closed_stdout_exit(&output);
 }
 
 #[test]
@@ -61,5 +49,5 @@ fn status_into_closed_stdout_exits_quietly() {
         .stderr(Stdio::piped())
         .output()
         .expect("run orna status");
-    assert_quiet_sigpipe_exit(&output);
+    assert_quiet_closed_stdout_exit(&output);
 }
