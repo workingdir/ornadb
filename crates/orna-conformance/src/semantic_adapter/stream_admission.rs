@@ -58,6 +58,25 @@ pub fn is_table_assertion_false(diagnostic: SafeDiagnostic) -> bool {
     diagnostic.code == DiagnosticCode::TableAssertionFalse
 }
 
+/// The diagnostic of a stored reference a written row leaves without its
+/// target row (ORNA-REF-001, ORNA-MUT-007).
+pub(super) fn dangling_reference_diagnostic() -> SafeDiagnostic {
+    SafeDiagnostic {
+        code: DiagnosticCode::DanglingReference,
+        class: DiagnosticClass::Permanent,
+    }
+}
+
+/// The public refusal code of a candidate validation failure that has one: a
+/// false table assertion (ORNA-A091-009) or a dangling stored reference.
+pub fn validation_refusal_code(diagnostic: SafeDiagnostic) -> Option<&'static str> {
+    match diagnostic.code {
+        DiagnosticCode::TableAssertionFalse => Some("ORNA-A091-009"),
+        DiagnosticCode::DanglingReference => Some(orna_project::DANGLING_REFERENCE_CODE),
+        _ => None,
+    }
+}
+
 pub(super) fn stream_error_diagnostic(error: orna_runtime::StreamStepError) -> Diagnostic {
     Diagnostic::new(
         SafeText::new("ORNA-LIST-STREAM").expect("static code"),
@@ -150,6 +169,7 @@ pub(super) fn stream_failure_cause(code: DiagnosticCode) -> Diagnostic {
         DiagnosticCode::Internal => "stream-failure:internal",
         DiagnosticCode::TableAssertionFalse => "stream-failure:table-assertion-false",
         DiagnosticCode::StaleBaseline => "stream-failure:stale-baseline",
+        DiagnosticCode::DanglingReference => "stream-failure:dangling-reference",
     };
     Diagnostic::new(
         SafeText::new(label).expect("static label"),

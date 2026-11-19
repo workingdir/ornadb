@@ -3,9 +3,10 @@ use super::{
     HISTORICAL_SCAN_RETRY, HistoricalState, HistoricalTableSchemas, Instant, MountRowBaselines,
     Mutex, ObjectIdentityManifest, OnceLock, OrpBlobBinding, ProjectLoader, Repository,
     RowLoadError, RowSaveContext, RuntimeState, RuntimeTableActivationSnapshot,
-    RuntimeTableIdentity, SCAN_PENDING, SchemaDescriptor, SourceRowRequest, TableSource, TypedKey,
-    VfsRepositoryCache, VfsRetainedDraftStore, VfsSaveCandidate, VfsSaveCoordinates,
-    VfsScratchStore, VfsTableRowReplacement, admit_row_under_descriptor, admit_source_row,
+    RuntimeTableIdentity, SCAN_PENDING, SavedRowReferences, SchemaDescriptor, SourceRowRequest,
+    TableSource, TypedKey, VfsRepositoryCache, VfsRetainedDraftStore, VfsSaveCandidate,
+    VfsSaveCoordinates, VfsScratchStore, VfsTableRowReplacement, admit_row_under_descriptor,
+    admit_source_row, committed_database_id, committed_reference_catalogue,
     runtime_row_baseline_from_rows, settle_historical_scan, source_without_fields,
     substitute_text_fields, transactional_loaded_project_candidate_validator,
     validate_blob_descriptors,
@@ -437,6 +438,17 @@ impl MountWriter {
                 orna_runtime::RuntimeError::InvalidTableMutation,
             )
         })?;
+        let references = committed_reference_catalogue(
+            &self.repository,
+            &self.project,
+            &row.table_object_ids,
+            EvaluatorLimits::default(),
+        )
+        .map_err(|_| {
+            orna_runtime::TableActivationError::Runtime(
+                orna_runtime::RuntimeError::InvalidTableMutation,
+            )
+        })?;
         let admitted = admit_source_row(
             &self.project,
             &row.source.schema,
@@ -448,6 +460,7 @@ impl MountWriter {
                 owner_field_values: Vec::new(),
                 key_components: &row.key_components,
                 mutation_id,
+                references: references.as_ref(),
             },
         )
         .map_err(|error| {
@@ -456,6 +469,11 @@ impl MountWriter {
                 orna_runtime::RuntimeError::InvalidTableMutation,
             )
         })?;
+        let saved_row = references.map(|catalogue| SavedRowReferences {
+            catalogue,
+            table: coordinates.table().table().to_owned(),
+            key: coordinates.key().to_vec(),
+        });
         let (source_mutation, bindings, resolved_schema) = admitted.into_mutation_and_bindings();
         // Text primary keys use their UTF-8 bytes in admitted mutations;
         // other key kinds keep the canonical typed-key encoding.
@@ -515,9 +533,11 @@ impl MountWriter {
         let validator = transactional_loaded_project_candidate_validator(
             &self.project,
             &self.identities,
+            committed_database_id(&self.repository),
             None,
             Arc::clone(&row.table_object_ids),
             EvaluatorLimits::default(),
+            saved_row,
         )
         .map_err(|_| {
             orna_runtime::TableActivationError::Runtime(

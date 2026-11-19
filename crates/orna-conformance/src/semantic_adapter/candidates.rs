@@ -17,6 +17,13 @@ pub(super) struct TransactionalTableCandidateValidator {
     /// last `validate_changed` found false; the commit gate reads it to name the
     /// refusal (ORNA-A091-009).
     pub(super) refused_assertion: Option<orna_runtime::FalseAssertion>,
+    /// The stored references of the row a mounted save wrote, which the candidate
+    /// state must still resolve (ORNA-REF-001, ORNA-MUT-007). Absent when the
+    /// caller writes no row through the mounted path.
+    pub(super) saved_row: Option<SavedRowReferences>,
+    /// The primary keys of the candidate tables; they name the rows the saved
+    /// row's reference check reads.
+    pub(super) candidate_keys: TableKeys,
 }
 
 /// Reports whether any committed module declares a table-level or module-level
@@ -41,45 +48,61 @@ pub fn project_declares_assertions(loaded: &orna_project::LoadedProject) -> bool
 /// Builds a transaction validator from every committed project module. This
 /// keeps mounted row saves on the same cross-module assertion and effect
 /// admission path as project-backed transactions.
+///
+/// The mounted save's `saved_row` is the row it wrote: its stored references
+/// must still resolve in the candidate state (ORNA-REF-001, ORNA-MUT-007).
+///
+/// `database_id` is the committed database the stored references bind to; a
+/// table that stores a reference is refused without one.
 pub fn transactional_loaded_project_candidate_validator(
     loaded: &orna_project::LoadedProject,
     identities: &orna_project::ObjectIdentityManifest,
+    database_id: Option<[u8; 16]>,
     cwd_generation: Option<orna_repository::CwdGeneration>,
     table_object_ids: Arc<BTreeMap<String, orna_runtime::TableObjectId>>,
     limits: EvaluatorLimits,
+    saved_row: Option<SavedRowReferences>,
 ) -> Result<Box<dyn TableActivationCandidateValidator>, StageOutcome<Diagnostic>> {
     transactional_loaded_project_validator(
         loaded,
         identities,
+        database_id,
         cwd_generation,
         table_object_ids,
         limits,
         admit_transaction_project,
+        saved_row,
     )
 }
 
 /// Builds the commit gate's validator (bead ornadb-gq4g). A table whose primary
 /// key cannot be lowered is admitted without its key, and only the checks that
 /// read such a table are refused.
+/// `database_id` is the committed database the stored references bind to.
 pub fn transactional_loaded_project_commit_validator(
     loaded: &orna_project::LoadedProject,
     identities: &orna_project::ObjectIdentityManifest,
+    database_id: Option<[u8; 16]>,
     table_object_ids: Arc<BTreeMap<String, orna_runtime::TableObjectId>>,
     limits: EvaluatorLimits,
 ) -> Result<Box<dyn TableActivationCandidateValidator>, StageOutcome<Diagnostic>> {
     transactional_loaded_project_validator(
         loaded,
         identities,
+        database_id,
         None,
         table_object_ids,
         limits,
         admit_transaction_project_tolerant,
+        None,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn transactional_loaded_project_validator(
     loaded: &orna_project::LoadedProject,
     identities: &orna_project::ObjectIdentityManifest,
+    database_id: Option<[u8; 16]>,
     cwd_generation: Option<orna_repository::CwdGeneration>,
     table_object_ids: Arc<BTreeMap<String, orna_runtime::TableObjectId>>,
     limits: EvaluatorLimits,
@@ -89,7 +112,48 @@ pub(super) fn transactional_loaded_project_validator(
         &str,
         &Catalogue,
     ) -> Result<AdmittedTransaction, AdmissionFailure>,
+    saved_row: Option<SavedRowReferences>,
 ) -> Result<Box<dyn TableActivationCandidateValidator>, StageOutcome<Diagnostic>> {
+    let project = project_unit_of(loaded);
+    let catalogue = loaded
+        .production_catalogue()
+        .map_err(|_| StageOutcome::Failed(standard_profile_diagnostic()))?;
+    let admitted = admit(&project, limits, "", &catalogue).map_err(|failure| *failure)?;
+    let candidate_table_fields = candidate_table_fields_in_stable_id_order(
+        loaded,
+        identities,
+        database_id,
+        &project,
+        &admitted.table_fields,
+    )
+    .map_err(|reason| StageOutcome::Skipped { reason })?;
+    let mut validator = TransactionalTableCandidateValidator::new(
+        cwd_generation,
+        &admitted.functions,
+        &admitted.key_fields,
+        &admitted.float_fields,
+        &admitted.table_fields,
+        &admitted.table_assertions,
+        &admitted.module_assertions,
+        table_object_ids,
+        limits,
+    );
+    validator.candidate_table_fields = candidate_table_fields;
+    validator.saved_row = saved_row;
+    // A table whose key admission could not lower (bead ornadb-gq4g) holds rows
+    // and assertions but no key; the commit gate refuses only the checks that read it.
+    validator.unsupported = admitted
+        .table_fields
+        .keys()
+        .filter(|table| !admitted.key_fields.contains_key(*table))
+        .cloned()
+        .collect();
+    Ok(Box::new(validator))
+}
+
+/// The project unit a loaded project is admitted as: its committed modules and
+/// standard sources, with no loose rows and no expectations.
+pub(super) fn project_unit_of(loaded: &orna_project::LoadedProject) -> ProjectUnit {
     let mut modules = loaded
         .modules()
         .iter()
@@ -111,8 +175,7 @@ pub(super) fn transactional_loaded_project_validator(
                 source: source.clone(),
             }),
     );
-
-    let project = ProjectUnit {
+    ProjectUnit {
         fixture_id: "vfs-mounted-row".into(),
         project_id: "mounted".into(),
         environment_id: None,
@@ -129,44 +192,13 @@ pub(super) fn transactional_loaded_project_validator(
             steps: Vec::new(),
             negative_cases: Vec::new(),
         },
-    };
-    let catalogue = loaded
-        .production_catalogue()
-        .map_err(|_| StageOutcome::Failed(standard_profile_diagnostic()))?;
-    let admitted = admit(&project, limits, "", &catalogue).map_err(|failure| *failure)?;
-    let candidate_table_fields = candidate_table_fields_in_stable_id_order(
-        loaded,
-        identities,
-        &project,
-        &admitted.table_fields,
-    )
-    .map_err(|reason| StageOutcome::Skipped { reason })?;
-    let mut validator = TransactionalTableCandidateValidator::new(
-        cwd_generation,
-        &admitted.functions,
-        &admitted.key_fields,
-        &admitted.float_fields,
-        &admitted.table_fields,
-        &admitted.table_assertions,
-        &admitted.module_assertions,
-        table_object_ids,
-        limits,
-    );
-    validator.candidate_table_fields = candidate_table_fields;
-    // A table whose key admission could not lower (bead ornadb-gq4g) holds rows
-    // and assertions but no key; the commit gate refuses only the checks that read it.
-    validator.unsupported = admitted
-        .table_fields
-        .keys()
-        .filter(|table| !admitted.key_fields.contains_key(*table))
-        .cloned()
-        .collect();
-    Ok(Box::new(validator))
+    }
 }
 
 pub(super) fn candidate_table_fields_in_stable_id_order(
     loaded: &orna_project::LoadedProject,
     identities: &orna_project::ObjectIdentityManifest,
+    database_id: Option<[u8; 16]>,
     project: &ProjectUnit,
     source_fields: &TableFields,
 ) -> Result<TableFields, String> {
@@ -193,9 +225,16 @@ pub(super) fn candidate_table_fields_in_stable_id_order(
             let fields = ordered_fields
                 .get_mut(&table)
                 .ok_or_else(|| format!("candidate table {table} has no admitted fields"))?;
-            let schema = loaded
-                .source_table_schema(identities, &schema_namespace, &name)
-                .map_err(|_| format!("candidate table {name} has no stable schema"))?;
+            let schema = match database_id {
+                Some(database_id) => loaded.source_table_schema_in_database(
+                    identities,
+                    database_id,
+                    &schema_namespace,
+                    &name,
+                ),
+                None => loaded.source_table_schema(identities, &schema_namespace, &name),
+            }
+            .map_err(|_| format!("candidate table {name} has no stable schema"))?;
             *fields = order_field_names_by_stable_id(fields, schema.field_object_ids())?;
         }
     }
@@ -241,7 +280,27 @@ impl TransactionalTableCandidateValidator {
             tables: tables.into_iter().collect(),
             unsupported: BTreeSet::new(),
             refused_assertion: None,
+            saved_row: None,
+            candidate_keys: key_fields.clone(),
         }
+    }
+
+    /// Checks the references of the row a mounted save wrote against the candidate
+    /// state (ORNA-REF-001, ORNA-MUT-007). A validator without a saved row checks nothing.
+    fn validate_saved_row(
+        &self,
+        rows: &orna_runtime::RuntimeTableRows,
+    ) -> Result<(), SafeDiagnostic> {
+        let Some(saved) = &self.saved_row else {
+            return Ok(());
+        };
+        validate_saved_row_references(
+            saved,
+            &self.candidate_keys,
+            &self.candidate_table_fields,
+            &self.candidate_key_fields,
+            rows,
+        )
     }
 }
 
@@ -408,6 +467,7 @@ impl TableActivationCandidateValidator for TransactionalTableCandidateValidator 
                 }
             }
         }
+        self.validate_saved_row(rows)?;
         Ok(())
     }
 }

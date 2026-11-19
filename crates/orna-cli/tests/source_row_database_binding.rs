@@ -198,6 +198,7 @@ fn long_key_alias_admits_only_a_pair_whose_text_is_its_encoding_text() {
             owner_field_values: Vec::new(),
             key_components: &[pair("forged".to_owned())],
             mutation_id: [0x7a; 16],
+            references: None,
         },
     );
     assert!(matches!(forged, Err(ProjectLoadError::InvalidSourceRow)));
@@ -213,6 +214,7 @@ fn long_key_alias_admits_only_a_pair_whose_text_is_its_encoding_text() {
             owner_field_values: Vec::new(),
             key_components: &[pair(key)],
             mutation_id: [0x7b; 16],
+            references: None,
         },
     );
     assert!(

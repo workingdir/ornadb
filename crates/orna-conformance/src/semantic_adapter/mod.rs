@@ -125,7 +125,7 @@ use effects::*;
 use project_graph::*;
 use relation::*;
 pub use runtime_adapter::*;
-use stored_references::*;
+pub use stored_references::*;
 pub use stream_admission::*;
 use support::*;
 use table_effects::*;

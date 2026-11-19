@@ -308,17 +308,17 @@ pub(crate) fn release_retention_cause(refusal: Option<&DraftRefusal>) -> &'stati
     refusal.map_or("unsynced", |refusal| refusal.cause)
 }
 
-/// The refusal text for a validation diagnostic: a false table assertion shows the
-/// spec code `ORNA-A091-009` (33-diagnostics.md), exactly as the REPL does; any other
+/// The refusal text for a validation diagnostic: a class with a catalogued spec
+/// code shows that code (`validation_refusal_code`: a false table assertion is
+/// `ORNA-A091-009`, a dangling stored reference is `ORNA-REF-DANGLING`); any other
 /// class keeps its internal name.
 pub(crate) fn refusal_text(
-    table_assertion_false: bool,
+    spec_code: Option<&'static str>,
     diagnostic: impl std::fmt::Debug,
 ) -> String {
-    if table_assertion_false {
-        "ORNA-A091-009".to_owned()
-    } else {
-        format!("{diagnostic:?}")
+    match spec_code {
+        Some(code) => code.to_owned(),
+        None => format!("{diagnostic:?}"),
     }
 }
 
@@ -336,7 +336,7 @@ pub(crate) fn save_failure(
         | VfsSaveError::Rejected { diagnostic, .. } => DocumentCommitError::Rejected(format!(
             "{context}: {}",
             refusal_text(
-                orna_conformance::is_table_assertion_false(diagnostic),
+                orna_conformance::validation_refusal_code(diagnostic),
                 diagnostic
             )
         )),
@@ -607,7 +607,7 @@ impl RowSaveContext {
                 Err(DocumentCommitError::Rejected(format!(
                     "mounted row document was rejected by semantic admission: {}",
                     refusal_text(
-                        orna_conformance::is_table_assertion_false(diagnostic),
+                        orna_conformance::validation_refusal_code(diagnostic),
                         diagnostic
                     )
                 )))
@@ -732,7 +732,7 @@ impl RowSaveContext {
                 Err(DocumentCommitError::Rejected(format!(
                     "mounted replacement was rejected by semantic admission: {}",
                     refusal_text(
-                        orna_conformance::is_table_assertion_false(diagnostic),
+                        orna_conformance::validation_refusal_code(diagnostic),
                         diagnostic
                     )
                 )))
@@ -992,7 +992,7 @@ impl RowSaveContext {
                 Err(DocumentCommitError::Rejected(format!(
                     "temporary mounted row document was rejected by semantic admission: {}",
                     refusal_text(
-                        orna_conformance::is_table_assertion_false(diagnostic),
+                        orna_conformance::validation_refusal_code(diagnostic),
                         diagnostic
                     )
                 )))

@@ -1625,6 +1625,23 @@ pub fn admit_row_unit_with_key_spelling(
     for name in &owner_fields {
         source_schema_fields.remove(*name);
     }
+    // A stored reference column spells its target's key, not a table value
+    // (ORNA-REF-001; 29-formats.md:129). Type it as that key so the source
+    // spelling is checked against the key the target row is stored under.
+    for reference in &schema.references {
+        let key_type = analysis_named_symbol(&reference.to_table, analysis)
+            .and_then(|symbol| symbol.table_key_type());
+        if let (Some(key_type), Some(column)) = (
+            key_type,
+            source_schema_fields.get_mut(&reference.from_column),
+        ) {
+            *column = if reference.optional {
+                Type::Optional(Box::new(key_type))
+            } else {
+                key_type
+            };
+        }
+    }
     let decoded_key = match spelling {
         RowKeySpelling::LegacyPathV1 => decode_row_key_path(input.key_path),
         RowKeySpelling::VerifiedVfs1(keys) => Some(keys.to_vec()),

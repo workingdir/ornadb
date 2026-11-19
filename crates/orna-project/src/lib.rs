@@ -699,6 +699,10 @@ pub struct SourceRowRequest<'a> {
     pub owner_field_values: Vec<(String, Raw)>,
     pub key_components: &'a [KeyComponentText],
     pub mutation_id: [u8; 16],
+    /// The stored references of the committed database the row is written to.
+    /// When present, each reference column is bound to the stored reference its
+    /// target row names (ORNA-REF-001).
+    pub references: Option<&'a ReferenceCatalogue>,
 }
 
 impl<'a> SourceRowRequest<'a> {
@@ -718,6 +722,7 @@ impl<'a> SourceRowRequest<'a> {
             owner_field_values: Vec::new(),
             key_components: &[],
             mutation_id,
+            references: None,
         }
     }
 }
@@ -743,6 +748,7 @@ pub fn admit_source_row(
         owner_field_values,
         key_components,
         mutation_id,
+        references,
     } = request;
     if project.source_commit() != Some(schema.source_commit())
         || project.source_snapshot_id().as_ref() != Some(schema.snapshot_id())
@@ -828,7 +834,7 @@ pub fn admit_source_row(
     reserved_field_names.extend(owner_field_names.iter().cloned());
     let decoded_key = decode_source_key_path(&key_path, key_components)
         .ok_or(ProjectLoadError::InvalidSourceRow)?;
-    let lowered = lower_row_unit_with_key_spelling(
+    let mut lowered = lower_row_unit_with_key_spelling(
         &analysis,
         &input,
         &reserved_field_names,
@@ -838,6 +844,13 @@ pub fn admit_source_row(
     if lowered.owner != table_path {
         return Err(ProjectLoadError::InvalidSourceRow);
     }
+    stored_reference::bind_source_row_references(
+        references,
+        &module_name,
+        schema.declaration_name(),
+        &lowered.reference_columns,
+        &mut lowered.fields,
+    )?;
 
     let row_fields = lowered
         .fields
