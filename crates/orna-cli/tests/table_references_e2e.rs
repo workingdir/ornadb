@@ -632,6 +632,26 @@ fn a_cross_module_table_field_references_a_row_of_the_other_module() {
 }
 
 #[test]
+fn enum_keyed_table_run_path_admits_the_write() {
+    // ORNA-ENUM-005 through `orna run`: a payload-free enum key is a row key, so an insert
+    // into an enum-keyed table in an asserting project is admitted and reads back in the run.
+    let (_directory, root) = committed_project(&[(
+        "main.orna",
+        "pub enum Level {\n    low,\n    high,\n}\n\
+         pub table Task(level: Level) {\n    title: Str,\n    assert every(row => row.title != \"\");\n}\n\
+         pub fn round_trip(): Str { Task.insert({ level: Level.low, title: \"Ship\" }); Task | map(task => task.title) | first() ?? \"none\" }\n\
+         pub fn main() {}\n",
+    )]);
+    let output = orna(&root, &["run", "main.round_trip"]);
+    assert_success(&output, "orna run of an insert into an enum-keyed asserting table");
+    assert!(
+        transcript(&output).contains("\"Ship\""),
+        "the enum-keyed row reads back in the same run\n{}",
+        transcript(&output)
+    );
+}
+
+#[test]
 fn a_mounted_save_of_a_missing_reference_is_refused_and_keeps_the_stored_row() {
     // ORNA-MUT-007 and ORNA-REF-003 through the mount: a saved row whose reference
     // names no committed row is refused at sync with EINVAL, and the stored row keeps

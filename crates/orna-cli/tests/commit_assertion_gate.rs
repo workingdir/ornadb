@@ -8,11 +8,12 @@
 //! its rows under a project that declares no assertion, publishes them, and
 //! then stages the asserting source.
 //!
-//! Interim gap (bead ornadb-gq4g): the transactional seam reads only scalar
-//! primary keys. A check that reads a table of any other key is refused as
-//! unvalidated at commit (ORNA-CMD-WORKFLOW-REFUSED), and no subset of the candidate's assertions is
-//! published (ORNA-ASSERT-049, ORNA-ASSERT-050). A project whose assertions do
-//! not read such a table is not refused for it.
+//! Payload-free enum primary keys are read by the transactional seam
+//! (ORNA-ENUM-005); other key types (Date, Instant, Uuid, tuple) are still
+//! refused as unvalidated at commit (ORNA-CMD-WORKFLOW-REFUSED, bead
+//! ornadb-gq4g), and no subset of the candidate's assertions is published
+//! (ORNA-ASSERT-049, ORNA-ASSERT-050). A project whose assertions do not read
+//! such a table is not refused for it.
 
 #[path = "support/product.rs"]
 mod product;
@@ -36,6 +37,10 @@ pub table Task(level: Level) {\n    title: Str,\n}\n";
 /// The enum-keyed `Task` table with a table assertion.
 const ENUM_KEYED_ASSERTED_LIBRARY: &str = "pub enum Level {\n    low,\n    high,\n}\n\
 pub table Task(level: Level) {\n    title: Str,\n    assert every(row => row.title != \"\");\n}\n";
+
+/// The Date-keyed `Day` table, without and with a table assertion.
+const DATE_KEYED_LIBRARY: &str = "pub table Day(date: Date) {\n    title: Str,\n}\n";
+const DATE_KEYED_ASSERTED_LIBRARY: &str = "pub table Day(date: Date) {\n    title: Str,\n    assert every(row => row.title != \"\");\n}\n";
 
 /// The enum-keyed `Task` table beside a scalar `Book` table whose assertion
 /// the published row `Dune` violates.
@@ -259,22 +264,41 @@ fn assert_free_project_commits_its_published_rows() {
     assert_ne!(head(&root), before);
 }
 
-/// Interim gap (bead ornadb-gq4g): the enum-keyed `Task` table's own assertion
-/// reads a table the seam cannot lower, so the commit is refused as unvalidated
-/// with its cause, even with no rows to validate. An enum-keyed row cannot be
-/// published (`ORNA-CMD-WORKFLOW-REFUSED source row key is not canonical`), so this test stages the
-/// table with no rows.
+/// The enum-keyed `Task` table with a table assertion and no rows commits: the
+/// seam reads payload-free enum keys (ORNA-ENUM-005), and the candidate has no
+/// row to violate. An enum-keyed row cannot be published yet
+/// (`ORNA-CMD-WORKFLOW-REFUSED source row key is not canonical`), so this test
+/// stages the table with no rows.
 #[test]
-fn enum_keyed_table_assertion_refuses_the_commit_with_its_cause() {
+fn enum_keyed_table_assertion_commits_with_no_staged_rows() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let root = initialized_database(&directory, ENUM_KEYED_LIBRARY);
     commit_source(&root, "enum keyed table fixture");
     let before = head(&root);
 
-    let refused = stage_and_commit(
+    let committed = stage_and_commit(
         &root,
         ENUM_KEYED_ASSERTED_LIBRARY,
         "assert on enum-keyed table",
+    );
+    assert_success(&committed, "commit of an enum-keyed table assertion");
+    assert_ne!(head(&root), before);
+}
+
+/// ORNA-ENUM-005 scope: a Date key is still outside the seam's key types, so a
+/// table assertion over a Date-keyed table is refused as unvalidated with its
+/// cause, even with no rows to validate (bead ornadb-gq4g).
+#[test]
+fn date_keyed_table_assertion_refuses_the_commit_with_its_cause() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let root = initialized_database(&directory, DATE_KEYED_LIBRARY);
+    commit_source(&root, "date keyed table fixture");
+    let before = head(&root);
+
+    let refused = stage_and_commit(
+        &root,
+        DATE_KEYED_ASSERTED_LIBRARY,
+        "assert on date-keyed table",
     );
     let text = transcript(&refused);
     assert_ne!(refused.status.code(), Some(0), "{text}");
@@ -290,10 +314,10 @@ fn enum_keyed_table_assertion_refuses_the_commit_with_its_cause() {
     assert_eq!(head(&root), before, "{text}");
 }
 
-/// Interim gap (bead ornadb-gq4g), checked per assertion: the violating scalar
-/// `Book` assertion is still evaluated beside the enum-keyed `Task` table, which
-/// declares no assertion. The published row `Dune` violates the scalar `Book`
-/// assertion, so the refusal names `ORNA-A091-009` and no unvalidated cause.
+/// The violating scalar `Book` assertion is evaluated beside the enum-keyed
+/// `Task` table, which declares no assertion. The published row `Dune` violates
+/// the scalar `Book` assertion, so the refusal names `ORNA-A091-009` and no
+/// unvalidated cause.
 #[test]
 fn scalar_table_assertion_beside_enum_keyed_table_is_still_evaluated() {
     let directory = tempfile::tempdir().expect("temporary directory");
@@ -323,7 +347,7 @@ fn scalar_table_assertion_beside_enum_keyed_table_is_still_evaluated() {
 /// that declares table assertions, so an enum-keyed table with no assertion
 /// still commits.
 #[test]
-fn assert_free_project_with_non_scalar_key_still_commits() {
+fn assert_free_project_with_enum_key_still_commits() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let root = initialized_database(&directory, ENUM_KEYED_LIBRARY);
     commit_source(&root, "enum keyed table fixture");
