@@ -158,6 +158,23 @@ fn scan_with_bounded_memory(rows: u32) {
 }
 
 #[test]
+fn production_committed_read_matches_the_cursor_scan() {
+    let mut table = committed_int_table(0, SCAN_ROWS);
+    let production = table.production_rows();
+    assert!(!production.is_empty(), "the seeded table holds rows");
+    let store = &mut table.store;
+    let cursor = store
+        .scan(table_id(), KeyBounds::all(), Direction::Forward)
+        .expect("the committed table scans");
+    let mut scanned = Vec::new();
+    while let Some(row) = store.next(cursor).expect("the cursor advances") {
+        scanned.push((row.key.to_vec(), row.row.to_vec()));
+    }
+    store.close(cursor);
+    assert_eq!(scanned, production);
+}
+
+#[test]
 fn taking_ten_rows_reads_exactly_ten_rows() {
     let mut seeded = Seeded(committed_int_table(0, SCAN_ROWS));
     let store = &mut seeded.0.store;

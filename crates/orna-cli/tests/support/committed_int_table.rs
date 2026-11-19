@@ -15,8 +15,8 @@ use orna_check::{Catalogue, TableSchema};
 use orna_evaluator::Limits;
 use orna_exec::TableId;
 use orna_hir::DefId;
-use orna_project::CommittedTableStore;
-use orna_repository::Repository;
+use orna_project::{CommittedTableStore, committed_tables};
+use orna_repository::{GitCommitRef, Repository, RepositoryFormatContext};
 use orna_runtime::TableObjectId;
 use tempfile::TempDir;
 
@@ -34,10 +34,40 @@ pub fn table_id() -> TableId {
 const MAX_BUFFERED_ROWS: usize = 4_096;
 
 /// A committed `Item` table and the project directory that holds it. The store
-/// is declared first so it drops before the directory it reads from.
+/// and the inputs are declared before the directory, so they drop before the
+/// directory they read from.
 pub struct CommittedIntTable {
     pub store: CommittedTableStore,
+    inputs: CommittedInputs,
     _directory: TempDir,
+}
+
+/// The inputs that the committed reads of the `Item` table take: the repository,
+/// its HEAD commit, the commit's format context, and the table's schema and id.
+struct CommittedInputs {
+    repository: Repository,
+    format: RepositoryFormatContext,
+    commit: GitCommitRef,
+    schemas: BTreeMap<String, TableSchema>,
+    table_ids: BTreeMap<String, TableObjectId>,
+}
+
+impl CommittedIntTable {
+    /// The `(runtime key, stored tuple)` rows of `Item` that the production
+    /// committed read materialises, in ascending runtime-key order.
+    pub fn production_rows(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
+        let inputs = &self.inputs;
+        let mut tables = committed_tables(
+            &inputs.repository,
+            &inputs.format,
+            &inputs.commit,
+            &inputs.schemas,
+            &inputs.table_ids,
+        )
+        .expect("the committed tables read");
+        let table = tables.remove(TABLE).expect("the Item table is committed");
+        table.rows
+    }
 }
 
 /// Rows each seed run inserts. One `orna run` is charged against the
@@ -92,19 +122,23 @@ pub fn committed_int_table(first: u32, end: u32) -> CommittedIntTable {
         &orna(directory.path(), &["publish", "--message", "seed"]),
         "publish seeded rows",
     );
-    let store = open_committed(directory.path(), object_id, &source, first);
+    let inputs = committed_inputs(directory.path(), object_id, &source, first);
+    let store = open_committed(&inputs);
     CommittedIntTable {
         store,
+        inputs,
         _directory: directory,
     }
 }
 
-fn open_committed(
+/// Reads the committed inputs of the `Item` table at HEAD of the project in
+/// `directory`, admitting `source` as the module that seeds `seed_{first}`.
+fn committed_inputs(
     directory: &Path,
     object_id: [u8; 16],
     source: &str,
     first: u32,
-) -> CommittedTableStore {
+) -> CommittedInputs {
     let repository = Repository::discover(directory).expect("the project repository");
     let commit = repository
         .head()
@@ -128,12 +162,24 @@ fn open_committed(
         .map(|(name, table)| (name.clone(), table.schema().clone()))
         .collect();
     let table_ids = BTreeMap::from([(TABLE.to_owned(), object_id)]);
+    CommittedInputs {
+        repository,
+        format,
+        commit,
+        schemas,
+        table_ids,
+    }
+}
+
+/// Opens the committed store over `inputs`, serving the `Item` table under
+/// [`table_id`].
+fn open_committed(inputs: &CommittedInputs) -> CommittedTableStore {
     CommittedTableStore::open_committed(
-        &repository,
-        &format,
-        &commit,
-        &schemas,
-        &table_ids,
+        &inputs.repository,
+        &inputs.format,
+        &inputs.commit,
+        &inputs.schemas,
+        &inputs.table_ids,
         [(table_id(), TABLE.to_owned())],
         MAX_BUFFERED_ROWS,
     )
