@@ -699,6 +699,11 @@ const LEGACY_READ_ONLY_HELP: &str = orna_repository::LegacyWriteRefused::REMEDY;
 /// journalled, but nothing in this build activates it.
 const MIGRATION_PREPARED_HELP: &str = "this build has no writer for format-1/2 snapshots; a format-3 migration candidate is prepared here but not activated; activation is tracked as ornadb-5il1.192";
 
+/// Remedy for a pending insert whose key the published HEAD already holds
+/// (ORNA-PUB-013). The pending change is kept; this build has no command that
+/// reconciles it with the existing row.
+const ROW_KEY_CONFLICT_HELP: &str = "this build has no command that reconciles a pending insert with a row the published HEAD already holds; the pending change is kept, and reconciling it is tracked as ornadb-5il1.503";
+
 /// Remedy for a managed-path edit that recovery refused (ORNA-PUB-010). The edit
 /// stays on disk; the user either admits it or discards it, then retries.
 const MANAGED_EDIT_HELP: &str = "the edited bytes are retained on disk and were not overwritten (copy them elsewhere if you need them); keeping edits to orna-managed store paths is not supported; to discard the edit, run `git show HEAD:<path> > <path>` (`git checkout -- <path>` does not restore a skip-worktree store path), then retry `orna publish`";
@@ -786,6 +791,14 @@ pub(super) fn describe_storage_failure(
         }
         E::RuntimeUnavailable => "local runtime state is unavailable".to_owned(),
         E::RepositoryUnavailable(_) => "the backing repository is unavailable".to_owned(),
+        E::RepositoryMalformed(FormatContextError::GraphMalformed(GraphError::DuplicateRowKey)) => {
+            return Diagnostic::target_with_detail(
+                "ORNA-CMD-WORKFLOW-REFUSED",
+                title,
+                ROW_KEY_CONFLICT_HELP,
+                "the pending row's key already exists in the snapshot it would publish onto; the candidate could not be built, so nothing was published, HEAD was not changed and the pending change is kept".to_owned(),
+            );
+        }
         E::RepositoryMalformed(error) => format_context_detail(error),
         other => format!("{other}"),
     };
@@ -819,6 +832,30 @@ mod tests {
         assert!(rendered.contains("(ORNA-REPO-CONTEXT-017)"));
         assert!(!rendered.contains("GraphMalformed"));
         assert!(!rendered.contains("RepositoryMalformed"));
+    }
+
+    /// A pending insert whose key the published HEAD already holds is refused
+    /// as a row-key conflict, never reported as malformed data, and the pending
+    /// change is kept.
+    #[test]
+    fn duplicate_pending_row_key_publish_error_keeps_the_pending_change() {
+        let diagnostic = describe_storage_failure(
+            "publication candidate could not be prepared",
+            &orna_storage::Error::RepositoryMalformed(
+                orna_repository::FormatContextError::GraphMalformed(
+                    orna_repository::GraphError::DuplicateRowKey,
+                ),
+            ),
+        );
+        assert_eq!(diagnostic.code, "ORNA-CMD-WORKFLOW-REFUSED");
+        assert_eq!(diagnostic.help, ROW_KEY_CONFLICT_HELP);
+        let rendered = diagnostic.to_string();
+        assert!(rendered.starts_with(
+            "error[ORNA-CMD-WORKFLOW-REFUSED]: publication candidate could not be prepared\n"
+        ));
+        assert!(rendered.contains("the pending change is kept"));
+        assert!(!rendered.contains("malformed"));
+        assert!(!rendered.contains("ORNA-REPO-CONTEXT-017"));
     }
 
     #[test]
