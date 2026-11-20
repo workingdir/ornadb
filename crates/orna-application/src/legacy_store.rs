@@ -652,6 +652,14 @@ impl LegacyTableRows {
             rows,
         }
     }
+
+    /// A compact table of `rows` for tests of the row mapping.
+    pub(crate) fn compact_for_tests(rows: Vec<LegacyRow>) -> Self {
+        Self {
+            source: LegacyRowSource::Compact,
+            rows,
+        }
+    }
 }
 
 #[cfg(test)]
