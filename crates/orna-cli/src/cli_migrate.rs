@@ -1,6 +1,7 @@
 //! `orna migrate` and `orna upgrade`: prepare a format-3 copy of a legacy
 //! worktree and activate it in one confirmed step.
 
+use super::assertion_gate::{GatedCommand, refusal_diagnostic};
 use super::*;
 
 /// Names why the migration source failed format admission. The title carries
@@ -246,7 +247,7 @@ fn prepare_copy(
             orna_repository::migration_copy::MigrationStore,
             orna_repository::RepositoryError,
         > {
-            let store = orna_application::build_migration_store(staged, database)?;
+            let store = super::assertion_gate::migration_store(staged, database)?;
             // The declared count is an assertion: it must equal the Blob values the
             // decoded rows carry. A mismatch refuses before any candidate is built.
             if let Some(declared) = declared_annotation_defaults {
@@ -299,6 +300,11 @@ fn migration_copy_error(error: orna_repository::RepositoryError) -> Diagnostic {
             "remove `--annotation-defaults` to use the decoded count, or pass the decoded Blob count; no copy was prepared and the source is unchanged",
             format!("declared={declared} decoded={decoded}"),
         ),
+        orna_repository::RepositoryError::CandidateAssertionRefused(refusal) => {
+            let error =
+                orna_repository::RepositoryError::CandidateAssertionRefused(refusal.clone());
+            refusal_diagnostic(&refusal, GatedCommand::Migrate, &error)
+        }
         other => Diagnostic::target_with_detail(
             "ORNA-CMD-REPOSITORY-UNAVAILABLE",
             "migration copy could not be prepared or recovered",
@@ -944,7 +950,7 @@ fn activation_store(
     staged: &orna_repository::Repository,
     database: orna_repository::DatabaseId,
 ) -> Result<orna_repository::migration_copy::MigrationStore, orna_repository::RepositoryError> {
-    let store = orna_application::build_migration_store(staged, database)?;
+    let store = super::assertion_gate::migration_store(staged, database)?;
     let unpublished = crate::source_unpublished_mutation_count(source)
         .map_err(|_| orna_repository::RepositoryError::PublicationRecoveryConflict)?;
     if unpublished != 0 {

@@ -64,6 +64,7 @@ pub fn build_migration_store(
     let (mut store, expectation) = build_store_with_expectation(repository, database)?;
     store.candidate_gate = Some(CandidateGate::new(move |repository, candidate| {
         verify_candidate(repository, candidate, &expectation)
+            .map_err(RepositoryError::MigrationStoreRefused)
     }));
     Ok(store)
 }

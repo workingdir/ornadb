@@ -628,9 +628,12 @@ fn candidate_with_a_text_store_root_fails_the_installed_gate() {
         .candidate_gate
         .as_ref()
         .expect("the migration store installs the candidate gate");
-    let detail = gate
+    let error = gate
         .check(&repository, &candidate)
         .expect_err("a candidate whose store root is a text file must not pass the gate");
+    let RepositoryError::MigrationStoreRefused(detail) = &error else {
+        panic!("the refusal is a migration store refusal: {error:?}");
+    };
     assert!(
         detail.starts_with("candidate format context is unavailable"),
         "the text store root is refused at the format context: {detail}"

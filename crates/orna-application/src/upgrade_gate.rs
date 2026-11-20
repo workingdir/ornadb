@@ -335,6 +335,7 @@ mod tests {
             payload[0] ^= 0xff;
             store.candidate_gate = Some(CandidateGate::new(move |repository, candidate| {
                 verify_candidate(repository, candidate, &expectation)
+                    .map_err(RepositoryError::MigrationStoreRefused)
             }));
             Ok(store)
         };
