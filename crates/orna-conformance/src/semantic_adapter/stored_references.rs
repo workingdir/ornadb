@@ -177,13 +177,12 @@ impl CandidateState for ActivationRows<'_, '_> {
     }
 }
 
-/// The stored references a mounted save of one row must still resolve to: the
-/// catalogue of the committed database, the table and stored key of the row
-/// the save wrote (ORNA-REF-001, ORNA-MUT-007).
+/// The stored references the rows a commit saved must still resolve to: the
+/// catalogue of the committed database and each `(table, stored key)` the commit
+/// wrote, replaced, deleted or rekeyed (ORNA-REF-001, ORNA-MUT-007, ORNA-MUT-008).
 pub struct SavedRowReferences {
     pub catalogue: ReferenceCatalogue,
-    pub table: String,
-    pub key: Vec<u8>,
+    pub rows: Vec<(String, Vec<u8>)>,
 }
 
 /// The database identity the committed `HEAD` of `repository` records: `None`
@@ -235,6 +234,24 @@ pub fn committed_reference_catalogue(
         admit_transaction_project(&project, limits, "", &catalogue).map_err(|failure| *failure)?;
     ReferenceCatalogue::new(database_id, &admitted.table_schemas, table_object_ids)
         .map_err(|_| StageOutcome::Failed(reference_identity_diagnostic()))
+}
+
+/// Whether `loaded` declares a table with a stored reference, so that each of
+/// its committed writes is checked against stored references (ORNA-MUT-007,
+/// ORNA-MUT-008). A project that cannot be admitted here counts as declaring
+/// them: its writes are then checked and refused, never left unchecked.
+pub fn project_declares_stored_references(
+    loaded: &orna_project::LoadedProject,
+    limits: EvaluatorLimits,
+) -> bool {
+    let Ok(catalogue) = loaded.production_catalogue() else {
+        return true;
+    };
+    let project = project_unit_of(loaded);
+    match admit_transaction_project(&project, limits, "", &catalogue) {
+        Ok(admitted) => ReferenceCatalogue::declares_references(&admitted.table_schemas),
+        Err(_) => true,
+    }
 }
 
 fn reference_identity_diagnostic() -> Diagnostic {
@@ -308,8 +325,11 @@ impl CandidateState for CandidateRowsState<'_> {
     }
 }
 
-/// Validates that the row a mounted save wrote still resolves its stored
-/// references over the candidate state (ORNA-REF-001, ORNA-MUT-007).
+/// Validates that the rows a commit saved still resolve their stored references
+/// over the candidate state (ORNA-REF-001, ORNA-MUT-007, ORNA-MUT-008). A row the
+/// commit deleted or rekeyed away must not stay referenced. A dangling reference
+/// is refused with its own code; any other failure to read the state is refused
+/// as an evaluation failure, so nothing commits unchecked.
 pub(super) fn validate_saved_row_references(
     saved: &SavedRowReferences,
     keys: &TableKeys,
@@ -317,10 +337,18 @@ pub(super) fn validate_saved_row_references(
     key_fields: &TableFields,
     rows: &orna_runtime::RuntimeTableRows,
 ) -> Result<(), SafeDiagnostic> {
-    validate_written_row_references(
+    let mut touched = Vec::with_capacity(saved.rows.len());
+    for (table, key) in &saved.rows {
+        let key_names = key_fields
+            .get(table)
+            .ok_or_else(table_evaluation_diagnostic)?;
+        let components =
+            candidate_key_components(key, key_names).map_err(|_| table_row_decode_diagnostic())?;
+        touched.push((table.clone(), components));
+    }
+    validate_touched_references(
         &saved.catalogue,
-        &saved.table,
-        &saved.key,
+        &touched,
         keys,
         table_fields,
         key_fields,
@@ -347,6 +375,20 @@ pub(super) fn validate_written_row_references(
     let components =
         candidate_key_components(key, key_names).map_err(|_| table_row_decode_diagnostic())?;
     let touched = [(table.to_owned(), components)];
+    validate_touched_references(catalogue, &touched, keys, table_fields, key_fields, rows)
+}
+
+/// Checks the stored references of the `touched` rows over the candidate state,
+/// refusing a dangling reference with its own code and any other failure to read
+/// the state as an evaluation failure, so nothing commits unchecked.
+fn validate_touched_references(
+    catalogue: &ReferenceCatalogue,
+    touched: &[(String, Vec<OvbRaw>)],
+    keys: &TableKeys,
+    table_fields: &TableFields,
+    key_fields: &TableFields,
+    rows: &orna_runtime::RuntimeTableRows,
+) -> Result<(), SafeDiagnostic> {
     let mut state = CandidateRowsState {
         rows,
         keys,
@@ -354,7 +396,7 @@ pub(super) fn validate_written_row_references(
         key_fields,
     };
     catalogue
-        .validate(&touched, &mut state)
+        .validate(touched, &mut state)
         .map_err(|error| match error {
             ReferenceError::Dangling => dangling_reference_diagnostic(),
             _ => table_evaluation_diagnostic(),

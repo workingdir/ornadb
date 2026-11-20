@@ -15,6 +15,7 @@
 
 #[path = "cli_serve_app.rs"]
 mod cli_serve_app;
+mod served_validator;
 
 use super::*;
 use crate::media_range::{MediaMethod, media_reply};
@@ -31,8 +32,9 @@ use orna_security::{
     MAX_SESSION_LEASE, Origin, OriginPolicy, SessionBoundary, SessionDeletionAdapter,
 };
 use orna_serving::Serving;
+use served_validator::served_table_candidate_validator_factory;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     io::{self, BufRead, BufReader, Read, Write},
     net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
@@ -740,12 +742,16 @@ fn open_served_clone(endpoint: &Endpoint) -> Result<ServedClone, Diagnostic> {
                 format!("runtime error: {error:?}"),
             )
         })?;
-    // A project that declares assertions checks each committed mounted-row
-    // write against them (ORNA-ASSERT-042). A project without assertions keeps
+    // A project that declares assertions or stored references checks each
+    // committed mounted-row write against them (ORNA-ASSERT-042, ORNA-MUT-007,
+    // ORNA-MUT-008) before it publishes. A project that declares neither keeps
     // the unvalidated activation path, as the REPL commit does.
     let table_candidate_validator = project
         .as_ref()
-        .filter(|project| orna_conformance::project_declares_assertions(project))
+        .filter(|project| {
+            orna_conformance::project_declares_assertions(project)
+                || orna_conformance::project_declares_stored_references(project, Limits::default())
+        })
         .map(|project| {
             served_table_candidate_validator_factory(repository.clone(), project.clone())
         });
@@ -758,75 +764,6 @@ fn open_served_clone(endpoint: &Endpoint) -> Result<ServedClone, Diagnostic> {
         runtime,
         table_candidate_validator,
     })
-}
-
-/// Builds the factory that checks each committed mounted-row write against
-/// the served project's table assertions. The factory runs once per commit,
-/// against that commit's own generation, so the validator and the row it
-/// checks share one HEAD.
-fn served_table_candidate_validator_factory(
-    repository: Repository,
-    project: orna_project::LoadedProject,
-) -> orna_live::TableCandidateValidatorFactory {
-    Box::new(move |context: &orna_runtime::RuntimeActivationContext| {
-        served_table_candidate_validator(&repository, &project, context)
-    })
-}
-
-/// Builds the table-assertion validator for one staged commit. Any failure to
-/// read the generation, its committed identities or the admitted project
-/// fails the commit closed as `RuntimeUnavailable`, so the write is refused
-/// before any row is published.
-fn served_table_candidate_validator(
-    repository: &Repository,
-    project: &orna_project::LoadedProject,
-    context: &orna_runtime::RuntimeActivationContext,
-) -> orna_live::Result<Box<dyn orna_runtime::TableActivationCandidateValidator>> {
-    let generation = u64::try_from(context.capture().generation())
-        .map_err(|_| orna_live::Error::RuntimeUnavailable)?;
-    let cwd_generation = repository
-        .cwd_generation(RuntimeGeneration::new(generation))
-        .map_err(|_| orna_live::Error::RuntimeUnavailable)?;
-    let commit = cwd_generation
-        .head()
-        .ok_or(orna_live::Error::RuntimeUnavailable)?;
-    let identities =
-        orna_project::ObjectIdentityManifest::read_committed_if_present(repository, commit)
-            .map_err(|_| orna_live::Error::RuntimeUnavailable)?
-            .ok_or(orna_live::Error::RuntimeUnavailable)?;
-    ensure_unambiguous_live_table_names(&identities)?;
-    // The validator admits exactly the identities this activation admitted, so a
-    // commit carrying them passes and a commit under any other identity is refused.
-    // A name-addressed activation admits none.
-    let table_object_ids = Arc::new(context.table_object_ids().clone());
-    orna_conformance::transactional_loaded_project_candidate_validator(
-        project,
-        &identities,
-        orna_conformance::committed_database_id(repository),
-        Some(cwd_generation),
-        table_object_ids,
-        Limits::default(),
-        None,
-    )
-    .map_err(|_| orna_live::Error::RuntimeUnavailable)
-}
-
-/// Fails closed when two live table identities share one qualified name, so
-/// the commit cannot pick one committed identity for that name. This host binds
-/// every live table, so a duplicate under any name fails the commit.
-fn ensure_unambiguous_live_table_names(
-    identities: &orna_project::ObjectIdentityManifest,
-) -> orna_live::Result<()> {
-    let mut names = BTreeSet::new();
-    for record in identities.records() {
-        if record.kind() != orna_project::ObjectKind::Table || record.is_retired() {
-            continue;
-        }
-        if !names.insert(record.qualified_name()) {
-            return Err(orna_live::Error::RuntimeUnavailable);
-        }
-    }
-    Ok(())
 }
 
 /// The serving state admitted before the listener binds. `None` from

@@ -471,8 +471,10 @@ impl MountWriter {
         })?;
         let saved_row = references.map(|catalogue| SavedRowReferences {
             catalogue,
-            table: coordinates.table().table().to_owned(),
-            key: coordinates.key().to_vec(),
+            rows: vec![(
+                coordinates.table().table().to_owned(),
+                coordinates.key().to_vec(),
+            )],
         });
         let (source_mutation, bindings, resolved_schema) = admitted.into_mutation_and_bindings();
         // Text primary keys use their UTF-8 bytes in admitted mutations;

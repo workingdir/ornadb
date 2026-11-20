@@ -2,6 +2,7 @@ use super::*;
 use std::process::Command;
 
 mod head_pin;
+mod served_references;
 
 #[test]
 fn websocket_failures_close_with_size_or_protocol_code() {
@@ -2366,6 +2367,7 @@ fn request_over_socket(
     session: &LiveSession,
     envelope: Envelope,
 ) -> Envelope {
+    let request = envelope.request;
     send_request_over_socket(stream, session, envelope);
     let limits = ProtocolLimits::default();
     loop {
@@ -2377,7 +2379,7 @@ fn request_over_socket(
         }
         assert_eq!(
             opcode, 2,
-            "the answer is one binary message, not opcode {opcode} with payload {payload:?}"
+            "request {request:?} is answered by one binary message, not opcode {opcode} with payload {payload:?}"
         );
         return Envelope::decode(&payload, limits).expect("canonical answer");
     }
