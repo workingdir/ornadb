@@ -54,6 +54,7 @@ pub enum RuntimeError {
     InvocationOwnerInvalid,
     InvocationTailInvalid,
     InvocationTailLimit,
+    InvalidTablePageLimit,
     StreamIdentityMismatch,
     MigrationCarryTargetDiffers,
     StreamSourceNotReplayable,
@@ -165,6 +166,7 @@ impl fmt::Display for RuntimeError {
             Self::InvocationOwnerInvalid => "runtime invocation owner or arguments are invalid",
             Self::InvocationTailInvalid => "runtime invocation tail cursor is invalid",
             Self::InvocationTailLimit => "runtime invocation tail page limit is invalid",
+            Self::InvalidTablePageLimit => "runtime committed table page limit is invalid",
             Self::StreamIdentityMismatch => "stream source identity mismatch",
             Self::MigrationCarryTargetDiffers => {
                 "migration carry target holds stream rows that differ from the carry"
