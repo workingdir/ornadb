@@ -85,25 +85,36 @@ pub fn preflight_row_sources(
 ///
 /// Each row's `source_id` must lie under `project_id`; the table owner is the
 /// unique declared table whose namespace and name prefix the remaining path.
+/// Stored references are not resolved here: the caller resolves them with
+/// [`resolve_stored_references`] once every table's admitted keys are known.
 pub fn admit_row_sources(
     project_id: &str,
     module_sources: &[&str],
     analysis: &Analysis,
     loose_rows: &[RowSource<'_>],
-    identity: &RowAdmissionIdentity,
     limits: Limits,
 ) -> RowResult<Vec<AdmittedLooseRow>> {
     preflight_row_sources(module_sources, loose_rows, limits)?;
-    let rows = loose_rows
+    loose_rows
         .iter()
         .map(|row| admit_row_source(project_id, analysis, *row, limits))
-        .collect::<RowResult<Vec<_>>>()?;
-    for row in &rows {
+        .collect()
+}
+
+/// Resolves every stored table reference in admitted rows against `identity`.
+///
+/// Run after all tables are admitted, so the identity can carry the admitted
+/// keys of each target table.
+pub fn resolve_stored_references(
+    rows: &[AdmittedLooseRow],
+    identity: &RowAdmissionIdentity,
+) -> RowResult<()> {
+    for row in rows {
         for value in row.body.values() {
             validate_stored_references(value.raw(), identity)?;
         }
     }
-    Ok(rows)
+    Ok(())
 }
 
 fn admit_row_source(
@@ -186,46 +197,7 @@ fn admit_row(
             "loose row body is not a record",
         ));
     };
-    let key_names = admission
-        .keys
-        .iter()
-        .map(|(name, _)| name.clone())
-        .collect::<BTreeSet<_>>();
-    let mut supplied = BTreeSet::new();
-    for field in fields {
-        if !supplied.insert(field.name.as_str()) {
-            return Err(row_error(
-                "ORNA-CONFORMANCE-ROW-DUPLICATE",
-                "loose row body repeats a field",
-            ));
-        }
-        if key_names.contains(field.name.as_str()) {
-            return Err(row_error(
-                "E3004",
-                "loose row body must not repeat path key",
-            ));
-        }
-        if admission.computed.contains(&field.name) {
-            return Err(row_error(
-                "ORNA-CONFORMANCE-ROW-COMPUTED",
-                "loose row body cannot supply a computed field",
-            ));
-        }
-        if !schema.fields.contains_key(&field.name) {
-            return Err(row_error(
-                "ORNA-CONFORMANCE-ROW-UNKNOWN",
-                "loose row body contains an unknown field",
-            ));
-        }
-    }
-    for required in &admission.required {
-        if !key_names.contains(required.as_str()) && !supplied.contains(required.as_str()) {
-            return Err(row_error(
-                "ORNA-CONFORMANCE-ROW-MISSING",
-                "loose row body omits a required stored field",
-            ));
-        }
-    }
+    check_field_names(schema, admission, fields.iter().map(|field| field.name.as_str()))?;
     let expressions = fields
         .iter()
         .map(|field| (field.name.as_str(), &field.value))
@@ -283,6 +255,189 @@ fn admitted_key<'a>(
     Ok((key, admission))
 }
 
+/// Resolves the declared schema of one table owner in the analysed project.
+pub fn declared_table<'a>(
+    analysis: &'a Analysis,
+    owner: &TableOwner,
+) -> RowResult<&'a TableSchema> {
+    analysis
+        .modules
+        .get(&owner.namespace)
+        .and_then(|module| module.symbols.get(&owner.table))
+        .and_then(|symbol| symbol.table_schema.as_ref())
+        .ok_or_else(|| {
+            row_error(
+                "ORNA-CONFORMANCE-ROW-OWNER",
+                "stored row has no declared table owner",
+            )
+        })
+}
+
+/// Resolves the declared table owner whose namespace and name are exactly the
+/// `/`-separated stored table `path`.
+pub fn table_owner_for_path(analysis: &Analysis, path: &str) -> RowResult<TableOwner> {
+    let components = path.split('/').map(str::to_owned).collect::<Vec<_>>();
+    let mut owners = Vec::new();
+    for (namespace, module) in &analysis.modules {
+        for (name, symbol) in &module.symbols {
+            if symbol.table_schema.is_none() {
+                continue;
+            }
+            let mut root = namespace.0.clone();
+            root.push(name.clone());
+            if root == components {
+                owners.push(TableOwner {
+                    namespace: namespace.clone(),
+                    table: name.clone(),
+                });
+            }
+        }
+    }
+    if owners.len() != 1 {
+        return Err(row_error(
+            "ORNA-CONFORMANCE-ROW-OWNER",
+            "stored row has no declared table owner",
+        ));
+    }
+    Ok(owners.pop().expect("one owner candidate"))
+}
+
+/// Admits one stored compact-table row against its declared table owner.
+///
+/// `key` holds one decoded value per declared key column and `fields` holds
+/// stored values under their declared field names. Field-name, computed and
+/// type rules are the same as for loose rows.
+pub fn admit_stored_row(
+    analysis: &Analysis,
+    owner: &TableOwner,
+    key: Vec<Value>,
+    fields: &[(String, Raw)],
+) -> RowResult<AdmittedLooseRow> {
+    let schema = declared_table(analysis, owner)?;
+    let admission = schema.admission.as_ref().ok_or_else(|| {
+        row_error(
+            "ORNA-CONFORMANCE-ROW-SCHEMA",
+            "table declaration lacks row admission metadata",
+        )
+    })?;
+    let key_mismatch = || {
+        row_error(
+            "ORNA-CONFORMANCE-ROW-PATH",
+            "stored row key does not match the declared key schema",
+        )
+    };
+    if key.len() != admission.keys.len() {
+        return Err(key_mismatch());
+    }
+    for (value, (_, ty)) in key.iter().zip(&admission.keys) {
+        if !matches!(ty, Type::Text | Type::Int | Type::Bool) {
+            return Err(row_error(
+                "ORNA-CONFORMANCE-ROW-UNSUPPORTED-TYPE",
+                "row admission does not support this key type",
+            ));
+        }
+        if !matches_value(value.raw(), ty, None) {
+            return Err(key_mismatch());
+        }
+    }
+    check_field_names(
+        schema,
+        admission,
+        fields.iter().map(|(name, _)| name.as_str()),
+    )?;
+    let body = admitted_stored_body(schema, fields)?;
+    Ok(AdmittedLooseRow {
+        owner: owner.clone(),
+        key,
+        body,
+    })
+}
+
+/// Checks supplied field names against the table's admission rules: no
+/// duplicates, no path keys, no computed fields, only declared fields, and
+/// every required stored field present.
+fn check_field_names<'a>(
+    schema: &TableSchema,
+    admission: &TableAdmission,
+    names: impl IntoIterator<Item = &'a str>,
+) -> RowResult<()> {
+    let key_names = admission
+        .keys
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut supplied = BTreeSet::new();
+    for name in names {
+        if !supplied.insert(name) {
+            return Err(row_error(
+                "ORNA-CONFORMANCE-ROW-DUPLICATE",
+                "loose row body repeats a field",
+            ));
+        }
+        if key_names.contains(name) {
+            return Err(row_error("E3004", "loose row body must not repeat path key"));
+        }
+        if admission.computed.contains(name) {
+            return Err(row_error(
+                "ORNA-CONFORMANCE-ROW-COMPUTED",
+                "loose row body cannot supply a computed field",
+            ));
+        }
+        if !schema.fields.contains_key(name) {
+            return Err(row_error(
+                "ORNA-CONFORMANCE-ROW-UNKNOWN",
+                "loose row body contains an unknown field",
+            ));
+        }
+    }
+    for required in &admission.required {
+        if !key_names.contains(required.as_str()) && !supplied.contains(required.as_str()) {
+            return Err(row_error(
+                "ORNA-CONFORMANCE-ROW-MISSING",
+                "loose row body omits a required stored field",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Converts stored field values into typed body values, rejecting unsupported
+/// or mismatched fields.
+fn admitted_stored_body(
+    schema: &TableSchema,
+    fields: &[(String, Raw)],
+) -> RowResult<BTreeMap<String, Value>> {
+    let mut body = BTreeMap::new();
+    for (name, raw) in fields {
+        let expected = schema.fields.get(name).ok_or_else(|| {
+            row_error(
+                "ORNA-CONFORMANCE-ROW-UNKNOWN",
+                "stored row contains an unknown field",
+            )
+        })?;
+        if !supports_field_type(expected) {
+            return Err(row_error(
+                "ORNA-CONFORMANCE-ROW-UNSUPPORTED-TYPE",
+                "row admission does not support this field type",
+            ));
+        }
+        if !matches_value(raw, expected, None) {
+            return Err(row_error(
+                "ORNA-CONFORMANCE-ROW-TYPE",
+                "stored row field has an incompatible type",
+            ));
+        }
+        let value = Value::new(raw.clone()).map_err(|_| {
+            row_error(
+                "ORNA-CONFORMANCE-ROW-EVALUATION",
+                "stored row field could not be admitted",
+            )
+        })?;
+        body.insert(name.clone(), value);
+    }
+    Ok(body)
+}
+
 /// Converts the evaluated row map into typed stored fields, rejecting unknown,
 /// unsupported or mismatched fields.
 fn admitted_body(
@@ -322,7 +477,7 @@ fn admitted_body(
                 "row admission does not support this field type",
             ));
         }
-        if !matches_value(value.raw(), expected, expression) {
+        if !matches_value(value.raw(), expected, Some(*expression)) {
             return Err(row_error(
                 "ORNA-CONFORMANCE-ROW-TYPE",
                 "loose row body field has an incompatible type",
@@ -439,62 +594,94 @@ fn decode_key(text: &str, ty: &Type) -> RowResult<Value> {
     })
 }
 
-fn matches_value(value: &Raw, ty: &Type, expression: &Expr) -> bool {
+/// Checks a raw value against a declared field type.
+///
+/// Loose rows pass their source expression, so list, tuple, and record shape is
+/// read from the source. Stored rows pass `None` and are checked from the stored
+/// shape alone.
+fn matches_value(value: &Raw, ty: &Type, expression: Option<&Expr>) -> bool {
     match ty {
         Type::Text => matches!(value, Raw::Text(_)),
         Type::Int => matches!(value, Raw::Int(_)),
         Type::Bool => matches!(value, Raw::Bool(_)),
         Type::Decimal => matches!(value, Raw::Tag(60000, _)),
         Type::List(inner) => match (value, expression) {
-            (Raw::Array(values), Expr::List { elements, .. }) if values.len() == elements.len() => {
+            (Raw::Array(values), Some(Expr::List { elements, .. }))
+                if values.len() == elements.len() =>
+            {
                 values
                     .iter()
                     .zip(elements)
-                    .all(|(value, expression)| matches_value(value, inner, expression))
+                    .all(|(value, expression)| matches_value(value, inner, Some(expression)))
+            }
+            (Raw::Array(values), None) => {
+                values.iter().all(|value| matches_value(value, inner, None))
             }
             _ => false,
         },
-        Type::Tuple(types) => match (value, expression) {
-            (Raw::Tag(60015, tuple), Expr::Tuple { elements, .. }) => match tuple.as_ref() {
-                Raw::Array(values)
-                    if values.len() == types.len() && elements.len() == types.len() =>
-                {
-                    values
-                        .iter()
-                        .zip(types)
-                        .zip(elements)
-                        .all(|((value, ty), expression)| matches_value(value, ty, expression))
-                }
-                _ => false,
-            },
-            _ => false,
-        },
-        Type::Record(types) => match (value, expression) {
-            (Raw::Map(values), Expr::Record { fields, .. }) if values.len() == types.len() => {
-                types.iter().all(|(name, ty)| {
-                    let value = values.iter().find_map(|(key, value)| match key {
-                        Raw::Text(key) if key == name => Some(value),
-                        _ => None,
-                    });
-                    let expression = fields
+        // Spec 29-formats: tuples are Tag(60015, Array).
+        Type::Tuple(types) => {
+            let Raw::Tag(60015, tuple) = value else {
+                return false;
+            };
+            let Raw::Array(values) = tuple.as_ref() else {
+                return false;
+            };
+            if values.len() != types.len() {
+                return false;
+            }
+            match expression {
+                None => values
+                    .iter()
+                    .zip(types)
+                    .all(|(value, ty)| matches_value(value, ty, None)),
+                Some(Expr::Tuple { elements, .. }) if elements.len() == types.len() => values
+                    .iter()
+                    .zip(types)
+                    .zip(elements)
+                    .all(|((value, ty), expression)| matches_value(value, ty, Some(expression))),
+                Some(_) => false,
+            }
+        }
+        Type::Record(types) => {
+            let Raw::Map(values) = value else {
+                return false;
+            };
+            if values.len() != types.len() {
+                return false;
+            }
+            let fields = match expression {
+                None => None,
+                Some(Expr::Record { fields, .. }) => Some(fields),
+                Some(_) => return false,
+            };
+            types.iter().all(|(name, ty)| {
+                let Some(value) = values.iter().find_map(|(key, value)| match key {
+                    Raw::Text(key) if key == name => Some(value),
+                    _ => None,
+                }) else {
+                    return false;
+                };
+                match fields {
+                    None => matches_value(value, ty, None),
+                    Some(fields) => fields
                         .iter()
                         .find(|field| field.name == *name)
-                        .map(|field| &field.value);
-                    matches!((value, expression), (Some(value), Some(expression))
-                        if matches_value(value, ty, expression))
-                })
-            }
-            _ => false,
-        },
+                        .is_some_and(|field| matches_value(value, ty, Some(&field.value))),
+                }
+            })
+        }
         // Source evaluation represents optional absence as bare `null`; its
         // OVB option wrapper is introduced only by a type-directed codec.
         Type::Optional(inner) => {
             matches!(value, Raw::Null) || matches_value(value, inner, expression)
         }
         // A Blob field admits a blob reference: its stored text, or a record that
-        // carries that text and the blob's length.
+        // carries that text and the blob's length. A stored compact blob slot
+        // holds its payload bytes, which loose source rows cannot express.
         Type::Named(name) if name == "Blob" => match value {
             Raw::Text(_) => true,
+            Raw::Bytes(_) => expression.is_none(),
             Raw::Map(entries) => {
                 entries.len() == 2
                     && entries.iter().any(|(key, item)| {
@@ -583,9 +770,9 @@ mod stored_reference_tests {
         let bare = Raw::Array(vec![Raw::Int(51.into()), Raw::Text("north".into())]);
         let tagged = Raw::Tag(60015, Box::new(bare.clone()));
 
-        assert!(matches_value(&tagged, &ty, expression));
+        assert!(matches_value(&tagged, &ty, Some(expression)));
         assert!(
-            !matches_value(&bare, &ty, expression),
+            !matches_value(&bare, &ty, Some(expression)),
             "a bare array in a tuple column must not admit"
         );
     }
@@ -615,11 +802,31 @@ mod stored_reference_tests {
         assert!(matches_value(
             &Raw::Text("blob-ref".into()),
             &ty,
-            expression
+            Some(expression)
         ));
-        assert!(matches_value(&record, &ty, expression));
-        assert!(!matches_value(&Raw::Int(3.into()), &ty, expression));
-        assert!(!matches_value(&without_length, &ty, expression));
-        assert!(!matches_value(&text_length, &ty, expression));
+        assert!(matches_value(&record, &ty, Some(expression)));
+        assert!(!matches_value(&Raw::Int(3.into()), &ty, Some(expression)));
+        assert!(!matches_value(&without_length, &ty, Some(expression)));
+        assert!(!matches_value(&text_length, &ty, Some(expression)));
+    }
+
+    #[test]
+    fn stored_shapes_are_checked_without_source_expressions() {
+        // Stored rows carry no source expression, so shape comes from the stored value.
+        let list = Type::List(Box::new(Type::Int));
+        assert!(matches_value(&Raw::Array(vec![Raw::Int(1.into())]), &list, None));
+        assert!(!matches_value(&Raw::Array(vec![Raw::Text("x".into())]), &list, None));
+        assert!(!matches_value(&Raw::Int(1.into()), &list, None));
+
+        let tuple = Type::Tuple(vec![Type::Int, Type::Text]);
+        let bare = Raw::Array(vec![Raw::Int(51.into()), Raw::Text("north".into())]);
+        assert!(matches_value(&Raw::Tag(60015, Box::new(bare.clone())), &tuple, None));
+        assert!(!matches_value(&bare, &tuple, None));
+
+        let record = Type::Record(BTreeMap::from([("n".to_owned(), Type::Int)]));
+        let stored = Raw::Map(vec![(Raw::Text("n".into()), Raw::Int(2.into()))]);
+        assert!(matches_value(&stored, &record, None));
+        let renamed = Raw::Map(vec![(Raw::Text("m".into()), Raw::Int(2.into()))]);
+        assert!(!matches_value(&renamed, &record, None));
     }
 }
