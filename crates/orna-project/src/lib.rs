@@ -1563,49 +1563,6 @@ impl ProjectLoader {
         )
     }
 
-    /// The stored-field names of table `table_object_id` in storage order, as the
-    /// source at `commit` declares it. Binds no relation, so a table that holds no
-    /// rows at `commit` still has its storage order.
-    pub fn resolve_committed_source_storage_order(
-        &self,
-        repository: &Repository,
-        commit: &GitCommitRef,
-        table_object_id: TableObjectId,
-    ) -> Result<Vec<String>, ProjectLoadError> {
-        let project = self.load_committed_snapshot(repository, commit)?;
-        let manifest = ObjectIdentityManifest::read_committed(repository, commit)
-            .map_err(|_| ProjectLoadError::InvalidTableSchema)?;
-        let context = repository
-            .open_pinned_format_context(commit.as_str())
-            .map_err(|_| ProjectLoadError::InvalidTableSchema)?;
-        let facts = source_table_facts(commit, &project, &manifest, &context, table_object_id)?;
-        source_storage_order(&facts.table)
-    }
-
-    /// Private-candidate variant of [`Self::resolve_committed_source_storage_order`].
-    pub fn resolve_private_candidate_source_storage_order(
-        &self,
-        repository: &Repository,
-        candidate: &PrivateCommit,
-        table_object_id: TableObjectId,
-    ) -> Result<Vec<String>, ProjectLoadError> {
-        let project = self.load_private_candidate(repository, candidate)?;
-        let manifest = ObjectIdentityManifest::read_private_candidate(repository, candidate)
-            .map_err(|_| ProjectLoadError::InvalidTableSchema)?
-            .ok_or(ProjectLoadError::InvalidTableSchema)?;
-        let context = repository
-            .open_private_candidate_format_context(candidate)
-            .map_err(|_| ProjectLoadError::InvalidTableSchema)?;
-        let facts = source_table_facts(
-            candidate.commit(),
-            &project,
-            &manifest,
-            &context,
-            table_object_id,
-        )?;
-        source_storage_order(&facts.table)
-    }
-
     /// Loads the root module and reachable imports from the immutable tree of
     /// a private publication candidate. The candidate capability, rather than
     /// a ref name or worktree path, is the source authority.
@@ -2053,15 +2010,6 @@ fn source_table_facts(
         database_id,
         table,
     })
-}
-
-/// The stored-field names of `table` in storage order, from its source descriptor.
-fn source_storage_order(
-    table: &SourceTableSchemaArtifact,
-) -> Result<Vec<String>, ProjectLoadError> {
-    let (_, storage_order) = stored_field_names(table.descriptor().raw())
-        .map_err(|_| ProjectLoadError::InvalidTableSchema)?;
-    Ok(storage_order)
 }
 
 /// Resolves one table against the identity `manifest` and format `context` of the

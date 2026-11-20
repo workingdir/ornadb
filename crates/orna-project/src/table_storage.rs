@@ -29,7 +29,10 @@ use orna_value::{
     decode_canonical_storage_value, encode_canonical_storage_value,
 };
 
-use crate::{ProjectLoadError, ProjectLoader, ResolvedTableSchema};
+use crate::{
+    ObjectIdentityManifest, ProjectLoadError, ProjectLoader, ResolvedTableSchema,
+    SourceTableSchemaArtifact, source_table_facts,
+};
 
 /// Committed table storage violates the descriptor or row contract.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -103,6 +106,51 @@ pub fn private_candidate_tables(
             loader.resolve_private_candidate_source_storage_order(repository, candidate, object_id)
         },
     )
+}
+
+impl ProjectLoader {
+    /// The stored-field names of table `table_object_id` in storage order, as the
+    /// source at `commit` declares it. Binds no relation, so a table that holds no
+    /// rows at `commit` still has its storage order.
+    pub fn resolve_committed_source_storage_order(
+        &self,
+        repository: &Repository,
+        commit: &GitCommitRef,
+        table_object_id: TableObjectId,
+    ) -> Result<Vec<String>, ProjectLoadError> {
+        let project = self.load_committed_snapshot(repository, commit)?;
+        let manifest = ObjectIdentityManifest::read_committed(repository, commit)
+            .map_err(|_| ProjectLoadError::InvalidTableSchema)?;
+        let context = repository
+            .open_pinned_format_context(commit.as_str())
+            .map_err(|_| ProjectLoadError::InvalidTableSchema)?;
+        let facts = source_table_facts(commit, &project, &manifest, &context, table_object_id)?;
+        source_storage_order(&facts.table)
+    }
+
+    /// Private-candidate variant of [`Self::resolve_committed_source_storage_order`].
+    pub fn resolve_private_candidate_source_storage_order(
+        &self,
+        repository: &Repository,
+        candidate: &PrivateCommit,
+        table_object_id: TableObjectId,
+    ) -> Result<Vec<String>, ProjectLoadError> {
+        let project = self.load_private_candidate(repository, candidate)?;
+        let manifest = ObjectIdentityManifest::read_private_candidate(repository, candidate)
+            .map_err(|_| ProjectLoadError::InvalidTableSchema)?
+            .ok_or(ProjectLoadError::InvalidTableSchema)?;
+        let context = repository
+            .open_private_candidate_format_context(candidate)
+            .map_err(|_| ProjectLoadError::InvalidTableSchema)?;
+        let facts = source_table_facts(
+            candidate.commit(),
+            &project,
+            &manifest,
+            &context,
+            table_object_id,
+        )?;
+        source_storage_order(&facts.table)
+    }
 }
 
 /// Shared reader behind [`committed_tables`] and [`private_candidate_tables`].
@@ -702,6 +750,15 @@ pub fn stored_field_names(descriptor: &Raw) -> Result<StoredFieldNames, TableSto
         }
     }
     Ok((by_id, in_storage_order))
+}
+
+/// The stored-field names of `table` in storage order, from its source descriptor.
+fn source_storage_order(
+    table: &SourceTableSchemaArtifact,
+) -> Result<Vec<String>, ProjectLoadError> {
+    let (_, storage_order) = stored_field_names(table.descriptor().raw())
+        .map_err(|_| ProjectLoadError::InvalidTableSchema)?;
+    Ok(storage_order)
 }
 
 /// Maps an evaluator (canonical) key to its runtime key.
