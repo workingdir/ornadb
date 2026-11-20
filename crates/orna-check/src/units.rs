@@ -779,6 +779,12 @@ pub(crate) fn type_of(ty: &TypeExpr) -> Type {
         } if path.as_slice() == ["Range"] && arguments.len() == 1 => {
             Type::Range(Box::new(type_of(&arguments[0])))
         }
+        // `List<T>` is written `[T]` (05-types.md): both spellings denote one list type.
+        TypeExpr::Name {
+            path, arguments, ..
+        } if path.as_slice() == ["List"] && arguments.len() == 1 => {
+            Type::List(Box::new(type_of(&arguments[0])))
+        }
         // Predicate<S> is the structural callable type `fn(S): Bool`
         // (standard library, Predicate<S>).
         TypeExpr::Name {

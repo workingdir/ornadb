@@ -656,7 +656,11 @@ impl DurableTransactionalEvaluator {
         }
         let mut successful_source =
             ListStreamSource::new(successful_key.clone(), successful_bridge.payloads.clone());
-        let mut successful_handler = ListTableHandler::new(successful_bridge, self.limits);
+        let mut successful_handler = ListTableHandler::new(
+            successful_bridge,
+            self.limits,
+            self.stored_references.clone(),
+        );
         let successful_step = successful_state
             .run_stream_once(
                 successful_writer,

@@ -905,6 +905,23 @@ mod tests {
         ));
     }
 
+    /// A compact field whose storage id names no stored field of the declared
+    /// relation fails closed.
+    #[test]
+    fn unknown_compact_field_fails_closed() {
+        let rows = LegacyTableRows::compact_for_tests(vec![LegacyRow::for_tests(
+            TypedKey::Text("carol".to_owned()),
+            vec![LegacyField::for_tests(
+                LegacyFieldName::ObjectId([0xDD; 16]),
+                text("Caz"),
+            )],
+        )]);
+        let address = LegacyTableAddress::Relation(TABLE);
+        let error = migration_row_input(&declared(), &[LegacyTable::new(&address, &rows)])
+            .expect_err("a compact field that no stored field carries fails closed");
+        assert!(matches!(error, MigrationRowError::UnknownField { .. }));
+    }
+
     /// A compact and an editable source for one relation are a cross-source
     /// conflict, refused through the whole mapping.
     #[test]

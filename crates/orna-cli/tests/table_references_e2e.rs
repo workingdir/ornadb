@@ -55,6 +55,16 @@ pub fn dangling_spare() { let ghost = Owner.insert({ id: "ghost", name: "Ghost" 
 pub fn main() {}
 "#;
 
+/// The stream-driven twin of [`OPTIONAL_SOURCE`]: `ingest` inserts a row whose
+/// optional reference is absent, through the stream path of `orna run`.
+const STREAM_OPTIONAL_SOURCE: &str = r#"pub table Owner(id: Str) { name: Str, }
+pub table Vehicle(id: Str) { label: Str, spare: Owner?, }
+pub type Delivery { pub id: Str, pub name: Str, }
+pub fn deliveries() = Stream.from_list([Delivery { id: "v1", name: "Estate" }], source_identity: "garage:deliveries:v1");
+pub fn ingest() { deliveries() | for_each(d => { Vehicle.insert({ id: d.id, label: d.name, spare: null }); }); }
+pub fn main() {}
+"#;
+
 /// Keeps the host's Git configuration and repository routing out of every
 /// process this test starts.
 fn isolate_git(command: &mut Command) {
@@ -496,6 +506,22 @@ fn an_optional_reference_is_stored_when_present_and_checked_when_present() {
         "ORNA-REF-DANGLING",
         "a dangling optional reference",
     );
+}
+
+/// A stream run that writes a row with an absent optional reference. The stream
+/// path checks each written row against its references, and an absent optional
+/// reference names no row, so the invocation completes.
+#[test]
+fn a_stream_run_writes_an_absent_optional_reference_and_completes() {
+    let database = committed_database(STREAM_OPTIONAL_SOURCE);
+    let root = database.root();
+    let ingested = orna(&root, &["run", "main.ingest"]);
+    assert_success(
+        &ingested,
+        "orna run of a stream that writes an absent optional reference",
+    );
+    assert_eq!(ingested.stdout, b"invocation completed\n");
+    assert!(ingested.stderr.is_empty(), "{}", transcript(&ingested));
 }
 
 /// A table declared in a non-root module, `shop/owners.orna`, read through the

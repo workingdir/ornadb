@@ -207,6 +207,16 @@ pub enum LegacyReadError {
     /// specification gives no precedence between them, so the read refuses
     /// rather than merging or choosing (ADR 0121 D4).
     CrossSourceConflict { relation: String },
+    /// One loose row of an editable table fails admission against its declared
+    /// table schema (UPGRADE-3 step 3; ADR 0121). `unit` is the repository path
+    /// of the row unit refused on its own, when one is isolated; `code` is the
+    /// admission diagnostic's stable code. The read refuses rather than decoding
+    /// the row unchecked.
+    RowNotAdmitted {
+        table: String,
+        unit: Option<String>,
+        code: String,
+    },
 }
 
 impl std::fmt::Display for LegacyReadError {
@@ -245,6 +255,22 @@ impl std::fmt::Display for LegacyReadError {
             Self::CrossSourceConflict { relation } => write!(
                 formatter,
                 "relation {relation} holds rows in both its compact and its loose source; no precedence between them is specified"
+            ),
+            Self::RowNotAdmitted {
+                table,
+                unit: Some(unit),
+                code,
+            } => write!(
+                formatter,
+                "the loose row unit {unit:?} of table {table} is not admitted by its declared schema ({code})"
+            ),
+            Self::RowNotAdmitted {
+                table,
+                unit: None,
+                code,
+            } => write!(
+                formatter,
+                "a loose row of table {table} is not admitted by its declared schema ({code})"
             ),
         }
     }
@@ -364,9 +390,9 @@ fn legacy_compact_fields(value: &Raw) -> Result<Vec<LegacyField>, LegacyReadErro
 
 /// One committed loose row unit: its repository-relative path and the key-path
 /// components after the table directory.
-struct LooseRowUnit {
-    path: String,
-    key_path: Vec<String>,
+pub(crate) struct LooseRowUnit {
+    pub(crate) path: String,
+    pub(crate) key_path: Vec<String>,
 }
 
 /// Every loose row unit the commit tracks under `table_path`, in path order.
@@ -431,11 +457,13 @@ pub(crate) fn loose_row_unit_paths(
     }
 }
 
-fn read_loose_table_rows(
+/// Reads the committed bytes of every loose row unit under `table_path`, in
+/// path order, within the project loader's source budget.
+pub(crate) fn read_loose_table_units(
     repository: &Repository,
     commit: &GitCommitRef,
     table_path: &str,
-) -> Result<LegacyTableRows, LegacyReadError> {
+) -> Result<Vec<(LooseRowUnit, Vec<u8>)>, LegacyReadError> {
     let mut total_bytes = 0usize;
     let budget = ProjectLimits::default().max_source_bytes;
     let mut sources = Vec::new();
@@ -445,6 +473,15 @@ fn read_loose_table_rows(
         total_bytes += bytes.len();
         sources.push((unit, bytes));
     }
+    Ok(sources)
+}
+
+fn read_loose_table_rows(
+    repository: &Repository,
+    commit: &GitCommitRef,
+    table_path: &str,
+) -> Result<LegacyTableRows, LegacyReadError> {
+    let sources = read_loose_table_units(repository, commit, table_path)?;
     decode_loose_rows(table_path, sources)
 }
 
@@ -452,7 +489,7 @@ fn read_loose_table_rows(
 /// table's rows (ORNA-ROW-001..005). It reads no source: the caller supplies
 /// every unit's path, key path and bytes, so the parse, lowering, key
 /// reconstruction and the one-row-per-key check are one pure path.
-fn decode_loose_rows(
+pub(crate) fn decode_loose_rows(
     table_path: &str,
     sources: Vec<(LooseRowUnit, Vec<u8>)>,
 ) -> Result<LegacyTableRows, LegacyReadError> {
@@ -612,6 +649,14 @@ impl LegacyTableRows {
     pub(crate) fn loose_for_tests(rows: Vec<LegacyRow>) -> Self {
         Self {
             source: LegacyRowSource::LooseRowUnit,
+            rows,
+        }
+    }
+
+    /// A compact table of `rows` for tests of the row mapping.
+    pub(crate) fn compact_for_tests(rows: Vec<LegacyRow>) -> Self {
+        Self {
+            source: LegacyRowSource::Compact,
             rows,
         }
     }

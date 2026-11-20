@@ -257,6 +257,20 @@ impl ReferenceCatalogue {
         self.targets.get(table).map(|shape| shape.key_fields.len())
     }
 
+    /// The tables the reference columns of `table` name, each once, in column
+    /// order. Checking a row of `table` reads these tables' candidate rows
+    /// (ORNA-MUT-007), so a candidate state for `table` must include them.
+    #[must_use]
+    pub fn reference_targets(&self, table: &str) -> Vec<String> {
+        let mut targets: Vec<String> = Vec::new();
+        for column in self.columns.get(table).into_iter().flatten() {
+            if !targets.contains(&column.target) {
+                targets.push(column.target.clone());
+            }
+        }
+        targets
+    }
+
     /// Decodes the stored reference `reference` (tag 60021) when it names this
     /// catalogue's database and a referenced table.
     #[must_use]

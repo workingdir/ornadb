@@ -7,8 +7,11 @@
 //! declared relations are built from the committed object identities, and each
 //! declared table's legacy rows are read from the same snapshot.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
+use orna_check::Analysis;
+use orna_evaluator::Limits;
+use orna_evaluator::row_admission::{RowAdmissionIdentity, RowSource, admit_row_sources};
 use orna_project::{ObjectIdentityManifest, ProjectLoader};
 use orna_repository::migration_copy::{
     CandidateGate, MigrationStore, RetiredLegacyKind, RetiredLegacyPath,
@@ -20,8 +23,8 @@ use orna_repository::{
 
 use crate::format3_store::build_format3_store_relations;
 use crate::legacy_store::{
-    LegacyReadError, LegacyTableAddress, LegacyTableRows, loose_row_unit_paths,
-    read_legacy_table_rows,
+    LegacyReadError, LegacyTableAddress, LegacyTableRows, LooseRowUnit, decode_loose_rows,
+    loose_row_unit_paths, read_legacy_table_rows, read_loose_table_units,
 };
 use crate::migration_rows::{
     ExpectedRelation, Format2BlobReader, LegacyTable, migration_row_input_with_format2_blobs,
@@ -44,6 +47,10 @@ const DATABASE_RECORD: &str = ".orna/database.orna";
 /// The legacy format marker a migration drops; never retired as a file.
 const LEGACY_FORMAT_RECORD: &str = ".orna/format.orna";
 
+/// The project id that names the migration's loose-row source units for
+/// admission. Each row's source path is `{id}/{table path}/{key}.orna`.
+const MIGRATION_ROW_SOURCE_PROJECT: &str = "migration-source";
+
 /// Builds the [`MigrationStore`] of the source repository's committed head for
 /// the destination `database`.
 ///
@@ -57,6 +64,7 @@ pub fn build_migration_store(
     let (mut store, expectation) = build_store_with_expectation(repository, database)?;
     store.candidate_gate = Some(CandidateGate::new(move |repository, candidate| {
         verify_candidate(repository, candidate, &expectation)
+            .map_err(RepositoryError::MigrationStoreRefused)
     }));
     Ok(store)
 }
@@ -157,9 +165,25 @@ pub(crate) fn build_store_with_expectation(
         addresses.push(LegacyTableAddress::TablePath(path.to_owned()));
     }
 
+    let module_sources: Vec<&str> = project
+        .modules()
+        .iter()
+        .map(|module| module.source.as_str())
+        .collect();
     let mut rows = Vec::with_capacity(addresses.len());
     for address in &addresses {
-        rows.push(match read_legacy_table_rows(repository, &commit, address) {
+        let table_rows = match address {
+            LegacyTableAddress::Relation(_) => read_legacy_table_rows(repository, &commit, address),
+            LegacyTableAddress::TablePath(path) => read_admitted_loose_rows(
+                repository,
+                &commit,
+                path,
+                &module_sources,
+                &analysis,
+                *database.as_bytes(),
+            ),
+        };
+        rows.push(match table_rows {
             Ok(table_rows) => table_rows,
             // An editable table with no directory in the snapshot has no rows.
             Err(LegacyReadError::MissingTablePath(_)) => LegacyTableRows::absent_loose(),
@@ -261,6 +285,129 @@ pub(crate) fn build_store_with_expectation(
     ))
 }
 
+/// Reads one editable table's loose row units and admits every unit against the
+/// table's declared schema before any unit is decoded (UPGRADE-3 step 3; ADR
+/// 0121). One refused row refuses the whole read.
+fn read_admitted_loose_rows(
+    repository: &Repository,
+    commit: &orna_repository::GitCommitRef,
+    table_path: &str,
+    module_sources: &[&str],
+    analysis: &Analysis,
+    database_id: [u8; 16],
+) -> Result<LegacyTableRows, LegacyReadError> {
+    let units = read_loose_table_units(repository, commit, table_path)?;
+    admit_loose_units(table_path, &units, module_sources, analysis, database_id)?;
+    decode_loose_rows(table_path, units)
+}
+
+/// Admits every loose row unit of `table_path` against the project's declared
+/// table schemas (ADR 0121). Each unit is one source of the admission project,
+/// named by its repository path, keeping the `.orna` suffix that the key decoder
+/// reads. Any unit that is not admitted refuses the table. The table-wide
+/// diagnostic does not name a unit, so the first unit refused when admitted
+/// alone is named in the refusal.
+fn admit_loose_units(
+    table_path: &str,
+    units: &[(LooseRowUnit, Vec<u8>)],
+    module_sources: &[&str],
+    analysis: &Analysis,
+    database_id: [u8; 16],
+) -> Result<(), LegacyReadError> {
+    let source_ids: Vec<String> = units
+        .iter()
+        .map(|(unit, _)| format!("{MIGRATION_ROW_SOURCE_PROJECT}/{}", unit.path))
+        .collect();
+    let texts = units
+        .iter()
+        .map(|(unit, bytes)| {
+            std::str::from_utf8(bytes)
+                .map_err(|_| LegacyReadError::UndecodableRowUnit(unit.path.clone()))
+        })
+        .collect::<Result<Vec<&str>, _>>()?;
+    let rows: Vec<RowSource<'_>> = source_ids
+        .iter()
+        .zip(texts)
+        .map(|(source_id, source)| RowSource {
+            source_id: source_id.as_str(),
+            source,
+        })
+        .collect();
+    let identity = RowAdmissionIdentity {
+        database_id,
+        tables: BTreeMap::new(),
+    };
+    let Err(diagnostic) = admit_row_sources(
+        MIGRATION_ROW_SOURCE_PROJECT,
+        module_sources,
+        analysis,
+        &rows,
+        &identity,
+        Limits::default(),
+    ) else {
+        return Ok(());
+    };
+    let unit = rows.iter().zip(units).find_map(|(row, (unit, _))| {
+        admit_row_sources(
+            MIGRATION_ROW_SOURCE_PROJECT,
+            module_sources,
+            analysis,
+            std::slice::from_ref(row),
+            &identity,
+            Limits::default(),
+        )
+        .err()
+        .map(|_| unit.path.clone())
+    });
+    Err(LegacyReadError::RowNotAdmitted {
+        table: table_path.to_owned(),
+        unit,
+        code: diagnostic.code().to_owned(),
+    })
+}
+
 fn refused(detail: impl Into<String>) -> RepositoryError {
     RepositoryError::MigrationStoreRefused(detail.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use orna_check::{ModuleInput, analyze};
+
+    use super::{LegacyReadError, LooseRowUnit, admit_loose_units};
+
+    /// One root table `Note` keyed by an integer, with one stored text field.
+    const NOTE_MODULE: &str = "pub table Note(id: Int) {\n    text: Str,\n}\n";
+
+    /// The one loose row of `Note` at key `1`, carrying `source` as its body.
+    fn note_row(source: &str) -> Vec<(LooseRowUnit, Vec<u8>)> {
+        let unit = LooseRowUnit {
+            path: "Note/1.orna".to_owned(),
+            key_path: vec!["1.orna".to_owned()],
+        };
+        vec![(unit, source.as_bytes().to_vec())]
+    }
+
+    #[test]
+    fn a_row_whose_fields_match_its_declared_table_is_admitted() {
+        let analysis = analyze(&[ModuleInput::new("main.orna", NOTE_MODULE)]);
+        assert!(analysis.is_ok(), "the Note module analyses");
+        let units = note_row("{ text: \"Alpha\", }\n");
+        admit_loose_units("Note", &units, &[NOTE_MODULE], &analysis, [0; 16])
+            .expect("a row that matches its declared table is admitted");
+    }
+
+    #[test]
+    fn a_row_with_a_field_its_table_does_not_declare_is_refused() {
+        let analysis = analyze(&[ModuleInput::new("main.orna", NOTE_MODULE)]);
+        let units = note_row("{ text: \"Alpha\", nickname: \"Al\", }\n");
+        match admit_loose_units("Note", &units, &[NOTE_MODULE], &analysis, [0; 16]) {
+            Err(LegacyReadError::RowNotAdmitted { table, unit, code }) => {
+                assert_eq!(table, "Note");
+                assert_eq!(unit.as_deref(), Some("Note/1.orna"));
+                assert_eq!(code, "ORNA-CONFORMANCE-ROW-UNKNOWN");
+            }
+            other => panic!("a row with an undeclared field is refused: {other:?}"),
+        }
+    }
 }

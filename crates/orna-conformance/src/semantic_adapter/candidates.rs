@@ -489,6 +489,13 @@ pub(super) struct ListTableCandidateValidator {
     /// Shared with the handler that built this validator; holds the site of the
     /// assertion that refused the item (ORNA-ASSERT-051).
     pub(super) assertion_refusal: Arc<Mutex<Option<String>>>,
+    /// The stored-reference catalogue the written row is checked against; `None`
+    /// when the table declares no reference columns (ORNA-REF-001).
+    pub(super) references: Option<Arc<orna_project::ReferenceCatalogue>>,
+    /// The primary key the item wrote, the row the reference rules check.
+    pub(super) written_key: Vec<u8>,
+    /// The table schemas the reference rules read, shared with the bridge.
+    pub(super) schemas: Arc<ListStreamSchemas>,
 }
 
 impl ListTableCandidateValidator {
@@ -496,12 +503,17 @@ impl ListTableCandidateValidator {
         bridge: &ListStreamBridge,
         limits: EvaluatorLimits,
         assertion_refusal: Arc<Mutex<Option<String>>>,
+        references: Option<Arc<orna_project::ReferenceCatalogue>>,
+        written_key: Vec<u8>,
     ) -> Result<Self, String> {
         let module_assertions =
             applicable_module_assertions(&bridge.table, &bridge.module_assertions)?;
         let mut tables = BTreeSet::from([bridge.table.clone()]);
         for assertion in &module_assertions {
             tables.extend(concrete_dependency_tables(&assertion.dependencies));
+        }
+        if let Some(references) = &references {
+            tables.extend(references.reference_targets(&bridge.table));
         }
         Ok(Self {
             table: bridge.table.clone(),
@@ -511,6 +523,9 @@ impl ListTableCandidateValidator {
             limits,
             tables: tables.into_iter().collect(),
             assertion_refusal,
+            references,
+            written_key,
+            schemas: Arc::clone(&bridge.schemas),
         })
     }
 
@@ -646,12 +661,27 @@ impl StreamTableCandidateValidator for ListTableCandidateValidator {
             self.check_module_assertion(assertion, rows, &mut budget)
                 .map_err(|diagnostic| self.refuse(assertion, diagnostic))?;
         }
+        if let Some(references) = &self.references {
+            validate_written_row_references(
+                references,
+                &self.table,
+                &self.written_key,
+                &self.schemas.keys,
+                &self.schemas.table_fields,
+                &self.schemas.key_names,
+                rows,
+            )?;
+        }
         Ok(())
     }
 }
 
 impl ListTableHandler {
-    pub(super) fn new(bridge: ListStreamBridge, limits: EvaluatorLimits) -> Self {
+    pub(super) fn new(
+        bridge: ListStreamBridge,
+        limits: EvaluatorLimits,
+        references: Option<Arc<orna_project::ReferenceCatalogue>>,
+    ) -> Self {
         Self {
             bridge,
             limits,
@@ -659,6 +689,7 @@ impl ListTableHandler {
             digest: [9; 32],
             refusal: None,
             assertion_refusal: Arc::new(Mutex::new(None)),
+            references,
         }
     }
 }
@@ -671,6 +702,13 @@ impl StreamHandler for ListTableHandler {
         };
         let row = match evaluate_list_item_row(&self.bridge, &value, self.limits) {
             Ok(row) => row,
+            Err(error) => {
+                self.refusal = Some(item_evaluation_refusal(&self.bridge, &error));
+                return StreamHandlerResult::Fail(stream_handler_diagnostic());
+            }
+        };
+        let row = match bind_stored_row(self.references.as_deref(), &self.bridge.table, &row) {
+            Ok(bound) => bound.unwrap_or(row),
             Err(error) => {
                 self.refusal = Some(item_evaluation_refusal(&self.bridge, &error));
                 return StreamHandlerResult::Fail(stream_handler_diagnostic());
@@ -691,6 +729,7 @@ impl StreamHandler for ListTableHandler {
             Ok(encoded) => encoded,
             Err(_) => return StreamHandlerResult::Fail(stream_handler_diagnostic()),
         };
+        let written_key = key.clone();
         let mutation = match TableMutation::new(id, &self.bridge.table, key, Some(encoded)) {
             Ok(mutation) => mutation,
             Err(_) => return StreamHandlerResult::Fail(stream_handler_diagnostic()),
@@ -708,6 +747,8 @@ impl StreamHandler for ListTableHandler {
             &self.bridge,
             self.limits,
             Arc::clone(&self.assertion_refusal),
+            self.references.clone(),
+            written_key,
         ) {
             Ok(validator) => Box::new(validator),
             Err(_) => {
