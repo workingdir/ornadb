@@ -92,24 +92,28 @@ pub struct MigrationStore {
 }
 
 /// The check a [`CandidateGate`] runs over the admitted migration candidate.
-type CandidateCheck = dyn Fn(&Repository, &PrivateCommit) -> Result<(), String>;
+type CandidateCheck = dyn Fn(&Repository, &PrivateCommit) -> Result<(), RepositoryError>;
 
 /// A check over the admitted migration candidate, supplied with its store. The
-/// migration refuses the candidate with the check's message when it fails.
+/// migration refuses the candidate with the check's error when it fails.
 #[derive(Clone)]
 pub struct CandidateGate(Arc<CandidateCheck>);
 
 impl CandidateGate {
     /// Wraps `check`, which receives the repository and the admitted candidate.
     pub fn new(
-        check: impl Fn(&Repository, &PrivateCommit) -> Result<(), String> + 'static,
+        check: impl Fn(&Repository, &PrivateCommit) -> Result<(), RepositoryError> + 'static,
     ) -> Self {
         Self(Arc::new(check))
     }
 
     /// Runs the check over `candidate`, the way the migration does before it
     /// accepts the candidate.
-    pub fn check(&self, repository: &Repository, candidate: &PrivateCommit) -> Result<(), String> {
+    pub fn check(
+        &self,
+        repository: &Repository,
+        candidate: &PrivateCommit,
+    ) -> Result<(), RepositoryError> {
         (self.0)(repository, candidate)
     }
 }
@@ -1751,9 +1755,7 @@ fn build_migration_candidate(
         .collect();
     refuse_tracked_loose_rows(&tracked, &store.retired)?;
     match &store.candidate_gate {
-        Some(gate) => gate
-            .check(repository, &candidate)
-            .map_err(RepositoryError::MigrationStoreRefused)?,
+        Some(gate) => gate.check(repository, &candidate)?,
         None if !store.relations.is_empty() => {
             return Err(RepositoryError::MigrationStoreRefused(
                 "a migration with declared relations has no candidate gate".to_owned(),

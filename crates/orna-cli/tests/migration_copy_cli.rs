@@ -637,7 +637,7 @@ fn cli_migration_copy_prepares_a_populated_format_two_source() {
     let parent = TempDir::new().unwrap();
     let source = parent.path().join("source");
     fs::create_dir(&source).unwrap();
-    initialize_populated_format_two_source(&source);
+    initialize_populated_format_two_source(&source, POPULATED_CONTACT_MAIN);
     let source_status = git_output(
         &source,
         &["status", "--porcelain=v2", "--untracked-files=all"],
@@ -645,7 +645,7 @@ fn cli_migration_copy_prepares_a_populated_format_two_source() {
     let git_trace = parent.path().join("git-trace.log");
 
     let first = parent.path().join("first");
-    let output = run_copy(&source, &first, "0", &git_trace);
+    let output = run_copy(&source, &first, "1", &git_trace);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "{stderr}");
     let stdout = String::from_utf8(output.stdout).unwrap();
@@ -656,7 +656,7 @@ fn cli_migration_copy_prepares_a_populated_format_two_source() {
 
     let second = parent.path().join("second");
     let second_trace = parent.path().join("git-trace-second.log");
-    let output = run_copy(&source, &second, "0", &second_trace);
+    let output = run_copy(&source, &second, "1", &second_trace);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "{stderr}");
 
@@ -715,7 +715,7 @@ fn cli_migration_copy_preserves_a_dirty_format_two_workspace_and_old_commit_byte
     let source = parent.path().join("source");
     fs::create_dir(&source).unwrap();
     fs::write(source.join("tracked.txt"), b"committed bytes\n").unwrap();
-    initialize_populated_format_two_source(&source);
+    initialize_populated_format_two_source(&source, POPULATED_CONTACT_MAIN);
 
     let (source_head, committed_bytes) = commit_dependency_submodule(parent.path(), &source);
 
@@ -740,7 +740,7 @@ fn cli_migration_copy_preserves_a_dirty_format_two_workspace_and_old_commit_byte
 
     let destination = parent.path().join("migrated");
     let git_trace = parent.path().join("git-trace.log");
-    let output = run_copy(&source, &destination, "0", &git_trace);
+    let output = run_copy(&source, &destination, "1", &git_trace);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "{stderr}");
 
@@ -831,19 +831,20 @@ fn commit_dependency_submodule(parent: &Path, source: &Path) -> (String, Vec<u8>
     (source_head, committed_bytes)
 }
 
+const POPULATED_CONTACT_MAIN: &str = "pub table Contact(id: Str) {\n    name: Str,\n    avatar: Blob,\n}\n";
+
 /// Commits a format-2 source with one populated Contact table: the module, one
 /// loose row unit carrying an inline ORR-2 Blob, the format-2 record and the
 /// legacy sidecar.
-fn initialize_populated_format_two_source(root: &Path) {
-    const MAIN: &str = "pub table Contact(id: Str) {\n    name: Str,\n    avatar: Blob,\n}\n";
+fn initialize_populated_format_two_source(root: &Path, main: &str) {
     const ALICE: &str = "{\n    name: \"Alice Smith\",\n    avatar: \"aGVsbG8=\",\n}\n";
     git_output(root, &["init", "-b", "main"]);
     git_output(root, &["config", "user.name", "kierandrewett"]);
     git_output(root, &["config", "user.email", "kieran@drewett.dev"]);
     git_output(root, &["config", "commit.gpgsign", "false"]);
-    fs::write(root.join("main.orna"), MAIN).unwrap();
-    fs::create_dir_all(root.join("contacts/Contact")).unwrap();
-    fs::write(root.join("contacts/Contact/alice-smith.orna"), ALICE).unwrap();
+    fs::write(root.join("main.orna"), main).unwrap();
+    fs::create_dir_all(root.join("Contact")).unwrap();
+    fs::write(root.join("Contact/alice-smith.orna"), ALICE).unwrap();
     fs::create_dir_all(root.join(".orna")).unwrap();
     fs::write(
         root.join(".orna/format.orna"),
@@ -2150,4 +2151,62 @@ fn cli_upgrade_refuses_a_symlink_in_place_of_a_migrated_loose_row() {
     );
     assert!(journal_is_present(&destination), "the journal is kept");
     assert_eq!(git_output(&destination, &["rev-parse", "HEAD"]), copy_head);
+}
+
+/// A table assertion that the admitted legacy row `Alice Smith` violates refuses
+/// the copy with ORNA-A091-009 before any candidate is created; the source is
+/// unchanged.
+#[test]
+fn cli_migration_copy_refuses_a_false_table_assertion_over_an_admitted_legacy_row() {
+    const MAIN: &str = "pub table Contact(id: Str) {\n    name: Str,\n    avatar: Blob,\n    assert every(contact => contact.name != \"Alice Smith\");\n}\n";
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    fs::create_dir(&source).unwrap();
+    initialize_populated_format_two_source(&source, MAIN);
+    let head_before = git_output(&source, &["rev-parse", "HEAD"]);
+    let status_before = git_output(
+        &source,
+        &["status", "--porcelain=v2", "--untracked-files=all"],
+    );
+    let git_trace = parent.path().join("git-trace.log");
+
+    let destination = parent.path().join("migrated");
+    let output = run_copy(&source, &destination, "1", &git_trace);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(stderr.contains("ORNA-A091-009"), "{stderr}");
+    assert!(stderr.contains("is false over the migrated rows"), "{stderr}");
+    assert!(!destination.exists(), "no candidate is created");
+    assert_eq!(git_output(&source, &["rev-parse", "HEAD"]), head_before);
+    assert_eq!(
+        git_output(
+            &source,
+            &["status", "--porcelain=v2", "--untracked-files=all"]
+        ),
+        status_before,
+        "the source worktree is unchanged"
+    );
+}
+
+/// A table assertion that every admitted legacy row satisfies does not refuse
+/// the copy: the populated source prepares and journals its candidate.
+#[test]
+fn cli_migration_copy_holding_table_assertion_prepares_the_populated_source() {
+    const MAIN: &str = "pub table Contact(id: Str) {\n    name: Str,\n    avatar: Blob,\n    assert every(contact => contact.name != \"\");\n}\n";
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    fs::create_dir(&source).unwrap();
+    initialize_populated_format_two_source(&source, MAIN);
+    let git_trace = parent.path().join("git-trace.log");
+
+    let destination = parent.path().join("migrated");
+    let output = run_copy(&source, &destination, "1", &git_trace);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.starts_with("prepared or recovered format-3 migration copy: source_format=2 "),
+        "{stdout}"
+    );
+    assert!(journal_is_present(&destination), "the candidate is journaled");
 }

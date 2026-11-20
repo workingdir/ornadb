@@ -1,7 +1,7 @@
 //! The CLI's production candidate assertion gate (ORNA-ASSERT-042, ORNA-ASSERT-044,
-//! ORNA-ASSERT-045, ORNA-ASSERT-048). `orna commit` and `orna publish` both
-//! refuse a candidate through this one gate before any ref, pin or journal
-//! names it. A checkout target is checked by the same validator through
+//! ORNA-ASSERT-045, ORNA-ASSERT-048). `orna commit`, `orna publish` and the
+//! migration copy refuse a candidate through this one gate before any ref, pin
+//! or journal names it. A checkout target is checked by the same validator through
 //! `validate_committed_target`, so no command disagrees about what an admitted
 //! assertion means.
 
@@ -30,6 +30,31 @@ impl CandidateAssertionGate for AssertionGate {
     }
 }
 
+/// Builds the migration store of `staged` (UPGRADE-3 step 3). The candidate
+/// must pass the migration's own check, then every admitted table and module
+/// assertion over its own rows: a false assertion over an admitted legacy row
+/// refuses the copy before any ref moves (ORNA-ASSERT-042, ORNA-ASSERT-051).
+pub(crate) fn migration_store(
+    staged: &orna_repository::Repository,
+    database: orna_repository::DatabaseId,
+) -> Result<orna_repository::migration_copy::MigrationStore, orna_repository::RepositoryError> {
+    let mut store = orna_application::build_migration_store(staged, database)?;
+    let migration_check = store.candidate_gate.take();
+    store.candidate_gate = Some(orna_repository::migration_copy::CandidateGate::new(
+        move |repository, candidate| {
+            if let Some(check) = &migration_check {
+                check.check(repository, candidate)?;
+            }
+            AssertionGate {
+                command: GatedCommand::Migrate,
+            }
+            .validate(repository, candidate)
+            .map_err(orna_repository::RepositoryError::CandidateAssertionRefused)
+        },
+    ));
+    Ok(store)
+}
+
 /// The command whose assertion gate refused a candidate. Its remedy names the
 /// retry of that command and what the refusal left unchanged.
 #[derive(Clone, Copy)]
@@ -37,6 +62,7 @@ pub(crate) enum GatedCommand {
     Commit,
     Publish,
     Checkout,
+    Migrate,
 }
 
 impl GatedCommand {
@@ -48,6 +74,7 @@ impl GatedCommand {
             Self::Commit => "staged",
             Self::Publish => "pending",
             Self::Checkout => "target",
+            Self::Migrate => "migrated",
         }
     }
 }
@@ -189,7 +216,8 @@ fn validate_candidate_assertions(
     let project = orna_project::ProjectLoader::default()
         .load_private_candidate(repository, candidate)
         .map_err(|_| unvalidated(&format!("{word} project could not be loaded")))?;
-    if !orna_conformance::project_declares_assertions(&project) {
+    let declares = orna_conformance::project_declares_assertions(&project);
+    if !declares {
         return Ok(());
     }
     let (table_names, schemas) =
@@ -345,6 +373,9 @@ pub(crate) fn refusal_diagnostic(
                 GatedCommand::Checkout => {
                     "change the target commit's source or rows so every assertion holds, then retry the checkout; HEAD and the working tree were not changed"
                 }
+                GatedCommand::Migrate => {
+                    "change the legacy rows or source so every assertion holds, then retry `orna migrate copy`; no copy was prepared and the source is unchanged"
+                }
             };
             ("ORNA-A091-009", title, help)
         }
@@ -358,6 +389,9 @@ pub(crate) fn refusal_diagnostic(
                 }
                 GatedCommand::Checkout => {
                     "fix the target commit's source or store, then retry the checkout; HEAD and the working tree were not changed"
+                }
+                GatedCommand::Migrate => {
+                    "fix the legacy source or store, then retry `orna migrate copy`; no copy was prepared and the source is unchanged"
                 }
             };
             (
