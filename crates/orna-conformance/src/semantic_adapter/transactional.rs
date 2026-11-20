@@ -419,16 +419,6 @@ pub(super) fn stored_row_record(
     if components.len() != key_names.len() {
         return Err(RuntimeError::InvalidTableMutation);
     }
-    let mut entries: Vec<(orna_value::Raw, orna_value::Raw)> = Vec::new();
-    for (name, component) in key_names.iter().zip(components) {
-        let value = orna_value::Value::decode(
-            &component
-                .encode()
-                .map_err(|_| RuntimeError::InvalidTableMutation)?,
-        )
-        .map_err(|_| RuntimeError::InvalidTableMutation)?;
-        entries.push((orna_value::Raw::Text((*name).clone()), value.raw().clone()));
-    }
     let positional = match row.raw() {
         orna_value::Raw::Array(values) => values.clone(),
         other => vec![other.clone()],
@@ -439,6 +429,20 @@ pub(super) fn stored_row_record(
         .collect();
     if positional.len() != remaining.len() {
         return Err(RuntimeError::InvalidTableMutation);
+    }
+    // The record has exactly one entry per key field and per remaining field,
+    // so it is sized to that count rather than grown from an empty Vec, which
+    // would keep spare capacity for the life of the stored row.
+    let mut entries: Vec<(orna_value::Raw, orna_value::Raw)> =
+        Vec::with_capacity(key_names.len() + remaining.len());
+    for (name, component) in key_names.iter().zip(components) {
+        let value = orna_value::Value::decode(
+            &component
+                .encode()
+                .map_err(|_| RuntimeError::InvalidTableMutation)?,
+        )
+        .map_err(|_| RuntimeError::InvalidTableMutation)?;
+        entries.push((orna_value::Raw::Text((*name).clone()), value.raw().clone()));
     }
     for (name, value) in remaining.iter().zip(positional) {
         entries.push((orna_value::Raw::Text((*name).clone()), value));
@@ -451,14 +455,18 @@ pub(super) fn stored_row_record(
     // sorts by its length first and then by its bytes: "id" precedes "title"
     // precedes "artist" (bead ornadb-jm0d).
     entries.sort_by(|left, right| {
-        let name = |entry: &(orna_value::Raw, orna_value::Raw)| match &entry.0 {
-            orna_value::Raw::Text(name) => name.clone(),
-            _ => String::new(),
-        };
-        let (left, right) = (name(left), name(right));
-        left.len().cmp(&right.len()).then_with(|| left.cmp(&right))
+        let (left, right) = (canonical_name(left), canonical_name(right));
+        left.len().cmp(&right.len()).then_with(|| left.cmp(right))
     });
     Value::new(orna_value::Raw::Map(entries)).map_err(|_| RuntimeError::InvalidTableMutation)
+}
+
+/// The field name of a rebuilt record entry, borrowed so sorting does not copy it.
+fn canonical_name(entry: &(orna_value::Raw, orna_value::Raw)) -> &str {
+    match &entry.0 {
+        orna_value::Raw::Text(name) => name.as_str(),
+        _ => "",
+    }
 }
 
 impl Default for TransactionalEvaluator {
