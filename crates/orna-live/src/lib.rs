@@ -3002,8 +3002,24 @@ impl LiveHost {
     ///
     /// Returns attachment, security, serving, and response validation errors
     /// as produced by the frame pipeline; see `Self::complete`.
+    pub fn dispatch_frame<'a, A>(
+        &'a mut self,
+        attachment: [u8; 16],
+        now: u64,
+        frame: Frame,
+        application: &'a mut A,
+    ) -> Pin<Box<dyn Future<Output = Result<DispatchOutcome>> + 'a>>
+    where
+        A: LiveApplication + 'a,
+    {
+        // The frame pipeline future is large. Boxing it keeps every caller's
+        // stack frame constant; a debug-build caller that awaits many frames,
+        // such as the test thread, would otherwise reserve each one inline.
+        Box::pin(self.dispatch_frame_inner(attachment, now, frame, application))
+    }
+
     #[allow(clippy::too_many_lines)]
-    pub async fn dispatch_frame(
+    async fn dispatch_frame_inner(
         &mut self,
         attachment: [u8; 16],
         now: u64,
