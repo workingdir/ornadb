@@ -3,10 +3,10 @@
 //! and `orna repl`: one row per object the store holds, whether or not a reference
 //! reaches it, with its id, the `sys.GitObjectKind` Git reads it as and its size in
 //! bytes. Every stored object is available locally with no promisor remote
-//! (ORNA-SYS-052, ORNA-SYS-111). A partial clone serves the objects it promises too:
+//! (ORNA-SYS-052, ORNA-GIT-002). A partial clone serves the objects it promises too:
 //! each has no size and is not available locally. A project with no commit for the
-//! rows to pin to is refused with `sys.snapshot.incomplete` rather than served
-//! truncated.
+//! rows to pin to is refused with `sys.snapshot.incomplete`. A store of any size is
+//! served in full, one page at a time: no store is refused for the number of its objects.
 
 #[path = "support/git_project.rs"]
 mod git_project;
@@ -198,7 +198,7 @@ fn repl_serves_each_reachable_commit_as_a_commit_object() {
 }
 
 #[test]
-// Specified: ORNA-SYS-111. A partial clone's store does not hold the blobs it has
+// Specified: ORNA-SYS-052, ORNA-GIT-002. A partial clone's store does not hold the blobs it has
 // promised, so each promised object is a row with no size that is not available
 // locally. The objects the store holds keep their size and are available locally.
 fn orna_run_serves_the_promised_objects_of_a_partial_clone() {
@@ -249,7 +249,7 @@ fn orna_run_serves_the_promised_objects_of_a_partial_clone() {
 }
 
 #[test]
-// Specified: ORNA-SYS-111. Object rows are pinned to the commit `HEAD` names. A
+// Specified: ORNA-SYS-011. Object rows are pinned to the commit `HEAD` names. A
 // project with objects but no `HEAD` commit has no pin, so the read fails closed
 // with `sys.snapshot.incomplete` instead of serving rows that name no commit.
 fn orna_run_refuses_objects_it_cannot_pin() {
