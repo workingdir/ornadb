@@ -1353,9 +1353,10 @@ pub struct CommittedEvalPlan {
 }
 
 /// Builds the committed tables plan an Eval binds, at the activation's own
-/// pinned generation. A host installs one when its project declares stored
-/// references, so an Eval that deletes or rekeys a row is checked against the
-/// committed rows that reference it (ORNA-MUT-008).
+/// pinned generation. A host installs one when its project binds committed
+/// tables, so an Eval reads their committed rows. A host whose project declares
+/// stored references also checks a delete or rekey against the committed rows
+/// that reference it (ORNA-MUT-008).
 pub type CommittedEvalRowsFactory =
     Box<dyn Fn(&RuntimeActivationContext) -> Result<CommittedEvalPlan> + Send>;
 

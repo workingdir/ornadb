@@ -33,7 +33,8 @@ use orna_security::{
 };
 use orna_serving::Serving;
 use served_validator::{
-    served_committed_eval_rows_factory, served_table_candidate_validator_factory,
+    binds_committed_tables, served_committed_eval_rows_factory,
+    served_table_candidate_validator_factory,
 };
 use std::{
     collections::BTreeMap,
@@ -697,8 +698,9 @@ struct ServedClone {
     /// commit against that commit's generation, so a false assertion refuses the
     /// write before any row is published (ORNA-ASSERT-042).
     table_candidate_validator: Option<orna_live::TableCandidateValidatorFactory>,
-    /// `None` when the project declares no stored reference. Installed on the
-    /// host, it binds the committed rows each Eval checks its deletes and rekeys
+    /// `None` unless the served project declares a stored reference or binds
+    /// committed tables (`binds_committed_tables`). Installed on the host, it binds
+    /// the committed rows each Eval reads and checks its deletes and rekeys
     /// against, so a refused write answers with its ORNA-REF-DANGLING diagnostic.
     committed_eval_rows: Option<orna_live::CommittedEvalRowsFactory>,
 }
@@ -748,6 +750,14 @@ fn open_served_clone(endpoint: &Endpoint) -> Result<ServedClone, Diagnostic> {
                 format!("runtime error: {error:?}"),
             )
         })?;
+    // An Eval binds the committed rows of the served project's tables when it declares a
+    // stored reference, or declares tables whose committed identity manifest HEAD carries.
+    // The mutations it stamps carry those committed identities, so the validator below
+    // admits them. This one decision serves both, taken once at startup.
+    let binds_committed = project.as_ref().is_some_and(|project| {
+        orna_conformance::project_declares_stored_references(project, Limits::default())
+            || binds_committed_tables(&repository, project)
+    });
     // A project that declares assertions or stored references checks each
     // committed mounted-row write against them (ORNA-ASSERT-042, ORNA-MUT-007,
     // ORNA-MUT-008) before it publishes. A project that declares neither keeps
@@ -759,15 +769,17 @@ fn open_served_clone(endpoint: &Endpoint) -> Result<ServedClone, Diagnostic> {
                 || orna_conformance::project_declares_stored_references(project, Limits::default())
         })
         .map(|project| {
-            served_table_candidate_validator_factory(repository.clone(), project.clone())
+            served_table_candidate_validator_factory(
+                repository.clone(),
+                project.clone(),
+                binds_committed,
+            )
         });
-    // An Eval over a project that declares stored references binds the committed
-    // rows its reference check runs against (ORNA-MUT-008).
+    // A delete or rekey by such an Eval is checked against the committed rows that
+    // reference it (ORNA-MUT-008).
     let committed_eval_rows = project
         .as_ref()
-        .filter(|project| {
-            orna_conformance::project_declares_stored_references(project, Limits::default())
-        })
+        .filter(|_| binds_committed)
         .map(|project| served_committed_eval_rows_factory(repository.clone(), project.clone()));
     Ok(ServedClone {
         root: repository.worktree().to_path_buf(),
@@ -902,8 +914,8 @@ fn new_serve_state(
         Some(factory) => host.with_table_candidate_validator(factory),
         None => host,
     };
-    // A project declaring stored references binds its committed rows for each Eval;
-    // a project declaring none installs no factory.
+    // The factory plans each Eval's committed rows for a project that declares a
+    // stored reference or binds committed tables; any other project installs none.
     let host = match committed_eval_rows {
         Some(factory) => host.with_committed_eval_rows(factory),
         None => host,

@@ -3,6 +3,7 @@ use std::process::Command;
 
 mod head_pin;
 mod served_references;
+mod served_table_reads;
 
 #[test]
 fn websocket_failures_close_with_size_or_protocol_code() {
