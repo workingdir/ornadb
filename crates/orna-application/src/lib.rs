@@ -3242,9 +3242,11 @@ impl From<ApplicationError> for LiveError {
             ApplicationError::EffectRejected(code)
                 if code == orna_project::DANGLING_REFERENCE_CODE =>
             {
-                // A write that would leave a stored reference dangling is a
-                // refused validation (ORNA-MUT-008), answered as a correlated
-                // diagnostic rather than closing the socket.
+                // A staged activation whose writes would leave a stored
+                // reference dangling is a refused validation (ORNA-MUT-008),
+                // answered as a correlated diagnostic. The commit-time validator
+                // in orna-live maps its own DanglingReference and does not
+                // pass through this conversion.
                 Self::ValidationRejected(orna_project::DANGLING_REFERENCE_CODE)
             }
             _ => Self::ApplicationRejected,
