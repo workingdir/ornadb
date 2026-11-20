@@ -107,6 +107,40 @@ struct TargetShape {
     key_fields: Vec<String>,
 }
 
+/// The reference columns of every table in `schemas`, keyed by the table that
+/// holds them. A column is a reference when its type, or the type it makes
+/// optional, is the identity of another admitted table.
+fn reference_columns(
+    schemas: &BTreeMap<String, TableSchema>,
+) -> BTreeMap<String, Vec<ReferenceColumn>> {
+    let mut columns: BTreeMap<String, Vec<ReferenceColumn>> = BTreeMap::new();
+    for (table, schema) in schemas {
+        for (column, ty) in &schema.fields {
+            let (target, optional) = match ty {
+                Type::Named(target) => (target, false),
+                Type::Optional(inner) => match inner.as_ref() {
+                    Type::Named(target) => (target, true),
+                    _ => continue,
+                },
+                _ => continue,
+            };
+            // A nominal record, enum or refined type is not a table.
+            if !schemas.contains_key(target) {
+                continue;
+            }
+            columns
+                .entry(table.clone())
+                .or_default()
+                .push(ReferenceColumn {
+                    column: column.clone(),
+                    target: target.clone(),
+                    optional,
+                });
+        }
+    }
+    columns
+}
+
 /// The reference columns of every admitted table and the identity of every
 /// table they name, for one database.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -154,31 +188,7 @@ impl ReferenceCatalogue {
         schemas: &BTreeMap<String, TableSchema>,
         ids: &BTreeMap<String, TableObjectId>,
     ) -> Result<Option<Self>, ReferenceError> {
-        let mut columns: BTreeMap<String, Vec<ReferenceColumn>> = BTreeMap::new();
-        for (table, schema) in schemas {
-            for (column, ty) in &schema.fields {
-                let (target, optional) = match ty {
-                    Type::Named(target) => (target, false),
-                    Type::Optional(inner) => match inner.as_ref() {
-                        Type::Named(target) => (target, true),
-                        _ => continue,
-                    },
-                    _ => continue,
-                };
-                // A nominal record, enum or refined type is not a table.
-                if !schemas.contains_key(target) {
-                    continue;
-                }
-                columns
-                    .entry(table.clone())
-                    .or_default()
-                    .push(ReferenceColumn {
-                        column: column.clone(),
-                        target: target.clone(),
-                        optional,
-                    });
-            }
-        }
+        let columns = reference_columns(schemas);
         if columns.is_empty() || ids.is_empty() {
             return Ok(None);
         }
@@ -213,6 +223,26 @@ impl ReferenceCatalogue {
             targets,
             by_object_id,
         }))
+    }
+
+    /// Whether any table of `schemas` has a reference column, so that a
+    /// committed write to it is checked against stored references.
+    #[must_use]
+    pub fn declares_references(schemas: &BTreeMap<String, TableSchema>) -> bool {
+        !reference_columns(schemas).is_empty()
+    }
+
+    /// Every table the catalogue names: each referencing table and each target,
+    /// in name order.
+    #[must_use]
+    pub fn tables(&self) -> Vec<String> {
+        self.columns
+            .keys()
+            .chain(self.targets.keys())
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
     }
 
     /// The database every stored reference of this catalogue names.

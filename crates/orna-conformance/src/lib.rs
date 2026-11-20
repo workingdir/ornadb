@@ -40,7 +40,7 @@ pub use semantic_adapter::{
     RunningTableRequestDisposition, RuntimeAdapter, RuntimeEvaluator, RuntimeTarget,
     SavedRowReferences, SemanticAdapter, TransactionalEvaluator, committed_database_id,
     committed_reference_catalogue, is_table_assertion_false, project_declares_assertions,
-    transactional_loaded_project_candidate_validator,
+    project_declares_stored_references, transactional_loaded_project_candidate_validator,
     transactional_loaded_project_commit_validator, validation_refusal_code,
 };
 pub use syntax_adapter::SyntaxAdapter;

@@ -139,6 +139,13 @@ pub(super) fn transactional_loaded_project_validator(
         limits,
     );
     validator.candidate_table_fields = candidate_table_fields;
+    if let Some(saved) = &saved_row {
+        // The commit captures every table its stored references name, so a row
+        // that names a row this commit removes is seen (ORNA-MUT-007).
+        validator.tables.extend(saved.catalogue.tables());
+        validator.tables.sort();
+        validator.tables.dedup();
+    }
     validator.saved_row = saved_row;
     // A table whose key admission could not lower (bead ornadb-gq4g) holds rows
     // and assertions but no key; the commit gate refuses only the checks that read it.

@@ -112,8 +112,10 @@ pub enum Error {
     /// The retained session credential or lifetime has expired.
     SessionExpired,
     /// The table candidate validator rejected the staged commit. No row,
-    /// checkpoint, or terminal success was published for it.
-    ValidationRejected,
+    /// checkpoint, or terminal success was published for it. The payload is the
+    /// portable code of the refused check: ORNA-A091-009 for a false assertion,
+    /// ORNA-REF-DANGLING for a dangling stored reference.
+    ValidationRejected(&'static str),
 }
 
 impl Error {
@@ -137,7 +139,7 @@ impl Error {
             Self::RuntimeUnavailable => "live.runtime_unavailable",
             Self::SnapshotExpired => "wire.snapshot_expired",
             Self::SessionExpired => "wire.session_expired",
-            Self::ValidationRejected => "ORNA-A091-009",
+            Self::ValidationRejected(code) => code,
         }
     }
 }
@@ -1292,7 +1294,7 @@ impl HttpResponse {
                 Error::Closed | Error::SessionExpired => 410,
                 Error::Limit => 413,
                 Error::UnsupportedSubprotocol => 426,
-                Error::ValidationRejected => 422,
+                Error::ValidationRejected(_) => 422,
                 Error::DeletionFailed
                 | Error::ApplicationDrainRequired
                 | Error::InvalidFrame
@@ -1319,7 +1321,11 @@ impl<T: SessionDeletionAdapter> DeletionAdapter for T {}
 /// activation context that the staged mutations were admitted under. Commits
 /// use the validated runtime path only when a factory is installed.
 pub type TableCandidateValidatorFactory = Box<
-    dyn Fn(&RuntimeActivationContext) -> Result<Box<dyn TableActivationCandidateValidator>> + Send,
+    dyn Fn(
+            &RuntimeActivationContext,
+            &[orna_runtime::TableMutation],
+        ) -> Result<Box<dyn TableActivationCandidateValidator>>
+        + Send,
 >;
 
 /// Concrete async request/frame host adapter. Its async methods make it fit
@@ -2593,7 +2599,7 @@ impl LiveHost {
                     .await;
                 match committed {
                     Ok(response) => response,
-                    Err(error @ Error::ValidationRejected)
+                    Err(error @ Error::ValidationRejected(_))
                         if !self.deleted_sessions.contains_key(&session) =>
                     {
                         // A refused transaction keeps its correlated diagnostic
@@ -2812,7 +2818,7 @@ impl LiveHost {
             // A proven false table assertion refuses a well-formed request with
             // nothing published: its correlated diagnostic carries the portable
             // code without closing unrelated watches (30-protocol, forbidden effect).
-            Error::ValidationRejected => (Error::ValidationRejected.code(), event_watch),
+            error @ Error::ValidationRejected(_) => (error.code(), event_watch),
             // A denied event admitted on a live watch is an action-handle
             // rejection; a pre-admission event without a live watch
             // (including resync) is an unknown handle. Attachment-boundary
@@ -4123,7 +4129,7 @@ impl LiveHost {
         .map_err(|error| map_runtime(&error))?;
         let committed = match self.table_candidate_validator.as_ref() {
             Some(factory) => {
-                let mut validator = factory(staged.context())?;
+                let mut validator = factory(staged.context(), staged.mutations())?;
                 runtime
                     .commit_validated_table_request_activation(
                         ValidatedTableRequestActivationCommit {
@@ -4142,14 +4148,20 @@ impl LiveHost {
                     .await
                     .map_err(|error| match error {
                         TableActivationError::Runtime(error) => map_runtime(&error),
-                        TableActivationError::ValidationFailed(diagnostic)
-                            if diagnostic.code == DiagnosticCode::TableAssertionFalse =>
-                        {
-                            Error::ValidationRejected
+                        TableActivationError::ValidationFailed(diagnostic) => {
+                            // Only a proven false assertion or a proven dangling
+                            // reference is a verdict on the candidate. Any other
+                            // validator failure fails closed.
+                            match diagnostic.code {
+                                DiagnosticCode::TableAssertionFalse => {
+                                    Error::ValidationRejected("ORNA-A091-009")
+                                }
+                                DiagnosticCode::DanglingReference => {
+                                    Error::ValidationRejected("ORNA-REF-DANGLING")
+                                }
+                                _ => Error::RuntimeUnavailable,
+                            }
                         }
-                        // Only a proven false assertion is a verdict on the
-                        // candidate. Any other validator failure fails closed.
-                        TableActivationError::ValidationFailed(_) => Error::RuntimeUnavailable,
                     })?
             }
             None => runtime
@@ -4350,7 +4362,7 @@ impl LiveHost {
             .await;
         match committed {
             Ok(response) => Ok(response),
-            Err(error @ Error::ValidationRejected) => Err(error),
+            Err(error @ Error::ValidationRejected(_)) => Err(error),
             Err(error) => {
                 self.retain_failed_commit(session, request, fingerprint, controlled)
                     .await?;
@@ -8216,7 +8228,7 @@ fn host_error(error: Error) -> WireResponse {
         Error::Denied => (403, "live.denied"),
         Error::ApplicationDeferred => (503, "live.application_deferred"),
         Error::RuntimeUnavailable => (503, "live.runtime_unavailable"),
-        Error::ValidationRejected => (422, "ORNA-A091-009"),
+        Error::ValidationRejected(code) => (422, code),
         // A session whose application work must first be joined is
         // temporarily unavailable on a route that cannot join it; the
         // request itself is well formed.
@@ -10979,7 +10991,11 @@ mod tests {
     }
 
     fn rejecting_validator(code: DiagnosticCode) -> TableCandidateValidatorFactory {
-        Box::new(move |_: &RuntimeActivationContext| Ok(rejecting_candidate(code)))
+        Box::new(
+            move |_: &RuntimeActivationContext, _: &[orna_runtime::TableMutation]| {
+                Ok(rejecting_candidate(code))
+            },
+        )
     }
 
     fn rejecting_candidate(code: DiagnosticCode) -> Box<dyn TableActivationCandidateValidator> {
@@ -10994,7 +11010,7 @@ mod tests {
         assert_candidate_rejection_publishes_nothing(
             "assertion",
             DiagnosticCode::TableAssertionFalse,
-            Error::ValidationRejected,
+            Error::ValidationRejected("ORNA-A091-009"),
         );
     }
 

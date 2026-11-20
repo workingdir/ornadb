@@ -3239,6 +3239,14 @@ impl From<ApplicationError> for LiveError {
     fn from(error: ApplicationError) -> Self {
         match error {
             ApplicationError::SourceEffectFailed(SysFailureCode::AdminBusy) => Self::AdminBusy,
+            ApplicationError::EffectRejected(code)
+                if code == orna_project::DANGLING_REFERENCE_CODE =>
+            {
+                // A write that would leave a stored reference dangling is a
+                // refused validation (ORNA-MUT-008), answered as a correlated
+                // diagnostic rather than closing the socket.
+                Self::ValidationRejected(orna_project::DANGLING_REFERENCE_CODE)
+            }
             _ => Self::ApplicationRejected,
         }
     }

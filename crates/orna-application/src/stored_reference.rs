@@ -163,6 +163,21 @@ struct ActivationRows<'a> {
     handler: &'a SourceMutationEffectHandler,
 }
 
+impl ActivationRows<'_> {
+    /// The snapshot rows of `table`. A table the snapshot does not hold has no
+    /// proven rows, so reading it is refused rather than taken as empty.
+    fn captured_table(
+        &self,
+        table: &str,
+    ) -> Result<&BTreeMap<Vec<u8>, CanonicalValue>, ReferenceError> {
+        self.handler
+            .captured_rows
+            .as_ref()
+            .and_then(|captured| captured.get(table))
+            .ok_or(ReferenceError::State)
+    }
+}
+
 impl CandidateState for ActivationRows<'_> {
     fn row(&mut self, table: &str, key: &[OvbRaw]) -> Result<Option<OvbRaw>, ReferenceError> {
         let key = key_bytes(key)?;
@@ -176,27 +191,16 @@ impl CandidateState for ActivationRows<'_> {
         }
         // Without the snapshot an untouched row cannot be seen, so its
         // existence is unproven and the activation is refused.
-        let captured = self
-            .handler
-            .captured_rows
-            .as_ref()
-            .ok_or(ReferenceError::State)?;
-        Ok(captured
-            .get(table)
-            .and_then(|rows| rows.get(&key))
+        Ok(self
+            .captured_table(table)?
+            .get(&key)
             .map(|row| row.raw().clone()))
     }
 
     fn rows(&mut self, table: &str) -> Result<Vec<OvbRaw>, ReferenceError> {
-        let captured = self
-            .handler
-            .captured_rows
-            .as_ref()
-            .ok_or(ReferenceError::State)?;
-        let mut merged: BTreeMap<&Vec<u8>, Option<&CanonicalValue>> = captured
-            .get(table)
-            .into_iter()
-            .flatten()
+        let mut merged: BTreeMap<&Vec<u8>, Option<&CanonicalValue>> = self
+            .captured_table(table)?
+            .iter()
             .map(|(key, row)| (key, Some(row)))
             .collect();
         for (key, row) in self.handler.overlay.get(table).into_iter().flatten() {
