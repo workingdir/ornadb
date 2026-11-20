@@ -3,18 +3,18 @@
 //! ORNA-SYS-112).
 //!
 //! One row per object, in object-id order: `kind` is the `sys.GitObjectKind` Git reads
-//! the object as and `size` its size in bytes. The store lists only the objects it
-//! holds, so every row is available locally and has no promisor remote. A partial
-//! clone, whose store does not enumerate the objects it has promised, is refused with
-//! `sys.snapshot.incomplete`. [`crate::git_rows`] holds what every Git member shares:
-//! the repository read, the commit pin and the failure when either is unavailable.
+//! the object as. An object the store holds has its size in bytes, is available locally
+//! and has no promisor remote. An object a partial clone promises, and the store does
+//! not hold, has no size, is not available locally and names the promisor remote that
+//! serves it. [`crate::git_rows`] holds what every Git member shares: the repository
+//! read, the commit pin and the failure when either is unavailable.
 
 use std::collections::BTreeMap;
 
 use num_bigint::BigInt;
-use orna_repository::{CommittedGitObject, GitObjectKind};
+use orna_repository::{CommittedGitObject, GitObjectAvailability, GitObjectKind};
 use orna_sys::{SysEnum, SysHostContext};
-use orna_value::{enum_type_id, enum_variant_id, git_object_reference};
+use orna_value::{enum_type_id, enum_variant_id, git_object_reference, remote_reference};
 
 use crate::git_rows::{GitPage, RowPin, incomplete, object_id, page_ordered, repository};
 use crate::{EvaluationError, Value, object_id_raw};
@@ -50,7 +50,7 @@ struct ObjectFacts<'a> {
     /// The object's id, in Git's hexadecimal spelling.
     oid: &'a str,
     kind: GitObjectKind,
-    size: u64,
+    availability: &'a GitObjectAvailability,
 }
 
 impl<'a> ObjectFacts<'a> {
@@ -58,7 +58,7 @@ impl<'a> ObjectFacts<'a> {
         Self {
             oid: object.oid().as_str(),
             kind: object.kind(),
-            size: object.size(),
+            availability: object.availability(),
         }
     }
 }
@@ -67,6 +67,20 @@ impl<'a> ObjectFacts<'a> {
 /// available_locally, promisor_remote }` (34-system-reference.md, `sys.GitObject`).
 fn object_row(pin: &RowPin, object: &ObjectFacts<'_>) -> Result<Value, EvaluationError> {
     let oid = object_id(object.oid)?;
+    let (size, available_locally, promisor_remote) = match object.availability {
+        GitObjectAvailability::Local { size } => (
+            Value::Option(Some(Box::new(Value::Int(BigInt::from(*size))))),
+            true,
+            Value::Option(None),
+        ),
+        GitObjectAvailability::Promised { remote } => (
+            Value::Option(None),
+            false,
+            Value::Option(Some(Box::new(pin.reference(|database, snapshot| {
+                remote_reference(database, snapshot, remote.clone())
+            })?))),
+        ),
+    };
     Ok(Value::Record(BTreeMap::from([
         (
             "reference".to_owned(),
@@ -76,12 +90,12 @@ fn object_row(pin: &RowPin, object: &ObjectFacts<'_>) -> Result<Value, Evaluatio
         ),
         ("oid".to_owned(), Value::GitOid(oid)),
         ("kind".to_owned(), kind_value(object.kind)),
+        ("size".to_owned(), size),
         (
-            "size".to_owned(),
-            Value::Option(Some(Box::new(Value::Int(BigInt::from(object.size))))),
+            "available_locally".to_owned(),
+            Value::Bool(available_locally),
         ),
-        ("available_locally".to_owned(), Value::Bool(true)),
-        ("promisor_remote".to_owned(), Value::Option(None)),
+        ("promisor_remote".to_owned(), promisor_remote),
     ])))
 }
 
@@ -111,22 +125,26 @@ mod tests {
     use crate::git_rows::testing::{DATABASE, fields, oid, pin, reference_of, row_pin};
     use crate::object_id_raw;
     use num_bigint::BigInt;
-    use orna_repository::GitObjectKind;
-    use orna_value::{enum_type_id, enum_variant_id, git_object_reference, relations};
+    use orna_repository::{GitObjectAvailability, GitObjectKind};
+    use orna_value::{
+        enum_type_id, enum_variant_id, git_object_reference, relations, remote_reference,
+    };
 
     const BLOB_OID: &str = "00112233445566778899aabbccddeeff00112233";
 
-    fn entry(kind: GitObjectKind, size: u64) -> ObjectFacts<'static> {
+    fn facts<'a>(kind: GitObjectKind, availability: &'a GitObjectAvailability) -> ObjectFacts<'a> {
         ObjectFacts {
             oid: BLOB_OID,
             kind,
-            size,
+            availability,
         }
     }
 
     #[test]
     fn an_object_row_carries_its_id_kind_size_and_local_availability() {
-        let row = object_row(&row_pin(), &entry(GitObjectKind::Blob, 7)).expect("a row");
+        let availability = GitObjectAvailability::Local { size: 7 };
+        let row =
+            object_row(&row_pin(), &facts(GitObjectKind::Blob, &availability)).expect("a row");
         let row = fields(&row);
         assert_eq!(
             row.keys().map(String::as_str).collect::<Vec<_>>(),
@@ -158,10 +176,31 @@ mod tests {
 
     #[test]
     fn a_zero_byte_object_keeps_its_size_as_present() {
-        let row = object_row(&row_pin(), &entry(GitObjectKind::Tree, 0)).expect("a row");
+        let availability = GitObjectAvailability::Local { size: 0 };
+        let row =
+            object_row(&row_pin(), &facts(GitObjectKind::Tree, &availability)).expect("a row");
         assert_eq!(
             fields(&row)["size"],
             Value::Option(Some(Box::new(Value::Int(BigInt::from(0)))))
+        );
+    }
+
+    #[test]
+    fn a_promised_object_has_no_size_and_names_its_promisor_remote() {
+        let availability = GitObjectAvailability::Promised {
+            remote: "origin".to_owned(),
+        };
+        let row =
+            object_row(&row_pin(), &facts(GitObjectKind::Blob, &availability)).expect("a row");
+        let row = fields(&row);
+        assert_eq!(row["size"], Value::Option(None));
+        assert_eq!(row["available_locally"], Value::Bool(false));
+        let Value::Option(Some(remote)) = &row["promisor_remote"] else {
+            panic!("a promised object names its promisor remote");
+        };
+        assert_eq!(
+            reference_of(remote),
+            remote_reference(DATABASE, pin(), "origin".to_owned()).expect("a reference")
         );
     }
 

@@ -128,6 +128,70 @@ pub(crate) fn run_bounded_listing_accepting(
     Ok(output)
 }
 
+/// Most bytes one line of a streamed listing may hold. Git writes an object as a
+/// few hundred bytes, so a longer line is refused rather than buffered.
+const MAX_LISTING_LINE_BYTES: usize = 64 * 1024;
+
+/// Runs `command` and hands each line of its stdout to `visit` as it is read, so a
+/// listing is never held whole. The listing is refused when a line is not ended by
+/// a newline, is longer than `MAX_LISTING_LINE_BYTES`, or is not UTF-8, when `visit`
+/// refuses a line, or when the command does not exit successfully. A refused listing
+/// kills the child, so an endless command cannot hold this process.
+pub(crate) fn for_each_listing_line(
+    mut command: Command,
+    visit: impl FnMut(&str) -> Result<(), RepositoryError>,
+) -> Result<(), RepositoryError> {
+    command.stdout(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|_| RepositoryError::GitUnavailable)?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or(RepositoryError::GitOperationFailed)?;
+    if let Err(error) = for_each_line_of(BufReader::new(stdout), visit) {
+        // The child may already have exited, so a failed kill is not an error;
+        // the wait reaps it either way.
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
+    let status = child
+        .wait()
+        .map_err(|_| RepositoryError::GitOperationFailed)?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(RepositoryError::GitOperationFailed)
+    }
+}
+
+/// Hands each line of `reader`, without its newline, to `visit`, as
+/// [`for_each_listing_line`] does for a command's output.
+pub(crate) fn for_each_line_of(
+    mut reader: impl BufRead,
+    mut visit: impl FnMut(&str) -> Result<(), RepositoryError>,
+) -> Result<(), RepositoryError> {
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        // Content up to the bound and its newline fit in this read; a longer line
+        // has no newline within it and is refused below.
+        let read = reader
+            .by_ref()
+            .take(MAX_LISTING_LINE_BYTES as u64 + 1)
+            .read_until(b'\n', &mut line)
+            .map_err(|_| RepositoryError::GitOperationFailed)?;
+        if read == 0 {
+            return Ok(());
+        }
+        let text = line
+            .strip_suffix(b"\n")
+            .ok_or(RepositoryError::GitOperationFailed)?;
+        visit(listing_text(text)?)?;
+    }
+}
+
 pub(crate) fn run_command(mut command: Command) -> Result<Output, RepositoryError> {
     let output = command
         .output()
@@ -721,5 +785,90 @@ mod branch_listing_tests {
             parse_committed_branch(&record(" ", "main", "0123", "", ""), 40),
             Err(RepositoryError::InvalidObjectId)
         ));
+    }
+}
+
+#[cfg(test)]
+mod listing_line_tests {
+    use super::*;
+
+    fn lines_of(listing: &[u8]) -> Result<Vec<String>, RepositoryError> {
+        let mut lines = Vec::new();
+        for_each_line_of(listing, |line| {
+            lines.push(line.to_owned());
+            Ok(())
+        })?;
+        Ok(lines)
+    }
+
+    fn lines_of_command(command: Command) -> Result<Vec<String>, RepositoryError> {
+        let mut lines = Vec::new();
+        for_each_listing_line(command, |line| {
+            lines.push(line.to_owned());
+            Ok(())
+        })?;
+        Ok(lines)
+    }
+
+    #[test]
+    fn each_newline_ended_line_is_handed_over_without_its_newline() {
+        assert_eq!(lines_of(b"a 1\nb 2\n").expect("lines"), ["a 1", "b 2"]);
+        assert!(lines_of(b"").expect("no lines").is_empty());
+    }
+
+    #[test]
+    fn a_line_not_ended_by_a_newline_or_not_utf8_refuses_the_listing() {
+        assert!(matches!(
+            lines_of(b"a 1\nb 2"),
+            Err(RepositoryError::GitOperationFailed)
+        ));
+        assert!(matches!(
+            lines_of(b"\xff\n"),
+            Err(RepositoryError::GitOperationFailed)
+        ));
+    }
+
+    #[test]
+    fn a_line_longer_than_the_bound_refuses_the_listing() {
+        let mut fits = vec![b'a'; MAX_LISTING_LINE_BYTES];
+        fits.push(b'\n');
+        assert_eq!(lines_of(&fits).expect("a line at the bound").len(), 1);
+
+        let mut past = vec![b'a'; MAX_LISTING_LINE_BYTES + 1];
+        past.push(b'\n');
+        assert!(matches!(
+            lines_of(&past),
+            Err(RepositoryError::GitOperationFailed)
+        ));
+    }
+
+    #[test]
+    fn a_command_that_exits_unsuccessfully_refuses_its_listing() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "printf 'a\\n'; exit 3"]);
+        assert!(matches!(
+            lines_of_command(command),
+            Err(RepositoryError::GitOperationFailed)
+        ));
+    }
+
+    #[test]
+    fn a_command_that_is_not_installed_is_unavailable() {
+        assert!(matches!(
+            lines_of_command(Command::new("/nonexistent/orna-listing-command")),
+            Err(RepositoryError::GitUnavailable)
+        ));
+    }
+
+    #[test]
+    fn a_refused_line_stops_an_endless_listing() {
+        // `yes` writes forever: the refusal must kill it rather than read on.
+        let mut visited = 0;
+        let result = for_each_listing_line(Command::new("yes"), |_| {
+            visited += 1;
+            Err(RepositoryError::GitOperationFailed)
+        });
+        assert!(matches!(result, Err(RepositoryError::GitOperationFailed)));
+        assert_eq!(visited, 1);
     }
 }

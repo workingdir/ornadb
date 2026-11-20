@@ -137,16 +137,18 @@ pub use format_context::{
     RepositorySnapshotPin, SchemaRootPin, StoreRootPin,
 };
 pub(crate) use git_command::{
-    ConfigValue, GitListRecord, GitTreeRecord, PromisorReachability, git_command,
-    git_command_at_root, git_command_in, git_stderr_indicates_malformed_object, listing_text,
-    parse_committed_branch, parse_committed_tree_entry, parse_git_bool, parse_remote_orna_refs,
-    parse_unix_seconds, remote_ref_records, require_native_object_id, run_bounded_listing,
-    run_bounded_listing_accepting, run_command, run_command_with_input,
+    ConfigValue, GitListRecord, GitTreeRecord, PromisorReachability, for_each_listing_line,
+    git_command, git_command_at_root, git_command_in, git_stderr_indicates_malformed_object,
+    listing_text, parse_committed_branch, parse_committed_tree_entry, parse_git_bool,
+    parse_remote_orna_refs, parse_unix_seconds, remote_ref_records, require_native_object_id,
+    run_bounded_listing, run_bounded_listing_accepting, run_command, run_command_with_input,
     scrub_git_routing_environment, trim_output, valid_branch_name, valid_native_object_id,
     valid_orna_internal_ref, valid_remote_name,
 };
 #[cfg(test)]
-pub(crate) use git_command::{bind_git_ceiling_above, bind_git_discovery_to_worktree};
+pub(crate) use git_command::{
+    bind_git_ceiling_above, bind_git_discovery_to_worktree, for_each_line_of,
+};
 pub(crate) use index_lock::GitIndexLock;
 #[cfg(test)]
 pub(crate) use index_lock::{GitIndexLockMarker, GitIndexLockOwnerLiveness};
@@ -185,7 +187,7 @@ pub use native_graph::{
     ProtectedContentTransfer, RangeVerification, RepositoryCaptureCapability, RepositoryReadScope,
     RowIndexMutation, VerifiedBlobRange,
 };
-pub use objects::CommittedGitObject;
+pub use objects::{CommittedGitObject, GitObjectAvailability};
 pub use orna_value::BlobMetadata;
 pub use paths::{
     GitDeclaredObjectSetState, GitObjectKind, GitObjectState, GitRepositoryCapabilities,
