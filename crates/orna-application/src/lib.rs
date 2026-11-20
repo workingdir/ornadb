@@ -1960,6 +1960,29 @@ impl SourceMutationEffectHandler {
         self.into_validated_mutations()
     }
 
+    /// Consumes the handler after validating every recorded mutation, then
+    /// re-addresses each evaluator-keyed row to the runtime key its committed
+    /// table stores it under (bead ornadb-zvz7v), as the REPL does before it
+    /// commits. A served Eval's delete then addresses the row it reads back.
+    pub fn into_runtime_keyed_mutations(self) -> Result<Vec<TableMutation>, ApplicationError> {
+        if !self.source_row_schemas.is_empty() || !self.protected_field_pins.is_empty() {
+            return Err(ApplicationError::Runtime(
+                "source row admission requires a staged activation".into(),
+            ));
+        }
+        self.validate_mutations()?;
+        let tables = &self.tables;
+        self.mutations
+            .into_iter()
+            .map(|mutation| {
+                let schema = tables
+                    .get(mutation.table())
+                    .ok_or(ApplicationError::InvalidTableMetadata)?;
+                runtime_keyed_mutation(mutation, schema)
+            })
+            .collect()
+    }
+
     fn into_validated_mutations(self) -> Result<Vec<TableMutation>, ApplicationError> {
         self.validate_mutations()?;
         Ok(self.mutations)
@@ -3088,6 +3111,26 @@ fn application_table_object_ids(
         .collect()
 }
 
+/// Re-addresses one served Eval mutation from the evaluator's key encoding to
+/// the runtime key its committed table stores the row under, as the REPL does
+/// before it commits (bead ornadb-zvz7v).
+fn runtime_keyed_mutation(
+    mutation: TableMutation,
+    table_schema: &TableSchema,
+) -> Result<TableMutation, ApplicationError> {
+    let text_primary_key = orna_project::has_text_primary_key(table_schema);
+    let key = orna_project::runtime_key_from_evaluator(mutation.key(), text_primary_key)
+        .map_err(|_| ApplicationError::InvalidTableMetadata)?;
+    let rekey_to = mutation
+        .rekey_to()
+        .map(|key| orna_project::runtime_key_from_evaluator(key, text_primary_key))
+        .transpose()
+        .map_err(|_| ApplicationError::InvalidTableMetadata)?;
+    mutation
+        .with_reencoded_keys(key, rekey_to)
+        .map_err(|_| ApplicationError::InvalidTableMetadata)
+}
+
 fn validate_snapshot_table_object_ids(
     admitted: &BTreeMap<String, TableObjectId>,
     snapshot: &RuntimeTableActivationSnapshot,
@@ -3820,7 +3863,9 @@ impl ApplicationLiveAdapter {
             }
         };
         let effects = handler.effect_report();
-        let mutations = handler.into_mutations().map_err(LiveError::from)?;
+        let mutations = handler
+            .into_runtime_keyed_mutations()
+            .map_err(LiveError::from)?;
         let value = value.unwrap_or_else(CanonicalValue::unit);
         let envelope = self.success_envelope(request, eval_fingerprint(message)?, value)?;
         if mutations.is_empty() {
