@@ -1036,7 +1036,7 @@ fn restore_complete_copy_from_manifest(
             &member.objects,
             &format!("snapshot {}", member.commit),
         )?;
-        verify_admitted_snapshot(restored, member)?;
+        admit_snapshot(restored, &member.commit, member.format)?;
     }
 
     for dependency in &manifest.dependencies {
@@ -1100,7 +1100,7 @@ pub fn materialize_complete_copy(
             &member.objects,
             &format!("snapshot {}", member.commit),
         )?;
-        verify_admitted_snapshot(copy, member)?;
+        admit_snapshot(copy, &member.commit, member.format)?;
     }
     checkout(copy, &manifest.snapshot)?;
     for dependency in &manifest.dependencies {
@@ -1761,11 +1761,11 @@ fn verify_recorded_closure(
 /// schema and store roots, a legacy member must still admit its recorded format
 /// record, and a member whose manifest names a format must reopen as that exact
 /// format rather than a different reader's snapshot.
-fn verify_admitted_snapshot(
+fn admit_snapshot(
     directory: &Path,
-    member: &CompleteCopyMember,
+    commit: &str,
+    recorded: Option<RepositoryFormat>,
 ) -> Result<(), CompleteCopyError> {
-    let commit = &member.commit;
     let snapshot_scope = format!("snapshot {commit}");
     let repository =
         Repository::discover(directory).map_err(|_| CompleteCopyError::IntegrityMismatch {
@@ -1785,10 +1785,7 @@ fn verify_admitted_snapshot(
     // ORNA-UPGRADE-001: the manifest states which reader answers this member, so
     // a copy that now reports another format is refused instead of being read
     // through the wrong decoder.
-    if member
-        .format
-        .is_some_and(|recorded| recorded != format.repository_format())
-    {
+    if recorded.is_some_and(|expected| expected != format.repository_format()) {
         return Err(CompleteCopyError::IntegrityMismatch {
             scope: format!("{snapshot_scope}: recorded format"),
         });
@@ -1799,6 +1796,18 @@ fn verify_admitted_snapshot(
         });
     }
     Ok(())
+}
+
+/// Verifies one snapshot on its own terms, with no manifest to lean on: every
+/// object reachable from `commit` must be present at its recorded kind and
+/// size, blob payloads must hash back to their IDs, and the snapshot must
+/// reopen under the format it reports. An in-place exchange runs this on both
+/// the legacy source and the activated candidate before the swap.
+pub(crate) fn verify_snapshot_at(directory: &Path, commit: &str) -> Result<(), CompleteCopyError> {
+    let scope = format!("snapshot {commit}");
+    let reached = closure_objects(directory, commit, &scope)?;
+    verify_closure(directory, &reached, &scope)?;
+    admit_snapshot(directory, commit, None)
 }
 
 /// Whether a snapshot's roots are complete for its recorded format. Legacy

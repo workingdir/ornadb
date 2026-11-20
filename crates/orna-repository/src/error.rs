@@ -99,6 +99,10 @@ pub enum RepositoryError {
     /// decoder exists yet, so the migration refuses before any destination is
     /// created; see MIGRATION.md and bead ornadb-5il1.486.
     Format2CompactUnimplemented,
+    /// A snapshot failed independent verification before an in-place exchange:
+    /// its closure, payloads or format admission did not hold. The detail names
+    /// the failing object or scope.
+    SnapshotIntegrity(String),
 }
 
 impl fmt::Display for RepositoryError {
@@ -206,6 +210,7 @@ impl fmt::Display for RepositoryError {
             Self::Format2CompactUnimplemented => f.write_str(
                 "format-2 compact-storage-v2 tables have no decoder yet; see MIGRATION.md and bead ornadb-5il1.486",
             ),
+            Self::SnapshotIntegrity(detail) => write!(f, "snapshot verification failed: {detail}"),
         }
     }
 }

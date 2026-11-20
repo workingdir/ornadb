@@ -815,6 +815,8 @@ pub fn exchange_activated_copy(
         return Err(RepositoryError::PublicationRecoveryConflict);
     }
     require_reviewed_result(&copy, verified)?;
+    require_snapshot_verified(&source_root, &verified.source_commit)?;
+    require_snapshot_verified(&destination, verified.candidate_journal.new_head())?;
     let source_name = source_root
         .file_name()
         .ok_or(RepositoryError::LocalStateUnavailable)?;
@@ -861,6 +863,19 @@ fn require_reviewed_result(
         Ok(recorded) if recorded == expected => Ok(()),
         _ => Err(RepositoryError::PublicationRecoveryConflict),
     }
+}
+
+/// Verifies one snapshot of an exchange participant on its own terms: every
+/// object reachable from the commit must be present and intact, and the
+/// snapshot must reopen under its reported format. Runs before the exchange
+/// barrier so a corrupt source or candidate is refused while the worktree still
+/// holds the source.
+fn require_snapshot_verified(
+    directory: &Path,
+    commit: &GitCommitRef,
+) -> Result<(), RepositoryError> {
+    crate::complete_copy::verify_snapshot_at(directory, &commit.to_string())
+        .map_err(|error| RepositoryError::SnapshotIntegrity(error.to_string()))
 }
 
 /// Atomically swaps the entries `first` and `second` of `parent`.
