@@ -12,23 +12,33 @@ use std::collections::BTreeSet;
 /// Builds the factory that checks each committed mounted-row write against
 /// the served project's table assertions and stored references. The factory
 /// runs once per commit, against that commit's own generation, so the
-/// validator and the row it checks share one HEAD.
+/// validator and the row it checks share one HEAD. `binds_committed` is the
+/// decision that installs each Eval's committed rows plan: an Eval that binds
+/// committed tables carries their HEAD identities, and the commit admits them.
 pub(super) fn served_table_candidate_validator_factory(
     repository: Repository,
     project: orna_project::LoadedProject,
+    binds_committed: bool,
 ) -> orna_live::TableCandidateValidatorFactory {
     Box::new(
         move |context: &orna_runtime::RuntimeActivationContext,
               mutations: &[orna_runtime::TableMutation]| {
-            served_table_candidate_validator(&repository, &project, context, mutations)
+            served_table_candidate_validator(
+                &repository,
+                &project,
+                binds_committed,
+                context,
+                mutations,
+            )
         },
     )
 }
 
 /// Builds the factory that plans the committed tables each served Eval binds, at
-/// the activation's own generation. A project that declares stored references
-/// checks an Eval's delete or rekey against the rows that reference the row
-/// (ORNA-MUT-008), so the Eval binds the admitted tables' live rows.
+/// the activation's own generation. The Eval reads the admitted tables' committed
+/// rows (ORNA-EVAL-002, ornadb-nb5yj). A project that declares stored references
+/// also checks the Eval's delete or rekey against the rows that reference the row
+/// (ORNA-MUT-008).
 pub(super) fn served_committed_eval_rows_factory(
     repository: Repository,
     project: orna_project::LoadedProject,
@@ -36,6 +46,34 @@ pub(super) fn served_committed_eval_rows_factory(
     Box::new(move |context: &orna_runtime::RuntimeActivationContext| {
         served_committed_eval_plan(&repository, &project, context)
     })
+}
+
+/// Whether a served Eval over `project` binds the committed rows of the project's
+/// tables: the project declares a table, and HEAD carries the committed identity
+/// manifest those tables resolve against. Without a commit or a manifest there is
+/// no plan to build, so the Eval runs without one, as it did before (ornadb-jm0d).
+/// A project whose tables cannot be read counts as declaring them.
+pub(super) fn binds_committed_tables(
+    repository: &Repository,
+    project: &orna_project::LoadedProject,
+) -> bool {
+    let declares_tables = match admitted_tables_of(project) {
+        Ok((names, _)) => !names.is_empty(),
+        Err(_) => true,
+    };
+    declares_tables && committed_identity_manifest_at_head(repository)
+}
+
+/// Whether HEAD carries a committed identity manifest. An unborn HEAD, or a
+/// commit that predates the manifest, carries none.
+fn committed_identity_manifest_at_head(repository: &Repository) -> bool {
+    let Ok(Some(head)) = repository.head() else {
+        return false;
+    };
+    matches!(
+        orna_project::ObjectIdentityManifest::read_committed_if_present(repository, &head),
+        Ok(Some(_))
+    )
 }
 
 /// The committed tables plan of the activation's generation: the admitted tables
@@ -125,6 +163,7 @@ fn touched_rows(mutations: &[orna_runtime::TableMutation]) -> Vec<(String, Vec<u
 fn served_table_candidate_validator(
     repository: &Repository,
     project: &orna_project::LoadedProject,
+    binds_committed: bool,
     context: &orna_runtime::RuntimeActivationContext,
     mutations: &[orna_runtime::TableMutation],
 ) -> orna_live::Result<Box<dyn orna_runtime::TableActivationCandidateValidator>> {
@@ -141,9 +180,9 @@ fn served_table_candidate_validator(
             .map_err(|_| orna_live::Error::RuntimeUnavailable)?
             .ok_or(orna_live::Error::RuntimeUnavailable)?;
     ensure_unambiguous_live_table_names(&identities)?;
-    // A project declaring stored references binds the committed HEAD identity of each
-    // live table, which its Eval rows carry, so the commit admits exactly those
-    // identities. A project declaring none keeps the activation's own identities.
+    // An Eval that binds committed tables carries the committed HEAD identity of each
+    // live table, so the commit admits exactly those identities. An Eval that binds
+    // none keeps the activation's own identities.
     let head_ids = head_table_object_ids(&identities);
     // Each row the commit wrote, replaced, deleted or rekeyed must still resolve
     // its stored references in the candidate state (ORNA-MUT-007, ORNA-MUT-008).
@@ -163,11 +202,9 @@ fn served_table_candidate_validator(
         rows: touched_rows(mutations),
     });
     // Admission follows the identities the Eval binds to its mutations: the committed
-    // HEAD identities when the project declares stored references (ORNA-MUT-008), and
-    // the activation's own identities otherwise, as before.
-    let declares_references =
-        orna_conformance::project_declares_stored_references(project, Limits::default());
-    let table_object_ids = if declares_references {
+    // HEAD identities when the Eval binds committed tables (ORNA-MUT-008), and the
+    // activation's own identities otherwise.
+    let table_object_ids = if binds_committed {
         Arc::new(head_ids)
     } else {
         Arc::new(context.table_object_ids().clone())
