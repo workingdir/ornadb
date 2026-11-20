@@ -116,14 +116,22 @@ fn ordering_compares_the_exact_amounts_of_one_currency() {
 }
 
 #[test]
-fn amounts_written_at_different_scales_are_neither_less_than_the_other() {
-    // `ops::binary` refuses `==` and `!=` on Money operands with `NotYet`, so
-    // equality is checked through the exact ordering: equal amounts are not
-    // less than each other in either direction.
-    let forward = run("pub fn run(): Bool = gbp(1.00) < gbp(1.0);\n").expect("forward runs");
-    let backward = run("pub fn run(): Bool = gbp(1.0) < gbp(1.00);\n").expect("backward runs");
-    assert_eq!(forward, Value::Bool(false));
-    assert_eq!(backward, Value::Bool(false));
+fn amounts_written_at_different_scales_are_equal() {
+    // Amounts are normalised decimals, so `1.00` and `1.0` are one amount and compare equal in both directions.
+    let forward = run("pub fn run(): Bool = gbp(1.00) == gbp(1.0);\n").expect("forward runs");
+    let backward = run("pub fn run(): Bool = gbp(1.0) == gbp(1.00);\n").expect("backward runs");
+    let unequal = run("pub fn run(): Bool = gbp(1.00) != gbp(1.0);\n").expect("unequal runs");
+    assert_eq!(forward, Value::Bool(true));
+    assert_eq!(backward, Value::Bool(true));
+    assert_eq!(unequal, Value::Bool(false));
+}
+
+#[test]
+fn different_amounts_in_one_currency_are_not_equal() {
+    let equal = run("pub fn run(): Bool = gbp(1.00) == gbp(2.00);\n").expect("equal runs");
+    let unequal = run("pub fn run(): Bool = gbp(1.00) != gbp(2.00);\n").expect("unequal runs");
+    assert_eq!(equal, Value::Bool(false));
+    assert_eq!(unequal, Value::Bool(true));
 }
 
 #[test]
