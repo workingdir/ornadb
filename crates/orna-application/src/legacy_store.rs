@@ -45,7 +45,7 @@ use orna_repository::{
     TypedKey, Uuid,
 };
 use orna_syntax::parse_row;
-use orna_value::Raw;
+use orna_value::{Raw, Value};
 
 /// The 1.0.0 record tag that wraps one stored row value as
 /// `[null, [[field, value], ...]]` (the compact reader's row record).
@@ -120,6 +120,9 @@ impl LegacyField {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LegacyRow {
     key: TypedKey,
+    /// The key as a compact segment stored it, before typed decoding. `None` for
+    /// a loose row unit, whose key is reconstructed from its path.
+    stored_key: Option<Value>,
     fields: Vec<LegacyField>,
 }
 
@@ -127,6 +130,12 @@ impl LegacyRow {
     /// The row's primary key.
     pub const fn key(&self) -> &TypedKey {
         &self.key
+    }
+
+    /// The key as the compact segment stored it, before typed decoding; `None`
+    /// for a loose row unit.
+    pub fn stored_key(&self) -> Option<&Value> {
+        self.stored_key.as_ref()
     }
 
     /// The row's stored fields, in stored order. A loose row unit holds
@@ -341,6 +350,7 @@ fn read_compact_table_rows(
             Ok(LegacyRow {
                 key: TypedKey::from_value(row.key())
                     .map_err(|_| LegacyReadError::UndecodableCompactRow)?,
+                stored_key: Some(row.key().clone()),
                 fields: legacy_compact_fields(row.value().raw())?,
             })
         })
@@ -517,7 +527,11 @@ pub(crate) fn decode_loose_rows(
                 _ => None,
             })
             .collect();
-        rows.push(LegacyRow { key, fields });
+        rows.push(LegacyRow {
+            key,
+            stored_key: None,
+            fields,
+        });
     }
     let rows = one_row_per_key(table_path.to_owned(), rows)?;
     Ok(LegacyTableRows {
@@ -666,7 +680,11 @@ impl LegacyTableRows {
 impl LegacyRow {
     /// A row of `key` storing `fields` in order, for tests of the row mapping.
     pub(crate) fn for_tests(key: TypedKey, fields: Vec<LegacyField>) -> Self {
-        Self { key, fields }
+        Self {
+            key,
+            stored_key: None,
+            fields,
+        }
     }
 }
 
@@ -727,6 +745,7 @@ mod legacy_rows {
     fn row(key: TypedKey) -> LegacyRow {
         LegacyRow {
             key,
+            stored_key: None,
             fields: Vec::new(),
         }
     }

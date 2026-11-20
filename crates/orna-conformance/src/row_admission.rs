@@ -30,14 +30,15 @@ pub fn admit_project_rows(
 ) -> RowResult<Vec<AdmittedLooseRow>> {
     let modules = module_sources(project);
     let loose_rows = loose_row_sources(project);
-    row_admission::admit_row_sources(
+    let rows = row_admission::admit_row_sources(
         &project.project_id,
         &modules,
         analysis,
         &loose_rows,
-        identity,
         limits,
-    )
+    )?;
+    row_admission::resolve_stored_references(&rows, identity)?;
+    Ok(rows)
 }
 
 fn module_sources(project: &ProjectUnit) -> Vec<&str> {
