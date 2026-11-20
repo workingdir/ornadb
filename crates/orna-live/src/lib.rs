@@ -1337,6 +1337,11 @@ pub struct CommittedEvalTables {
     pub table_object_ids: BTreeMap<String, orna_runtime::TableObjectId>,
 }
 
+/// The function that binds a plan's captured live rows as the Eval's committed rows.
+pub type CommittedEvalBind = Box<
+    dyn FnOnce(&orna_runtime::RuntimeTableRows) -> Result<orna_runtime::RuntimeTableRows> + Send,
+>;
+
 /// The committed tables an Eval binds, planned at the activation's own pinned
 /// generation: the admitted tables whose live rows the activation captures, and
 /// the function that binds those captured rows as the Eval's committed rows.
@@ -1344,10 +1349,7 @@ pub struct CommittedEvalTables {
 /// git `HEAD` rows, so an Eval sees the rows the runtime has admitted.
 pub struct CommittedEvalPlan {
     pub tables: Vec<orna_runtime::RuntimeTableIdentity>,
-    pub bind: Box<
-        dyn FnOnce(&orna_runtime::RuntimeTableRows) -> Result<orna_runtime::RuntimeTableRows>
-            + Send,
-    >,
+    pub bind: CommittedEvalBind,
 }
 
 /// Builds the committed tables plan an Eval binds, at the activation's own
