@@ -2036,6 +2036,7 @@ fn test_clone(root: &Path, identity: RuntimeIdentity) -> ServedClone {
         app: None,
         runtime,
         table_candidate_validator: None,
+        committed_eval_rows: None,
     }
 }
 

@@ -662,6 +662,7 @@ pub trait LiveApplication {
     /// Dispatches an Eval with the host's trusted stream-administration
     /// capability. The default preserves applications that do not implement
     /// runtime-backed source effects.
+    #[allow(clippy::too_many_arguments)]
     fn dispatch_eval_with_effects<'a>(
         &'a mut self,
         session: [u8; 16],
@@ -670,6 +671,7 @@ pub trait LiveApplication {
         context: Option<&'a RuntimeActivationContext>,
         work: &'a mut LiveApplicationWorkLease,
         _effects: Option<&'a dyn LiveAdminEffectDispatcher>,
+        _committed_rows: Option<CommittedEvalTables>,
     ) -> Pin<Box<dyn Future<Output = Result<LiveEvalResponse>> + 'a>> {
         self.dispatch_eval_with_work(session, request, message, context, work)
     }
@@ -1017,6 +1019,7 @@ pub struct LiveApplicationTicket {
     watch: Option<[u8; 16]>,
     fingerprint: [u8; 32],
     eval_context: Option<RuntimeActivationContext>,
+    eval_committed_rows: Option<CommittedEvalTables>,
     admin_effects: Option<Arc<dyn LiveAdminEffectDispatcher>>,
     activation_runtime: Option<Arc<RuntimeState>>,
     activation_lease: Option<WriterLease>,
@@ -1108,10 +1111,11 @@ impl LiveApplicationTicket {
                 let context = self.eval_context.as_ref();
                 let work = &mut self.work;
                 let effects = self.admin_effects.as_deref();
+                let committed_rows = self.eval_committed_rows.take();
                 let execute = move || async move {
                     application
                         .dispatch_eval_with_effects(
-                            session, request, message, context, work, effects,
+                            session, request, message, context, work, effects, committed_rows,
                         )
                         .await
                 };
@@ -1317,6 +1321,55 @@ impl HttpResponse {
 pub trait DeletionAdapter: SessionDeletionAdapter {}
 impl<T: SessionDeletionAdapter> DeletionAdapter for T {}
 
+/// The committed tables an Eval binds, read at the activation's own pinned
+/// generation: the rows of each admitted table and the committed identity of
+/// each table. The identities resolve the stored references that name a
+/// committed row (ORNA-REF-DANGLING) when the Eval is checked.
+#[derive(Debug, Default)]
+pub struct CommittedEvalTables {
+    pub rows: orna_runtime::RuntimeTableRows,
+    pub table_object_ids: BTreeMap<String, orna_runtime::TableObjectId>,
+}
+
+/// The committed tables an Eval binds, planned at the activation's own pinned
+/// generation: the admitted tables whose live rows the activation captures, and
+/// the function that binds those captured rows as the Eval's committed rows.
+/// `bind` receives the live rows of `tables` at the pinned capture, never the
+/// git `HEAD` rows, so an Eval sees the rows the runtime has admitted.
+pub struct CommittedEvalPlan {
+    pub tables: Vec<orna_runtime::RuntimeTableIdentity>,
+    pub bind: Box<
+        dyn FnOnce(&orna_runtime::RuntimeTableRows) -> Result<orna_runtime::RuntimeTableRows>
+            + Send,
+    >,
+}
+
+/// Builds the committed tables plan an Eval binds, at the activation's own
+/// pinned generation. A host installs one when its project declares stored
+/// references, so an Eval that deletes or rekeys a row is checked against the
+/// committed rows that reference it (ORNA-MUT-008).
+pub type CommittedEvalRowsFactory =
+    Box<dyn Fn(&RuntimeActivationContext) -> Result<CommittedEvalPlan> + Send>;
+
+/// Reads the committed tables an Eval binds: the live rows of the planned tables
+/// at the activation's pinned capture, bound through the plan. A publication
+/// since the context was admitted fails closed as `StaleCapture`.
+async fn read_committed_eval_tables(
+    runtime: &RuntimeState,
+    plan: CommittedEvalPlan,
+    context: &RuntimeActivationContext,
+) -> Result<CommittedEvalTables> {
+    let snapshot = runtime
+        .begin_admitted_table_activation_at(&plan.tables, context)
+        .await
+        .map_err(|error| map_runtime(&error))?;
+    let rows = (plan.bind)(snapshot.table_rows())?;
+    Ok(CommittedEvalTables {
+        rows,
+        table_object_ids: snapshot.table_object_ids().clone(),
+    })
+}
+
 /// Builds the table candidate validator for one staged commit. It receives the
 /// activation context that the staged mutations were admitted under. Commits
 /// use the validated runtime path only when a factory is installed.
@@ -1348,6 +1401,7 @@ pub struct LiveHost {
     takeover_recovery_complete: bool,
     application_work: LiveApplicationWorkSupervisor,
     table_candidate_validator: Option<TableCandidateValidatorFactory>,
+    committed_eval_rows: Option<CommittedEvalRowsFactory>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1510,6 +1564,15 @@ impl LiveHost {
         self
     }
 
+    /// Installs the factory that reads the committed table rows each Eval
+    /// binds. A host whose project declares stored references needs it so a
+    /// delete is checked against the committed rows that reference the row.
+    #[must_use]
+    pub fn with_committed_eval_rows(mut self, factory: CommittedEvalRowsFactory) -> Self {
+        self.committed_eval_rows = Some(factory);
+        self
+    }
+
     fn build(
         limits: Limits,
         security: SessionBoundary,
@@ -1536,6 +1599,7 @@ impl LiveHost {
             takeover_recovery_complete: false,
             application_work: LiveApplicationWorkSupervisor::new(),
             table_candidate_validator: None,
+            committed_eval_rows: None,
         })
     }
 
@@ -2430,6 +2494,20 @@ impl LiveHost {
         } else {
             None
         };
+        let committed_factory = self.committed_eval_rows.as_ref();
+        let committed_plan = match (committed_factory, eval_context.as_ref()) {
+            (Some(factory), Some(context)) if matches!(envelope.message, Message::Eval { .. }) => {
+                Some(factory(context)?)
+            }
+            _ => None,
+        };
+        let eval_committed_rows = match (committed_plan, eval_context.as_ref()) {
+            (Some(plan), Some(context)) => {
+                let runtime = self.runtime.as_ref().ok_or(Error::RuntimeUnavailable)?;
+                Some(read_committed_eval_tables(runtime, plan, context).await?)
+            }
+            _ => None,
+        };
         let admin_effects = match (self.runtime.as_ref(), activation_lease) {
             (Some(runtime), Some(lease)) => Some(Arc::new(RuntimeAdminEffectDispatcher {
                 runtime: Arc::clone(runtime),
@@ -2486,6 +2564,7 @@ impl LiveHost {
             watch: envelope.watch,
             fingerprint,
             eval_context,
+            eval_committed_rows,
             admin_effects,
             activation_runtime: self.runtime.clone(),
             activation_lease,
@@ -3400,6 +3479,22 @@ impl LiveHost {
         } else {
             None
         };
+        let committed_plan = match (self.committed_eval_rows.as_ref(), context.as_ref()) {
+            (Some(factory), Some(context)) if matches!(message, Message::Eval { .. }) => {
+                Some(factory(context)?)
+            }
+            _ => None,
+        };
+        let committed_rows = match committed_plan {
+            Some(plan) => {
+                let runtime = activation_runtime
+                    .as_deref()
+                    .ok_or(Error::RuntimeUnavailable)?;
+                let context = context.as_ref().ok_or(Error::RuntimeUnavailable)?;
+                Some(read_committed_eval_tables(runtime, plan, context).await?)
+            }
+            None => None,
+        };
         let admin_effects = match (&activation_runtime, activation_lease) {
             (Some(runtime), Some(lease)) => Some(RuntimeAdminEffectDispatcher {
                 runtime: Arc::clone(runtime),
@@ -3429,6 +3524,7 @@ impl LiveHost {
                     context_ref,
                     work_ref,
                     effects_ref,
+                    committed_rows,
                 )
                 .await
         };

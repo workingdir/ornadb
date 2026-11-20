@@ -131,16 +131,16 @@ fn head_table_rows(
 
 /// One committed commit's admitted tables, read under that commit's own
 /// project, object identities and schemas.
-struct CommittedRows {
+pub(crate) struct CommittedRows {
     manifest: orna_project::ObjectIdentityManifest,
-    table_object_ids: BTreeMap<String, orna_runtime::TableObjectId>,
-    rows: orna_runtime::RuntimeTableRows,
+    pub(crate) table_object_ids: BTreeMap<String, orna_runtime::TableObjectId>,
+    pub(crate) rows: orna_runtime::RuntimeTableRows,
 }
 
 /// Reads the admitted tables of `commit` as evaluator rows under the commit's
 /// own schemas and identities (ORNA-ASSERT-048: one logical state). `Ok(None)`
 /// when `project` admits no table; any unreadable part fails with its cause.
-fn committed_admitted_rows(
+pub(crate) fn committed_admitted_rows(
     repository: &orna_repository::Repository,
     commit: &orna_repository::GitCommitRef,
     project: &orna_project::LoadedProject,

@@ -1,15 +1,14 @@
 use super::*;
 
-/// ORNA-MUT-008 through the live host (ornadb-pl0oi): an Eval that deletes a
-/// row a committed vehicle still references is refused fail-closed. The socket
-/// closes with 1002 and commits nothing, so the referencing row and its owner
-/// stay committed. The project declares no table assertions, so the reference
-/// check must hold without one. Answering that refusal with its
-/// `ORNA-REF-DANGLING` diagnostic needs a committed-bound reference snapshot
-/// (follow-up bead), so this test does not claim it. A fresh session then
-/// commits as usual.
+/// ORNA-MUT-008 through the live host (ornadb-zvz7v): an Eval that deletes a
+/// row a committed vehicle still references is refused with a correlated
+/// `ORNA-REF-DANGLING` diagnostic, and the socket stays open: a well-formed
+/// request that a commit refuses is answered, not closed (30-protocol). The
+/// refusal commits nothing, so the referencing row and its owner stay
+/// committed. The project declares no table assertions, so the reference check
+/// must hold without one.
 #[test]
-fn served_eval_deleting_a_referenced_row_is_refused_and_commits_nothing() {
+fn served_eval_deleting_a_referenced_row_is_refused_with_its_diagnostic() {
     let directory = tempfile::tempdir().expect("temporary project");
     orna_repository::initialize_repository(directory.path()).expect("orna init");
     std::fs::write(
@@ -52,9 +51,20 @@ fn served_eval_deleting_a_referenced_row_is_refused_and_commits_nothing() {
         "the vehicle commits and holds a reference to its owner"
     );
 
-    let delete = eval_envelope(&session, [52; 16], r#"main.Owner.delete("ada")"#);
-    send_request_over_socket(&mut socket, &session, delete);
-    expect_server_close(&mut socket, 1002);
+    let delete = eval_over_socket(
+        &mut socket,
+        &session,
+        [52; 16],
+        r#"main.Owner.delete("ada")"#,
+    );
+    let Message::Diagnostic { diagnostic, .. } = &delete.message else {
+        panic!("Eval answers with a Diagnostic, not {delete:?}");
+    };
+    assert_eq!(delete.request, Some([52; 16]), "the refusal is correlated");
+    assert_eq!(
+        diagnostic.code().expect("a portable diagnostic code"),
+        "ORNA-REF-DANGLING"
+    );
     assert_eq!(
         committed_rows(directory.path(), "Owner").len(),
         1,
@@ -66,16 +76,14 @@ fn served_eval_deleting_a_referenced_row_is_refused_and_commits_nothing() {
         "a refused delete keeps the referencing vehicle"
     );
 
-    let resumed = create_session_in(address, database);
-    let mut resumed_socket = open_websocket(address, &resumed);
     let row = CanonicalValue::new(OvbRaw::Map(vec![
         (OvbRaw::Text("id".into()), OvbRaw::Text("bob".into())),
         (OvbRaw::Text("name".into()), OvbRaw::Text("Bob".into())),
     ]))
     .expect("canonical row");
     let admitted = eval_over_socket(
-        &mut resumed_socket,
-        &resumed,
+        &mut socket,
+        &session,
         [53; 16],
         r#"main.Owner.insert({ id: "bob", name: "Bob" })"#,
     );

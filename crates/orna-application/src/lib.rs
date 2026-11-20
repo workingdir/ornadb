@@ -23,8 +23,8 @@ use orna_evaluator::{
     page_catalogue_rows, reference_standard_profile, reference_standard_sources,
 };
 use orna_live::{
-    Error as LiveError, FirstPartyEffectTrust, LiveAdminEffectDispatcher, LiveApplication,
-    LiveEvalResponse, LiveEvalTransaction,
+    CommittedEvalTables, Error as LiveError, FirstPartyEffectTrust, LiveAdminEffectDispatcher,
+    LiveApplication, LiveEvalResponse, LiveEvalTransaction,
 };
 use orna_live_lease::LiveApplicationWorkLease;
 use orna_project::{AdmittedSourceRow, LoadedProject, ResolvedTableSchema, admitted_table_schemas};
@@ -906,9 +906,56 @@ impl ApplicationAuthority {
         context: &RuntimeActivationContext,
         dispatcher: &dyn AsyncApplicationEffectDispatcher,
     ) -> Result<StagedActivation, ApplicationError> {
+        self.evaluate_staged_with_async_effects_over(
+            application,
+            arguments,
+            context,
+            dispatcher,
+            application_table_object_ids(application),
+            None,
+        )
+        .await
+    }
+
+    /// Evaluates like [`Self::evaluate_staged_with_async_effects`] with `rows`
+    /// as the committed table contents the Eval binds. Stored references are
+    /// checked against the committed identities, as the synchronous snapshot
+    /// path checks them, so a delete of a referenced row is refused with its
+    /// diagnostic instead of failing on an unbound table snapshot.
+    /// `table_object_ids` are the committed identities those rows were read
+    /// under, so the handler and the reference catalogue resolve each table as
+    /// the snapshot does.
+    pub async fn evaluate_staged_with_async_effects_over_table_rows(
+        &self,
+        application: &AdmittedApplication,
+        arguments: &Environment,
+        context: &RuntimeActivationContext,
+        dispatcher: &dyn AsyncApplicationEffectDispatcher,
+        rows: RuntimeTableRows,
+        table_object_ids: BTreeMap<String, TableObjectId>,
+    ) -> Result<StagedActivation, ApplicationError> {
+        self.evaluate_staged_with_async_effects_over(
+            application,
+            arguments,
+            context,
+            dispatcher,
+            table_object_ids,
+            Some(rows),
+        )
+        .await
+    }
+
+    async fn evaluate_staged_with_async_effects_over(
+        &self,
+        application: &AdmittedApplication,
+        arguments: &Environment,
+        context: &RuntimeActivationContext,
+        dispatcher: &dyn AsyncApplicationEffectDispatcher,
+        table_object_ids: BTreeMap<String, TableObjectId>,
+        rows: Option<RuntimeTableRows>,
+    ) -> Result<StagedActivation, ApplicationError> {
         validate_terminal_runtime_effect(application)?;
         let tables = application_table_schemas(application);
-        let table_object_ids = application_table_object_ids(application);
         let publication_rows = dispatcher
             .publication_metadata_rows()
             .await
@@ -920,11 +967,27 @@ impl ApplicationAuthority {
             tables.keys().map(String::as_str),
             publication_rows.is_some(),
         )?;
-        let mut handler = AsyncSourceMutationEffectHandler::new_with_table_object_ids(
-            tables,
-            publication_rows,
-            table_object_ids,
-        )?;
+        let mut handler = match rows {
+            Some(rows) => {
+                let references = stored_reference::stored_reference_catalogue(
+                    context.capture().database_id(),
+                    &tables,
+                    &table_object_ids,
+                )?;
+                AsyncSourceMutationEffectHandler::new_over_table_rows(
+                    tables,
+                    rows,
+                    references,
+                    publication_rows,
+                    table_object_ids,
+                )?
+            }
+            None => AsyncSourceMutationEffectHandler::new_with_table_object_ids(
+                tables,
+                publication_rows,
+                table_object_ids,
+            )?,
+        };
         handler.explain_catalogue = Some(explain_catalogue);
         handler.mutations = handler
             .mutations
@@ -2417,6 +2480,26 @@ impl AsyncSourceMutationEffectHandler {
         })
     }
 
+    fn new_over_table_rows(
+        tables: BTreeMap<String, TableSchema>,
+        rows: RuntimeTableRows,
+        references: Option<orna_project::ReferenceCatalogue>,
+        publication_rows: Option<RuntimePublicationMetadataRows>,
+        table_object_ids: BTreeMap<String, TableObjectId>,
+    ) -> Result<Self, ApplicationError> {
+        Ok(Self {
+            mutations: SourceMutationEffectHandler::with_table_rows_and_table_object_ids(
+                tables,
+                rows,
+                table_object_ids,
+            )?
+            .with_stored_references(references),
+            effects: Vec::new(),
+            publication_rows,
+            explain_catalogue: None,
+        })
+    }
+
     fn into_parts(self) -> (SourceMutationEffectHandler, Vec<ApplicationEffectRequest>) {
         (self.mutations, self.effects)
     }
@@ -2805,6 +2888,7 @@ impl EffectHandler for SourceMutationEffectHandler {
                 }
                 let key = encoded_key(key)?;
                 if self.current_row(&table, &key)?.is_none() {
+                    eprintln!("DBGPROBE4 table={table} key={key:02x?} captured_tables={:?} captured_keys={:?}", self.captured_rows.as_ref().map(|c| c.keys().cloned().collect::<Vec<_>>()), self.captured_rows.as_ref().and_then(|c| c.get(&table)).map(|rows| rows.keys().cloned().collect::<Vec<Vec<u8>>>()));
                     return Err(Self::effect_error("ORNA-EVAL-TABLE-MISSING-ROW"));
                 }
                 self.record(&table, key.clone(), None)?;
@@ -3249,7 +3333,21 @@ impl From<ApplicationError> for LiveError {
                 // pass through this conversion.
                 Self::ValidationRejected(orna_project::DANGLING_REFERENCE_CODE)
             }
-            _ => Self::ApplicationRejected,
+            ApplicationError::Evaluation(diagnostic)
+                if diagnostic.code() == orna_project::DANGLING_REFERENCE_CODE =>
+            {
+                // The evaluator refuses a REPL input whose delete or rekey would
+                // leave a committed row dangling (ORNA-MUT-008). The refusal is
+                // answered as the same correlated diagnostic as the activation
+                // path above, not closed as an unanswered application failure.
+                Self::ValidationRejected(orna_project::DANGLING_REFERENCE_CODE)
+            }
+            _ => {
+                if let ApplicationError::Evaluation(diagnostic) = &error {
+                    eprintln!("DBGPROBE3 code={:?}", diagnostic.code());
+                }
+                Self::ApplicationRejected
+            }
         }
     }
 }
@@ -3646,6 +3744,7 @@ impl ApplicationLiveAdapter {
         request: [u8; 16],
         message: &Message,
         context: Option<&RuntimeActivationContext>,
+        committed_rows: Option<CommittedEvalTables>,
     ) -> std::result::Result<LiveEvalResponse, LiveError> {
         let Message::Eval { source, .. } = message else {
             return Err(LiveError::ApplicationRejected);
@@ -3677,10 +3776,35 @@ impl ApplicationLiveAdapter {
         // The handler serves the system relations the input reads at the commit
         // this Eval is bound to (`Self::bind_commit`): the host's Git state and
         // the catalogue over that commit's identities.
-        let mut handler =
-            SourceMutationEffectHandler::new(self.repl_table_schemas().map_err(LiveError::from)?)
-                .with_sys_host_context(self.authority.sys_host.clone())
-                .with_catalogue_identities(self.catalogue_identities.as_deref());
+        let tables = self.repl_table_schemas().map_err(LiveError::from)?;
+        // The committed rows are the table contents at the commit this Eval is
+        // bound to; the handler's overlay merges this input's staged writes over
+        // them. Without committed rows every table read fails closed. The
+        // committed identities resolve the stored references this input's
+        // deletes and rekeys are checked against (ORNA-MUT-008), so a delete that
+        // leaves a committed row dangling is refused at evaluation.
+        let references = match (context, committed_rows.as_ref()) {
+            (Some(context), Some(committed)) => stored_reference::stored_reference_catalogue(
+                context.capture().database_id(),
+                &tables,
+                &committed.table_object_ids,
+            )
+            .map_err(LiveError::from)?,
+            _ => None,
+        };
+        let handler = match committed_rows {
+            Some(committed) => SourceMutationEffectHandler::with_table_rows_and_table_object_ids(
+                tables,
+                committed.rows,
+                committed.table_object_ids,
+            )
+            .map_err(LiveError::from)?,
+            None => SourceMutationEffectHandler::new(tables),
+        };
+        let mut handler = handler
+            .with_sys_host_context(self.authority.sys_host.clone())
+            .with_catalogue_identities(self.catalogue_identities.as_deref())
+            .with_stored_references(references);
         // The REPL serves `sys.explain` from the activation's pinned CWD
         // snapshot (ORNA-SYS-008), as the module activation does. A pure
         // evaluation has no activation context, so no catalogue is pinned
@@ -4121,7 +4245,7 @@ impl LiveApplication for ApplicationLiveAdapter {
         Box::pin(async move {
             if self.eval_module.is_none() {
                 return self
-                    .eval_repl_with_transaction(session, request, message, context)
+                    .eval_repl_with_transaction(session, request, message, context, None)
                     .await;
             }
             self.eval_module_with_transaction(session, request, message, context)
@@ -4148,6 +4272,9 @@ impl LiveApplication for ApplicationLiveAdapter {
         })
     }
 
+    // The arity belongs to this trait method: the committed rows are the
+    // ticket's own table contents, moved into the evaluation that binds them.
+    #[allow(clippy::too_many_arguments)]
     fn dispatch_eval_with_effects<'a>(
         &'a mut self,
         session: [u8; 16],
@@ -4156,12 +4283,17 @@ impl LiveApplication for ApplicationLiveAdapter {
         context: Option<&'a RuntimeActivationContext>,
         work: &'a mut LiveApplicationWorkLease,
         effects: Option<&'a dyn LiveAdminEffectDispatcher>,
+        committed_rows: Option<CommittedEvalTables>,
     ) -> Pin<Box<dyn Future<Output = std::result::Result<LiveEvalResponse, LiveError>> + 'a>> {
         Box::pin(async move {
             if self.eval_module.is_none() {
-                return self
-                    .dispatch_eval_with_work(session, request, message, context, work)
-                    .await;
+                work.check_active()?;
+                let response = self
+                    .eval_repl_with_transaction(session, request, message, context, committed_rows)
+                    .await?;
+                work.complete();
+                work.check_active()?;
+                return Ok(response);
             }
             let (Some(context), Some(effects)) = (context, effects) else {
                 return self
@@ -4171,16 +4303,31 @@ impl LiveApplication for ApplicationLiveAdapter {
             work.check_active()?;
             let admitted = self.evaluate_eval_message(message)?;
             let dispatcher = LiveEffectAdapter(effects);
-            let staged = self
-                .authority
-                .evaluate_staged_with_async_effects(
-                    &admitted,
-                    &Environment::new(),
-                    context,
-                    &dispatcher,
-                )
-                .await
-                .map_err(LiveError::from)?;
+            let staged = match committed_rows {
+                Some(committed) => {
+                    self.authority
+                        .evaluate_staged_with_async_effects_over_table_rows(
+                            &admitted,
+                            &Environment::new(),
+                            context,
+                            &dispatcher,
+                            committed.rows,
+                            committed.table_object_ids,
+                        )
+                        .await
+                }
+                None => {
+                    self.authority
+                        .evaluate_staged_with_async_effects(
+                            &admitted,
+                            &Environment::new(),
+                            context,
+                            &dispatcher,
+                        )
+                        .await
+                }
+            }
+            .map_err(LiveError::from)?;
             let envelope =
                 self.success_envelope(request, eval_fingerprint(message)?, staged.value().clone())?;
             let response = if staged.mutations().is_empty() {
@@ -6289,6 +6436,7 @@ mod tests {
             Some(&context),
             &mut work,
             Some(&dispatcher),
+            None,
         ))
         .expect("effect-enabled host still dispatches REPL source");
         let LiveEvalResponse::Pure(envelope) = response else {
