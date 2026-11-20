@@ -201,27 +201,7 @@ pub(crate) fn build_store_with_expectation(
         };
         rows.push(table_rows);
     }
-    // Every stored table reference of an admitted row must name a row that the
-    // snapshot admits (ADR 0121; ORNA-CONFORMANCE-ROW-REFERENCE).
-    let table_paths = declared
-        .relations()
-        .iter()
-        .map(|relation| {
-            let id = *relation.relation_id();
-            declared
-                .table_name(&id)
-                .map(|path| (id, path))
-                .ok_or_else(|| refused("a declared relation has no source table name"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let identity =
-        stored_reference_identity(&table_paths, &analysis, &admitted, *database.as_bytes())?;
-    resolve_stored_references(&admitted, &identity).map_err(|diagnostic| {
-        refused(format!(
-            "a stored table reference is not admitted: {}",
-            diagnostic.code()
-        ))
-    })?;
+    resolve_admitted_references(&declared, &analysis, &admitted, *database.as_bytes())?;
     let tables: Vec<LegacyTable<'_>> = addresses
         .iter()
         .zip(rows.iter())
@@ -315,6 +295,34 @@ pub(crate) fn build_store_with_expectation(
             blobs,
         },
     ))
+}
+
+/// Resolves every stored table reference of the admitted rows against the
+/// snapshot's admitted keys (ADR 0121; ORNA-CONFORMANCE-ROW-REFERENCE).
+fn resolve_admitted_references(
+    declared: &StagedRelations,
+    analysis: &Analysis,
+    admitted: &[AdmittedLooseRow],
+    database_id: [u8; 16],
+) -> Result<(), RepositoryError> {
+    let table_paths = declared
+        .relations()
+        .iter()
+        .map(|relation| {
+            let id = *relation.relation_id();
+            declared
+                .table_name(&id)
+                .map(|path| (id, path))
+                .ok_or_else(|| refused("a declared relation has no source table name"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let identity = stored_reference_identity(&table_paths, analysis, admitted, database_id)?;
+    resolve_stored_references(admitted, &identity).map_err(|diagnostic| {
+        refused(format!(
+            "a stored table reference is not admitted: {}",
+            diagnostic.code()
+        ))
+    })
 }
 
 /// Reads one editable table's loose row units and admits every unit against the
