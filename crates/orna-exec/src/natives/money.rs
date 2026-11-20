@@ -136,3 +136,47 @@ pub(super) fn compare(
     let ordering: Ordering = left_amount.compare(right_amount)?;
     machine.ordering_value(ordering)
 }
+
+#[cfg(test)]
+mod tests {
+    use num_bigint::BigInt;
+
+    use super::*;
+
+    fn amount(value: i64) -> Decimal {
+        Decimal::new(BigInt::from(value), BigInt::from(0)).expect("a small decimal is in range")
+    }
+
+    #[test]
+    fn two_currencies_are_refused_with_a_type_error() {
+        let gbp = Value::Money {
+            amount: amount(100),
+            currency: [1; 16],
+        };
+        let eur = Value::Money {
+            amount: amount(100),
+            currency: [2; 16],
+        };
+        assert!(matches!(
+            same_currency(&gbp, &eur),
+            Err(Stop::Error("ORNA-EVAL-TYPE"))
+        ));
+    }
+
+    #[test]
+    fn an_operand_that_is_not_money_is_refused_with_a_type_error() {
+        let gbp = Value::Money {
+            amount: amount(100),
+            currency: [1; 16],
+        };
+        let decimal = Value::Decimal(amount(100));
+        assert!(matches!(
+            same_currency(&gbp, &decimal),
+            Err(Stop::Error("ORNA-EVAL-TYPE"))
+        ));
+        assert!(matches!(
+            same_currency(&decimal, &gbp),
+            Err(Stop::Error("ORNA-EVAL-TYPE"))
+        ));
+    }
+}
