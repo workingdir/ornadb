@@ -1,9 +1,10 @@
 //! The `core.money` engine natives (hir-host.md B6): the arithmetic and comparison of `Money<C>` values. Two amounts add,
-//! subtract and compare only in the same currency; the currency is the id each value carries. Each call charges one step.
+//! subtract, compare and test equality only in the same currency; the currency is the id each value carries. Each
+//! native call charges one step; `==`/`!=` are operator rules in ops::binary, as Decimal equality is.
 
 use std::cmp::Ordering;
 
-use orna_hir::Ty;
+use orna_hir::{BinOp, Ty};
 
 use crate::decimal::Decimal;
 use crate::error::Stop;
@@ -137,6 +138,15 @@ pub(super) fn compare(
     machine.ordering_value(ordering)
 }
 
+/// `==` and `!=` on two `Money<C>` values. Two amounts are equal when they name the same currency and their exact
+/// decimal amounts are equal: a normalised decimal is one value whatever scale it was written at, so `12.5` equals
+/// `12.50`. Two currencies are refused exactly as arithmetic and ordering refuse them.
+pub(crate) fn equality(op: BinOp, lhs: &Value, rhs: &Value) -> Result<Value, Stop> {
+    let (left_amount, right_amount, _) = same_currency(lhs, rhs)?;
+    let equal = left_amount == right_amount;
+    Ok(Value::Bool(equal == matches!(op, BinOp::Eq)))
+}
+
 #[cfg(test)]
 mod tests {
     use num_bigint::BigInt;
@@ -176,6 +186,31 @@ mod tests {
         ));
         assert!(matches!(
             same_currency(&decimal, &gbp),
+            Err(Stop::Error("ORNA-EVAL-TYPE"))
+        ));
+    }
+
+    #[test]
+    fn equality_is_exact_across_scales_and_refuses_two_currencies() {
+        let pounds = |coefficient: i64, exponent: i64| Value::Money {
+            amount: Decimal::new(BigInt::from(coefficient), BigInt::from(exponent))
+                .expect("a small decimal is in range"),
+            currency: [1; 16],
+        };
+        assert!(matches!(
+            equality(BinOp::Eq, &pounds(125, -1), &pounds(1250, -2)),
+            Ok(Value::Bool(true))
+        ));
+        assert!(matches!(
+            equality(BinOp::Ne, &pounds(125, -1), &pounds(1250, -2)),
+            Ok(Value::Bool(false))
+        ));
+        let euros = Value::Money {
+            amount: amount(125),
+            currency: [2; 16],
+        };
+        assert!(matches!(
+            equality(BinOp::Eq, &pounds(125, -1), &euros),
             Err(Stop::Error("ORNA-EVAL-TYPE"))
         ));
     }
