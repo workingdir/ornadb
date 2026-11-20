@@ -599,11 +599,8 @@ fn parse_add_row(words: &mut Words<'_>) -> Result<Command, Diagnostic> {
             "use `add --row TABLE KEY_TEXT` to stage one logical row",
         ));
     }
-    let table = words.require(
-        "`add --row` needs a table",
-        "use `add --row TABLE KEY_TEXT`",
-    )?;
-    let key = words.require("`add --row` needs a key", "use `add --row TABLE KEY_TEXT`")?;
+    let table = words.require("`add --row` needs TABLE", "use `add --row TABLE KEY_TEXT`")?;
+    let key = words.require("`add --row` needs KEY", "use `add --row TABLE KEY_TEXT`")?;
     words.reject_trailing(
         "unexpected trailing arguments for `add`",
         "use `add --row TABLE KEY_TEXT` with exactly one table and key",
