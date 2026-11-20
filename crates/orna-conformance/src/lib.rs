@@ -9,7 +9,7 @@ use futures::executor::block_on;
 use num_bigint::BigInt;
 use orna_evaluator::Environment;
 use orna_repository::Repository;
-use orna_runtime::{RuntimeIdentity, RuntimeState};
+use orna_runtime::{RuntimeError, RuntimeIdentity, RuntimeState};
 use orna_stream::Checkpoint;
 use orna_stream_identity::{CheckpointKey, Component, ConsumerIdentity};
 use orna_syntax::parse_module;
@@ -1170,6 +1170,27 @@ fn reference_module_namespace(unit: &SourceUnit) -> Result<&str, String> {
         .ok_or_else(|| "reference module identity is invalid".to_owned())
 }
 
+/// Committed rows read per page when the reference counts a relation: the
+/// runtime's largest page, so no page holds more rows than that.
+const REFERENCE_COUNT_PAGE_ROWS: usize = 1024;
+
+/// Counts the committed rows of `table` page by page, so the count never holds
+/// the whole relation in memory at once.
+async fn committed_row_count(state: &RuntimeState, table: &str) -> Result<usize, RuntimeError> {
+    let mut count = 0;
+    let mut after: Option<Vec<u8>> = None;
+    loop {
+        let page = state
+            .committed_table_page(table, after.as_deref(), REFERENCE_COUNT_PAGE_ROWS)
+            .await?;
+        count += page.rows.len();
+        match page.next {
+            Some(next) => after = Some(next),
+            None => return Ok(count),
+        }
+    }
+}
+
 async fn verify_reference_step(
     state: &RuntimeState,
     project: &ProjectUnit,
@@ -1220,11 +1241,9 @@ async fn verify_reference_step(
                 let before = previous_reading_count.ok_or_else(|| {
                     "reference additional-row expectation lacks a baseline".to_owned()
                 })?;
-                let observed = state
-                    .committed_table_rows("sensors.Reading")
+                let observed = committed_row_count(state, "sensors.Reading")
                     .await
                     .map_err(|_| "reference sensors.Reading rows could not be read".to_owned())?
-                    .len()
                     .saturating_sub(before);
                 if observed as u64 != expected {
                     return Err("reference stream added an unexpected number of rows".into());

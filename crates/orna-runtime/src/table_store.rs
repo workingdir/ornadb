@@ -17,6 +17,10 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+mod committed_relation;
+pub use committed_relation::CommittedTablePage;
+use committed_relation::{committed_relation_page, committed_relation_rows};
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Mutation {
     pub id: [u8; 16],
@@ -1679,45 +1683,19 @@ impl RuntimeState {
         &self,
         table: &str,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, RuntimeError> {
-        validate_table_name(table)?;
-        // A table written under its committed identity stores rows under
-        // `oid:<hex>`, so the name is resolved through the durable identity
-        // mapping first (bead ornadb-jm0d).
-        let mut storage = vec![table.to_owned()];
-        let mut identities = self
-            .connection
-            .query(
-                "SELECT object_id FROM table_identity WHERE table_name = ?1",
-                params![table],
-            )
-            .await?;
-        while let Some(row) = identities.next().await? {
-            let bytes: Vec<u8> = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
-            if let Ok(id) = <[u8; 16]>::try_from(bytes.as_slice()) {
-                storage.push(table_storage_key(table, Some(TableObjectId::new(id))));
-            }
-        }
-        let mut rows = self
-            .connection
-            .query(
-                "SELECT row_key, row_value FROM table_row
-                 WHERE table_id = ?1 OR table_id = ?2 OR table_id = ?3
-                 ORDER BY row_key",
-                params![
-                    storage[0].clone(),
-                    storage.get(1).cloned().unwrap_or_default(),
-                    storage.get(2).cloned().unwrap_or_default()
-                ],
-            )
-            .await?;
-        let mut result = Vec::new();
-        while let Some(row) = rows.next().await? {
-            result.push((
-                row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
-                row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
-            ));
-        }
-        Ok(result)
+        committed_relation_rows(&self.connection, table).await
+    }
+
+    /// Reads one page of a committed relation: at most `limit` rows whose key
+    /// follows `after` (the first rows when `None`), in canonical key order.
+    /// `limit` must be between 1 and `MAX_RUNTIME_QUERY_PAGE_ROWS`.
+    pub async fn committed_table_page(
+        &self,
+        table: &str,
+        after: Option<&[u8]>,
+        limit: usize,
+    ) -> Result<CommittedTablePage, RuntimeError> {
+        committed_relation_page(&self.connection, table, after, limit).await
     }
 
     pub async fn commit(

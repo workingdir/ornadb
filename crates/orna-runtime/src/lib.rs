@@ -102,6 +102,7 @@ pub use repository_identity::{
     migration_copy_runtime_identity, migration_source_runtime_identity,
     repository_runtime_identity, runtime_identity_for_database_id,
 };
+pub use table_store::CommittedTablePage;
 mod stream_carry;
 pub use catalogue::{
     CatalogueAdmission, CatalogueAdmissionResult, CatalogueDeclaration, CatalogueError,
@@ -22640,6 +22641,10 @@ mod tests {
             ),
             (RuntimeError::InvocationTailLimit, "invocation_tail_limit"),
             (
+                RuntimeError::InvalidTablePageLimit,
+                "invalid_table_page_limit",
+            ),
+            (
                 RuntimeError::StreamIdentityMismatch,
                 "stream_identity_mismatch",
             ),
@@ -22730,7 +22735,7 @@ mod tests {
                 "stream_failure_skip_unsupported",
             ),
         ];
-        assert_eq!(table.len(), 49);
+        assert_eq!(table.len(), 50);
         for (variant, class) in table {
             assert_eq!(admin_failure_class(variant), *class);
             assert_eq!(admin_failure_from_class(class), *variant, "{class}");
