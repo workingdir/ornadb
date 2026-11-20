@@ -67,14 +67,7 @@ impl TableEffectHandler<'_, '_> {
         table: &str,
         row: &Value,
     ) -> Result<Option<Value>, EvaluationError> {
-        let Some(references) = self.references else {
-            return Ok(None);
-        };
-        references
-            .bind_row(table, row.raw())
-            .map_err(reference_failure)?
-            .map(|bound| Value::new(bound).map_err(|_| reference_failure(ReferenceError::NotARow)))
-            .transpose()
+        bind_stored_row(self.references, table, row)
     }
 
     /// The row the stored reference `reference` names in this activation's own
@@ -96,6 +89,24 @@ impl TableEffectHandler<'_, '_> {
             .map(Option::<&Value>::cloned)
             .map_err(|error| transaction_error(table_error_code(error)))
     }
+}
+
+/// The row of `table` with its reference columns bound to stored references
+/// (ORNA-REF-001), or `None` when `row` already holds them or no catalogue
+/// applies. The table effects and the list stream item path bind through it.
+pub(super) fn bind_stored_row(
+    references: Option<&ReferenceCatalogue>,
+    table: &str,
+    row: &Value,
+) -> Result<Option<Value>, EvaluationError> {
+    let Some(references) = references else {
+        return Ok(None);
+    };
+    references
+        .bind_row(table, row.raw())
+        .map_err(reference_failure)?
+        .map(|bound| Value::new(bound).map_err(|_| reference_failure(ReferenceError::NotARow)))
+        .transpose()
 }
 
 /// Validates the referential constraints of the activation `mutations` wrote
@@ -298,9 +309,7 @@ impl CandidateState for CandidateRowsState<'_> {
 }
 
 /// Validates that the row a mounted save wrote still resolves its stored
-/// references over the candidate state (ORNA-REF-001, ORNA-MUT-007). A dangling
-/// reference is refused with its own code; any other failure to read the state
-/// is refused as an evaluation failure, so nothing commits unchecked.
+/// references over the candidate state (ORNA-REF-001, ORNA-MUT-007).
 pub(super) fn validate_saved_row_references(
     saved: &SavedRowReferences,
     keys: &TableKeys,
@@ -308,20 +317,43 @@ pub(super) fn validate_saved_row_references(
     key_fields: &TableFields,
     rows: &orna_runtime::RuntimeTableRows,
 ) -> Result<(), SafeDiagnostic> {
+    validate_written_row_references(
+        &saved.catalogue,
+        &saved.table,
+        &saved.key,
+        keys,
+        table_fields,
+        key_fields,
+        rows,
+    )
+}
+
+/// Validates that the row of `table` stored under `key` still resolves its
+/// stored references over the candidate state (ORNA-REF-001, ORNA-MUT-007). A
+/// dangling reference is refused with its own code; any other failure to read
+/// the state is refused as an evaluation failure, so nothing commits unchecked.
+pub(super) fn validate_written_row_references(
+    catalogue: &ReferenceCatalogue,
+    table: &str,
+    key: &[u8],
+    keys: &TableKeys,
+    table_fields: &TableFields,
+    key_fields: &TableFields,
+    rows: &orna_runtime::RuntimeTableRows,
+) -> Result<(), SafeDiagnostic> {
     let key_names = key_fields
-        .get(&saved.table)
+        .get(table)
         .ok_or_else(table_evaluation_diagnostic)?;
-    let components = candidate_key_components(&saved.key, key_names)
-        .map_err(|_| table_row_decode_diagnostic())?;
-    let touched = [(saved.table.clone(), components)];
+    let components =
+        candidate_key_components(key, key_names).map_err(|_| table_row_decode_diagnostic())?;
+    let touched = [(table.to_owned(), components)];
     let mut state = CandidateRowsState {
         rows,
         keys,
         table_fields,
         key_fields,
     };
-    saved
-        .catalogue
+    catalogue
         .validate(&touched, &mut state)
         .map_err(|error| match error {
             ReferenceError::Dangling => dangling_reference_diagnostic(),
