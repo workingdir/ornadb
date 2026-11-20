@@ -99,15 +99,12 @@ impl Evaluator<'_> {
 
     fn compute(&mut self, unit: DefId) -> Option<UnitKey> {
         let builder = self.builder;
-        let Some(UnitDef {
+        let UnitDef {
             family,
             factors,
             affine,
             ..
-        }) = builder.unit_def(unit)
-        else {
-            return None;
-        };
+        } = builder.unit_def(unit)?;
         if family.is_some_and(|family| builder.family_axis(family) == Some(unit)) {
             return Some(UnitKey::base(unit));
         }
