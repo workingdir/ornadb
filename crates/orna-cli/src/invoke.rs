@@ -2,13 +2,13 @@ use super::repl::write_result_line;
 use super::repl_inspect::{DISPLAY, render};
 use super::{
     ApplicationAuthority, ApplicationError, BoundedEvaluator, Cow, Diagnostic,
-    DurableTransactionalEvaluator, Endpoint, Environment, Exit, Limits, ProjectUnit,
-    RuntimeEvaluator, RuntimeMode, StageOutcome, StdSnapshotPin, cancellation_diagnostic,
-    cli_output_failed, committed_base_reader, committed_table_object_ids, diagnostic_documentation,
-    execution_project, load_project, local_project_path, project_load_diagnostic,
-    pure_execution_project, pure_sys_host_context, refuse_legacy_bare_module_rows, request_nonce,
-    run_committed_table_invocation, runtime_identity, runtime_publication_metadata_rows,
-    semantic_catalogue, stdout_closed, sys_host, write_success_line,
+    DurableTransactionalEvaluator, Endpoint, Environment, Exit, Limits, RuntimeEvaluator,
+    RuntimeMode, StageOutcome, cancellation_diagnostic, cli_output_failed, committed_base_reader,
+    committed_table_object_ids, diagnostic_documentation, execution_project, load_project,
+    local_project_path, project_load_diagnostic, pure_execution_project, pure_sys_host_context,
+    refuse_legacy_bare_module_rows, request_nonce, run_committed_table_invocation,
+    runtime_identity, runtime_publication_metadata_rows, semantic_catalogue, stdout_closed,
+    sys_host, write_success_line,
 };
 use orna_value::CanonicalValue;
 
@@ -99,8 +99,7 @@ pub(crate) fn run_project_function(
         return run_project_stream_invocation_with_project(
             endpoint,
             target,
-            &execution,
-            sys_host::std_snapshot_pin(&project),
+            &project,
             catalogue,
             color_enabled,
         );
@@ -126,12 +125,10 @@ pub(crate) fn run_project_stream_invocation(
             "fix the first reported source contract error, then run the project again",
         ));
     }
-    let execution = execution_project(&project);
     run_project_stream_invocation_with_project(
         endpoint,
         root_entry,
-        &execution,
-        sys_host::std_snapshot_pin(&project),
+        &project,
         catalogue,
         color_enabled,
     )
@@ -326,8 +323,7 @@ fn failure_location(
 pub(crate) fn run_project_stream_invocation_with_project(
     endpoint: &Endpoint,
     root_entry: &str,
-    project: &ProjectUnit,
-    std_snapshot: StdSnapshotPin,
+    project: &orna_project::LoadedProject,
     catalogue: std::sync::Arc<orna_check::Catalogue>,
     color_enabled: bool,
 ) -> Result<(), Diagnostic> {
@@ -339,6 +335,24 @@ pub(crate) fn run_project_stream_invocation_with_project(
                 "run the command inside an initialized local Git worktree",
             )
         })?;
+    let std_snapshot = sys_host::std_snapshot_pin(project);
+    let table_object_ids = committed_table_object_ids(&repository, project)?;
+    let head = repository.head().ok().flatten();
+    // Admission is bound to the committed snapshot when there is one, exactly as
+    // `run_project_invocation_with_arguments` binds it, so the stored references
+    // resolve against the same commit as the admitted project.
+    let loaded_project = match &head {
+        Some(head) => orna_project::ProjectLoader::default()
+            .load_committed_snapshot(&repository, head)
+            .map_err(project_load_diagnostic)?,
+        None => project.clone(),
+    };
+    let execution = execution_project(&loaded_project);
+    let references = crate::stored_references::committed_stored_references(
+        &repository,
+        &loaded_project,
+        &table_object_ids,
+    )?;
     let (identity, initial_digest) = runtime_identity(&repository)?;
     let owner_id = orna_runtime::process_owner_id();
     let outcome = tokio::runtime::Builder::new_current_thread()
@@ -359,14 +373,15 @@ pub(crate) fn run_project_stream_invocation_with_project(
                     identity,
                     RuntimeMode::Run,
                     std_snapshot,
-                    repository.head().ok().flatten().as_ref(),
+                    head.as_ref(),
                 ))
+                .with_stored_references(references)
                 .execute_project_stream(
                     &repository,
                     identity,
                     owner_id,
                     initial_digest,
-                    project,
+                    &execution,
                     root_entry,
                 ),
         )
