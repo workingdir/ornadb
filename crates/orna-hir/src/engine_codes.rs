@@ -82,11 +82,17 @@ fn is_temperature(program: &Program, ty: Ty) -> bool {
         && program.modules[definition.module].path.to_string() == TEMPERATURE_MODULE
 }
 
-/// `E5002`: `+` with two affine points. `point - point` is a `Delta` (the library's `Sub<Self, Delta>` instance), so
-/// only addition is rejected here.
+/// Whether `ty` is a quantity of an affine unit, such as `C` (an `offset` or `affine` clause, units.md 8.5).
+fn is_affine_quantity(program: &Program, ty: Ty) -> bool {
+    matches!(program.tys.kind(ty), Some(TyKind::Quantity(_, key)) if program.units.key(*key).is_affine())
+}
+
+/// `E5002`: `+` with two affine points: two `core.temperature` points, or two quantities of an affine unit.
+/// `point - point` is a `Delta` (the library's `Sub<Self, Delta>` instance), so only addition is rejected here.
 fn affine_rejection(program: &Program, op: BinOp, left: Ty, right: Ty) -> Option<&'static str> {
-    (matches!(op, BinOp::Add) && is_temperature(program, left) && is_temperature(program, right))
-        .then_some(AFFINE_POINT_OPERATOR)
+    let points = is_temperature(program, left) && is_temperature(program, right);
+    let quantities = is_affine_quantity(program, left) && is_affine_quantity(program, right);
+    (matches!(op, BinOp::Add) && (points || quantities)).then_some(AFFINE_POINT_OPERATOR)
 }
 
 /// `E5001`: `+` or `-` with two quantities whose units have different dimensions, or with a `Duration` and a quantity
@@ -119,10 +125,11 @@ fn is_time_key(program: &Program, key: &UnitKey) -> bool {
     *key.scale() == Rational::one() && unit_name(program, axis) == "Time.second"
 }
 
-/// The published code for a fold (`sum`) over an element type, when the element is an affine point (`E5003`).
+/// The published code for a fold (`sum`) over an affine element: a point or a quantity of an affine unit (`E5003`).
 #[must_use]
 pub fn sum_rejection(program: &Program, element: Ty) -> Option<&'static str> {
-    is_temperature(program, element).then_some(AFFINE_POINT_SUM)
+    (is_temperature(program, element) || is_affine_quantity(program, element))
+        .then_some(AFFINE_POINT_SUM)
 }
 
 /// Whether one `Money` operand with one `Float` operand is the `E5103` class for `op`.

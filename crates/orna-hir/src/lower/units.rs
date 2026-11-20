@@ -128,8 +128,8 @@ fn family_name(builder: &Builder, unit: DefId) -> String {
 pub(crate) struct UnitJob {
     /// The unit the expression defines.
     pub(crate) unit: DefId,
-    /// The family the unit is a variant of.
-    pub(crate) family: DefId,
+    /// The family the unit is a variant of, or none for a top-level unit, whose factors resolve in scope.
+    pub(crate) family: Option<DefId>,
     /// The module the expression is written in.
     pub(crate) module: ModuleId,
     /// The unit expression as written.
@@ -219,22 +219,43 @@ impl Builder {
         if let Some(expr) = &variant.unit {
             self.unit_jobs.push(UnitJob {
                 unit,
-                family,
+                family: Some(family),
                 module,
                 expr: expr.clone(),
             });
         }
     }
 
-    /// Resolves every queued derived-unit expression into factors, once all definitions exist.
+    /// Queues the expression of a top-level derived unit, such as `pub unit kWh : Energy = 3.6e6.J;`. An expression
+    /// outside the unit grammar stays unkeyed; its names are still lowered as a body.
+    pub(crate) fn queue_top_level_unit(&mut self, module: ModuleId, unit: DefId, value: &AstExpr) {
+        let mut terms = Vec::new();
+        if collect_terms(value, false, &mut terms).is_none() {
+            return;
+        }
+        let span = self.pending[unit.index()].span.clone();
+        self.unit_jobs.push(UnitJob {
+            unit,
+            family: None,
+            module,
+            expr: UnitExpr { terms, span },
+        });
+    }
+
+    /// Resolves every queued derived-unit expression into factors, once all definitions exist. A unit keeps the
+    /// `offset` and `affine` clauses its declaration recorded.
     pub(crate) fn resolve_unit_jobs(&mut self) {
         for job in std::mem::take(&mut self.unit_jobs) {
             let factors = self.resolve_factors(&job);
+            let (offset, affine) = match &self.pending[job.unit.index()].kind {
+                PendingKind::Built(DefKind::Unit(def)) => (def.offset.clone(), def.affine),
+                _ => (None, false),
+            };
             self.pending[job.unit.index()].kind = PendingKind::Built(DefKind::Unit(UnitDef {
-                family: Some(job.family),
+                family: job.family,
                 factors,
-                offset: None,
-                affine: false,
+                offset,
+                affine,
             }));
         }
     }
@@ -303,7 +324,7 @@ impl Builder {
                 NameTarget::Def(base) => self.variant_of(base, &name),
                 _ => None,
             },
-            None => self.variant_of(job.family, &name),
+            None => job.family.and_then(|family| self.variant_of(family, &name)),
         };
         match (member, &term.family) {
             (Some(unit), _) => UnitLookup::Found(unit),
@@ -324,4 +345,45 @@ pub(crate) fn literal_offset(offset: Option<&AstExpr>) -> Option<Box<str>> {
         } => Some(Box::from(text.as_str())),
         _ => None,
     }
+}
+
+/// Appends the terms of a top-level unit's value. The value is an ordinary expression, read only as far as the unit
+/// grammar reaches: a name, a coefficient-qualified (`3.6e6.J`) or family-qualified (`Length.kilometre`) name, a
+/// product or quotient of those, and parentheses. Any other shape has no unit expression.
+fn collect_terms(expr: &AstExpr, divide: bool, terms: &mut Vec<UnitTerm>) -> Option<()> {
+    let term = |coefficient: Option<String>,
+                family: Option<String>,
+                name: &str,
+                span: &SyntaxSpan| UnitTerm {
+        divide,
+        coefficient,
+        family,
+        name: name.to_owned(),
+        exponent: None,
+        span: span.clone(),
+    };
+    match expr {
+        AstExpr::Name { text, span } => terms.push(term(None, None, text, span)),
+        AstExpr::Field { base, name, span } => match &**base {
+            AstExpr::Literal {
+                text,
+                kind: LiteralKind::Integer | LiteralKind::Decimal | LiteralKind::Float,
+                ..
+            } => terms.push(term(Some(text.clone()), None, name, span)),
+            AstExpr::Name { text, .. } => terms.push(term(None, Some(text.clone()), name, span)),
+            _ => return None,
+        },
+        AstExpr::Binary { lhs, op, rhs, .. } => {
+            let flip = match op.as_str() {
+                "*" => false,
+                "/" => true,
+                _ => return None,
+            };
+            collect_terms(lhs, divide, terms)?;
+            collect_terms(rhs, divide != flip, terms)?;
+        }
+        AstExpr::Group { inner, .. } => collect_terms(inner, divide, terms)?,
+        _ => return None,
+    }
+    Some(())
 }

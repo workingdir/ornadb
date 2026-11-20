@@ -714,8 +714,8 @@ bead = "ornadb-csenl.17"
 case = "valid/affine-max.orna"
 field = "public-signature"
 first = "examples.valid.affine-max::hottest=hottest([Quantity]) -> Quantity?"
-second = "examples.valid.affine-max::hottest=hottest([Float]) -> Float?"
-reason = "the fixture unit `C` now resolves in the HIR observer (the reference catalogue supplies it), so the HIR lowers `Float<C>` but its public signature renders the unit-applied Float as plain Float; the checker renders the same parameter as Quantity. The unit argument is dropped by the HIR signature rendering, which the H2a signature slice does not yet carry"
+second = "examples.valid.affine-max::hottest=hottest([Quantity<Float, C>]) -> Quantity<Float, C>?"
+reason = "the fixture spells the parameter `Float<C>`, with unit `C` declared in the sibling valid/affine-unit.orna; the HIR publishes the unit argument as `Quantity<Float, C>` (it previously published `Float`), while the checker publishes the bare `Quantity`. Which rendering is normative is a checker/H2a signature decision"
 bead = "ornadb-csenl.18"
 
 # H0 environment categories. Each count is the measured number of lowering

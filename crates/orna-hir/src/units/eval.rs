@@ -34,6 +34,17 @@ pub(crate) struct UnitEval {
     pub(crate) table: UnitTable,
 }
 
+impl UnitEval {
+    /// Keys a top-level base unit by its own axis, `({unit: 1}, 1)`, as soon as its declaration is built: a base
+    /// unit has no factors to wait for (units.md 3.3).
+    pub(crate) fn bind_base(&mut self, unit: DefId) {
+        let key = UnitKey::base(unit);
+        let id = self.table.intern(key.clone());
+        self.table.bind_unit(unit, id);
+        self.slots.insert(unit, Slot::Done(Some(key)));
+    }
+}
+
 /// Evaluates every unit of `builder` not yet finished, interns the keys and records the diagnostics.
 pub(crate) fn evaluate(builder: &mut Builder) {
     let mut state = std::mem::take(&mut builder.unit_eval);
@@ -88,21 +99,20 @@ impl Evaluator<'_> {
 
     fn compute(&mut self, unit: DefId) -> Option<UnitKey> {
         let builder = self.builder;
-        let Some(UnitDef {
-            family: Some(family),
+        let UnitDef {
+            family,
             factors,
+            affine,
             ..
-        }) = builder.unit_def(unit)
-        else {
-            return None;
-        };
-        if builder.family_axis(*family) == Some(unit) {
+        } = builder.unit_def(unit)?;
+        if family.is_some_and(|family| builder.family_axis(family) == Some(unit)) {
             return Some(UnitKey::base(unit));
         }
         if factors.is_empty() {
             return None;
         }
         match self.derive(factors) {
+            Ok(Some(key)) if *affine => Some(key.with_affine()),
             Ok(key) => key,
             Err(message) => {
                 self.report(unit, UNIT_LIMIT, message);

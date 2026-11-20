@@ -58,6 +58,22 @@ fn power_too_wide(width: u64, exponent: u32) -> bool {
     width.saturating_mul(u64::from(exponent)) > MAX_BITS
 }
 
+/// The exponent of a decimal literal: an optional sign, then one or more digits. A magnitude beyond `i64`
+/// saturates, and the budget check in [`Rational::parse_decimal`] then refuses it.
+fn decimal_exponent(text: &str) -> Option<i64> {
+    let (negative, digits) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text.strip_prefix('+').unwrap_or(text)),
+    };
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let magnitude = digits.bytes().fold(0_i64, |acc, b| {
+        acc.saturating_mul(10).saturating_add(i64::from(b - b'0'))
+    });
+    Some(if negative { -magnitude } else { magnitude })
+}
+
 impl Rational {
     /// The rational `1`.
     #[must_use]
@@ -97,14 +113,19 @@ impl Rational {
         reduced.within_budget()
     }
 
-    /// Parses a coefficient written as a decimal literal, such as `1000` or `1609.344`, exactly. `None` when the
-    /// text is not a plain decimal literal.
+    /// Parses a coefficient written as a decimal literal, such as `1000`, `1609.344`, or `3.6e6`, exactly. `None`
+    /// when the text is not a plain decimal literal. A power of ten beyond [`MAX_BITS`] is refused as
+    /// [`KeyError::Budget`] before it is computed.
     #[must_use]
     pub fn parse_decimal(text: &str) -> Option<Result<Self, KeyError>> {
         let digits: String = text.chars().filter(|c| *c != '_').collect();
-        let (whole, fraction) = match digits.split_once('.') {
+        let (mantissa, exponent) = match digits.find(['e', 'E']) {
+            Some(index) => (&digits[..index], decimal_exponent(&digits[index + 1..])?),
+            None => (digits.as_str(), 0),
+        };
+        let (whole, fraction) = match mantissa.split_once('.') {
             Some((whole, fraction)) => (whole, fraction),
-            None => (digits.as_str(), ""),
+            None => (mantissa, ""),
         };
         let well_formed = !whole.is_empty() && whole.bytes().all(|b| b.is_ascii_digit());
         let fraction_ok = fraction.bytes().all(|b| b.is_ascii_digit());
@@ -112,11 +133,18 @@ impl Rational {
             return None;
         }
         let num = format!("{whole}{fraction}").parse::<BigInt>().ok()?;
-        let places = u32::try_from(fraction.len()).ok()?;
-        if u64::from(places) > MAX_BITS {
+        // The value is `num * 10^shift`: the exponent, less one place for each fraction digit.
+        let places = i64::try_from(fraction.len()).unwrap_or(i64::MAX);
+        let shift = exponent.saturating_sub(places);
+        if shift.unsigned_abs() > MAX_BITS {
             return Some(Err(KeyError::Budget));
         }
-        Some(Self::new(num, BigInt::from(10).pow(places)))
+        let ten = BigInt::from(10).pow(u32::try_from(shift.unsigned_abs()).ok()?);
+        if shift < 0 {
+            Some(Self::new(num, ten))
+        } else {
+            Some(Self::new(num * ten, BigInt::from(1)))
+        }
     }
 
     /// The numerator, carrying the sign.
@@ -293,6 +321,9 @@ impl Exponents {
 pub struct UnitKey {
     exponents: Exponents,
     scale: Rational,
+    /// Whether the unit is affine (an `offset` or `affine` clause, units.md 8.5). Only the declaring unit's own key
+    /// is affine: arithmetic on keys yields a non-affine key.
+    affine: bool,
 }
 
 impl UnitKey {
@@ -305,7 +336,11 @@ impl UnitKey {
         if !scale.is_positive() {
             return Err(KeyError::NonPositiveScale);
         }
-        Ok(Self { exponents, scale })
+        Ok(Self {
+            exponents,
+            scale,
+            affine: false,
+        })
     }
 
     /// The key of a base unit of `axis`: `({axis: 1}, 1)`.
@@ -314,6 +349,7 @@ impl UnitKey {
         Self {
             exponents: Exponents::axis(axis),
             scale: Rational::one(),
+            affine: false,
         }
     }
 
@@ -323,6 +359,7 @@ impl UnitKey {
         Self {
             exponents: Exponents::dimensionless(),
             scale: Rational::one(),
+            affine: false,
         }
     }
 
@@ -336,6 +373,22 @@ impl UnitKey {
     #[must_use]
     pub fn scale(&self) -> &Rational {
         &self.scale
+    }
+
+    /// Whether the unit is affine (an `offset` or `affine` clause, units.md 8.5). Two affine points cannot be added
+    /// (E5002) and a sum over them is rejected (E5003).
+    #[must_use]
+    pub fn is_affine(&self) -> bool {
+        self.affine
+    }
+
+    /// The key of an affine unit: the same dimension and scale, marked as a point rather than a difference.
+    #[must_use]
+    pub fn with_affine(&self) -> Self {
+        Self {
+            affine: true,
+            ..self.clone()
+        }
     }
 
     /// Whether the key has no dimension (`V` is empty).
@@ -359,6 +412,7 @@ impl UnitKey {
         Ok(Self {
             exponents: self.exponents.add(&other.exponents)?,
             scale: self.scale.mul(&other.scale)?,
+            affine: false,
         })
     }
 
@@ -371,6 +425,7 @@ impl UnitKey {
         Ok(Self {
             exponents: self.exponents.add(&other.exponents.scale(-1)?)?,
             scale: self.scale.div(&other.scale)?,
+            affine: false,
         })
     }
 
@@ -383,6 +438,7 @@ impl UnitKey {
         Ok(Self {
             exponents: self.exponents.scale(exponent)?,
             scale: self.scale.pow(exponent)?,
+            affine: false,
         })
     }
 
@@ -398,6 +454,7 @@ impl UnitKey {
         Ok(Self {
             exponents: self.exponents.clone(),
             scale: self.scale.mul(factor)?,
+            affine: false,
         })
     }
 

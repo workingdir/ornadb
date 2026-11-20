@@ -46,7 +46,25 @@ fn decimal_coefficients_are_exact() {
     assert_eq!(mile, rat(201_168, 125));
     assert!(mile.is_finite_decimal());
     assert!(!rat(1, 3).is_finite_decimal());
-    assert!(Rational::parse_decimal("1e3").is_none());
+}
+
+#[test]
+fn decimal_coefficients_admit_an_exponent() {
+    let parsed = |text: &str| {
+        Rational::parse_decimal(text)
+            .expect("a decimal")
+            .expect("in budget")
+    };
+    assert_eq!(parsed("3.6e6"), rat(3_600_000, 1));
+    assert_eq!(parsed("2E-3"), rat(1, 500));
+    assert_eq!(parsed("1e+3"), rat(1000, 1));
+    for malformed in ["1e", "e3", "1ee3", "1e-", "1e3.5"] {
+        assert!(Rational::parse_decimal(malformed).is_none(), "{malformed}");
+    }
+    assert_eq!(
+        Rational::parse_decimal("1e5000"),
+        Some(Err(KeyError::Budget))
+    );
 }
 
 #[test]
