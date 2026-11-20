@@ -491,6 +491,21 @@ fn matches_value(value: &Raw, ty: &Type, expression: &Expr) -> bool {
         Type::Optional(inner) => {
             matches!(value, Raw::Null) || matches_value(value, inner, expression)
         }
+        // A Blob field admits a blob reference: its stored text, or a record that
+        // carries that text and the blob's length.
+        Type::Named(name) if name == "Blob" => match value {
+            Raw::Text(_) => true,
+            Raw::Map(entries) => {
+                entries.len() == 2
+                    && entries.iter().any(|(key, item)| {
+                        matches!((key, item), (Raw::Text(name), Raw::Text(_)) if name == "blob")
+                    })
+                    && entries.iter().any(|(key, item)| {
+                        matches!((key, item), (Raw::Text(name), Raw::Int(_)) if name == "length")
+                    })
+            }
+            _ => false,
+        },
         _ => false,
     }
 }
@@ -498,6 +513,7 @@ fn matches_value(value: &Raw, ty: &Type, expression: &Expr) -> bool {
 fn supports_field_type(ty: &Type) -> bool {
     match ty {
         Type::Text | Type::Int | Type::Bool | Type::Decimal => true,
+        Type::Named(name) if name == "Blob" => true,
         Type::List(inner) | Type::Optional(inner) => supports_field_type(inner),
         Type::Tuple(types) => types.iter().all(supports_field_type),
         Type::Record(fields) => fields.values().all(supports_field_type),
@@ -572,5 +588,38 @@ mod stored_reference_tests {
             !matches_value(&bare, &ty, expression),
             "a bare array in a tuple column must not admit"
         );
+    }
+
+    #[test]
+    fn blob_field_admits_only_blob_reference_representations() {
+        let parsed = parse_row("{ photo: \"blob-ref\" }");
+        let Expr::Record { fields, .. } = &parsed.value else {
+            panic!("row fixture must parse as a record");
+        };
+        let expression = &fields[0].value;
+        let ty = Type::Named("Blob".to_owned());
+        let record = Raw::Map(vec![
+            (Raw::Text("blob".into()), Raw::Text("blob-ref".into())),
+            (Raw::Text("length".into()), Raw::Int(3.into())),
+        ]);
+        let without_length = Raw::Map(vec![(
+            Raw::Text("blob".into()),
+            Raw::Text("blob-ref".into()),
+        )]);
+        let text_length = Raw::Map(vec![
+            (Raw::Text("blob".into()), Raw::Text("blob-ref".into())),
+            (Raw::Text("length".into()), Raw::Text("3".into())),
+        ]);
+
+        assert!(supports_field_type(&ty));
+        assert!(matches_value(
+            &Raw::Text("blob-ref".into()),
+            &ty,
+            expression
+        ));
+        assert!(matches_value(&record, &ty, expression));
+        assert!(!matches_value(&Raw::Int(3.into()), &ty, expression));
+        assert!(!matches_value(&without_length, &ty, expression));
+        assert!(!matches_value(&text_length, &ty, expression));
     }
 }
