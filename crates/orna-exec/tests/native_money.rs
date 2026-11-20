@@ -2,7 +2,7 @@
 //! its amount is read by `.amount`, and its arithmetic runs through the engine natives. The currency id is the id the
 //! host gives the currency's module-qualified name, and it is stable across two activations.
 
-use orna_exec::{ExecError, ExecLimits, Value, run_entry};
+use orna_exec::{ExecError, ExecLimits, Run, Value, run_entry};
 use orna_hir::{DefId, DefKind, ModulePath, Name, Program, SourceId, SourceUnit, lower, typeck};
 use orna_syntax::parse_module_with_file;
 
@@ -41,7 +41,7 @@ fn user_diagnostics(program: &Program) -> Vec<String> {
         .collect()
 }
 
-fn run(source: &str) -> Result<Value, ExecError> {
+fn lower_run(source: &str) -> (Program, DefId) {
     let program = lower_typed(&format!("{GBP}{source}"));
     let diagnostics = user_diagnostics(&program);
     assert!(
@@ -57,7 +57,16 @@ fn run(source: &str) -> Result<Value, ExecError> {
                 && program.defs[*def].name.as_str() == "run"
         })
         .expect("the source defines `run`");
-    run_entry(&program, run_def, LIMITS).result
+    (program, run_def)
+}
+
+fn run_with(source: &str, limits: ExecLimits) -> Run {
+    let (program, run_def) = lower_run(source);
+    run_entry(&program, run_def, limits)
+}
+
+fn run(source: &str) -> Result<Value, ExecError> {
+    run_with(source, LIMITS).result
 }
 
 fn money_parts(value: Value) -> ([u8; 16], Value) {
@@ -96,4 +105,72 @@ fn the_currency_id_is_the_host_id_of_the_qualified_name_and_stable_across_activa
     let (second_currency, _) = money_parts(second);
     assert_eq!(first_currency, second_currency);
     assert_eq!(first_currency, orna_value::enum_type_id("main.GBP"));
+}
+
+#[test]
+fn ordering_compares_the_exact_amounts_of_one_currency() {
+    let less = run("pub fn run(): Bool = gbp(1.00) < gbp(2.00);\n").expect("less runs");
+    let greater = run("pub fn run(): Bool = gbp(2.00) < gbp(1.00);\n").expect("greater runs");
+    assert_eq!(less, Value::Bool(true));
+    assert_eq!(greater, Value::Bool(false));
+}
+
+#[test]
+fn amounts_written_at_different_scales_are_neither_less_than_the_other() {
+    // `ops::binary` refuses `==` and `!=` on Money operands with `NotYet`, so
+    // equality is checked through the exact ordering: equal amounts are not
+    // less than each other in either direction.
+    let forward = run("pub fn run(): Bool = gbp(1.00) < gbp(1.0);\n").expect("forward runs");
+    let backward = run("pub fn run(): Bool = gbp(1.0) < gbp(1.00);\n").expect("backward runs");
+    assert_eq!(forward, Value::Bool(false));
+    assert_eq!(backward, Value::Bool(false));
+}
+
+#[test]
+fn scaling_by_a_decimal_is_exact() {
+    let scaled = run("pub fn run(): Money<GBP> = gbp(12.34) * 2.5;\n").expect("scale runs");
+    let literal = run("pub fn run(): Money<GBP> = gbp(30.85);\n").expect("literal runs");
+    assert_eq!(money_parts(scaled), money_parts(literal));
+}
+
+#[test]
+fn dividing_by_a_decimal_is_exact_or_a_named_error() {
+    let halved = run("pub fn run(): Money<GBP> = gbp(10.00) / 4.00;\n").expect("divide runs");
+    let literal = run("pub fn run(): Money<GBP> = gbp(2.50);\n").expect("literal runs");
+    assert_eq!(money_parts(halved), money_parts(literal));
+    let inexact = run("pub fn run(): Money<GBP> = gbp(10.00) / 3.00;\n");
+    assert_eq!(inexact, Err(ExecError::Code("InexactDivision")));
+    let zero = run("pub fn run(): Money<GBP> = gbp(10.00) / 0.00;\n");
+    assert_eq!(zero, Err(ExecError::Code("ORNA-EVAL-DIVIDE-BY-ZERO")));
+}
+
+#[test]
+fn a_currency_suffix_literal_is_the_constructor_of_its_exact_amount() {
+    let suffixed = run("pub fn run(): Money<GBP> = 12.34.GBP;\n").expect("suffix runs");
+    let constructed = run("pub fn run(): Money<GBP> = gbp(12.34);\n").expect("constructor runs");
+    assert_eq!(money_parts(suffixed), money_parts(constructed));
+}
+
+#[test]
+fn the_step_budget_admits_exactly_the_steps_the_run_charges() {
+    let source = "pub fn run(): Money<GBP> = gbp(12.34) + gbp(1.00);\n";
+    let measured = run_with(source, LIMITS);
+    assert!(measured.result.is_ok(), "{:?}", measured.result);
+    let steps = measured.steps;
+    let exact = ExecLimits {
+        max_steps: steps,
+        ..LIMITS
+    };
+    assert!(
+        run_with(source, exact).result.is_ok(),
+        "{steps} steps admit the run"
+    );
+    let short = ExecLimits {
+        max_steps: steps - 1,
+        ..LIMITS
+    };
+    assert_eq!(
+        run_with(source, short).result,
+        Err(ExecError::Code("ORNA-EVAL-LIMIT"))
+    );
 }
