@@ -54,6 +54,8 @@ mod currency;
 mod currency_tests;
 #[cfg(test)]
 mod diagnostics_tests;
+#[cfg(test)]
+mod dimension_tests;
 mod display;
 mod expectation;
 mod expr;

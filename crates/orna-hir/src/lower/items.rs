@@ -319,7 +319,13 @@ impl Builder {
             offset,
             affine,
         }));
+
+        if matches!(&definition, orna_syntax_ast::UnitDefinition::Base) {
+            // A base unit is its own axis, so its key is known before any evaluation (units.md 3.3).
+            self.unit_eval.bind_base(def);
+        }
         if let orna_syntax_ast::UnitDefinition::Derived { value, offset, .. } = definition {
+            self.queue_top_level_unit(module, def, &value);
             // A derived unit's expression is not part of the value model, but its
             // names are still written in the module: lower it so the editor index
             // sees them.
