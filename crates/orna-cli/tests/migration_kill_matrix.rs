@@ -78,8 +78,9 @@
 
 use std::{
     fs,
+    io::Write,
     path::{Path, PathBuf},
-    process::{Child, Command, Output},
+    process::{Child, Command, Output, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -1809,6 +1810,19 @@ fn run_in_place(source: &Path, confirm: Option<&str>) -> Output {
         .expect("in-place upgrade starts")
 }
 
+/// Runs `run_in_place` with `--debug`, which prints a refusal's detail. The
+/// default output keeps that detail out, because it can name repository objects.
+fn run_in_place_debug(source: &Path, confirm: Option<&str>) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_orna"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .arg("--debug")
+        .args(["--db", source.to_str().unwrap()])
+        .args(in_place_words(confirm))
+        .output()
+        .expect("in-place upgrade starts")
+}
+
 /// Reads `candidate_commit=` from the review printed before publication.
 fn candidate_from_review(output: &Output) -> String {
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -2043,5 +2057,94 @@ fn in_place_rerun_refuses_an_unpublished_tail_appended_after_the_exchange_parked
     assert!(
         !case.path().join("source-format3-verify").exists(),
         "no verification copy is prepared"
+    );
+}
+
+/// Writes the packed objects of the repository at `root` out as loose objects
+/// and drops the packs, so a single object can then be removed by its loose
+/// path. Every pack leaves the store before any is unpacked: `git unpack-objects`
+/// writes nothing for an object a pack still holds.
+fn loosen_objects(root: &Path) {
+    let pack_dir = root.join(".git").join("objects").join("pack");
+    let mut packs = Vec::new();
+    for entry in fs::read_dir(&pack_dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "pack")
+        {
+            packs.push(fs::read(&path).unwrap());
+        }
+        fs::remove_file(&path).unwrap();
+    }
+    for pack in packs {
+        let mut child = Command::new("git")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .current_dir(root)
+            .args(["unpack-objects", "-q"])
+            .stdin(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("git unpack-objects starts");
+        child.stdin.take().unwrap().write_all(&pack).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+/// The exchange verifies the activated copy's new snapshot independently before
+/// the swap (ORNA-UPGRADE step 8). A candidate object the activation left out of
+/// the store, one the format reader never opens, refuses the exchange: the
+/// worktree keeps its source bytes and the activated copy stays at the sibling.
+#[test]
+fn in_place_exchange_refuses_an_activated_candidate_missing_an_object_it_reaches() {
+    let parent = TempDir::new().unwrap();
+    let pristine = pristine_source(parent.path());
+    let legacy_head = git(&pristine, &["rev-parse", "HEAD"]);
+    let case = TempDir::new().unwrap();
+    let (source, candidate) = park_in_place(case.path(), &pristine, "upgrade-exchanging");
+    let sibling = in_place_sibling(&source);
+    assert_eq!(git(&sibling, &["rev-parse", "HEAD"]), candidate);
+    assert_eq!(
+        git(&sibling, &["rev-parse", "HEAD^"]),
+        legacy_head,
+        "the candidate extends the legacy head"
+    );
+    loosen_objects(&sibling);
+    let loose = sibling
+        .join(".git")
+        .join("objects")
+        .join(&legacy_head[..2])
+        .join(&legacy_head[2..]);
+    assert!(
+        loose.is_file(),
+        "the legacy head is loose once the packs are unpacked"
+    );
+    fs::remove_file(&loose).unwrap();
+    let source_before = source_state(&source);
+    let sibling_before = source_state(&sibling);
+
+    let rerun = run_in_place_debug(&source, Some(&candidate));
+    let stderr = String::from_utf8_lossy(&rerun.stderr);
+    assert_eq!(rerun.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("activated candidate could not be published in place"),
+        "{stderr}"
+    );
+    assert!(stderr.contains(&legacy_head), "{stderr}");
+    assert_eq!(
+        source_state(&source),
+        source_before,
+        "the worktree is unchanged"
+    );
+    assert_eq!(
+        source_state(&sibling),
+        sibling_before,
+        "the activated copy is kept"
     );
 }
