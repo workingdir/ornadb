@@ -1,8 +1,8 @@
 //! `orna migrate` and `orna upgrade`: prepare a format-3 copy of a legacy
 //! worktree and activate it in one confirmed step.
 
-use super::*;
 use super::assertion_gate::{GatedCommand, refusal_diagnostic};
+use super::*;
 
 /// Names why the migration source failed format admission. The title carries
 /// the `FormatContextError` message, so the cause is user-visible; the stable

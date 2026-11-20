@@ -831,7 +831,8 @@ fn commit_dependency_submodule(parent: &Path, source: &Path) -> (String, Vec<u8>
     (source_head, committed_bytes)
 }
 
-const POPULATED_CONTACT_MAIN: &str = "pub table Contact(id: Str) {\n    name: Str,\n    avatar: Blob,\n}\n";
+const POPULATED_CONTACT_MAIN: &str =
+    "pub table Contact(id: Str) {\n    name: Str,\n    avatar: Blob,\n}\n";
 
 /// Commits a format-2 source with one populated Contact table: the module, one
 /// loose row unit carrying an inline ORR-2 Blob, the format-2 record and the
@@ -2175,7 +2176,10 @@ fn cli_migration_copy_refuses_a_false_table_assertion_over_an_admitted_legacy_ro
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "{stderr}");
     assert!(stderr.contains("ORNA-A091-009"), "{stderr}");
-    assert!(stderr.contains("is false over the migrated rows"), "{stderr}");
+    assert!(
+        stderr.contains("is false over the migrated rows"),
+        "{stderr}"
+    );
     assert!(!destination.exists(), "no candidate is created");
     assert_eq!(git_output(&source, &["rev-parse", "HEAD"]), head_before);
     assert_eq!(
@@ -2208,5 +2212,8 @@ fn cli_migration_copy_holding_table_assertion_prepares_the_populated_source() {
         stdout.starts_with("prepared or recovered format-3 migration copy: source_format=2 "),
         "{stdout}"
     );
-    assert!(journal_is_present(&destination), "the candidate is journaled");
+    assert!(
+        journal_is_present(&destination),
+        "the candidate is journaled"
+    );
 }
