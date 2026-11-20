@@ -370,7 +370,7 @@ pub(super) fn parse_cli_reporting(arguments: &[String]) -> ParseReport {
             return Err(Diagnostic::usage(
                 "ORNA-CMD-ARGUMENT-UNEXPECTED",
                 "command has unexpected arguments",
-                "this bounded slice accepts no extra arguments",
+                "remove the extra arguments; `orna --help` lists each command's usage",
             ));
         }
         Ok(Parsed {
