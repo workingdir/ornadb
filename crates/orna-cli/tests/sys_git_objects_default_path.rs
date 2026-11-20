@@ -3,9 +3,10 @@
 //! and `orna repl`: one row per object the store holds, whether or not a reference
 //! reaches it, with its id, the `sys.GitObjectKind` Git reads it as and its size in
 //! bytes. Every stored object is available locally with no promisor remote
-//! (ORNA-SYS-052, ORNA-SYS-111). A partial clone, whose store does not enumerate the
-//! objects it has promised, and a project with no commit for the rows to pin to are
-//! both refused with `sys.snapshot.incomplete` rather than served truncated.
+//! (ORNA-SYS-052, ORNA-SYS-111). A partial clone serves the objects it promises too:
+//! each has no size and is not available locally. A project with no commit for the
+//! rows to pin to is refused with `sys.snapshot.incomplete` rather than served
+//! truncated.
 
 #[path = "support/git_project.rs"]
 mod git_project;
@@ -197,21 +198,54 @@ fn repl_serves_each_reachable_commit_as_a_commit_object() {
 }
 
 #[test]
-// Specified: ORNA-SYS-111. A partial clone's store does not enumerate the objects it
-// has promised, so the read fails closed with `sys.snapshot.incomplete` rather than
-// serving the objects it holds as though they were all of them.
-fn orna_run_refuses_the_objects_of_a_partial_clone() {
-    let project = committed_project(SOURCE);
-    let root = project.path();
-    assert_count(root, "object_count", stored_objects(root).len());
-    git(root, &["remote", "add", "origin", "."]);
-    git(root, &["config", "remote.origin.promisor", "true"]);
+// Specified: ORNA-SYS-111. A partial clone's store does not hold the blobs it has
+// promised, so each promised object is a row with no size that is not available
+// locally. The objects the store holds keep their size and are available locally.
+fn orna_run_serves_the_promised_objects_of_a_partial_clone() {
+    let origin = committed_project(SOURCE);
+    let root = origin.path();
+    std::fs::write(root.join("notes.txt"), "first\n").expect("a first version");
+    git(root, &["add", "notes.txt"]);
+    git(root, &["commit", "-q", "-m", "first notes"]);
+    std::fs::write(root.join("notes.txt"), "second\n").expect("a second version");
+    git(root, &["add", "notes.txt"]);
+    git(root, &["commit", "-q", "-m", "second notes"]);
+    git(root, &["config", "uploadpack.allowFilter", "true"]);
+    git(root, &["config", "uploadpack.allowAnySHA1InWant", "true"]);
+    let parent = TempDir::new().expect("a directory to clone into");
+    let url = format!("file://{}", root.display());
     git(
-        root,
-        &["config", "remote.origin.partialclonefilter", "blob:none"],
+        parent.path(),
+        &["clone", "-q", "--filter=blob:none", &url, "clone"],
     );
-    git(root, &["config", "extensions.partialClone", "origin"]);
-    assert_refused(root, "object_count");
+    let clone = parent.path().join("clone");
+    let promised = git(
+        &clone,
+        &[
+            "rev-list",
+            "--objects",
+            "--missing=print",
+            "--no-object-names",
+            "--all",
+        ],
+    )
+    .lines()
+    .filter(|line| line.starts_with('?'))
+    .count();
+    assert!(promised > 0, "the first version of notes.txt is promised");
+    let stored = stored_objects(&clone);
+    assert_count(&clone, "object_count", stored.len() + promised);
+    assert_count(&clone, "local_object_count", stored.len());
+    assert_count(
+        &clone,
+        "blob_count",
+        count_of_kind(&stored, "blob") + promised,
+    );
+    assert_repl_count(
+        &clone,
+        "sys.git.objects | filter(o => (o.size ?? -1) == -1) | count()",
+        promised,
+    );
 }
 
 #[test]
