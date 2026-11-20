@@ -19,10 +19,6 @@ use orna_value::{enum_type_id, enum_variant_id, git_object_reference, remote_ref
 use crate::git_rows::{GitPage, RowPin, incomplete, object_id, page_ordered, repository};
 use crate::{EvaluationError, Value, object_id_raw};
 
-/// Most objects one read lists. A repository with more is refused with
-/// `sys.snapshot.incomplete` rather than served truncated.
-const MAX_OBJECTS: usize = 50_000;
-
 /// Serves the page of `sys.git.objects` that follows the object whose id is `after`,
 /// from the repository `context` attached. The cursor of a page is the hexadecimal id
 /// of the last object it served, so objects order by id as Git spells them.
@@ -31,15 +27,17 @@ pub(crate) fn objects_page(
     after: Option<&[u8]>,
     rows: usize,
 ) -> Result<GitPage, EvaluationError> {
+    // One object past the page is listed too: its presence says a next page exists. The
+    // repository has already applied the cursor, so the page starts at its first object.
     let objects = repository(context)?
-        .committed_git_objects(MAX_OBJECTS)
+        .committed_git_objects_after(after, rows.saturating_add(1))
         .map_err(|_| incomplete())?;
     let facts = objects.iter().map(ObjectFacts::of).collect::<Vec<_>>();
     page_ordered(
         context,
         &facts,
         |object| object.oid.as_bytes().to_vec(),
-        after,
+        None,
         rows,
         object_row,
     )

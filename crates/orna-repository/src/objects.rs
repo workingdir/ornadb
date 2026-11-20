@@ -9,11 +9,13 @@
 //! refuses the listing. In a partial clone, one `git rev-list --objects
 //! --missing=print-info` run names each reachable object the local store does not
 //! hold. Such an object is represented as promised by the promisor remote that
-//! serves it, and has no size: its payload is neither fetched nor invented. Nothing
-//! is guessed: a line that does not have the shape Git writes, an id of the wrong
+//! serves it, and has no size: its payload is neither fetched nor invented. A page
+//! holds only its own objects, so the contradiction check compares only the ids the
+//! page holds: an id the page has already let go is not compared again. Nothing is
+//! guessed: a line that does not have the shape Git writes, an id of the wrong
 //! width, a kind Git does not name, a size that is not a decimal number, a missing
-//! object that is not a blob, a line past the per-line bound, a listing past the
-//! object limit, or a promisor remote that cannot be named refuses the whole listing.
+//! object that is not a blob, a line past the per-line bound, or a promisor remote
+//! that cannot be named refuses the whole listing.
 
 use std::collections::BTreeMap;
 use std::process::{Command, Stdio};
@@ -62,29 +64,40 @@ impl CommittedGitObject {
 /// separated by one space and each record ended by a newline.
 const OBJECT_FORMAT: &str = "--batch-check=%(objectname) %(objecttype) %(objectsize)";
 
-/// The objects one observation holds, keyed by id, and the most it may hold.
-struct ObjectSet {
+/// The objects one page holds, keyed by id: the `count` smallest ids after the cursor,
+/// so a page never holds more than `count` objects however large the store.
+struct ObjectWindow<'a> {
+    after: Option<&'a [u8]>,
+    count: usize,
     objects: BTreeMap<NativeObjectId, (GitObjectKind, GitObjectAvailability)>,
-    max_objects: usize,
 }
 
-impl ObjectSet {
-    fn new(max_objects: usize) -> Self {
+impl<'a> ObjectWindow<'a> {
+    fn new(after: Option<&'a [u8]>, count: usize) -> Self {
         Self {
+            after,
+            count,
             objects: BTreeMap::new(),
-            max_objects,
         }
     }
 
-    /// Records one object. An id recorded again with the same kind and availability
-    /// is the same object; with any other kind or availability the listings
-    /// contradict one another. A new id past the limit is refused.
-    fn insert_distinct(
+    /// Records one listed object. An id at or before the cursor is not on the page and
+    /// is skipped. An id the page already holds is the same object when its kind and
+    /// availability agree, and a contradiction refuses the listing otherwise. A new id
+    /// is held while the page has room; once it is full, a new id smaller than the
+    /// largest held one replaces that one, and any other id lies beyond the page.
+    fn record(
         &mut self,
         oid: NativeObjectId,
         kind: GitObjectKind,
         availability: GitObjectAvailability,
     ) -> Result<(), RepositoryError> {
+        if self
+            .after
+            .is_some_and(|after| oid.as_str().as_bytes() <= after)
+        {
+            return Ok(());
+        }
         if let Some((known_kind, known_availability)) = self.objects.get(&oid) {
             return if *known_kind == kind && *known_availability == availability {
                 Ok(())
@@ -92,14 +105,20 @@ impl ObjectSet {
                 Err(RepositoryError::GitOperationFailed)
             };
         }
-        if self.objects.len() >= self.max_objects {
-            return Err(RepositoryError::GitOperationFailed);
+        if self.objects.len() < self.count {
+            self.objects.insert(oid, (kind, availability));
+        } else if self
+            .objects
+            .last_key_value()
+            .is_some_and(|(largest, _)| oid < *largest)
+        {
+            self.objects.pop_last();
+            self.objects.insert(oid, (kind, availability));
         }
-        self.objects.insert(oid, (kind, availability));
         Ok(())
     }
 
-    /// The objects in object-id order.
+    /// The held objects in object-id order.
     fn into_objects(self) -> Vec<CommittedGitObject> {
         self.objects
             .into_iter()
@@ -113,26 +132,29 @@ impl ObjectSet {
 }
 
 impl Repository {
-    /// Lists every object the local store holds, and in a partial clone every
-    /// reachable object it does not hold, ordered by object id.
+    /// Lists the objects the local store holds, and in a partial clone the reachable
+    /// objects it does not hold, in object-id order, from the first one after `after`
+    /// (or the first of all when `after` is `None`) and at most `count` of them. Each
+    /// page reads both listings through to their end, so every page reads the whole store
+    /// again and holds only the objects it returns.
     ///
-    /// Both listings run with lazy fetch and replacement objects disabled, so the
-    /// kind and size read are the stored object's own and nothing is fetched. A
-    /// repository whose configuration cannot be interpreted is refused, and so is a
-    /// listing with more than `max_objects` distinct objects or with a line past the
-    /// per-line bound; the listing is never served truncated. Each listing is read
-    /// line by line and never held whole, so only its distinct objects are held, and
-    /// those are bounded by `max_objects`.
-    pub fn committed_git_objects(
+    /// Both listings run with lazy fetch and replacement objects disabled, so the kind
+    /// and size read are the stored object's own and nothing is fetched. A repository
+    /// whose configuration cannot be interpreted is refused, and so is a listing with a
+    /// line past the per-line bound; the listing is never served truncated. Each listing
+    /// is read line by line and never held whole, so only the page's objects are held,
+    /// and those are bounded by `count`.
+    pub fn committed_git_objects_after(
         &self,
-        max_objects: usize,
+        after: Option<&[u8]>,
+        count: usize,
     ) -> Result<Vec<CommittedGitObject>, RepositoryError> {
         let capabilities = self.observe_git_capabilities()?;
         if capabilities.mode() == GitRepositoryMode::Malformed {
             return Err(RepositoryError::GitOperationFailed);
         }
         let object_id_length = self.native_object_id_length()?;
-        let mut objects = ObjectSet::new(max_objects);
+        let mut objects = ObjectWindow::new(after, count);
         for_each_listing_line(self.stored_listing_command(), |line| {
             record_stored_object(line, object_id_length, &mut objects)
         })?;
@@ -154,7 +176,7 @@ impl Repository {
                         remote
                     }
                 };
-                objects.insert_distinct(oid, kind, GitObjectAvailability::Promised { remote })
+                objects.record(oid, kind, GitObjectAvailability::Promised { remote })
             })?;
         }
         Ok(objects.into_objects())
@@ -196,7 +218,7 @@ impl Repository {
 fn record_stored_object(
     line: &str,
     object_id_length: usize,
-    objects: &mut ObjectSet,
+    objects: &mut ObjectWindow<'_>,
 ) -> Result<(), RepositoryError> {
     let mut fields = line.split(' ');
     let (Some(oid), Some(kind), Some(size), None) =
@@ -213,7 +235,7 @@ fn record_stored_object(
     let size = size
         .parse::<u64>()
         .map_err(|_| RepositoryError::GitOperationFailed)?;
-    objects.insert_distinct(
+    objects.record(
         NativeObjectId::new(oid)?,
         kind,
         GitObjectAvailability::Local { size },
@@ -280,14 +302,15 @@ fn promised_object_remote(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::for_each_line_of;
+    use crate::{Repository, for_each_line_of, test_support};
 
     const SHA1_WIDTH: usize = 40;
     const FIRST: &str = "1111111111111111111111111111111111111111";
     const SECOND: &str = "2222222222222222222222222222222222222222";
+    const THIRD: &str = "3333333333333333333333333333333333333333";
 
     fn parse(listing: &str) -> Result<Vec<CommittedGitObject>, RepositoryError> {
-        let mut objects = ObjectSet::new(usize::MAX);
+        let mut objects = ObjectWindow::new(None, usize::MAX);
         for_each_line_of(listing.as_bytes(), |line| {
             record_stored_object(line, SHA1_WIDTH, &mut objects)
         })?;
@@ -341,17 +364,17 @@ mod tests {
 
     #[test]
     fn an_object_listed_as_local_and_as_promised_refuses_the_listing() {
-        let mut objects = ObjectSet::new(usize::MAX);
+        let mut objects = ObjectWindow::new(None, usize::MAX);
         let oid = NativeObjectId::new(FIRST).expect("an id");
         objects
-            .insert_distinct(
+            .record(
                 oid.clone(),
                 GitObjectKind::Blob,
                 GitObjectAvailability::Local { size: 7 },
             )
             .expect("a first record");
         assert!(matches!(
-            objects.insert_distinct(
+            objects.record(
                 oid,
                 GitObjectKind::Blob,
                 GitObjectAvailability::Promised {
@@ -362,30 +385,66 @@ mod tests {
         ));
     }
 
+    /// The ids a window holds after `listed` is recorded in order, each a blob held
+    /// locally at seven bytes.
+    fn window_of(
+        after: Option<&[u8]>,
+        count: usize,
+        listed: &[&str],
+    ) -> Result<Vec<String>, RepositoryError> {
+        let mut window = ObjectWindow::new(after, count);
+        for &oid in listed {
+            window.record(
+                NativeObjectId::new(oid)?,
+                GitObjectKind::Blob,
+                GitObjectAvailability::Local { size: 7 },
+            )?;
+        }
+        Ok(window
+            .into_objects()
+            .iter()
+            .map(|object| object.oid().as_str().to_owned())
+            .collect())
+    }
+
     #[test]
-    fn a_listing_past_the_object_limit_is_refused() {
-        let mut objects = ObjectSet::new(1);
-        let first = GitObjectAvailability::Local { size: 7 };
-        objects
-            .insert_distinct(
+    fn a_page_holds_its_count_of_the_smallest_ids_after_its_cursor() {
+        assert_eq!(
+            window_of(None, 2, &[THIRD, SECOND, FIRST]).expect("a page"),
+            [FIRST, SECOND]
+        );
+    }
+
+    #[test]
+    fn a_page_skips_the_ids_at_or_before_its_cursor() {
+        assert_eq!(
+            window_of(Some(SECOND.as_bytes()), usize::MAX, &[FIRST, SECOND, THIRD])
+                .expect("a page"),
+            [THIRD]
+        );
+    }
+
+    #[test]
+    fn a_page_of_no_objects_holds_nothing() {
+        assert!(window_of(None, 0, &[FIRST]).expect("a page").is_empty());
+    }
+
+    #[test]
+    fn an_object_the_page_holds_listed_with_another_kind_refuses_the_page() {
+        let mut window = ObjectWindow::new(None, 1);
+        let held = GitObjectAvailability::Local { size: 7 };
+        window
+            .record(
                 NativeObjectId::new(FIRST).expect("an id"),
                 GitObjectKind::Blob,
-                first.clone(),
+                held.clone(),
             )
-            .expect("the first object");
-        // A repeat of the first object is not a new object, so it still fits.
-        objects
-            .insert_distinct(
-                NativeObjectId::new(FIRST).expect("an id"),
-                GitObjectKind::Blob,
-                first,
-            )
-            .expect("a repeat");
+            .expect("a first record");
         assert!(matches!(
-            objects.insert_distinct(
-                NativeObjectId::new(SECOND).expect("an id"),
-                GitObjectKind::Blob,
-                GitObjectAvailability::Local { size: 1 },
+            window.record(
+                NativeObjectId::new(FIRST).expect("an id"),
+                GitObjectKind::Tree,
+                held,
             ),
             Err(RepositoryError::GitOperationFailed)
         ));
@@ -485,5 +544,44 @@ mod tests {
         assert!(promised_object_remote(ConfigValue::Missing, &[]).is_err());
         assert!(promised_object_remote(ConfigValue::Value("mirror".to_owned()), &origin).is_err());
         assert!(promised_object_remote(ConfigValue::Malformed, &origin).is_err());
+    }
+
+    /// Past the former fifty-thousand-object limit: every object is served once, in
+    /// object-id order, when the store is paged twenty thousand at a time.
+    #[test]
+    fn a_store_past_fifty_thousand_objects_pages_through_each_object_once() {
+        const OBJECTS: usize = 50_001;
+        const PAGE: usize = 20_000;
+        let directory = tempfile::tempdir().expect("repository directory");
+        test_support::initialize_fixture_repository(directory.path());
+        let mut stream = String::new();
+        for index in 0..OBJECTS {
+            let content = format!("object {index}\n");
+            stream.push_str(&format!("blob\ndata {}\n{content}\n", content.len()));
+        }
+        test_support::git_with_input(directory.path(), &["fast-import", "--quiet"], &stream);
+        let repository = Repository::discover(directory.path()).expect("a Git worktree");
+
+        let everything = repository
+            .committed_git_objects_after(None, usize::MAX)
+            .expect("every object");
+        let mut paged = Vec::new();
+        let mut after: Option<String> = None;
+        loop {
+            let page = repository
+                .committed_git_objects_after(after.as_deref().map(str::as_bytes), PAGE)
+                .expect("a page of the store");
+            let Some(last) = page.last() else {
+                break;
+            };
+            after = Some(last.oid().as_str().to_owned());
+            paged.extend(page.iter().map(|object| object.oid().as_str().to_owned()));
+        }
+        let listed: Vec<String> = everything
+            .iter()
+            .map(|object| object.oid().as_str().to_owned())
+            .collect();
+        assert_eq!(listed.len(), OBJECTS);
+        assert_eq!(paged, listed);
     }
 }
