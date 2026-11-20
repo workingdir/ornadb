@@ -1115,7 +1115,13 @@ impl LiveApplicationTicket {
                 let execute = move || async move {
                     application
                         .dispatch_eval_with_effects(
-                            session, request, message, context, work, effects, committed_rows,
+                            session,
+                            request,
+                            message,
+                            context,
+                            work,
+                            effects,
+                            committed_rows,
                         )
                         .await
                 };
