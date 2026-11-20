@@ -48,10 +48,14 @@ ORNA-JSON-VALUE/1 <len:u32 be> <canonical JSON UTF-8 bytes>
 
 The body must be valid canonical JSON. It has no insignificant whitespace,
 unique object keys sorted by UTF-8 bytes, arrays in source order, finite
-numbers in the repository encoder's canonical form, and no trailing bytes.
-The codec parses and re-serialises the body, then accepts it only when the
-bytes are identical. The body length is bounded by the existing opaque payload
-limit and the frame length must match.
+numbers with no exponent (each number token is kept exactly as received, so
+`-0` and `12.50` are accepted), and no trailing bytes. The codec checks the
+received bytes with a byte scanner: it confirms the structure, strictly
+ascending key order by UTF-8 bytes, and that each string is the canonical
+escaping of its decoded text. It does not re-serialise a parsed value, so the
+verdict does not depend on serde_json features such as `preserve_order` or
+`arbitrary_precision`. The body length is bounded by the existing opaque
+payload limit and the frame length must match.
 
 The accepted `std.json.encode` conversion matrix remains ADR 0057's matrix:
 null, booleans, integers, bigints, finite floats, text, base64 bytes, explicit

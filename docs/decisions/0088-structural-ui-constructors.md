@@ -380,7 +380,8 @@ No bound is raised or bypassed by V9. The constructor and evaluator retain:
   (`MAX_CALL_ARGUMENTS`, 64);
 * the registered opaque codec payload ceiling
   (`MAX_OPAQUE_CODEC_PAYLOAD_LENGTH`, 16 MiB), the `u32` body length, exact
-  frame end, UTF-8 check, canonical JSON re-encoding check, and no-trailing-
+  frame end, UTF-8 check, canonical JSON byte-scan check (the received bytes
+  must already be the canonical form; nothing is re-serialised), and no-trailing-
   bytes rule;
 * the UI codec's recursive runtime-value bound
   (`MAX_RUNTIME_VALUE_NODES`, 65,536); and
