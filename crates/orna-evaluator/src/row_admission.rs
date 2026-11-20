@@ -197,7 +197,11 @@ fn admit_row(
             "loose row body is not a record",
         ));
     };
-    check_field_names(schema, admission, fields.iter().map(|field| field.name.as_str()))?;
+    check_field_names(
+        schema,
+        admission,
+        fields.iter().map(|field| field.name.as_str()),
+    )?;
     let expressions = fields
         .iter()
         .map(|field| (field.name.as_str(), &field.value))
@@ -330,7 +334,7 @@ pub fn admit_stored_row(
         return Err(key_mismatch());
     }
     for (value, (_, ty)) in key.iter().zip(&admission.keys) {
-        if !matches!(ty, Type::Text | Type::Int | Type::Bool) {
+        if !matches!(ty, Type::Text | Type::Int | Type::Bool | Type::Date) {
             return Err(row_error(
                 "ORNA-CONFORMANCE-ROW-UNSUPPORTED-TYPE",
                 "row admission does not support this key type",
@@ -375,7 +379,10 @@ fn check_field_names<'a>(
             ));
         }
         if key_names.contains(name) {
-            return Err(row_error("E3004", "loose row body must not repeat path key"));
+            return Err(row_error(
+                "E3004",
+                "loose row body must not repeat path key",
+            ));
         }
         if admission.computed.contains(name) {
             return Err(row_error(
@@ -508,10 +515,18 @@ fn validate_stored_references(raw: &Raw, identity: &RowAdmissionIdentity) -> Row
             };
             let exists = target_keys
                 .iter()
-                .any(|target_key| match (target_key.as_slice(), key) {
-                    ([only], raw) => only.raw() == raw,
-                    (values, Raw::Array(keys)) => values.iter().map(Value::raw).eq(keys.iter()),
-                    _ => false,
+                .any(|target_key| match target_key.as_slice() {
+                    [only] => only.raw() == key,
+                    [_, _, ..] => {
+                        let Raw::Tag(60015, tuple) = key else {
+                            return false;
+                        };
+                        let Raw::Array(components) = tuple.as_ref() else {
+                            return false;
+                        };
+                        target_key.iter().map(Value::raw).eq(components.iter())
+                    }
+                    [] => false,
                 });
             if !exists {
                 return Err(stored_reference_error());
@@ -605,6 +620,9 @@ fn matches_value(value: &Raw, ty: &Type, expression: Option<&Expr>) -> bool {
         Type::Int => matches!(value, Raw::Int(_)),
         Type::Bool => matches!(value, Raw::Bool(_)),
         Type::Decimal => matches!(value, Raw::Tag(60000, _)),
+        // Spec 29-formats: a Date is Tag 60001 over canonical text. Only stored
+        // keys reach this arm, and `Value` construction already validated them.
+        Type::Date => matches!(value, Raw::Tag(60001, _)),
         Type::List(inner) => match (value, expression) {
             (Raw::Array(values), Some(Expr::List { elements, .. }))
                 if values.len() == elements.len() =>
@@ -814,13 +832,25 @@ mod stored_reference_tests {
     fn stored_shapes_are_checked_without_source_expressions() {
         // Stored rows carry no source expression, so shape comes from the stored value.
         let list = Type::List(Box::new(Type::Int));
-        assert!(matches_value(&Raw::Array(vec![Raw::Int(1.into())]), &list, None));
-        assert!(!matches_value(&Raw::Array(vec![Raw::Text("x".into())]), &list, None));
+        assert!(matches_value(
+            &Raw::Array(vec![Raw::Int(1.into())]),
+            &list,
+            None
+        ));
+        assert!(!matches_value(
+            &Raw::Array(vec![Raw::Text("x".into())]),
+            &list,
+            None
+        ));
         assert!(!matches_value(&Raw::Int(1.into()), &list, None));
 
         let tuple = Type::Tuple(vec![Type::Int, Type::Text]);
         let bare = Raw::Array(vec![Raw::Int(51.into()), Raw::Text("north".into())]);
-        assert!(matches_value(&Raw::Tag(60015, Box::new(bare.clone())), &tuple, None));
+        assert!(matches_value(
+            &Raw::Tag(60015, Box::new(bare.clone())),
+            &tuple,
+            None
+        ));
         assert!(!matches_value(&bare, &tuple, None));
 
         let record = Type::Record(BTreeMap::from([("n".to_owned(), Type::Int)]));

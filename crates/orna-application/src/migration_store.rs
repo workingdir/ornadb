@@ -11,20 +11,26 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use orna_check::Analysis;
 use orna_evaluator::Limits;
-use orna_evaluator::row_admission::{RowAdmissionIdentity, RowSource, admit_row_sources};
-use orna_project::{ObjectIdentityManifest, ProjectLoader};
+use orna_evaluator::row_admission::{
+    AdmittedLooseRow, RowAdmissionIdentity, RowSource, admit_row_sources, admit_stored_row,
+    declared_table, resolve_stored_references, table_owner_for_path,
+};
+use orna_project::{ObjectIdentityManifest, ProjectLoader, StoredSchema};
 use orna_repository::migration_copy::{
     CandidateGate, MigrationStore, RetiredLegacyKind, RetiredLegacyPath,
 };
-use orna_repository::relation_admission::{OBJECT_IDENTITY_RELATION_ID, StoredObjectIdentity};
+use orna_repository::relation_admission::{
+    OBJECT_IDENTITY_RELATION_ID, StagedRelation, StoredObjectIdentity,
+};
 use orna_repository::{
     CommittedTreeEntryKind, DatabaseId, Repository, RepositoryError, RepositoryFormat,
 };
+use orna_value::{Raw, Value};
 
-use crate::format3_store::build_format3_store_relations;
+use crate::format3_store::{StagedRelations, build_format3_store_relations};
 use crate::legacy_store::{
-    LegacyReadError, LegacyTableAddress, LegacyTableRows, LooseRowUnit, decode_loose_rows,
-    loose_row_unit_paths, read_legacy_table_rows, read_loose_table_units,
+    LegacyFieldName, LegacyReadError, LegacyTableAddress, LegacyTableRows, LooseRowUnit,
+    decode_loose_rows, loose_row_unit_paths, read_legacy_table_rows, read_loose_table_units,
 };
 use crate::migration_rows::{
     ExpectedRelation, Format2BlobReader, LegacyTable, migration_row_input_with_format2_blobs,
@@ -50,6 +56,9 @@ const LEGACY_FORMAT_RECORD: &str = ".orna/format.orna";
 /// The project id that names the migration's loose-row source units for
 /// admission. Each row's source path is `{id}/{table path}/{key}.orna`.
 const MIGRATION_ROW_SOURCE_PROJECT: &str = "migration-source";
+
+/// The tag of a multi-column composite key: a tuple of its key values.
+const TUPLE_TAG: u64 = 60015;
 
 /// Builds the [`MigrationStore`] of the source repository's committed head for
 /// the destination `database`.
@@ -170,26 +179,49 @@ pub(crate) fn build_store_with_expectation(
         .iter()
         .map(|module| module.source.as_str())
         .collect();
+    let mut admitted = Vec::new();
     let mut rows = Vec::with_capacity(addresses.len());
     for address in &addresses {
         let table_rows = match address {
-            LegacyTableAddress::Relation(_) => read_legacy_table_rows(repository, &commit, address),
-            LegacyTableAddress::TablePath(path) => read_admitted_loose_rows(
-                repository,
-                &commit,
-                path,
-                &module_sources,
-                &analysis,
-                *database.as_bytes(),
-            ),
+            LegacyTableAddress::Relation(relation_id) => {
+                read_admitted_compact_rows(repository, &commit, &declared, &analysis, relation_id)
+            }
+            LegacyTableAddress::TablePath(path) => {
+                read_admitted_loose_rows(repository, &commit, path, &module_sources, &analysis)
+            }
         };
-        rows.push(match table_rows {
-            Ok(table_rows) => table_rows,
+        let table_rows = match table_rows {
+            Ok((table_rows, units)) => {
+                admitted.extend(units);
+                table_rows
+            }
             // An editable table with no directory in the snapshot has no rows.
             Err(LegacyReadError::MissingTablePath(_)) => LegacyTableRows::absent_loose(),
             Err(error) => return Err(refused(format!("{error}"))),
-        });
+        };
+        rows.push(table_rows);
     }
+    // Every stored table reference of an admitted row must name a row that the
+    // snapshot admits (ADR 0121; ORNA-CONFORMANCE-ROW-REFERENCE).
+    let table_paths = declared
+        .relations()
+        .iter()
+        .map(|relation| {
+            let id = *relation.relation_id();
+            declared
+                .table_name(&id)
+                .map(|path| (id, path))
+                .ok_or_else(|| refused("a declared relation has no source table name"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let identity =
+        stored_reference_identity(&table_paths, &analysis, &admitted, *database.as_bytes())?;
+    resolve_stored_references(&admitted, &identity).map_err(|diagnostic| {
+        refused(format!(
+            "a stored table reference is not admitted: {}",
+            diagnostic.code()
+        ))
+    })?;
     let tables: Vec<LegacyTable<'_>> = addresses
         .iter()
         .zip(rows.iter())
@@ -294,11 +326,38 @@ fn read_admitted_loose_rows(
     table_path: &str,
     module_sources: &[&str],
     analysis: &Analysis,
-    database_id: [u8; 16],
-) -> Result<LegacyTableRows, LegacyReadError> {
+) -> Result<(LegacyTableRows, Vec<AdmittedLooseRow>), LegacyReadError> {
     let units = read_loose_table_units(repository, commit, table_path)?;
-    admit_loose_units(table_path, &units, module_sources, analysis, database_id)?;
-    decode_loose_rows(table_path, units)
+    let admitted = admit_loose_units(table_path, &units, module_sources, analysis)?;
+    Ok((decode_loose_rows(table_path, units)?, admitted))
+}
+
+/// Reads one compact table and admits every stored row against its declared
+/// table before the rows are decoded (UPGRADE-3 step 3; ADR 0121). The declared
+/// table is found by its storage id; a compact table with no declared relation
+/// is an unknown relation.
+fn read_admitted_compact_rows(
+    repository: &Repository,
+    commit: &orna_repository::GitCommitRef,
+    declared: &StagedRelations,
+    analysis: &Analysis,
+    relation_id: &[u8; 16],
+) -> Result<(LegacyTableRows, Vec<AdmittedLooseRow>), LegacyReadError> {
+    let relation = declared
+        .relations()
+        .iter()
+        .find(|relation| relation.relation_id() == relation_id)
+        .ok_or(LegacyReadError::UnknownRelation(*relation_id))?;
+    let table_path = declared
+        .table_name(relation_id)
+        .ok_or(LegacyReadError::UnknownRelation(*relation_id))?;
+    let table_rows = read_legacy_table_rows(
+        repository,
+        commit,
+        &LegacyTableAddress::Relation(*relation_id),
+    )?;
+    let admitted = admit_compact_rows(&table_rows, relation, table_path, analysis)?;
+    Ok((table_rows, admitted))
 }
 
 /// Admits every loose row unit of `table_path` against the project's declared
@@ -312,8 +371,7 @@ fn admit_loose_units(
     units: &[(LooseRowUnit, Vec<u8>)],
     module_sources: &[&str],
     analysis: &Analysis,
-    database_id: [u8; 16],
-) -> Result<(), LegacyReadError> {
+) -> Result<Vec<AdmittedLooseRow>, LegacyReadError> {
     let source_ids: Vec<String> = units
         .iter()
         .map(|(unit, _)| format!("{MIGRATION_ROW_SOURCE_PROJECT}/{}", unit.path))
@@ -333,36 +391,168 @@ fn admit_loose_units(
             source,
         })
         .collect();
-    let identity = RowAdmissionIdentity {
-        database_id,
-        tables: BTreeMap::new(),
-    };
-    let Err(diagnostic) = admit_row_sources(
+    match admit_row_sources(
         MIGRATION_ROW_SOURCE_PROJECT,
         module_sources,
         analysis,
         &rows,
-        &identity,
         Limits::default(),
-    ) else {
-        return Ok(());
-    };
-    let unit = rows.iter().zip(units).find_map(|(row, (unit, _))| {
-        admit_row_sources(
-            MIGRATION_ROW_SOURCE_PROJECT,
-            module_sources,
-            analysis,
-            std::slice::from_ref(row),
-            &identity,
-            Limits::default(),
-        )
-        .err()
-        .map(|_| unit.path.clone())
-    });
-    Err(LegacyReadError::RowNotAdmitted {
+    ) {
+        Ok(admitted) => Ok(admitted),
+        Err(diagnostic) => {
+            let unit = rows.iter().zip(units).find_map(|(row, (unit, _))| {
+                admit_row_sources(
+                    MIGRATION_ROW_SOURCE_PROJECT,
+                    module_sources,
+                    analysis,
+                    std::slice::from_ref(row),
+                    Limits::default(),
+                )
+                .err()
+                .map(|_| unit.path.clone())
+            });
+            Err(LegacyReadError::RowNotAdmitted {
+                table: table_path.to_owned(),
+                unit,
+                code: diagnostic.code().to_owned(),
+            })
+        }
+    }
+}
+
+/// Admits every stored row of one compact table against its declared table
+/// (UPGRADE-3 step 3; ADR 0121). A multi-column key is stored as one tuple, and
+/// each field is named by its declared object id. The record holds the live
+/// projection, so it may repeat key columns; those are checked against the
+/// stored key and are not part of the body.
+fn admit_compact_rows(
+    table_rows: &LegacyTableRows,
+    relation: &StagedRelation,
+    table_path: &str,
+    analysis: &Analysis,
+) -> Result<Vec<AdmittedLooseRow>, LegacyReadError> {
+    let refuse = |code: &str| LegacyReadError::RowNotAdmitted {
         table: table_path.to_owned(),
-        unit,
-        code: diagnostic.code().to_owned(),
+        unit: None,
+        code: code.to_owned(),
+    };
+    let owner = table_owner_for_path(analysis, table_path)
+        .map_err(|diagnostic| refuse(diagnostic.code()))?;
+    let declared =
+        declared_table(analysis, &owner).map_err(|diagnostic| refuse(diagnostic.code()))?;
+    let admission = declared
+        .admission
+        .as_ref()
+        .ok_or_else(|| refuse("ORNA-CONFORMANCE-ROW-SCHEMA"))?;
+    let key_columns = admission
+        .keys
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<Vec<_>>();
+    let schema = StoredSchema::new(relation.descriptor())
+        .map_err(|_| LegacyReadError::UndecodableCompactRow)?;
+    table_rows
+        .rows()
+        .iter()
+        .map(|row| -> Result<AdmittedLooseRow, LegacyReadError> {
+            let stored = row
+                .stored_key()
+                .ok_or(LegacyReadError::UndecodableCompactRow)?;
+            let key = compact_key_components(stored, key_columns.len())?;
+            let fields = row
+                .fields()
+                .iter()
+                .map(|field| -> Result<(String, Raw), LegacyReadError> {
+                    let name = match field.name() {
+                        LegacyFieldName::Declared(name) => name.clone(),
+                        LegacyFieldName::ObjectId(id) => schema
+                            .fields()
+                            .iter()
+                            .find(|candidate| candidate.id() == id)
+                            .map(|candidate| candidate.name().to_owned())
+                            .ok_or_else(|| refuse("ORNA-CONFORMANCE-ROW-UNKNOWN"))?,
+                    };
+                    Ok((name, field.value().clone()))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let body = non_key_fields(&key_columns, &key, fields).map_err(refuse)?;
+            admit_stored_row(analysis, &owner, key, &body)
+                .map_err(|diagnostic| refuse(diagnostic.code()))
+        })
+        .collect()
+}
+
+/// The body fields of one compact record: every field that is not a key column.
+/// A key column the record repeats must appear once and must equal its
+/// component of the stored key; otherwise the row is refused with the code
+/// returned.
+fn non_key_fields(
+    key_columns: &[&str],
+    key: &[Value],
+    fields: Vec<(String, Raw)>,
+) -> Result<Vec<(String, Raw)>, &'static str> {
+    let mut repeated = BTreeSet::new();
+    let mut body = Vec::with_capacity(fields.len());
+    for (name, raw) in fields {
+        let Some(position) = key_columns.iter().position(|column| *column == name) else {
+            body.push((name, raw));
+            continue;
+        };
+        if !repeated.insert(position) {
+            return Err("ORNA-CONFORMANCE-ROW-DUPLICATE");
+        }
+        if key.get(position).map(Value::raw) != Some(&raw) {
+            return Err("ORNA-CONFORMANCE-ROW-PATH");
+        }
+    }
+    Ok(body)
+}
+
+/// The key values of one compact row in key-column order. A multi-column key
+/// (`arity` of two or more) is stored as one tuple of its columns; a
+/// single-column key is the stored value itself.
+fn compact_key_components(stored: &Value, arity: usize) -> Result<Vec<Value>, LegacyReadError> {
+    if arity < 2 {
+        return Ok(vec![stored.clone()]);
+    }
+    let Raw::Tag(TUPLE_TAG, parts) = stored.raw() else {
+        return Ok(vec![stored.clone()]);
+    };
+    let Raw::Array(parts) = parts.as_ref() else {
+        return Ok(vec![stored.clone()]);
+    };
+    parts
+        .iter()
+        .map(|part| Value::new(part.clone()).map_err(|_| LegacyReadError::UndecodableCompactRow))
+        .collect()
+}
+
+/// The snapshot identity that stored table references resolve against: each
+/// declared table's owner and the keys its admitted rows carry (ADR 0121).
+fn stored_reference_identity(
+    table_paths: &[([u8; 16], &str)],
+    analysis: &Analysis,
+    admitted: &[AdmittedLooseRow],
+    database_id: [u8; 16],
+) -> Result<RowAdmissionIdentity, RepositoryError> {
+    let mut tables = BTreeMap::new();
+    for (id, path) in table_paths {
+        let owner = table_owner_for_path(analysis, path).map_err(|diagnostic| {
+            refused(format!(
+                "a declared table has no admission owner: {}",
+                diagnostic.code()
+            ))
+        })?;
+        let keys: Vec<Vec<Value>> = admitted
+            .iter()
+            .filter(|row| row.owner == owner)
+            .map(|row| row.key.clone())
+            .collect();
+        tables.insert(*id, (owner, keys));
+    }
+    Ok(RowAdmissionIdentity {
+        database_id,
+        tables,
     })
 }
 
@@ -372,9 +562,16 @@ fn refused(detail: impl Into<String>) -> RepositoryError {
 
 #[cfg(test)]
 mod tests {
-    use orna_check::{ModuleInput, analyze};
+    use std::collections::BTreeMap;
 
-    use super::{LegacyReadError, LooseRowUnit, admit_loose_units};
+    use orna_check::{ModuleInput, analyze};
+    use orna_evaluator::row_admission::{AdmittedLooseRow, resolve_stored_references};
+    use orna_value::{Raw, Value};
+
+    use super::{
+        LegacyReadError, LooseRowUnit, TUPLE_TAG, admit_loose_units, compact_key_components,
+        non_key_fields, stored_reference_identity,
+    };
 
     /// One root table `Note` keyed by an integer, with one stored text field.
     const NOTE_MODULE: &str = "pub table Note(id: Int) {\n    text: Str,\n}\n";
@@ -393,7 +590,7 @@ mod tests {
         let analysis = analyze(&[ModuleInput::new("main.orna", NOTE_MODULE)]);
         assert!(analysis.is_ok(), "the Note module analyses");
         let units = note_row("{ text: \"Alpha\", }\n");
-        admit_loose_units("Note", &units, &[NOTE_MODULE], &analysis, [0; 16])
+        admit_loose_units("Note", &units, &[NOTE_MODULE], &analysis)
             .expect("a row that matches its declared table is admitted");
     }
 
@@ -401,7 +598,7 @@ mod tests {
     fn a_row_with_a_field_its_table_does_not_declare_is_refused() {
         let analysis = analyze(&[ModuleInput::new("main.orna", NOTE_MODULE)]);
         let units = note_row("{ text: \"Alpha\", nickname: \"Al\", }\n");
-        match admit_loose_units("Note", &units, &[NOTE_MODULE], &analysis, [0; 16]) {
+        match admit_loose_units("Note", &units, &[NOTE_MODULE], &analysis) {
             Err(LegacyReadError::RowNotAdmitted { table, unit, code }) => {
                 assert_eq!(table, "Note");
                 assert_eq!(unit.as_deref(), Some("Note/1.orna"));
@@ -409,5 +606,95 @@ mod tests {
             }
             other => panic!("a row with an undeclared field is refused: {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_compact_tuple_key_splits_into_its_columns_and_a_single_key_stays_whole() {
+        let columns = vec![
+            Value::new(Raw::Int(1.into())).expect("a canonical key"),
+            Value::new(Raw::Text("two".into())).expect("a canonical key"),
+        ];
+        let tuple = Value::new(Raw::Tag(
+            TUPLE_TAG,
+            Box::new(Raw::Array(vec![
+                Raw::Int(1.into()),
+                Raw::Text("two".into()),
+            ])),
+        ))
+        .expect("a canonical tuple key");
+        assert_eq!(
+            compact_key_components(&tuple, 2).expect("a tuple splits"),
+            columns
+        );
+        let whole = compact_key_components(&tuple, 1).expect("a one-column key stays whole");
+        assert_eq!(whole, vec![tuple]);
+        let single = Value::new(Raw::Int(7.into())).expect("a canonical key");
+        let passed = compact_key_components(&single, 1).expect("a single key passes through");
+        assert_eq!(passed, vec![single]);
+    }
+
+    #[test]
+    fn a_compact_record_drops_repeated_key_columns_that_agree_with_the_key() {
+        let key = vec![
+            Value::new(Raw::Int(1.into())).expect("a canonical key"),
+            Value::new(Raw::Text("two".into())).expect("a canonical key"),
+        ];
+        let columns = ["a", "b"];
+        let record = vec![
+            ("b".to_owned(), Raw::Text("two".into())),
+            ("c".to_owned(), Raw::Int(3.into())),
+            ("a".to_owned(), Raw::Int(1.into())),
+        ];
+        assert_eq!(
+            non_key_fields(&columns, &key, record),
+            Ok(vec![("c".to_owned(), Raw::Int(3.into()))])
+        );
+    }
+
+    #[test]
+    fn a_compact_record_refuses_a_repeated_key_column_that_disagrees_or_repeats() {
+        let key = vec![Value::new(Raw::Int(1.into())).expect("a canonical key")];
+        let columns = ["id"];
+        let disagreeing = vec![("id".to_owned(), Raw::Int(2.into()))];
+        assert_eq!(
+            non_key_fields(&columns, &key, disagreeing),
+            Err("ORNA-CONFORMANCE-ROW-PATH")
+        );
+        let repeated = vec![
+            ("id".to_owned(), Raw::Int(1.into())),
+            ("id".to_owned(), Raw::Int(1.into())),
+        ];
+        assert_eq!(
+            non_key_fields(&columns, &key, repeated),
+            Err("ORNA-CONFORMANCE-ROW-DUPLICATE")
+        );
+    }
+
+    #[test]
+    fn a_stored_reference_resolves_only_to_an_admitted_key_of_its_database() {
+        let analysis = analyze(&[ModuleInput::new("main.orna", NOTE_MODULE)]);
+        let units = note_row("{ text: \"Alpha\", }\n");
+        let target = admit_loose_units("Note", &units, &[NOTE_MODULE], &analysis)
+            .expect("the Note row is admitted");
+        let database = [1; 16];
+        let note_table = [7; 16];
+        let identity =
+            stored_reference_identity(&[(note_table, "Note")], &analysis, &target, database)
+                .expect("the identity of the declared table builds");
+        let owner = target[0].owner.clone();
+        let resolve = |db: [u8; 16], key: Raw| {
+            let link = Value::table_reference(db, note_table, key).expect("a stored reference");
+            let referrer = AdmittedLooseRow {
+                owner: owner.clone(),
+                key: vec![Value::new(Raw::Int(2.into())).expect("a canonical key")],
+                body: BTreeMap::from([("link".to_owned(), link)]),
+            };
+            resolve_stored_references(&[referrer], &identity)
+        };
+        resolve(database, Raw::Int(1.into())).expect("an admitted key resolves");
+        let missing = resolve(database, Raw::Int(9.into())).expect_err("a missing key is refused");
+        assert_eq!(missing.code(), "ORNA-CONFORMANCE-ROW-REFERENCE");
+        let foreign = resolve([2; 16], Raw::Int(1.into())).expect_err("a foreign database");
+        assert_eq!(foreign.code(), "ORNA-CONFORMANCE-ROW-REFERENCE");
     }
 }
