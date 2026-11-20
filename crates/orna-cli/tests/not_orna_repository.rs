@@ -3,6 +3,17 @@ use std::process::{Command, Output};
 use tempfile::TempDir;
 
 const REJECTION_CODE: &str = "ORNA-CMD-REPOSITORY-UNAVAILABLE";
+/// `Exit::Target`: the exit status of every target-level refusal.
+const REFUSAL_EXIT_CODE: i32 = 1;
+
+/// Every command form that reads the local worktree, in the form it is typed.
+const WORKTREE_FORMS: &[(&str, &[&str])] = &[
+    ("status", &["status"]),
+    ("status --porcelain", &["status", "--porcelain"]),
+    ("status --short", &["status", "--short"]),
+    ("status --format json", &["status", "--format", "json"]),
+    ("check", &["check"]),
+];
 
 fn plain_git_repository() -> TempDir {
     let directory = tempfile::tempdir().expect("plain Git repository");
@@ -34,29 +45,37 @@ fn orna(directory: &TempDir, args: &[&str]) -> Output {
 
 fn assert_rejected(output: &Output, command: &str) {
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        !output.status.success(),
-        "{command} accepted a plain Git repository: {stderr}"
+    assert_eq!(
+        output.status.code(),
+        Some(REFUSAL_EXIT_CODE),
+        "{command} exit status: {stderr}"
     );
     assert!(
         output.stdout.is_empty(),
         "{command} wrote stdout: {:?}",
         output.stdout
     );
+    assert!(!stderr.contains("panicked"), "{command} panicked: {stderr}");
     assert!(stderr.contains(REJECTION_CODE), "{command}: {stderr}");
     assert!(
         stderr.contains("not an Orna repository"),
         "{command}: {stderr}"
     );
+    assert!(stderr.contains("orna init"), "{command}: {stderr}");
 }
 
 #[test]
-fn status_and_check_reject_plain_git_until_orna_init() {
+fn plain_git_worktree_is_refused_by_every_worktree_form() {
     let directory = plain_git_repository();
 
-    assert_rejected(&orna(&directory, &["status"]), "status");
-    assert_rejected(&orna(&directory, &["status", "--short"]), "status --short");
-    assert_rejected(&orna(&directory, &["check"]), "check");
+    for (command, args) in WORKTREE_FORMS {
+        assert_rejected(&orna(&directory, args), command);
+    }
+}
+
+#[test]
+fn plain_git_worktree_is_accepted_by_every_worktree_form_after_orna_init() {
+    let directory = plain_git_repository();
 
     let target = directory.path().to_str().expect("UTF-8 path");
     let initialized = orna(&directory, &["init", target]);
@@ -66,16 +85,12 @@ fn status_and_check_reject_plain_git_until_orna_init() {
         initialized.stderr
     );
 
-    let status = orna(&directory, &["status", "--short"]);
-    assert!(
-        status.status.success(),
-        "status stderr: {:?}",
-        status.stderr
-    );
-    let checked = orna(&directory, &["check"]);
-    assert!(
-        checked.status.success(),
-        "check stderr: {:?}",
-        checked.stderr
-    );
+    for (command, args) in WORKTREE_FORMS {
+        let output = orna(&directory, args);
+        assert!(
+            output.status.success(),
+            "{command} stderr: {:?}",
+            output.stderr
+        );
+    }
 }
