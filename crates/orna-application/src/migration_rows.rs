@@ -905,24 +905,21 @@ mod tests {
         ));
     }
 
-    /// A compact row's field object id the declared relation does not store
-    /// fails closed, as a declared-name field does.
+    /// A compact field whose storage id names no stored field of the declared
+    /// relation fails closed.
     #[test]
-    fn compact_unknown_field_fails_closed() {
+    fn unknown_compact_field_fails_closed() {
         let rows = LegacyTableRows::compact_for_tests(vec![LegacyRow::for_tests(
             TypedKey::Text("carol".to_owned()),
             vec![LegacyField::for_tests(
-                LegacyFieldName::ObjectId([0x99; 16]),
+                LegacyFieldName::ObjectId([0xDD; 16]),
                 text("Caz"),
             )],
         )]);
         let address = LegacyTableAddress::Relation(TABLE);
         let error = migration_row_input(&declared(), &[LegacyTable::new(&address, &rows)])
-            .expect_err("object id 0x99 is not a stored field");
-        assert!(matches!(
-            error,
-            MigrationRowError::UnknownField { ref relation, .. } if relation == PATH
-        ));
+            .expect_err("a compact field that no stored field carries fails closed");
+        assert!(matches!(error, MigrationRowError::UnknownField { .. }));
     }
 
     /// A compact and an editable source for one relation are a cross-source

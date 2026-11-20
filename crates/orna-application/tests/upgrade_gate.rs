@@ -441,6 +441,82 @@ fn source_whose_store_root_is_a_text_file_is_refused() {
     );
 }
 
+/// Commits `bytes` at `path` in the source clone, the way a legacy edit lands.
+fn commit_source_file(directory: &Path, path: &str, bytes: &[u8], message: &str) {
+    fs::write(directory.join(path), bytes).expect("the source file is written");
+    let add = Command::new("git")
+        .current_dir(directory)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args(["add", "--", path])
+        .output()
+        .expect("git add starts");
+    assert!(
+        add.status.success(),
+        "git add: {}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+    let commit = Command::new("git")
+        .current_dir(directory)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "-c",
+            "user.name=Orna Test",
+            "-c",
+            "user.email=orna-test@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            message,
+        ])
+        .output()
+        .expect("git commit starts");
+    assert!(
+        commit.status.success(),
+        "git commit: {}",
+        String::from_utf8_lossy(&commit.stderr)
+    );
+}
+
+#[test]
+fn loose_row_with_an_undeclared_field_refuses_the_migration_store() {
+    let (source_directory, _repository) = clone_golden();
+    commit_source_file(
+        source_directory.path(),
+        "main.orna",
+        b"use contacts;\n\npub table Counter(id: Int) {}\n\npub table Label(id: Str) {}\n\npub table Day(id: Date) {}\n\npub table Asset(id: Int) {\n    payload: Blob,\n}\n",
+        "import the contacts module",
+    );
+    // The golden rows still carry `emails`, which the declared schema no longer has.
+    commit_source_file(
+        source_directory.path(),
+        "contacts/main.orna",
+        b"pub table Contact(id: Str) {\n    name: Str,\n    avatar: Blob,\n}\n",
+        "declare Contact without the emails field its legacy rows carry",
+    );
+    let repository = Repository::discover(source_directory.path()).expect("the source reopens");
+    let database = inspect_legacy_source_metadata(&repository)
+        .expect("the golden metadata reads")
+        .database_id();
+    let error = match build_migration_store(&repository, database) {
+        Ok(_) => panic!("a loose row with an undeclared field must not build a migration store"),
+        Err(error) => error,
+    };
+    match error {
+        RepositoryError::MigrationStoreRefused(detail) => assert!(
+            detail
+                .contains("is not admitted by its declared schema (ORNA-CONFORMANCE-ROW-UNKNOWN)"),
+            "the refusal names the unadmitted loose row: {detail}"
+        ),
+        other => panic!("an undeclared loose field is refused by the store: {other:?}"),
+    }
+    let error = prepare(&repository, &build_migration_store)
+        .expect_err("a source with an undeclared loose field must not migrate");
+    assert!(
+        matches!(error, RepositoryError::MigrationStoreRefused(_)),
+        "no candidate is built from the refused store: {error:?}"
+    );
+}
+
 #[test]
 fn candidate_with_a_relation_the_legacy_snapshot_does_not_stage_is_refused() {
     let (_source_directory, repository) = clone_golden();

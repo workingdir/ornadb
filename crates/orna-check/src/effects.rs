@@ -192,4 +192,20 @@ mod tests {
             assert_eq!(host_effect(path), None, "{path:?}");
         }
     }
+
+    /// The spec labels `sys.blob.capture_file` `invoke` (api/sys.json), but
+    /// `invoke` is not a `sys.EffectKind` value and the same label covers the
+    /// in-memory blob writer. The host class follows the operation: capture
+    /// reads the host filesystem (ORNA-BLOB-015 external I/O); the writer does
+    /// not touch the host.
+    #[test]
+    fn invoke_labelled_blob_operations_split_by_host_io() {
+        assert_eq!(
+            host_effect(&["sys", "blob", "capture_file"]),
+            Some(EffectKind::Filesystem)
+        );
+        for name in ["begin", "append", "finish", "abort"] {
+            assert_eq!(host_effect(&["sys", "blob", name]), None, "sys.blob.{name}");
+        }
+    }
 }
