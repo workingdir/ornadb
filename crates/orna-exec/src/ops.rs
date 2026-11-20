@@ -15,6 +15,7 @@ use crate::decimal;
 use crate::error::Stop;
 use crate::float;
 use crate::machine::ExecLimits;
+use crate::natives::money;
 use crate::time;
 use crate::value::Value;
 
@@ -64,6 +65,10 @@ pub(crate) fn binary(
             BinOp::Eq => Ok(Value::Bool(lhs == rhs)),
             BinOp::Ne => Ok(Value::Bool(lhs != rhs)),
             _ => Err(Stop::NotYet("operator on enum values")),
+        },
+        (lhs @ Value::Money { .. }, rhs @ Value::Money { .. }) => match op {
+            BinOp::Eq | BinOp::Ne => money::equality(op, &lhs, &rhs),
+            _ => Err(Stop::NotYet("operator on money values")),
         },
         _ => Err(Stop::NotYet("operator on operands of different shapes")),
     }

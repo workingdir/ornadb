@@ -11,7 +11,7 @@ mod collection;
 mod decimal_divide;
 mod hash;
 mod json;
-mod money;
+pub(crate) mod money;
 mod money_round;
 mod order;
 mod orna;
