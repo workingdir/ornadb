@@ -133,7 +133,7 @@ pub(super) enum Command {
     Checkout {
         name: String,
     },
-    /// `restore --staged --row TABLE KEY`: restore one logical row's index entry to HEAD.
+    /// `restore --staged --row TABLE KEY_TEXT`: restore one logical row's index entry to HEAD.
     RestoreRow {
         table: String,
         key: String,
@@ -370,7 +370,7 @@ pub(super) fn parse_cli_reporting(arguments: &[String]) -> ParseReport {
             return Err(Diagnostic::usage(
                 "ORNA-CMD-ARGUMENT-UNEXPECTED",
                 "command has unexpected arguments",
-                "this bounded slice accepts no extra arguments",
+                "remove the extra arguments; `orna --help` lists each command's usage",
             ));
         }
         Ok(Parsed {
@@ -596,14 +596,14 @@ fn parse_add_row(words: &mut Words<'_>) -> Result<Command, Diagnostic> {
         return Err(Diagnostic::usage(
             "ORNA-CMD-ARGUMENT-INVALID",
             "`add` requires `--row`",
-            "use `add --row TABLE KEY` to stage one logical row",
+            "use `add --row TABLE KEY_TEXT` to stage one logical row",
         ));
     }
-    let table = words.require("`add --row` needs a table", "use `add --row TABLE KEY`")?;
-    let key = words.require("`add --row` needs a key", "use `add --row TABLE KEY`")?;
+    let table = words.require("`add --row` needs TABLE", "use `add --row TABLE KEY_TEXT`")?;
+    let key = words.require("`add --row` needs KEY", "use `add --row TABLE KEY_TEXT`")?;
     words.reject_trailing(
         "unexpected trailing arguments for `add`",
-        "use `add --row TABLE KEY` with exactly one table and key",
+        "use `add --row TABLE KEY_TEXT` with exactly one table and key",
     )?;
     Ok(Command::AddRow {
         table: table.to_owned(),
