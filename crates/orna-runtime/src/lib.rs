@@ -852,6 +852,24 @@ impl RuntimeState {
         .await
     }
 
+    /// Captures an admitted activation at the pinned capture of `context`: a
+    /// publication since the context was admitted fails closed with
+    /// [`RuntimeError::StaleCapture`]. The rows are the live runtime rows at that
+    /// capture, not the committed `HEAD` rows.
+    pub async fn begin_admitted_table_activation_at(
+        &self,
+        tables: &[RuntimeTableIdentity],
+        context: &RuntimeActivationContext,
+    ) -> Result<RuntimeTableActivationSnapshot, RuntimeError> {
+        self.begin_table_activation_inner(
+            &admitted_table_names(tables)?,
+            admitted_table_object_ids(tables)?,
+            Some(context.capture()),
+            None,
+        )
+        .await
+    }
+
     /// Captures an admitted activation whose declared relations are read over
     /// `committed`: the published `HEAD` rows, bound to the pin they were read at.
     /// The pin is read before the rows, so a publication between the two reads

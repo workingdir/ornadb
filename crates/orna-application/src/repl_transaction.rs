@@ -2,8 +2,7 @@ use super::*;
 use orna_check::Type;
 use orna_project::{
     CommittedTable, ProjectLoader, StoredSchema, admit_format3_row, blob_placeholder,
-    evaluator_rows, has_text_primary_key, holds_blob, restore_stored_blobs,
-    runtime_key_from_evaluator,
+    evaluator_rows, holds_blob, restore_stored_blobs,
 };
 use orna_repository::{OrpBlobBinding, Repository, RepositoryFormatContext};
 use orna_syntax_ast::Expr;
@@ -335,17 +334,7 @@ fn normalize_repl_mutations(
             normalized.push(mutation);
             continue;
         }
-        let text_primary_key = has_text_primary_key(table_schema);
-        let key = runtime_key_from_evaluator(mutation.key(), text_primary_key)
-            .map_err(|_| ApplicationError::InvalidTableMetadata)?;
-        let rekey_to = mutation
-            .rekey_to()
-            .map(|key| runtime_key_from_evaluator(key, text_primary_key))
-            .transpose()
-            .map_err(|_| ApplicationError::InvalidTableMetadata)?;
-        let mutation = mutation
-            .with_reencoded_keys(key, rekey_to)
-            .map_err(|_| ApplicationError::InvalidTableMetadata)?;
+        let mutation = runtime_keyed_mutation(mutation, table_schema)?;
         let source_key = (table.clone(), mutation.key().to_vec());
         let source = match written.get(&source_key) {
             Some(row) => row.clone(),

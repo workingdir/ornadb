@@ -423,6 +423,7 @@ fn live_application_reads_publication_relations_from_durable_runtime_rows() {
         Some(&activation_context),
         &mut work,
         Some(&dispatcher),
+        None,
     ))
     .expect("live dispatch evaluates the .orna system relation reads");
     let LiveEvalResponse::Pure(envelope) = response else {

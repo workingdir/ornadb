@@ -22,7 +22,7 @@ use orna_check::{
 use orna_repository::dependency_origins::MAX_GITMODULES_BYTES;
 use orna_repository::{
     CommittedTableBinding, CommittedTableBindingRequest, CommittedTreeEntry,
-    CommittedTreeEntryKind, FINAL_REPOSITORY_FORMAT, FormatContextError, GitCommitRef,
+    CommittedTreeEntryKind, DatabaseId, FINAL_REPOSITORY_FORMAT, FormatContextError, GitCommitRef,
     OrpBlobBinding, PrivateCommit, ProtectedContentPin, Repository, RepositoryError,
     RepositoryFormatContext, TypedKey,
 };
@@ -1944,15 +1944,27 @@ fn resolve_committed_source_table_schema_for_project(
     resolve_source_table_schema(commit, project, &manifest, &context, table_object_id)
 }
 
-/// Resolves one table against the identity `manifest` and format `context` of the
-/// exact snapshot `commit`, which must be the snapshot `project` was loaded from.
-fn resolve_source_table_schema(
+/// The source table of one committed snapshot, resolved before any relation is
+/// bound to it: its schema as the source declares it, and the snapshot and
+/// database that schema belongs to.
+struct SourceTableFacts {
+    source_commit: GitCommitRef,
+    snapshot_id: [u8; 32],
+    database_id: DatabaseId,
+    table: SourceTableSchemaArtifact,
+}
+
+/// Checks that the identity `manifest` and format `context` belong to the exact
+/// snapshot `commit`, which must be the snapshot `project` was loaded from, and
+/// resolves `table_object_id` to its source table. Binds no relation, so a table
+/// with no rows at `commit` resolves too.
+fn source_table_facts(
     commit: &GitCommitRef,
     project: &LoadedProject,
     manifest: &ObjectIdentityManifest,
     context: &RepositoryFormatContext,
     table_object_id: TableObjectId,
-) -> Result<ResolvedTableSchema, ProjectLoadError> {
+) -> Result<SourceTableFacts, ProjectLoadError> {
     let table_identity = manifest
         .records()
         .iter()
@@ -1980,18 +1992,41 @@ fn resolve_source_table_schema(
     if context.snapshot_pin().snapshot_id() != snapshot_id {
         return Err(ProjectLoadError::InvalidTableSchema);
     }
-    let expected_database_id = context
+    let database_id = context
         .require_database_id()
         .map_err(|_| ProjectLoadError::InvalidTableSchema)?;
     let table = project.source_table_schema_in_database(
         manifest,
-        *expected_database_id.as_bytes(),
+        *database_id.as_bytes(),
         module_name,
         declaration_name,
     )?;
     if *table.table_object_id() != table_object_id.bytes() {
         return Err(ProjectLoadError::InvalidTableSchema);
     }
+    Ok(SourceTableFacts {
+        source_commit,
+        snapshot_id,
+        database_id,
+        table,
+    })
+}
+
+/// Resolves one table against the identity `manifest` and format `context` of the
+/// exact snapshot `commit`, which must be the snapshot `project` was loaded from.
+fn resolve_source_table_schema(
+    commit: &GitCommitRef,
+    project: &LoadedProject,
+    manifest: &ObjectIdentityManifest,
+    context: &RepositoryFormatContext,
+    table_object_id: TableObjectId,
+) -> Result<ResolvedTableSchema, ProjectLoadError> {
+    let SourceTableFacts {
+        source_commit,
+        snapshot_id,
+        database_id: expected_database_id,
+        table,
+    } = source_table_facts(commit, project, manifest, context, table_object_id)?;
     let binding = context
         .bind_committed_table(CommittedTableBindingRequest {
             module_name: table.module_name(),

@@ -29,7 +29,10 @@ use orna_value::{
     decode_canonical_storage_value, encode_canonical_storage_value,
 };
 
-use crate::{ProjectLoadError, ProjectLoader, ResolvedTableSchema};
+use crate::{
+    ObjectIdentityManifest, ProjectLoadError, ProjectLoader, ResolvedTableSchema,
+    SourceTableSchemaArtifact, source_table_facts,
+};
 
 /// Committed table storage violates the descriptor or row contract.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -71,10 +74,14 @@ pub fn committed_tables(
     tables: &BTreeMap<String, TableSchema>,
     table_ids: &BTreeMap<String, TableObjectId>,
 ) -> Result<BTreeMap<String, CommittedTable>, TableStorageError> {
-    read_tables(format_context, tables, table_ids, |object_id| {
-        ProjectLoader::default()
-            .resolve_committed_source_table_schema(repository, commit, object_id)
-    })
+    let loader = ProjectLoader::default();
+    read_tables(
+        format_context,
+        tables,
+        table_ids,
+        |object_id| loader.resolve_committed_source_table_schema(repository, commit, object_id),
+        |object_id| loader.resolve_committed_source_storage_order(repository, commit, object_id),
+    )
 }
 
 /// Reads every table's rows of one private publication candidate, keyed in the
@@ -87,26 +94,112 @@ pub fn private_candidate_tables(
     tables: &BTreeMap<String, TableSchema>,
     table_ids: &BTreeMap<String, TableObjectId>,
 ) -> Result<BTreeMap<String, CommittedTable>, TableStorageError> {
-    read_tables(format_context, tables, table_ids, |object_id| {
-        ProjectLoader::default()
-            .resolve_private_candidate_source_table_schema(repository, candidate, object_id)
-    })
+    let loader = ProjectLoader::default();
+    read_tables(
+        format_context,
+        tables,
+        table_ids,
+        |object_id| {
+            loader.resolve_private_candidate_source_table_schema(repository, candidate, object_id)
+        },
+        |object_id| {
+            loader.resolve_private_candidate_source_storage_order(repository, candidate, object_id)
+        },
+    )
+}
+
+impl ProjectLoader {
+    /// The stored-field names of table `table_object_id` in storage order, as the
+    /// source at `commit` declares it. Binds no relation, so a table that holds no
+    /// rows at `commit` still has its storage order.
+    pub fn resolve_committed_source_storage_order(
+        &self,
+        repository: &Repository,
+        commit: &GitCommitRef,
+        table_object_id: TableObjectId,
+    ) -> Result<Vec<String>, ProjectLoadError> {
+        let project = self.load_committed_snapshot(repository, commit)?;
+        let manifest = ObjectIdentityManifest::read_committed(repository, commit)
+            .map_err(|_| ProjectLoadError::InvalidTableSchema)?;
+        let context = repository
+            .open_pinned_format_context(commit.as_str())
+            .map_err(|_| ProjectLoadError::InvalidTableSchema)?;
+        let facts = source_table_facts(commit, &project, &manifest, &context, table_object_id)?;
+        source_storage_order(&facts.table)
+    }
+
+    /// Private-candidate variant of [`Self::resolve_committed_source_storage_order`].
+    pub fn resolve_private_candidate_source_storage_order(
+        &self,
+        repository: &Repository,
+        candidate: &PrivateCommit,
+        table_object_id: TableObjectId,
+    ) -> Result<Vec<String>, ProjectLoadError> {
+        let project = self.load_private_candidate(repository, candidate)?;
+        let manifest = ObjectIdentityManifest::read_private_candidate(repository, candidate)
+            .map_err(|_| ProjectLoadError::InvalidTableSchema)?
+            .ok_or(ProjectLoadError::InvalidTableSchema)?;
+        let context = repository
+            .open_private_candidate_format_context(candidate)
+            .map_err(|_| ProjectLoadError::InvalidTableSchema)?;
+        let facts = source_table_facts(
+            candidate.commit(),
+            &project,
+            &manifest,
+            &context,
+            table_object_id,
+        )?;
+        source_storage_order(&facts.table)
+    }
 }
 
 /// Shared reader behind [`committed_tables`] and [`private_candidate_tables`].
-/// `resolve` supplies each table's schema for the snapshot the caller names.
+/// `resolve` supplies a table's bound schema for the snapshot the caller names.
+/// `storage_order_of` supplies a table's stored-field order from its source
+/// declaration, which is all a table with no relation at that snapshot needs.
 fn read_tables(
     format_context: &RepositoryFormatContext,
     tables: &BTreeMap<String, TableSchema>,
     table_ids: &BTreeMap<String, TableObjectId>,
     resolve: impl Fn(TableObjectId) -> Result<ResolvedTableSchema, ProjectLoadError>,
+    storage_order_of: impl Fn(TableObjectId) -> Result<Vec<String>, ProjectLoadError>,
 ) -> Result<BTreeMap<String, CommittedTable>, TableStorageError> {
+    // The pinned store root names every table that holds rows; a table with no
+    // rows has no relation there. Both root preconditions are checked once here,
+    // as `load_row_map` checks them.
+    let bound_relations = if tables.is_empty() {
+        Vec::new()
+    } else {
+        format_context
+            .validate_schema_root()
+            .map_err(|_| TableStorageError)?;
+        format_context
+            .store_relation_ids()
+            .map_err(|_| TableStorageError)?
+    };
     let mut result = BTreeMap::new();
     for (table_name, table_schema) in tables {
         let object_id = table_ids
             .get(table_name)
             .copied()
             .ok_or(TableStorageError)?;
+        if !bound_relations.contains(&object_id.bytes()) {
+            // No relation at this snapshot: the table holds no rows. Its admission
+            // is still checked, and its stored field order comes from the source
+            // declaration, so no relation is bound for it.
+            if table_schema.admission.is_none() {
+                return Err(TableStorageError);
+            }
+            let storage_order = storage_order_of(object_id).map_err(|_| TableStorageError)?;
+            result.insert(
+                table_name.clone(),
+                CommittedTable {
+                    storage_order,
+                    rows: Vec::new(),
+                },
+            );
+            continue;
+        }
         let resolved_schema = resolve(object_id).map_err(|_| TableStorageError)?;
         let opened = open_table(format_context, object_id, resolved_schema, table_schema)?;
         let mut committed = Vec::<(Vec<u8>, Vec<u8>)>::new();
@@ -493,8 +586,15 @@ fn portable_storage_row(
     storage_order: &[String],
     schema: &TableSchema,
 ) -> Result<Vec<u8>, TableStorageError> {
+    // A live-tail row is admitted as its format-3 record, a map keyed by field
+    // name; a committed row is already its stored tuple. The record projects onto
+    // the stored tuple in storage order before the portable check.
+    let stored = match decode_canonical_storage_value(storage_row) {
+        Ok(Raw::Map(_)) => storage_row_from_record(storage_row, storage_order)?,
+        _ => storage_row.to_vec(),
+    };
     let Raw::Array(values) =
-        decode_canonical_storage_value(storage_row).map_err(|_| TableStorageError)?
+        decode_canonical_storage_value(&stored).map_err(|_| TableStorageError)?
     else {
         return Err(TableStorageError);
     };
@@ -650,6 +750,15 @@ pub fn stored_field_names(descriptor: &Raw) -> Result<StoredFieldNames, TableSto
         }
     }
     Ok((by_id, in_storage_order))
+}
+
+/// The stored-field names of `table` in storage order, from its source descriptor.
+fn source_storage_order(
+    table: &SourceTableSchemaArtifact,
+) -> Result<Vec<String>, ProjectLoadError> {
+    let (_, storage_order) = stored_field_names(table.descriptor().raw())
+        .map_err(|_| ProjectLoadError::InvalidTableSchema)?;
+    Ok(storage_order)
 }
 
 /// Maps an evaluator (canonical) key to its runtime key.

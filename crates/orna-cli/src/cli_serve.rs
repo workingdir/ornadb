@@ -32,7 +32,9 @@ use orna_security::{
     MAX_SESSION_LEASE, Origin, OriginPolicy, SessionBoundary, SessionDeletionAdapter,
 };
 use orna_serving::Serving;
-use served_validator::served_table_candidate_validator_factory;
+use served_validator::{
+    served_committed_eval_rows_factory, served_table_candidate_validator_factory,
+};
 use std::{
     collections::BTreeMap,
     io::{self, BufRead, BufReader, Read, Write},
@@ -695,6 +697,10 @@ struct ServedClone {
     /// commit against that commit's generation, so a false assertion refuses the
     /// write before any row is published (ORNA-ASSERT-042).
     table_candidate_validator: Option<orna_live::TableCandidateValidatorFactory>,
+    /// `None` when the project declares no stored reference. Installed on the
+    /// host, it binds the committed rows each Eval checks its deletes and rekeys
+    /// against, so a refused write answers with its ORNA-REF-DANGLING diagnostic.
+    committed_eval_rows: Option<orna_live::CommittedEvalRowsFactory>,
 }
 
 /// Resolves the clone at `endpoint` before the listener binds.
@@ -755,6 +761,14 @@ fn open_served_clone(endpoint: &Endpoint) -> Result<ServedClone, Diagnostic> {
         .map(|project| {
             served_table_candidate_validator_factory(repository.clone(), project.clone())
         });
+    // An Eval over a project that declares stored references binds the committed
+    // rows its reference check runs against (ORNA-MUT-008).
+    let committed_eval_rows = project
+        .as_ref()
+        .filter(|project| {
+            orna_conformance::project_declares_stored_references(project, Limits::default())
+        })
+        .map(|project| served_committed_eval_rows_factory(repository.clone(), project.clone()));
     Ok(ServedClone {
         root: repository.worktree().to_path_buf(),
         identity,
@@ -763,6 +777,7 @@ fn open_served_clone(endpoint: &Endpoint) -> Result<ServedClone, Diagnostic> {
         app,
         runtime,
         table_candidate_validator,
+        committed_eval_rows,
     })
 }
 
@@ -848,6 +863,7 @@ fn new_serve_state(
         app,
         runtime,
         table_candidate_validator,
+        committed_eval_rows,
     } = clone;
     let authority = ServingAuthority::for_listener(listener_address);
     let origins = authority.origins().map_err(|_| {
@@ -884,6 +900,12 @@ fn new_serve_state(
     // write. A project without assertions installs no validator.
     let host = match table_candidate_validator {
         Some(factory) => host.with_table_candidate_validator(factory),
+        None => host,
+    };
+    // A project declaring stored references binds its committed rows for each Eval;
+    // a project declaring none installs no factory.
+    let host = match committed_eval_rows {
+        Some(factory) => host.with_committed_eval_rows(factory),
         None => host,
     };
 

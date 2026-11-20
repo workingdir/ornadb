@@ -5,6 +5,8 @@
 //! (ORNA-ASSERT-042, ORNA-MUT-007, ORNA-MUT-008).
 
 use super::{Arc, BTreeMap, Limits, Repository, RuntimeGeneration};
+use crate::assertion_gate::admitted_tables_of;
+use crate::committed::table_identities_from_manifest;
 use std::collections::BTreeSet;
 
 /// Builds the factory that checks each committed mounted-row write against
@@ -21,6 +23,85 @@ pub(super) fn served_table_candidate_validator_factory(
             served_table_candidate_validator(&repository, &project, context, mutations)
         },
     )
+}
+
+/// Builds the factory that plans the committed tables each served Eval binds, at
+/// the activation's own generation. A project that declares stored references
+/// checks an Eval's delete or rekey against the rows that reference the row
+/// (ORNA-MUT-008), so the Eval binds the admitted tables' live rows.
+pub(super) fn served_committed_eval_rows_factory(
+    repository: Repository,
+    project: orna_project::LoadedProject,
+) -> orna_live::CommittedEvalRowsFactory {
+    Box::new(move |context: &orna_runtime::RuntimeActivationContext| {
+        served_committed_eval_plan(&repository, &project, context)
+    })
+}
+
+/// The committed tables plan of the activation's generation: the admitted tables
+/// at its HEAD, and the function that encodes the rows the activation captures
+/// as evaluator rows under each table's committed schema and storage order. Any
+/// failure to read the generation, its HEAD or the admitted tables fails the
+/// Eval closed as `RuntimeUnavailable`.
+fn served_committed_eval_plan(
+    repository: &Repository,
+    project: &orna_project::LoadedProject,
+    context: &orna_runtime::RuntimeActivationContext,
+) -> orna_live::Result<orna_live::CommittedEvalPlan> {
+    let generation = u64::try_from(context.capture().generation())
+        .map_err(|_| orna_live::Error::RuntimeUnavailable)?;
+    let cwd_generation = repository
+        .cwd_generation(RuntimeGeneration::new(generation))
+        .map_err(|_| orna_live::Error::RuntimeUnavailable)?;
+    let commit = cwd_generation
+        .head()
+        .ok_or(orna_live::Error::RuntimeUnavailable)?;
+    let (table_names, mut schemas) =
+        admitted_tables_of(project).map_err(|_| orna_live::Error::RuntimeUnavailable)?;
+    let (tables, bindings) = if table_names.is_empty() {
+        (Vec::new(), Vec::new())
+    } else {
+        let manifest =
+            orna_project::ObjectIdentityManifest::read_committed_if_present(repository, commit)
+                .map_err(|_| orna_live::Error::RuntimeUnavailable)?
+                .ok_or(orna_live::Error::RuntimeUnavailable)?;
+        let identities = table_identities_from_manifest(&manifest, table_names)
+            .map_err(|_| orna_live::Error::RuntimeUnavailable)?;
+        let mut bindings = Vec::with_capacity(identities.len());
+        for identity in &identities {
+            let name = identity.table().to_owned();
+            let schema = schemas
+                .remove(&name)
+                .ok_or(orna_live::Error::RuntimeUnavailable)?;
+            let storage_order = orna_project::ProjectLoader::default()
+                .resolve_committed_source_storage_order(repository, commit, identity.object_id())
+                .map_err(|_| orna_live::Error::RuntimeUnavailable)?;
+            bindings.push((name, schema, storage_order));
+        }
+        (identities, bindings)
+    };
+    Ok(orna_live::CommittedEvalPlan {
+        tables,
+        bind: Box::new(move |live: &orna_runtime::RuntimeTableRows| {
+            bind_admitted_rows(&bindings, live)
+        }),
+    })
+}
+
+/// Encodes the live stored rows of each admitted table as evaluator rows, under
+/// the table's committed schema and storage order.
+fn bind_admitted_rows(
+    bindings: &[(String, orna_check::TableSchema, Vec<String>)],
+    live: &orna_runtime::RuntimeTableRows,
+) -> orna_live::Result<orna_runtime::RuntimeTableRows> {
+    let mut rows = orna_runtime::RuntimeTableRows::new();
+    for (name, schema, storage_order) in bindings {
+        let stored = live.get(name).map_or(&[][..], Vec::as_slice);
+        let encoded = orna_project::evaluator_rows_from_stored(schema, storage_order, stored)
+            .map_err(|_| orna_live::Error::RuntimeUnavailable)?;
+        rows.insert(name.clone(), encoded);
+    }
+    Ok(rows)
 }
 
 /// The rows a staged commit writes, each as its table and stored key. An
@@ -60,10 +141,10 @@ fn served_table_candidate_validator(
             .map_err(|_| orna_live::Error::RuntimeUnavailable)?
             .ok_or(orna_live::Error::RuntimeUnavailable)?;
     ensure_unambiguous_live_table_names(&identities)?;
-    // The validator admits exactly the identities this activation admitted, so a
-    // commit carrying them passes and a commit under any other identity is refused.
-    // A name-addressed activation admits none.
-    let table_object_ids = Arc::new(context.table_object_ids().clone());
+    // A project declaring stored references binds the committed HEAD identity of each
+    // live table, which its Eval rows carry, so the commit admits exactly those
+    // identities. A project declaring none keeps the activation's own identities.
+    let head_ids = head_table_object_ids(&identities);
     // Each row the commit wrote, replaced, deleted or rekeyed must still resolve
     // its stored references in the candidate state (ORNA-MUT-007, ORNA-MUT-008).
     // The catalogue binds the committed HEAD identities, not the identities this
@@ -73,7 +154,7 @@ fn served_table_candidate_validator(
     let saved_row = orna_conformance::committed_reference_catalogue(
         repository,
         project,
-        &head_table_object_ids(&identities),
+        &head_ids,
         Limits::default(),
     )
     .map_err(|_| orna_live::Error::RuntimeUnavailable)?
@@ -81,6 +162,16 @@ fn served_table_candidate_validator(
         catalogue,
         rows: touched_rows(mutations),
     });
+    // Admission follows the identities the Eval binds to its mutations: the committed
+    // HEAD identities when the project declares stored references (ORNA-MUT-008), and
+    // the activation's own identities otherwise, as before.
+    let declares_references =
+        orna_conformance::project_declares_stored_references(project, Limits::default());
+    let table_object_ids = if declares_references {
+        Arc::new(head_ids)
+    } else {
+        Arc::new(context.table_object_ids().clone())
+    };
     orna_conformance::transactional_loaded_project_candidate_validator(
         project,
         &identities,
