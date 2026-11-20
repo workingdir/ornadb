@@ -594,13 +594,36 @@ fn canonical_json_codec_accepts_canonical_payload() {
     )
     .unwrap();
 
-    let body = br#"{"a":[1,true],"z":"ok"}"#;
-    let mut payload = Vec::from(JSON_MAGIC.as_bytes());
-    payload.extend_from_slice(&(body.len() as u32).to_be_bytes());
-    payload.extend_from_slice(body);
-    let value = OpaqueValue::new(&active, &registry, JSON_TYPE, &payload).unwrap();
-    assert_eq!(value.opaque_type(), JSON_TYPE);
-    assert_eq!(value.canonical_payload(), payload);
+    let frame = |body: &[u8]| {
+        let mut payload = Vec::from(JSON_MAGIC.as_bytes());
+        payload.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        payload.extend_from_slice(body);
+        payload
+    };
+    // Number tokens are kept exactly as received: no rounding through f64, no
+    // integer range limit, and negative zero as the standard JSON token `-0`.
+    for body in [
+        br#"{"a":[1,true],"z":"ok"}"#.as_slice(),
+        br#"{"big":123456789012345678901234567890}"#.as_slice(),
+        br#"{"exact":12.50}"#.as_slice(),
+        br#"{"half":0.1}"#.as_slice(),
+        br#"{"negative_zero":-0}"#.as_slice(),
+        br#"{"one":1.0}"#.as_slice(),
+        br#"{"escapes":"a\nb\u0001"}"#.as_slice(),
+        br#"{"negative_zero_fraction":-0.0}"#.as_slice(),
+        "{\"z\":2,\"\u{e9}\":1}".as_bytes(),
+    ] {
+        let payload = frame(body);
+        let value =
+            OpaqueValue::new(&active, &registry, JSON_TYPE, &payload).unwrap_or_else(|error| {
+                panic!(
+                    "canonical body {} rejected: {error:?}",
+                    String::from_utf8_lossy(body)
+                )
+            });
+        assert_eq!(value.opaque_type(), JSON_TYPE);
+        assert_eq!(value.canonical_payload(), payload);
+    }
 }
 
 #[test]
@@ -691,6 +714,17 @@ fn canonical_json_codec_rejects_invalid_and_noncanonical_payloads() {
         br#"{"z":1,"a":2}"#.as_slice(),
         br#"{"a":1,"a":1}"#.as_slice(),
         br#"1e0"#.as_slice(),
+        br#"1E3"#.as_slice(),
+        br#"-1.5e+2"#.as_slice(),
+        br#"{"a":1e3}"#.as_slice(),
+        br#"01"#.as_slice(),
+        br#"+1"#.as_slice(),
+        br#"{"a": 1}"#.as_slice(),
+        br#"[1, 2]"#.as_slice(),
+        br#"null "#.as_slice(),
+        br#""\/""#.as_slice(),
+        br#""\u0041""#.as_slice(),
+        "{\"\u{e9}\":1,\"z\":2}".as_bytes(),
     ] {
         assert_eq!(
             reject(&frame(body)),
