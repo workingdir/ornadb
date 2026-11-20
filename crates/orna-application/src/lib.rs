@@ -2888,7 +2888,6 @@ impl EffectHandler for SourceMutationEffectHandler {
                 }
                 let key = encoded_key(key)?;
                 if self.current_row(&table, &key)?.is_none() {
-                    eprintln!("DBGPROBE4 table={table} key={key:02x?} captured_tables={:?} captured_keys={:?}", self.captured_rows.as_ref().map(|c| c.keys().cloned().collect::<Vec<_>>()), self.captured_rows.as_ref().and_then(|c| c.get(&table)).map(|rows| rows.keys().cloned().collect::<Vec<Vec<u8>>>()));
                     return Err(Self::effect_error("ORNA-EVAL-TABLE-MISSING-ROW"));
                 }
                 self.record(&table, key.clone(), None)?;
@@ -3342,12 +3341,7 @@ impl From<ApplicationError> for LiveError {
                 // path above, not closed as an unanswered application failure.
                 Self::ValidationRejected(orna_project::DANGLING_REFERENCE_CODE)
             }
-            _ => {
-                if let ApplicationError::Evaluation(diagnostic) = &error {
-                    eprintln!("DBGPROBE3 code={:?}", diagnostic.code());
-                }
-                Self::ApplicationRejected
-            }
+            _ => Self::ApplicationRejected,
         }
     }
 }
