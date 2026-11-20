@@ -159,7 +159,8 @@ pub(super) async fn checkpoint_atomicity_fault_rolls_back(
         _ => return Err(RuntimeError::RecoveryInvalid),
     };
     let capture = state.capture().await?;
-    let mut handler = ListTableHandler::new(bridge, limits);
+    // CP-001 declares no reference columns, so no stored-reference catalogue applies.
+    let mut handler = ListTableHandler::new(bridge, limits, None);
     let StreamHandlerResult::CommitValidatedTable(mut batch) = handler.handle(&item) else {
         return Err(RuntimeError::RecoveryInvalid);
     };

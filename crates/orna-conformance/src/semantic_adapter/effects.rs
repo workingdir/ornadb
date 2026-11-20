@@ -1,5 +1,28 @@
 use super::*;
 
+/// The table schemas a list stream's written rows are checked against. The
+/// stream writes one table, so these are fixed at admission and shared by the
+/// validator of every item (ORNA-REF-001, ORNA-MUT-007).
+pub(super) struct ListStreamSchemas {
+    pub(super) keys: TableKeys,
+    pub(super) table_fields: TableFields,
+    /// Each table's key field names, the shape the reference rules read.
+    pub(super) key_names: TableFields,
+}
+
+impl ListStreamSchemas {
+    pub(super) fn new(keys: &TableKeys, table_fields: &TableFields) -> Self {
+        Self {
+            keys: keys.clone(),
+            table_fields: table_fields.clone(),
+            key_names: keys
+                .iter()
+                .map(|(table, key)| (table.clone(), key.fields.clone()))
+                .collect(),
+        }
+    }
+}
+
 pub(super) struct ListStreamBridge {
     pub(super) source_identity: String,
     pub(super) entry: String,
@@ -16,6 +39,7 @@ pub(super) struct ListStreamBridge {
     pub(super) module_assertions: Vec<AdmittedAssertion>,
     pub(super) assertion_functions: Functions,
     pub(super) payloads: Vec<Vec<u8>>,
+    pub(super) schemas: Arc<ListStreamSchemas>,
 }
 
 impl ListStreamBridge {
@@ -50,6 +74,9 @@ pub(super) struct ListTableHandler {
     /// The site of the assertion that refused the current item, written by the
     /// item's validator and read when the item fails (ORNA-ASSERT-051).
     pub(super) assertion_refusal: Arc<Mutex<Option<String>>>,
+    /// The stored references the list stream's written rows bind and resolve
+    /// through (ORNA-REF-001); `None` when the table declares none.
+    pub(super) references: Option<Arc<orna_project::ReferenceCatalogue>>,
 }
 
 pub(super) struct CandidateRelationEffectHandler<'a> {

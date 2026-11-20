@@ -230,7 +230,8 @@ impl DurableTransactionalEvaluator {
         let writer = state.acquire_lease(owner_id).await?;
         let key = bridge.checkpoint_key()?;
         let mut source = ListStreamSource::new(key.clone(), std::mem::take(&mut bridge.payloads));
-        let mut handler = ListTableHandler::new(bridge, self.limits);
+        let mut handler =
+            ListTableHandler::new(bridge, self.limits, self.stored_references.clone());
         match state
             .run_stream(
                 writer,

@@ -253,6 +253,7 @@ pub(super) fn admit_list_stream_source(
         .ok_or_else(|| Box::new(StageOutcome::Skipped {
             reason: "literal list stream bridge requires Stream.from_list piped to one for_each insert body".into(),
         }))?;
+    let schemas = Arc::new(ListStreamSchemas::new(&key_fields, &table_fields));
     let (table_name, key_fields) = key_fields.into_iter().next().expect("one table checked");
     applicable_module_assertions(&table_name, &module_assertions)
         .map_err(|reason| Box::new(StageOutcome::Skipped { reason }))?;
@@ -304,6 +305,7 @@ pub(super) fn admit_list_stream_source(
         module_assertions,
         assertion_functions,
         payloads,
+        schemas,
     })
 }
 
@@ -466,6 +468,7 @@ pub(super) fn admit_project_list_stream(
         module_assertions: module_assertions.clone(),
         assertion_functions,
         payloads,
+        schemas: Arc::new(ListStreamSchemas::new(key_fields, table_fields)),
     })
 }
 
